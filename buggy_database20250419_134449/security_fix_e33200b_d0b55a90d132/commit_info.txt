@@ -1,0 +1,130 @@
+Commit Hash: e33200bc01a6cfe73aa022cd4af92c1501c1e09a
+Subject: Merge branch 'tls-offload-netdev-and-mlx5-support'
+
+
+Security Keywords:
+- authentication
+
+Full commit message:
+Merge branch 'tls-offload-netdev-and-mlx5-support'
+
+Boris Pismenny says:
+
+====================
+TLS offload, netdev & MLX5 support
+
+The following series provides TLS TX inline crypto offload.
+
+v1->v2:
+   - Added IS_ENABLED(CONFIG_TLS_DEVICE) and a STATIC_KEY for icsk_clean_acked
+   - File license fix
+   - Fix spelling, comment by DaveW
+   - Move memory allocations out of tls_set_device_offload and other misc fixes,
+	comments by Kiril.
+
+v2->v3:
+   - Reversed xmas tree where needed and style fixes
+   - Removed the need for skb_page_frag_refill, per Eric's comment
+   - IPv6 dependency fixes
+
+v3->v4:
+   - Remove "inline" from functions in C files
+   - Make clean_acked_data_enabled a static variable and add enable/disable functions to control it.
+   - Remove unnecessary variable initialization mentioned by ShannonN
+   - Rebase over TLS RX
+   - Refactor the tls_software_fallback to reduce the number of variables mentioned by KirilT
+
+v4->v5:
+   - Add missing CONFIG_TLS_DEVICE
+
+v5->v6:
+   - Move changes to the software implementation into a seperate patch
+   - Fix some checkpatch warnings
+   - GPL export the enable/disable clean_acked_data functions
+
+v6->v7:
+   - Use the dst_entry to obtain the netdev in dev_get_by_index
+   - Remove the IPv6 patch since it is redundent now
+
+v7->v8:
+   - Fix a merge conflict in mlx5 header
+
+v8->v9:
+   - Fix false -Wmaybe-uninitialized warning
+   - Fix empty space in the end of new files
+
+v9->v10:
+   - Remove default "n" in net/Kconfig
+
+This series adds a generic infrastructure to offload TLS crypto to a
+network devices. It enables the kernel TLS socket to skip encryption and
+authentication operations on the transmit side of the data path. Leaving
+those computationally expensive operations to the NIC.
+
+The NIC offload infrastructure builds TLS records and pushes them to the
+TCP layer just like the SW KTLS implementation and using the same API.
+TCP segmentation is mostly unaffected. Currently the only exception is
+that we prevent mixed SKBs where only part of the payload requires
+offload. In the future we are likely to add a similar restriction
+following a change cipher spec record.
+
+The notable differences between SW KTLS and NIC offloaded TLS
+implementations are as follows:
+1. The offloaded implementation builds "plaintext TLS record", those
+records contain plaintext instead of ciphertext and place holder bytes
+instead of authentication tags.
+2. The offloaded implementation maintains a mapping from TCP sequence
+number to TLS records. Thus given a TCP SKB sent from a NIC offloaded
+TLS socket, we can use the tls NIC offload infrastructure to obtain
+enough context to encrypt the payload of the SKB.
+A TLS record is released when the last byte of the record is ack'ed,
+this is done through the new icsk_clean_acked callback.
+
+The infrastructure should be extendable to support various NIC offload
+implementations.  However it is currently written with the
+implementation below in mind:
+The NIC assumes that packets from each offloaded stream are sent as
+plaintext and in-order. It keeps track of the TLS records in the TCP
+stream. When a packet marked for offload is transmitted, the NIC
+encrypts the payload in-place and puts authentication tags in the
+relevant place holders.
+
+The responsibility for handling out-of-order packets (i.e. TCP
+retransmission, qdisc drops) falls on the netdev driver.
+
+The netdev driver keeps track of the expected TCP SN from the NIC's
+perspective.  If the next packet to transmit matches the expected TCP
+SN, the driver advances the expected TCP SN, and transmits the packet
+with TLS offload indication.
+
+If the next packet to transmit does not match the expected TCP SN. The
+driver calls the TLS layer to obtain the TLS record that includes the
+TCP of the packet for transmission. Using this TLS record, the driver
+posts a work entry on the transmit queue to reconstruct the NIC TLS
+state required for the offload of the out-of-order packet. It updates
+the expected TCP SN accordingly and transmit the now in-order packet.
+The same queue is used for packet transmission and TLS context
+reconstruction to avoid the need for flushing the transmit queue before
+issuing the context reconstruction request.
+
+Expected TCP SN is accessed without a lock, under the assumption that
+TCP doesn't transmit SKBs from different TX queue concurrently.
+
+If packets are rerouted to a different netdevice, then a software
+fallback routine handles encryption.
+
+Paper: https://www.netdevconf.org/1.2/papers/netdevconf-TLS.pdf
+====================
+
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+Metadata:
+Author: David S. Miller <davem@davemloft.net>
+Author Date: Tue May 1 09:42:48 2018 -0400
+Committer: David S. Miller <davem@davemloft.net>
+Commit Date: Tue May 1 09:42:48 2018 -0400
+
+Files Changed: 0
+Lines Added: 3355
+Lines Removed: 191
+Total Changes: 3546

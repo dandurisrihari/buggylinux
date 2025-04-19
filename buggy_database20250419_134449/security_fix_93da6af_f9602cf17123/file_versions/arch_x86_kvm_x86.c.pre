@@ -1,0 +1,52 @@
+commit a487f6797c881460024ab45f2fea562bc377f02a
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Tue Dec 10 17:33:01 2024 -0800
+
+    KVM: x86: Query X86_FEATURE_MWAIT iff userspace owns the CPUID feature bit
+    
+    Rework MONITOR/MWAIT emulation to query X86_FEATURE_MWAIT if and only if
+    the MISC_ENABLE_NO_MWAIT quirk is enabled, in which case MWAIT is not a
+    dynamic, KVM-controlled CPUID feature.  KVM's funky ABI for that quirk is
+    to emulate MONITOR/MWAIT as nops if userspace sets MWAIT in guest CPUID.
+    
+    For the case where KVM owns the MWAIT feature bit, check MISC_ENABLES
+    itself, i.e. check the actual control, not its reflection in guest CPUID.
+    
+    Avoiding consumption of dynamic CPUID features will allow KVM to defer
+    runtime CPUID updates until kvm_emulate_cpuid(), i.e. until the updates
+    become visible to the guest.  Alternatively, KVM could play other games
+    with runtime CPUID updates, e.g. by precisely specifying which feature
+    bits to update, but doing so adds non-trivial complexity and doesn't solve
+    the underlying issue of unnecessary updates causing meaningful overhead
+    for nested virtualization roundtrips.
+    
+    Link: https://lore.kernel.org/r/20241211013302.1347853-5-seanjc@google.com
+    Signed-off-by: Sean Christopherson <seanjc@google.com>
+
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 0aca2a5dac7e..9883f0565baf 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -2080,10 +2080,20 @@ EXPORT_SYMBOL_GPL(kvm_handle_invalid_op);
+ 
+ static int kvm_emulate_monitor_mwait(struct kvm_vcpu *vcpu, const char *insn)
+ {
+-	if (!kvm_check_has_quirk(vcpu->kvm, KVM_X86_QUIRK_MWAIT_NEVER_UD_FAULTS) &&
+-	    !guest_cpu_cap_has(vcpu, X86_FEATURE_MWAIT))
++	bool enabled;
++
++	if (kvm_check_has_quirk(vcpu->kvm, KVM_X86_QUIRK_MWAIT_NEVER_UD_FAULTS))
++		goto emulate_as_nop;
++
++	if (kvm_check_has_quirk(vcpu->kvm, KVM_X86_QUIRK_MISC_ENABLE_NO_MWAIT))
++		enabled = guest_cpu_cap_has(vcpu, X86_FEATURE_MWAIT);
++	else
++		enabled = vcpu->arch.ia32_misc_enable_msr & MSR_IA32_MISC_ENABLE_MWAIT;
++
++	if (!enabled)
+ 		return kvm_handle_invalid_op(vcpu);
+ 
++emulate_as_nop:
+ 	pr_warn_once("%s instruction emulated as NOP!\n", insn);
+ 	return kvm_emulate_as_nop(vcpu);
+ }

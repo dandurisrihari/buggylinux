@@ -1,0 +1,47 @@
+commit 01278cb143955f4b592568d1756f1baf506245c2
+Author: Chris Wilson <chris@chris-wilson.co.uk>
+Date:   Thu May 17 22:26:31 2018 +0100
+
+    drm/i915: Move fiddling with engine->last_retired_context
+    
+    Move the knowledge about resetting the current context tracking on the
+    engine from inside i915_gem_context.c into intel_engine_cs.c
+    
+    Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+    Link: https://patchwork.freedesktop.org/patch/msgid/20180517212633.24934-2-chris@chris-wilson.co.uk
+
+diff --git a/drivers/gpu/drm/i915/intel_engine_cs.c b/drivers/gpu/drm/i915/intel_engine_cs.c
+index 7983b8a1ad44..9e618aab6568 100644
+--- a/drivers/gpu/drm/i915/intel_engine_cs.c
++++ b/drivers/gpu/drm/i915/intel_engine_cs.c
+@@ -1096,6 +1096,29 @@ void intel_engines_unpark(struct drm_i915_private *i915)
+ 	}
+ }
+ 
++/**
++ * intel_engine_lost_context: called when the GPU is reset into unknown state
++ * @engine: the engine
++ *
++ * We have either reset the GPU or otherwise about to lose state tracking of
++ * the current GPU logical state (e.g. suspend). On next use, it is therefore
++ * imperative that we make no presumptions about the current state and load
++ * from scratch.
++ */
++void intel_engine_lost_context(struct intel_engine_cs *engine)
++{
++	struct i915_gem_context *ctx;
++
++	lockdep_assert_held(&engine->i915->drm.struct_mutex);
++
++	engine->legacy_active_context = NULL;
++	engine->legacy_active_ppgtt = NULL;
++
++	ctx = fetch_and_zero(&engine->last_retired_context);
++	if (ctx)
++		intel_context_unpin(ctx, engine);
++}
++
+ bool intel_engine_can_store_dword(struct intel_engine_cs *engine)
+ {
+ 	switch (INTEL_GEN(engine->i915)) {

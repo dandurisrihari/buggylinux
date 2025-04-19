@@ -1,0 +1,89 @@
+Commit Hash: c48f86071027af9c8d264194d6aed73f13016a22
+Subject: Merge branch 'PTP-for-DSA-tag_ocelot_8021q'
+
+
+Security Keywords:
+- Injection
+
+Full commit message:
+Merge branch 'PTP-for-DSA-tag_ocelot_8021q'
+
+Vladimir Oltean says:
+
+====================
+PTP for DSA tag_ocelot_8021q
+
+Changes in v2:
+Add stub definition for ocelot_port_inject_frame when switch driver is
+not compiled in.
+
+This is part two of the errata workaround begun here:
+https://patchwork.kernel.org/project/netdevbpf/cover/20210129010009.3959398-1-olteanv@gmail.com/
+
+Now that we have basic traffic support when we operate the Ocelot DSA
+switches without an NPI port, it would be nice to regain some of the
+features lost due to the lack of the NPI port functionality. An
+important one is PTP timestamping, which is intimately tied to the DSA
+frame header added by the NPI port: on TX, we put a "timestamp request
+ID" in the Injection Frame Header, while on RX, the Extraction Frame
+Header contains a partial 32-bit PTP timestamp. Get rid of the NPI port
+and replace it with a VLAN-based tagger, and you lose PTP, right?
+
+Well, not quite, this is what this patch series is about. The NPI port
+is basically a regular Ethernet port configured to service the packets
+in and out of the switch's CPU port module (which has other non-DSA I/O
+mechanisms too, such as register-based MMIO and DMA). If we disable the
+NPI port, we can in theory still access the packets delivered to the CPU
+port module by doing exactly what the ocelot switchdev driver does:
+extracting Ethernet packets through registers (yes, it is as icky as it
+sounds).
+
+However, there's a catch. The Felix switch was integrated into NXP
+LS1028A with the idea in mind that it will operate as DSA, i.e. using
+the CPU port module connected to the NPI port, not having I/O over
+register-based MMIO which is painfully slow and CPU intensive. So
+register-based packet I/O not supposed to work - those registers aren't
+even documented in the hardware reference manual for Felix. However
+they kinda do, with the exception of the fact that an RX interrupt was
+really not wired to the CPU cores - so we don't know when the CPU port
+module receives a new packet. But we can hack even around that, by
+replicating every packet that goes to the CPU port module and making it
+also go to a plain internal Ethernet port. Then drop the Ethernet packet
+and read the other copy of it from the CPU port module, this time
+annotated with the much-wanted RX timestamp.
+
+This is all fine and it works, but it does raise some questions about
+what DSA even is anymore, if we start having switches that inject some
+of their packets over Ethernet and some through registers, where do we
+draw the line. In principle I believe these concerns are founded, but at
+the same time, the way that the Felix driver uses register MMIO based
+packet I/O is fundamentally the same as any other DSA driver capable of
+PTP makes use of a side-channel for timestamps like a FIFO (just that
+this one is a lot more complicated, and comes with the entire actual
+packet, not just the timestamp).
+
+Nonetheless, I tried to keep the extra pressure added by this ERR
+workaround upon the DSA subsystem as small as possible, so some of the
+patches are just a revisit of some of Andrew's complaints w.r.t. the
+fact that tag_ocelot already violates any driver <-> tagger boundary,
+and as a consequence, is not able to be used on testbeds such as
+dsa_loop (which it now can). So now, the tag_ocelot and tag_ocelot_8021q
+drivers should be dsa_loop-clean, and have the ERR workarounds as
+self-contained as possible, using all the designated features for PTP
+timestamping and nothing more.
+
+Comments appreciated.
+====================
+
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+Metadata:
+Author: David S. Miller <davem@davemloft.net>
+Author Date: Sun Feb 14 17:31:44 2021 -0800
+Committer: David S. Miller <davem@davemloft.net>
+Commit Date: Sun Feb 14 17:31:44 2021 -0800
+
+Files Changed: 0
+Lines Added: 825
+Lines Removed: 495
+Total Changes: 1320

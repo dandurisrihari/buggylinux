@@ -1,0 +1,59 @@
+Commit Hash: a89573ce4ad32f19f43ec669771726817e185be0
+Subject: jbd2: fix outstanding credits assert in jbd2_journal_commit_transaction()
+
+
+Security Keywords:
+- injection
+
+Full commit message:
+jbd2: fix outstanding credits assert in jbd2_journal_commit_transaction()
+
+We catch an assert problem in jbd2_journal_commit_transaction() when
+doing fsstress and request falut injection tests. The problem is
+happened in a race condition between jbd2_journal_commit_transaction()
+and ext4_end_io_end(). Firstly, ext4_writepages() writeback dirty pages
+and start reserved handle, and then the journal was aborted due to some
+previous metadata IO error, jbd2_journal_abort() start to commit current
+running transaction, the committing procedure could be raced by
+ext4_end_io_end() and lead to subtract j_reserved_credits twice from
+commit_transaction->t_outstanding_credits, finally the
+t_outstanding_credits is mistakenly smaller than t_nr_buffers and
+trigger assert.
+
+kjournald2           kworker
+
+jbd2_journal_commit_transaction()
+ write_unlock(&journal->j_state_lock);
+ atomic_sub(j_reserved_credits, t_outstanding_credits); //sub once
+
+     	             jbd2_journal_start_reserved()
+     	              start_this_handle()  //detect aborted journal
+     	              jbd2_journal_free_reserved()  //get running transaction
+                       read_lock(&journal->j_state_lock)
+     	                __jbd2_journal_unreserve_handle()
+     	               atomic_sub(j_reserved_credits, t_outstanding_credits);
+                       //sub again
+                       read_unlock(&journal->j_state_lock);
+
+ journal->j_running_transaction = NULL;
+ J_ASSERT(t_nr_buffers <= t_outstanding_credits) //bomb!!!
+
+Fix this issue by using journal->j_state_lock to protect the subtraction
+in jbd2_journal_commit_transaction().
+
+Fixes: 96f1e0974575 ("jbd2: avoid long hold times of j_state_lock while committing a transaction")
+Signed-off-by: Zhang Yi <yi.zhang@huawei.com>
+Reviewed-by: Jan Kara <jack@suse.cz>
+Link: https://lore.kernel.org/r/20220611130426.2013258-1-yi.zhang@huawei.com
+Signed-off-by: Theodore Ts'o <tytso@mit.edu>
+
+Metadata:
+Author: Zhang Yi <yi.zhang@huawei.com>
+Author Date: Sat Jun 11 21:04:26 2022 +0800
+Committer: Theodore Ts'o <tytso@mit.edu>
+Commit Date: Tue Aug 2 23:52:19 2022 -0400
+
+Files Changed: 1
+Lines Added: 1
+Lines Removed: 1
+Total Changes: 2

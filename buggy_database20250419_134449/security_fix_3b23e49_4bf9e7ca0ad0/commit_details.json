@@ -1,0 +1,150 @@
+{
+  "hash": "3b23e4991fb66f6d152f9055ede271a726ef9f21",
+  "hash_short": "3b23e499",
+  "subject": "arm64: implement ftrace with regs",
+  "body": "This patch implements FTRACE_WITH_REGS for arm64, which allows a traced\nfunction's arguments (and some other registers) to be captured into a\nstruct pt_regs, allowing these to be inspected and/or modified. This is\na building block for live-patching, where a function's arguments may be\nforwarded to another function. This is also necessary to enable ftrace\nand in-kernel pointer authentication at the same time, as it allows the\nLR value to be captured and adjusted prior to signing.\n\nUsing GCC's -fpatchable-function-entry=N option, we can have the\ncompiler insert a configurable number of NOPs between the function entry\npoint and the usual prologue. This also ensures functions are AAPCS\ncompliant (e.g. disabling inter-procedural register allocation).\n\nFor example, with -fpatchable-function-entry=2, GCC 8.1.0 compiles the\nfollowing:\n\n| unsigned long bar(void);\n|\n| unsigned long foo(void)\n| {\n|         return bar() + 1;\n| }\n\n... to:\n\n| <foo>:\n|         nop\n|         nop\n|         stp     x29, x30, [sp, #-16]!\n|         mov     x29, sp\n|         bl      0 <bar>\n|         add     x0, x0, #0x1\n|         ldp     x29, x30, [sp], #16\n|         ret\n\nThis patch builds the kernel with -fpatchable-function-entry=2,\nprefixing each function with two NOPs. To trace a function, we replace\nthese NOPs with a sequence that saves the LR into a GPR, then calls an\nftrace entry assembly function which saves this and other relevant\nregisters:\n\n| mov\tx9, x30\n| bl\t<ftrace-entry>\n\nSince patchable functions are AAPCS compliant (and the kernel does not\nuse x18 as a platform register), x9-x18 can be safely clobbered in the\npatched sequence and the ftrace entry code.\n\nThere are now two ftrace entry functions, ftrace_regs_entry (which saves\nall GPRs), and ftrace_entry (which saves the bare minimum). A PLT is\nallocated for each within modules.\n\nSigned-off-by: Torsten Duwe <duwe@suse.de>\n[Mark: rework asm, comments, PLTs, initialization, commit message]\nSigned-off-by: Mark Rutland <mark.rutland@arm.com>\nReviewed-by: Amit Daniel Kachhap <amit.kachhap@arm.com>\nReviewed-by: Ard Biesheuvel <ard.biesheuvel@linaro.org>\nReviewed-by: Torsten Duwe <duwe@suse.de>\nTested-by: Amit Daniel Kachhap <amit.kachhap@arm.com>\nTested-by: Torsten Duwe <duwe@suse.de>\nCc: AKASHI Takahiro <takahiro.akashi@linaro.org>\nCc: Catalin Marinas <catalin.marinas@arm.com>\nCc: Josh Poimboeuf <jpoimboe@redhat.com>\nCc: Julien Thierry <jthierry@redhat.com>\nCc: Will Deacon <will@kernel.org>",
+  "full_message": "arm64: implement ftrace with regs\n\nThis patch implements FTRACE_WITH_REGS for arm64, which allows a traced\nfunction's arguments (and some other registers) to be captured into a\nstruct pt_regs, allowing these to be inspected and/or modified. This is\na building block for live-patching, where a function's arguments may be\nforwarded to another function. This is also necessary to enable ftrace\nand in-kernel pointer authentication at the same time, as it allows the\nLR value to be captured and adjusted prior to signing.\n\nUsing GCC's -fpatchable-function-entry=N option, we can have the\ncompiler insert a configurable number of NOPs between the function entry\npoint and the usual prologue. This also ensures functions are AAPCS\ncompliant (e.g. disabling inter-procedural register allocation).\n\nFor example, with -fpatchable-function-entry=2, GCC 8.1.0 compiles the\nfollowing:\n\n| unsigned long bar(void);\n|\n| unsigned long foo(void)\n| {\n|         return bar() + 1;\n| }\n\n... to:\n\n| <foo>:\n|         nop\n|         nop\n|         stp     x29, x30, [sp, #-16]!\n|         mov     x29, sp\n|         bl      0 <bar>\n|         add     x0, x0, #0x1\n|         ldp     x29, x30, [sp], #16\n|         ret\n\nThis patch builds the kernel with -fpatchable-function-entry=2,\nprefixing each function with two NOPs. To trace a function, we replace\nthese NOPs with a sequence that saves the LR into a GPR, then calls an\nftrace entry assembly function which saves this and other relevant\nregisters:\n\n| mov\tx9, x30\n| bl\t<ftrace-entry>\n\nSince patchable functions are AAPCS compliant (and the kernel does not\nuse x18 as a platform register), x9-x18 can be safely clobbered in the\npatched sequence and the ftrace entry code.\n\nThere are now two ftrace entry functions, ftrace_regs_entry (which saves\nall GPRs), and ftrace_entry (which saves the bare minimum). A PLT is\nallocated for each within modules.\n\nSigned-off-by: Torsten Duwe <duwe@suse.de>\n[Mark: rework asm, comments, PLTs, initialization, commit message]\nSigned-off-by: Mark Rutland <mark.rutland@arm.com>\nReviewed-by: Amit Daniel Kachhap <amit.kachhap@arm.com>\nReviewed-by: Ard Biesheuvel <ard.biesheuvel@linaro.org>\nReviewed-by: Torsten Duwe <duwe@suse.de>\nTested-by: Amit Daniel Kachhap <amit.kachhap@arm.com>\nTested-by: Torsten Duwe <duwe@suse.de>\nCc: AKASHI Takahiro <takahiro.akashi@linaro.org>\nCc: Catalin Marinas <catalin.marinas@arm.com>\nCc: Josh Poimboeuf <jpoimboe@redhat.com>\nCc: Julien Thierry <jthierry@redhat.com>\nCc: Will Deacon <will@kernel.org>",
+  "author_name": "Torsten Duwe",
+  "author_email": "duwe@lst.de",
+  "author_date": "Fri Feb 8 16:10:19 2019 +0100",
+  "author_date_iso": "2019-02-08T16:10:19+01:00",
+  "committer_name": "Mark Rutland",
+  "committer_email": "mark.rutland@arm.com",
+  "committer_date": "Wed Nov 6 14:17:35 2019 +0000",
+  "committer_date_iso": "2019-11-06T14:17:35+00:00",
+  "files_changed": [
+    "arch/arm64/Kconfig",
+    "arch/arm64/Makefile",
+    "arch/arm64/include/asm/ftrace.h",
+    "arch/arm64/include/asm/module.h",
+    "arch/arm64/kernel/entry-ftrace.S",
+    "arch/arm64/kernel/ftrace.c",
+    "arch/arm64/kernel/module-plts.c",
+    "arch/arm64/kernel/module.c"
+  ],
+  "files_changed_count": 8,
+  "stats": [
+    {
+      "file": "arch/arm64/Kconfig",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/Makefile",
+      "insertions": 5,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/include/asm/ftrace.h",
+      "insertions": 23,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/include/asm/module.h",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/arm64/kernel/entry-ftrace.S",
+      "insertions": 135,
+      "deletions": 5
+    },
+    {
+      "file": "arch/arm64/kernel/ftrace.c",
+      "insertions": 70,
+      "deletions": 14
+    },
+    {
+      "file": "arch/arm64/kernel/module-plts.c",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "arch/arm64/kernel/module.c",
+      "insertions": 14,
+      "deletions": 4
+    }
+  ],
+  "total_insertions": 252,
+  "total_deletions": 25,
+  "total_changes": 277,
+  "parents": [
+    "1f377e043b3b8ef68caffe47bdad794f4e2cb030"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v5.5",
+    "v5.5-rc1",
+    "v5.5-rc2",
+    "v5.5-rc3",
+    "v5.5-rc4",
+    "v5.5-rc5",
+    "v5.5-rc6",
+    "v5.5-rc7",
+    "v5.6",
+    "v5.6-rc1"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "authentication"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/arm64/Makefile",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/kernel/ftrace.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/Kconfig",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/include/asm/ftrace.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/include/asm/module.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/kernel/module.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/kernel/entry-ftrace.S",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/kernel/module-plts.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

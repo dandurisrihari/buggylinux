@@ -1,0 +1,67 @@
+Commit Hash: 5a605fd6cb1da0ec9cb6e54c06bcf58f706d2f83
+Subject: xfs: recalculate free rt extents after log recovery
+
+
+Security Keywords:
+- injection
+
+Full commit message:
+xfs: recalculate free rt extents after log recovery
+
+I've been observing periodic corruption reports from xfs_scrub involving
+the free rt extent counter (frextents) while running xfs/141.  That test
+uses an error injection knob to induce a torn write to the log, and an
+arbitrary number of recovery mounts, frextents will count fewer free rt
+extents than can be found the rtbitmap.
+
+The root cause of the problem is a combination of the misuse of
+sb_frextents in the incore mount to reflect both incore reservations
+made by running transactions as well as the actual count of free rt
+extents on disk.  The following sequence can reproduce the undercount:
+
+Thread 1			Thread 2
+xfs_trans_alloc(rtextents=3)
+xfs_mod_frextents(-3)
+<blocks>
+				xfs_attr_set()
+				xfs_bmap_attr_addfork()
+				xfs_add_attr2()
+				xfs_log_sb()
+				xfs_sb_to_disk()
+				xfs_trans_commit()
+<log flushed to disk>
+<log goes down>
+
+Note that thread 1 subtracts 3 from sb_frextents even though it never
+commits to using that space.  Thread 2 writes the undercounted value to
+the ondisk superblock and logs it to the xattr transaction, which is
+then flushed to disk.  At next mount, log recovery will find the logged
+superblock and write that back into the filesystem.  At the end of log
+recovery, we reread the superblock and install the recovered
+undercounted frextents value into the incore superblock.  From that
+point on, we've effectively leaked thread 1's transaction reservation.
+
+The correct fix for this is to separate the incore reservation from the
+ondisk usage, but that's a matter for the next patch.  Because the
+kernel has been logging superblocks with undercounted frextents for a
+very long time and we don't demand that sysadmins run xfs_repair after a
+crash, fix the undercount by recomputing frextents after log recovery.
+
+Gating this on log recovery is a reasonable balance (I think) between
+correcting the problem and slowing down every mount attempt.  Note that
+xfs_repair will fix undercounted frextents.
+
+Signed-off-by: Darrick J. Wong <djwong@kernel.org>
+Reviewed-by: Dave Chinner <dchinner@redhat.com>
+Signed-off-by: Dave Chinner <david@fromorbit.com>
+
+Metadata:
+Author: Darrick J. Wong <djwong@kernel.org>
+Author Date: Tue Apr 12 06:49:42 2022 +1000
+Committer: Dave Chinner <david@fromorbit.com>
+Commit Date: Tue Apr 12 06:49:42 2022 +1000
+
+Files Changed: 3
+Lines Added: 71
+Lines Removed: 9
+Total Changes: 80

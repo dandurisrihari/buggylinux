@@ -1,0 +1,66 @@
+{
+  "hash": "b2ae5fccb8c0ec2167e6e6c5c5a5eb8d656f70ef",
+  "hash_short": "b2ae5fcc",
+  "subject": "mm: introduce vma_start_read_locked{_nested} helpers",
+  "body": "Patch series \"reimplement per-vma lock as a refcount\", v10.\n\nBack when per-vma locks were introduces, vm_lock was moved out of\nvm_area_struct in [1] because of the performance regression caused by\nfalse cacheline sharing.  Recent investigation [2] revealed that the\nregressions is limited to a rather old Broadwell microarchitecture and\neven there it can be mitigated by disabling adjacent cacheline\nprefetching, see [3].\n\nSplitting single logical structure into multiple ones leads to more\ncomplicated management, extra pointer dereferences and overall less\nmaintainable code.  When that split-away part is a lock, it complicates\nthings even further.  With no performance benefits, there are no reasons\nfor this split.  Merging the vm_lock back into vm_area_struct also allows\nvm_area_struct to use SLAB_TYPESAFE_BY_RCU later in this patchset.\n\nThis patchset:\n\n1. moves vm_lock back into vm_area_struct, aligning it at the\n   cacheline boundary and changing the cache to be cacheline-aligned to\n   minimize cacheline sharing;\n\n2. changes vm_area_struct initialization to mark new vma as detached\n   until it is inserted into vma tree;\n\n3. replaces vm_lock and vma->detached flag with a reference counter;\n\n4. regroups vm_area_struct members to fit them into 3 cachelines;\n\n5. changes vm_area_struct cache to SLAB_TYPESAFE_BY_RCU to allow for\n   their reuse and to minimize call_rcu() calls.\n\nPagefault microbenchmarks show performance improvement:\nHmean     faults/cpu-1    507926.5547 (   0.00%)   506519.3692 *  -0.28%*\nHmean     faults/cpu-4    479119.7051 (   0.00%)   481333.6802 *   0.46%*\nHmean     faults/cpu-7    452880.2961 (   0.00%)   455845.6211 *   0.65%*\nHmean     faults/cpu-12   347639.1021 (   0.00%)   352004.2254 *   1.26%*\nHmean     faults/cpu-21   200061.2238 (   0.00%)   229597.0317 *  14.76%*\nHmean     faults/cpu-30   145251.2001 (   0.00%)   164202.5067 *  13.05%*\nHmean     faults/cpu-48   106848.4434 (   0.00%)   120641.5504 *  12.91%*\nHmean     faults/cpu-56    92472.3835 (   0.00%)   103464.7916 *  11.89%*\nHmean     faults/sec-1    507566.1468 (   0.00%)   506139.0811 *  -0.28%*\nHmean     faults/sec-4   1880478.2402 (   0.00%)  1886795.6329 *   0.34%*\nHmean     faults/sec-7   3106394.3438 (   0.00%)  3140550.7485 *   1.10%*\nHmean     faults/sec-12  4061358.4795 (   0.00%)  4112477.0206 *   1.26%*\nHmean     faults/sec-21  3988619.1169 (   0.00%)  4577747.1436 *  14.77%*\nHmean     faults/sec-30  3909839.5449 (   0.00%)  4311052.2787 *  10.26%*\nHmean     faults/sec-48  4761108.4691 (   0.00%)  5283790.5026 *  10.98%*\nHmean     faults/sec-56  4885561.4590 (   0.00%)  5415839.4045 *  10.85%*\n\n\nThis patch (of 18):\n\nIntroduce helper functions which can be used to read-lock a VMA when\nholding mmap_lock for read.  Replace direct accesses to vma->vm_lock with\nthese new helpers.\n\nLink: https://lkml.kernel.org/r/20250213224655.1680278-1-surenb@google.com\nLink: https://lkml.kernel.org/r/20250213224655.1680278-2-surenb@google.com\nSigned-off-by: Suren Baghdasaryan <surenb@google.com>\nReviewed-by: Lorenzo Stoakes <lorenzo.stoakes@oracle.com>\nReviewed-by: Davidlohr Bueso <dave@stgolabs.net>\nReviewed-by: Shakeel Butt <shakeel.butt@linux.dev>\nReviewed-by: Vlastimil Babka <vbabka@suse.cz>\nReviewed-by: Liam R. Howlett <Liam.Howlett@Oracle.com>\nTested-by: Shivank Garg <shivankg@amd.com>\n  Link: https://lkml.kernel.org/r/5e19ec93-8307-47c2-bb13-3ddf7150624e@amd.com\nCc: Christian Brauner <brauner@kernel.org>\nCc: David Hildenbrand <david@redhat.com>\nCc: David Howells <dhowells@redhat.com>\nCc: Hugh Dickins <hughd@google.com>\nCc: Jann Horn <jannh@google.com>\nCc: Johannes Weiner <hannes@cmpxchg.org>\nCc: Jonathan Corbet <corbet@lwn.net>\nCc: Klara Modin <klarasmodin@gmail.com>\nCc: Lokesh Gidra <lokeshgidra@google.com>\nCc: Mateusz Guzik <mjguzik@gmail.com>\nCc: Matthew Wilcox <willy@infradead.org>\nCc: Mel Gorman <mgorman@techsingularity.net>\nCc: Michal Hocko <mhocko@suse.com>\nCc: Minchan Kim <minchan@google.com>\nCc: Oleg Nesterov <oleg@redhat.com>\nCc: Pasha Tatashin <pasha.tatashin@soleen.com>\nCc: \"Paul E . McKenney\" <paulmck@kernel.org>\nCc: Peter Xu <peterx@redhat.com>\nCc: Peter Zijlstra (Intel) <peterz@infradead.org>\nCc: Sourav Panda <souravpanda@google.com>\nCc: Wei Yang <richard.weiyang@gmail.com>\nCc: Will Deacon <will@kernel.org>\nCc: Heiko Carstens <hca@linux.ibm.com>\nCc: Stephen Rothwell <sfr@canb.auug.org.au>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>",
+  "full_message": "mm: introduce vma_start_read_locked{_nested} helpers\n\nPatch series \"reimplement per-vma lock as a refcount\", v10.\n\nBack when per-vma locks were introduces, vm_lock was moved out of\nvm_area_struct in [1] because of the performance regression caused by\nfalse cacheline sharing.  Recent investigation [2] revealed that the\nregressions is limited to a rather old Broadwell microarchitecture and\neven there it can be mitigated by disabling adjacent cacheline\nprefetching, see [3].\n\nSplitting single logical structure into multiple ones leads to more\ncomplicated management, extra pointer dereferences and overall less\nmaintainable code.  When that split-away part is a lock, it complicates\nthings even further.  With no performance benefits, there are no reasons\nfor this split.  Merging the vm_lock back into vm_area_struct also allows\nvm_area_struct to use SLAB_TYPESAFE_BY_RCU later in this patchset.\n\nThis patchset:\n\n1. moves vm_lock back into vm_area_struct, aligning it at the\n   cacheline boundary and changing the cache to be cacheline-aligned to\n   minimize cacheline sharing;\n\n2. changes vm_area_struct initialization to mark new vma as detached\n   until it is inserted into vma tree;\n\n3. replaces vm_lock and vma->detached flag with a reference counter;\n\n4. regroups vm_area_struct members to fit them into 3 cachelines;\n\n5. changes vm_area_struct cache to SLAB_TYPESAFE_BY_RCU to allow for\n   their reuse and to minimize call_rcu() calls.\n\nPagefault microbenchmarks show performance improvement:\nHmean     faults/cpu-1    507926.5547 (   0.00%)   506519.3692 *  -0.28%*\nHmean     faults/cpu-4    479119.7051 (   0.00%)   481333.6802 *   0.46%*\nHmean     faults/cpu-7    452880.2961 (   0.00%)   455845.6211 *   0.65%*\nHmean     faults/cpu-12   347639.1021 (   0.00%)   352004.2254 *   1.26%*\nHmean     faults/cpu-21   200061.2238 (   0.00%)   229597.0317 *  14.76%*\nHmean     faults/cpu-30   145251.2001 (   0.00%)   164202.5067 *  13.05%*\nHmean     faults/cpu-48   106848.4434 (   0.00%)   120641.5504 *  12.91%*\nHmean     faults/cpu-56    92472.3835 (   0.00%)   103464.7916 *  11.89%*\nHmean     faults/sec-1    507566.1468 (   0.00%)   506139.0811 *  -0.28%*\nHmean     faults/sec-4   1880478.2402 (   0.00%)  1886795.6329 *   0.34%*\nHmean     faults/sec-7   3106394.3438 (   0.00%)  3140550.7485 *   1.10%*\nHmean     faults/sec-12  4061358.4795 (   0.00%)  4112477.0206 *   1.26%*\nHmean     faults/sec-21  3988619.1169 (   0.00%)  4577747.1436 *  14.77%*\nHmean     faults/sec-30  3909839.5449 (   0.00%)  4311052.2787 *  10.26%*\nHmean     faults/sec-48  4761108.4691 (   0.00%)  5283790.5026 *  10.98%*\nHmean     faults/sec-56  4885561.4590 (   0.00%)  5415839.4045 *  10.85%*\n\n\nThis patch (of 18):\n\nIntroduce helper functions which can be used to read-lock a VMA when\nholding mmap_lock for read.  Replace direct accesses to vma->vm_lock with\nthese new helpers.\n\nLink: https://lkml.kernel.org/r/20250213224655.1680278-1-surenb@google.com\nLink: https://lkml.kernel.org/r/20250213224655.1680278-2-surenb@google.com\nSigned-off-by: Suren Baghdasaryan <surenb@google.com>\nReviewed-by: Lorenzo Stoakes <lorenzo.stoakes@oracle.com>\nReviewed-by: Davidlohr Bueso <dave@stgolabs.net>\nReviewed-by: Shakeel Butt <shakeel.butt@linux.dev>\nReviewed-by: Vlastimil Babka <vbabka@suse.cz>\nReviewed-by: Liam R. Howlett <Liam.Howlett@Oracle.com>\nTested-by: Shivank Garg <shivankg@amd.com>\n  Link: https://lkml.kernel.org/r/5e19ec93-8307-47c2-bb13-3ddf7150624e@amd.com\nCc: Christian Brauner <brauner@kernel.org>\nCc: David Hildenbrand <david@redhat.com>\nCc: David Howells <dhowells@redhat.com>\nCc: Hugh Dickins <hughd@google.com>\nCc: Jann Horn <jannh@google.com>\nCc: Johannes Weiner <hannes@cmpxchg.org>\nCc: Jonathan Corbet <corbet@lwn.net>\nCc: Klara Modin <klarasmodin@gmail.com>\nCc: Lokesh Gidra <lokeshgidra@google.com>\nCc: Mateusz Guzik <mjguzik@gmail.com>\nCc: Matthew Wilcox <willy@infradead.org>\nCc: Mel Gorman <mgorman@techsingularity.net>\nCc: Michal Hocko <mhocko@suse.com>\nCc: Minchan Kim <minchan@google.com>\nCc: Oleg Nesterov <oleg@redhat.com>\nCc: Pasha Tatashin <pasha.tatashin@soleen.com>\nCc: \"Paul E . McKenney\" <paulmck@kernel.org>\nCc: Peter Xu <peterx@redhat.com>\nCc: Peter Zijlstra (Intel) <peterz@infradead.org>\nCc: Sourav Panda <souravpanda@google.com>\nCc: Wei Yang <richard.weiyang@gmail.com>\nCc: Will Deacon <will@kernel.org>\nCc: Heiko Carstens <hca@linux.ibm.com>\nCc: Stephen Rothwell <sfr@canb.auug.org.au>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>",
+  "author_name": "Suren Baghdasaryan",
+  "author_email": "surenb@google.com",
+  "author_date": "Thu Feb 13 14:46:38 2025 -0800",
+  "author_date_iso": "2025-02-13T14:46:38-08:00",
+  "committer_name": "Andrew Morton",
+  "committer_email": "akpm@linux-foundation.org",
+  "committer_date": "Sun Mar 16 22:06:17 2025 -0700",
+  "committer_date_iso": "2025-03-16T22:06:17-07:00",
+  "files_changed": [
+    "include/linux/mm.h",
+    "mm/userfaultfd.c"
+  ],
+  "files_changed_count": 2,
+  "stats": [
+    {
+      "file": "include/linux/mm.h",
+      "insertions": 24,
+      "deletions": 0
+    },
+    {
+      "file": "mm/userfaultfd.c",
+      "insertions": 5,
+      "deletions": 17
+    }
+  ],
+  "total_insertions": 29,
+  "total_deletions": 17,
+  "total_changes": 46,
+  "parents": [
+    "2f9b43d617e2685728568ca609c5c77e45d6f1e8"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "sec-1"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "include/linux/mm.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/userfaultfd.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

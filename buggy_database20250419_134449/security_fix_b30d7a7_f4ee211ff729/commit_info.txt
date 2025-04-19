@@ -1,0 +1,219 @@
+Commit Hash: b30d7a77c53ec04a6d94683d7680ec406b7f3ac8
+Subject: Merge tag 'perf-tools-for-v6.5-1-2023-06-28' of git://git.kernel.org/pub/scm/linux/kernel/git/perf/perf-tools-next
+
+
+Security Keywords:
+- inject
+
+Full commit message:
+Merge tag 'perf-tools-for-v6.5-1-2023-06-28' of git://git.kernel.org/pub/scm/linux/kernel/git/perf/perf-tools-next
+
+Pull perf tools updates from Namhyung Kim:
+ "Internal cleanup:
+
+   - Refactor PMU data management to handle hybrid systems in a generic
+     way.
+
+     Do more work in the lexer so that legacy event types parse more
+     easily. A side-effect of this is that if a PMU is specified,
+     scanning sysfs is avoided improving start-up time.
+
+   - Fix hybrid metrics, for example, the TopdownL1 works for both
+     performance and efficiency cores on Intel machines. To support
+     this, sort and regroup events after parsing.
+
+   - Add reference count checking for the 'thread' data structure.
+
+   - Lots of fixes for memory leaks in various places thanks to the ASAN
+     and Ian's refcount checker.
+
+   - Reduce the binary size by replacing static variables with local or
+     dynamically allocated memory.
+
+   - Introduce shared_mutex for annotate data to reduce memory
+     footprint.
+
+   - Make filesystem access library functions more thread safe.
+
+  Test:
+
+   - Organize cpu_map tests into a single suite.
+
+   - Add metric value validation test to check if the values are within
+     correct value ranges.
+
+   - Add perf stat stdio output test to check if event and metric names
+     match.
+
+   - Add perf data converter JSON output test.
+
+   - Fix a lot of issues reported by shellcheck(1). This is a
+     preparation to enable shellcheck by default.
+
+   - Make the large x86 new instructions test optional at build time
+     using EXTRA_TESTS=1.
+
+   - Add a test for libpfm4 events.
+
+  perf script:
+
+   - Add 'dsoff' outpuf field to display offset from the DSO.
+
+      $ perf script -F comm,pid,event,ip,dsoff
+         ls 2695501 cycles:      152cc73ef4b5 (/usr/lib/x86_64-linux-gnu/ld-2.31.so+0x1c4b5)
+         ls 2695501 cycles:  ffffffff99045b3e ([kernel.kallsyms])
+         ls 2695501 cycles:  ffffffff9968e107 ([kernel.kallsyms])
+         ls 2695501 cycles:  ffffffffc1f54afb ([kernel.kallsyms])
+         ls 2695501 cycles:  ffffffff9968382f ([kernel.kallsyms])
+         ls 2695501 cycles:  ffffffff99e00094 ([kernel.kallsyms])
+         ls 2695501 cycles:      152cc718a8d0 (/usr/lib/x86_64-linux-gnu/libselinux.so.1+0x68d0)
+         ls 2695501 cycles:  ffffffff992a6db0 ([kernel.kallsyms])
+
+   - Adjust width for large PID/TID values.
+
+  perf report:
+
+   - Robustify reading addr2line output for srcline by checking sentinel
+     output before the actual data and by using timeout of 1 second.
+
+   - Allow config terms (like 'name=ABC') with breakpoint events.
+
+      $ perf record -e mem:0x55feb98dd169:x/name=breakpoint/ -p 19646 -- sleep 1
+
+  perf annotate:
+
+   - Handle x86 instruction suffix like 'l' in 'movl' generally.
+
+   - Parse instruction operands properly even with a whitespace. This is
+     needed for llvm-objdump output.
+
+   - Support RISC-V binutils lookup using the triplet prefixes.
+
+   - Add '<' and '>' key to navigate to prev/next symbols in TUI.
+
+   - Fix instruction association and parsing for LoongArch.
+
+  perf stat:
+
+   - Add --per-cache aggregation option, optionally specify a cache
+     level like `--per-cache=L2`.
+
+      $ sudo perf stat --per-cache -a -e ls_dmnd_fills_from_sys.ext_cache_remote --\
+        taskset -c 0-15,64-79,128-143,192-207\
+        perf bench sched messaging -p -t -l 100000 -g 8
+
+        # Running 'sched/messaging' benchmark:
+        # 20 sender and receiver threads per group
+        # 8 groups == 320 threads run
+
+        Total time: 7.648 [sec]
+
+        Performance counter stats for 'system wide':
+
+        S0-D0-L3-ID0             16         17,145,912      ls_dmnd_fills_from_sys.ext_cache_remote
+        S0-D0-L3-ID8             16         14,977,628      ls_dmnd_fills_from_sys.ext_cache_remote
+        S0-D0-L3-ID16            16            262,539      ls_dmnd_fills_from_sys.ext_cache_remote
+        S0-D0-L3-ID24            16              3,140      ls_dmnd_fills_from_sys.ext_cache_remote
+        S0-D0-L3-ID32            16             27,403      ls_dmnd_fills_from_sys.ext_cache_remote
+        S0-D0-L3-ID40            16             17,026      ls_dmnd_fills_from_sys.ext_cache_remote
+        S0-D0-L3-ID48            16              7,292      ls_dmnd_fills_from_sys.ext_cache_remote
+        S0-D0-L3-ID56            16              2,464      ls_dmnd_fills_from_sys.ext_cache_remote
+        S1-D1-L3-ID64            16         22,489,306      ls_dmnd_fills_from_sys.ext_cache_remote
+        S1-D1-L3-ID72            16         21,455,257      ls_dmnd_fills_from_sys.ext_cache_remote
+        S1-D1-L3-ID80            16             11,619      ls_dmnd_fills_from_sys.ext_cache_remote
+        S1-D1-L3-ID88            16             30,978      ls_dmnd_fills_from_sys.ext_cache_remote
+        S1-D1-L3-ID96            16             37,628      ls_dmnd_fills_from_sys.ext_cache_remote
+        S1-D1-L3-ID104           16             13,594      ls_dmnd_fills_from_sys.ext_cache_remote
+        S1-D1-L3-ID112           16             10,164      ls_dmnd_fills_from_sys.ext_cache_remote
+        S1-D1-L3-ID120           16             11,259      ls_dmnd_fills_from_sys.ext_cache_remote
+
+              7.779171484 seconds time elapsed
+
+   - Change default (no event/metric) formatting for default metrics so
+     that events are hidden and the metric and group appear.
+
+       Performance counter stats for 'ls /':
+
+                    1.85 msec task-clock                       #    0.594 CPUs utilized
+                       0      context-switches                 #    0.000 /sec
+                       0      cpu-migrations                   #    0.000 /sec
+                      97      page-faults                      #   52.517 K/sec
+               2,187,173      cycles                           #    1.184 GHz
+               2,474,459      instructions                     #    1.13  insn per cycle
+                 531,584      branches                         #  287.805 M/sec
+                  13,626      branch-misses                    #    2.56% of all branches
+                              TopdownL1                 #     23.5 %  tma_backend_bound
+                                                        #     11.5 %  tma_bad_speculation
+                                                        #     39.1 %  tma_frontend_bound
+                                                        #     25.9 %  tma_retiring
+
+   - Allow --cputype option to have any PMU name (not just hybrid).
+
+   - Fix output value not to added when it runs multiple times with -r
+     option.
+
+  perf list:
+
+   - Show metricgroup description from JSON file called
+     metricgroups.json.
+
+   - Allow 'pfm' argument to list only libpfm4 events and check each
+     event is supported before showing it.
+
+  JSON vendor events:
+
+   - Avoid event grouping using "NO_GROUP_EVENTS" constraints. The
+     topdown events are correctly grouped even if no group exists.
+
+   - Add "Default" metric group to print it in the default output. And
+     use "DefaultMetricgroupName" to indicate the real metric group
+     name.
+
+   - Add AmpereOne core PMU events.
+
+  Misc:
+
+   - Define man page date correctly.
+
+   - Track exception level properly on ARM CoreSight ETM.
+
+   - Allow anonymous struct, union or enum when retrieving type names
+     from DWARF.
+
+   - Fix incorrect filename when calling `perf inject --jit`.
+
+   - Handle PLT size correctly on LoongArch"
+
+* tag 'perf-tools-for-v6.5-1-2023-06-28' of git://git.kernel.org/pub/scm/linux/kernel/git/perf/perf-tools-next: (269 commits)
+  perf test: Skip metrics w/o event name in stat STD output linter
+  perf test: Reorder event name checks in stat STD output linter
+  perf pmu: Remove a hard coded cpu PMU assumption
+  perf pmus: Add notion of default PMU for JSON events
+  perf unwind: Fix map reference counts
+  perf test: Set PERF_EXEC_PATH for script execution
+  perf script: Initialize buffer for regs_map()
+  perf tests: Fix test_arm_callgraph_fp variable expansion
+  perf symbol: Add LoongArch case in get_plt_sizes()
+  perf test: Remove x permission from lib/stat_output.sh
+  perf test: Rerun failed metrics with longer workload
+  perf test: Add skip list for metrics known would fail
+  perf test: Add metric value validation test
+  perf jit: Fix incorrect file name in DWARF line table
+  perf annotate: Fix instruction association and parsing for LoongArch
+  perf annotation: Switch lock from a mutex to a sharded_mutex
+  perf sharded_mutex: Introduce sharded_mutex
+  tools: Fix incorrect calculation of object size by sizeof
+  perf subcmd: Fix missing check for return value of malloc() in add_cmdname()
+  perf parse-events: Remove unneeded semicolon
+  ...
+
+Metadata:
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Author Date: Fri Jun 30 11:35:41 2023 -0700
+Committer: Linus Torvalds <torvalds@linux-foundation.org>
+Commit Date: Fri Jun 30 11:35:41 2023 -0700
+
+Files Changed: 4
+Lines Added: 20334
+Lines Removed: 11817
+Total Changes: 32151

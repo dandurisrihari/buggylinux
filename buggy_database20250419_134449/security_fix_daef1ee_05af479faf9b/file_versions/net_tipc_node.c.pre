@@ -1,0 +1,132 @@
+commit f779bf792284fed78fedee61b46df2d4652636d3
+Author: Tuong Lien <tuong.t.lien@dektech.com.au>
+Date:   Fri Sep 18 08:17:26 2020 +0700
+
+    tipc: optimize key switching time and logic
+    
+    We reduce the lasting time for a pending TX key to be active as well as
+    for a passive RX key to be freed which generally helps speed up the key
+    switching. It is not expected to be too fast but should not be too slow
+    either. Also the key handling logic is simplified that a pending RX key
+    will be removed automatically if it is found not working after a number
+    of times; the probing for a pending TX key is now carried on a specific
+    message user ('LINK_PROTOCOL' or 'LINK_CONFIG') which is more efficient
+    than using a timer on broadcast messages, the timer is reserved for use
+    later as needed.
+    
+    The kernel logs or 'pr***()' are now made as clear as possible to user.
+    Some prints are added, removed or changed to the debug-level. The
+    'TIPC_CRYPTO_DEBUG' definition is removed, and the 'pr_debug()' is used
+    instead which will be much helpful in runtime.
+    
+    Besides we also optimize the code in some other places as a preparation
+    for later commits.
+    
+    v2: silent more kernel logs, also use 'info->extack' for a message
+    emitted due to netlink operations instead (- David's comments).
+    
+    Acked-by: Jon Maloy <jmaloy@redhat.com>
+    Signed-off-by: Tuong Lien <tuong.t.lien@dektech.com.au>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/tipc/node.c b/net/tipc/node.c
+index 4edcee3088da..70045630e6bb 100644
+--- a/net/tipc/node.c
++++ b/net/tipc/node.c
+@@ -2872,11 +2872,10 @@ static int __tipc_nl_node_set_key(struct sk_buff *skb, struct genl_info *info)
+ {
+ 	struct nlattr *attrs[TIPC_NLA_NODE_MAX + 1];
+ 	struct net *net = sock_net(skb->sk);
+-	struct tipc_net *tn = tipc_net(net);
++	struct tipc_crypto *tx = tipc_net(net)->crypto_tx, *c = tx;
+ 	struct tipc_node *n = NULL;
+ 	struct tipc_aead_key *ukey;
+-	struct tipc_crypto *c;
+-	u8 *id, *own_id;
++	u8 *id, *own_id, mode;
+ 	int rc = 0;
+ 
+ 	if (!info->attrs[TIPC_NLA_NODE])
+@@ -2886,52 +2885,52 @@ static int __tipc_nl_node_set_key(struct sk_buff *skb, struct genl_info *info)
+ 			      info->attrs[TIPC_NLA_NODE],
+ 			      tipc_nl_node_policy, info->extack);
+ 	if (rc)
+-		goto exit;
++		return rc;
+ 
+ 	own_id = tipc_own_id(net);
+ 	if (!own_id) {
+-		rc = -EPERM;
+-		goto exit;
++		GENL_SET_ERR_MSG(info, "not found own node identity (set id?)");
++		return -EPERM;
+ 	}
+ 
+ 	rc = tipc_nl_retrieve_key(attrs, &ukey);
+ 	if (rc)
+-		goto exit;
++		return rc;
+ 
+-	rc = tipc_aead_key_validate(ukey);
++	rc = tipc_aead_key_validate(ukey, info);
+ 	if (rc)
+-		goto exit;
++		return rc;
+ 
+ 	rc = tipc_nl_retrieve_nodeid(attrs, &id);
+ 	switch (rc) {
+ 	case -ENODATA:
+-		/* Cluster key mode */
+-		rc = tipc_crypto_key_init(tn->crypto_tx, ukey, CLUSTER_KEY);
++		mode = CLUSTER_KEY;
+ 		break;
+ 	case 0:
+-		/* Per-node key mode */
+-		if (!memcmp(id, own_id, NODE_ID_LEN)) {
+-			c = tn->crypto_tx;
+-		} else {
++		mode = PER_NODE_KEY;
++		if (memcmp(id, own_id, NODE_ID_LEN)) {
+ 			n = tipc_node_find_by_id(net, id) ?:
+ 				tipc_node_create(net, 0, id, 0xffffu, 0, true);
+-			if (unlikely(!n)) {
+-				rc = -ENOMEM;
+-				break;
+-			}
++			if (unlikely(!n))
++				return -ENOMEM;
+ 			c = n->crypto_rx;
+ 		}
+-
+-		rc = tipc_crypto_key_init(c, ukey, PER_NODE_KEY);
+-		if (n)
+-			tipc_node_put(n);
+ 		break;
+ 	default:
+-		break;
++		return rc;
+ 	}
+ 
+-exit:
+-	return (rc < 0) ? rc : 0;
++	/* Initiate the TX/RX key */
++	rc = tipc_crypto_key_init(c, ukey, mode);
++	if (n)
++		tipc_node_put(n);
++
++	if (rc < 0) {
++		GENL_SET_ERR_MSG(info, "unable to initiate or attach new key");
++		return rc;
++	}
++
++	return 0;
+ }
+ 
+ int tipc_nl_node_set_key(struct sk_buff *skb, struct genl_info *info)
+@@ -2958,7 +2957,6 @@ static int __tipc_nl_node_flush_key(struct sk_buff *skb,
+ 		tipc_crypto_key_flush(n->crypto_rx);
+ 	rcu_read_unlock();
+ 
+-	pr_info("All keys are flushed!\n");
+ 	return 0;
+ }

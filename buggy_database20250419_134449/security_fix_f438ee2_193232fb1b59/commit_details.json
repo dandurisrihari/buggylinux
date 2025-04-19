@@ -1,0 +1,111 @@
+{
+  "hash": "f438ee21ef21f9fa4e7745e9a4a6dd8a6422c7e2",
+  "hash_short": "f438ee21",
+  "subject": "Merge branch 'bpf-mips-jit'",
+  "body": "Johan Almbladh says:\n\n====================\nThis is an implementation of an eBPF JIT for MIPS I-V and MIPS32/64 r1-r6.\nThe new JIT is written from scratch, but uses the same overall structure\nas other eBPF JITs.\n\nBefore, the MIPS JIT situation looked like this.\n\n  - 32-bit: MIPS32, cBPF-only, tests fail\n  - 64-bit: MIPS64r2-r6, eBPF, tests fail, incomplete eBPF ISA support\n\nThe new JIT implementation raises the bar to the following level.\n\n  - 32/64-bit: all MIPS ISA, eBPF, all tests pass, full eBPF ISA support\n\nOverview\n--------\nThe implementation supports all 32-bit and 64-bit eBPF instructions\ndefined as of this writing, including the recently-added atomics. It is\nintended to provide good performance for native word size operations,\nwhile also being complete so the JIT never has to fall back to the\ninterpreter. The new JIT replaces the current cBPF and eBPF JITs for MIPS.\n\nThe implementation is divided into separate files as follows. The source\nfiles contains comments describing internal mechanisms and details on\nthings like eBPF-to-CPU register mappings, so I won't repeat that here.\n\n  - jit_comp.[ch]    code shared between 32-bit and 64-bit JITs\n  - jit_comp32.c     32-bit JIT implementation\n  - jit_comp64.c     64-bit JIT implementation\n\nBoth the 32-bit and 64-bit versions map all eBPF registers to native MIPS\nCPU registers. There are also enough unmapped CPU registers available to\nallow all eBPF operations implemented natively by the JIT to use only CPU\nregisters without having to resort to stack scratch space.\n\nSome operations are deemed too complex to implement natively in the JIT.\nThose are instead implemented as a function call to a helper that performs\nthe operation. This is done in the following cases.\n\n  - 64-bit div and mod on a 32-bit CPU\n  - 64-bit atomics on a 32-bit CPU\n  - 32-bit atomics on a 32-bit CPU that lacks ll/sc instructions\n\nCPU errata workarounds\n----------------------\nThe JIT implements workarounds for R10000, Loongson-2F and Loongson-3 CPU\nerrata. For the Loongson workarounds, I have used the public information\navailable on the matter.\n\nLink: https://sourceware.org/legacy-ml/binutils/2009-11/msg00387.html\n\nTesting\n-------\nDuring the development of the JIT, I have added a number of new test cases\nto the test_bpf.ko test suite to be able to verify correctness of JIT\nimplementations in a more systematic way. The new additions increase the\ntest suite roughly three-fold, with many of the new tests being very\nextensive and even exhaustive when feasible.\n\nLink: https://lore.kernel.org/bpf/20211001130348.3670534-1-johan.almbladh@anyfinetworks.com/\nLink: https://lore.kernel.org/bpf/20210914091842.4186267-1-johan.almbladh@anyfinetworks.com/\nLink: https://lore.kernel.org/bpf/20210809091829.810076-1-johan.almbladh@anyfinetworks.com/\n\nThe JIT has been tested by running the test_bpf.ko test suite in QEMU with\nthe following MIPS ISAs, in both big and little endian mode, with and\nwithout JIT hardening enabled.\n\n  MIPS32r2, MIPS32r6, MIPS64r2, MIPS64r6\n\nFor the QEMU r2 targets, the correctness of pre-r2 code emitted has been\ntested by manually overriding each of the following macros with 0.\n\n  cpu_has_llsc, cpu_has_mips_2, cpu_has_mips_r1, cpu_has_mips_r2\n\nSimilarly, CPU errata workaround code has been tested by enabling the\neach of the following configurations for the MIPS64r2 targets.\n\n  CONFIG_WAR_R10000\n  CONFIG_CPU_LOONGSON3_WORKAROUNDS\n  CONFIG_CPU_NOP_WORKAROUNDS\n  CONFIG_CPU_JUMP_WORKAROUNDS\n\nThe JIT passes all tests in all configurations. Below is the summary for\nMIPS32r2 in little endian mode.\n\n  test_bpf: Summary: 1006 PASSED, 0 FAILED, [994/994 JIT'ed]\n  test_bpf: test_tail_calls: Summary: 8 PASSED, 0 FAILED, [8/8 JIT'ed]\n  test_bpf: test_skb_segment: Summary: 2 PASSED, 0 FAILED\n\nAccording to MIPS ISA reference documentation, the result of a 32-bit ALU\narithmetic operation on a 64-bit CPU is unpredictable if an operand\nregister value is not properly sign-extended to 64 bits. To verify the\ncode emitted by the JIT, the code generation engine in QEMU was modifed to\nflip all low 32 bits if the above condition was not met. With this\ntrip-wire installed, the kernel booted properly in qemu-system-mips64el\nand all test_bpf.ko tests passed.\n\nRemaining features\n------------------\nWhile the JIT is complete is terms of eBPF ISA support, this series does\nnot include support for BPF-to-BPF calls and BPF trampolines. Those\nfeatures are planned to be added in another patch series.\n\nThe BPF_ST | BPF_NOSPEC instruction currently emits nothing. This is\nconsistent with the behavior if the MIPS interpreter and the existing\neBPF JIT.\n\nWhy not build on the existing eBPF JIT?\n---------------------------------------\nThe existing eBPF JIT was originally written for MIPS64. An effort was\nmade to add MIPS32 support to it in commit 716850ab104d (\"MIPS: eBPF:\nInitial eBPF support for MIPS32 architecture.\"). That turned out to\ncontain a number of flaws, so eBPF support for MIPS32 was disabled in\ncommit 36366e367ee9 (\"MIPS: BPF: Restore MIPS32 cBPF JIT\").\n\nLink: https://lore.kernel.org/bpf/5deaa994.1c69fb81.97561.647e@mx.google.com/\n\nThe current eBPF JIT for MIPS64 lacks a lot of functionality regarding\nALU32, JMP32 and atomic operations. It also lacks 32-bit CPU support on a\nfundamental level, for example 32-bit CPU register mappings and o32 ABI\ncalling conventions. For optimization purposes, it tracks register usage\nthrough the program control flow in order to do zero-extension and sign-\nextension only when necessary, a static analysis of sorts. In my opinion,\nhaving this kind of complexity in JITs, and for which there is not\nadequate test coverage, is a problem. Such analysis should be done by the\nverifier, if needed at all. Finally, when I run the BPF test suite\ntest_bpf.ko on the current JIT, there are errors and warnings.\n\nI believe that an eBPF JIT should strive to be correct, complete and\noptimized, and in that order. The JIT runs after the verifer has audited\nthe program and given its approval. If the JIT then emits code that does\nsomething else, it will undermine the eBPF security model. A simple\nimplementation is easier to get correct than a complex one. Furthermore,\nthe real performance hit is not an extra CPU instruction here and there,\nbut when the JIT bails on an unimplemented eBPF instruction and cause the\nwhole program to fall back to the interpreter. My reasoning here boils\ndown to the following.\n\n* The JIT should not contain a static analyzer that tracks branches.\n\n* It is acceptable to emit possibly superfluous sign-/zero-extensions for\n  ALU32 and JMP32 operations on a 64-bit MIPS to guarantee correctness.\n\n* The JIT should handle all eBPF instructions on all MIPS CPUs.\n\nI conclude that the current eBPF MIPS JIT is complex, incomplete and\nincorrect. For the reasons stated above, I decided to not use the existing\nJIT implementation.\n====================\n\nSigned-off-by: Daniel Borkmann <daniel@iogearbox.net>\nSigned-off-by: Andrii Nakryiko <andrii@kernel.org>",
+  "full_message": "Merge branch 'bpf-mips-jit'\n\nJohan Almbladh says:\n\n====================\nThis is an implementation of an eBPF JIT for MIPS I-V and MIPS32/64 r1-r6.\nThe new JIT is written from scratch, but uses the same overall structure\nas other eBPF JITs.\n\nBefore, the MIPS JIT situation looked like this.\n\n  - 32-bit: MIPS32, cBPF-only, tests fail\n  - 64-bit: MIPS64r2-r6, eBPF, tests fail, incomplete eBPF ISA support\n\nThe new JIT implementation raises the bar to the following level.\n\n  - 32/64-bit: all MIPS ISA, eBPF, all tests pass, full eBPF ISA support\n\nOverview\n--------\nThe implementation supports all 32-bit and 64-bit eBPF instructions\ndefined as of this writing, including the recently-added atomics. It is\nintended to provide good performance for native word size operations,\nwhile also being complete so the JIT never has to fall back to the\ninterpreter. The new JIT replaces the current cBPF and eBPF JITs for MIPS.\n\nThe implementation is divided into separate files as follows. The source\nfiles contains comments describing internal mechanisms and details on\nthings like eBPF-to-CPU register mappings, so I won't repeat that here.\n\n  - jit_comp.[ch]    code shared between 32-bit and 64-bit JITs\n  - jit_comp32.c     32-bit JIT implementation\n  - jit_comp64.c     64-bit JIT implementation\n\nBoth the 32-bit and 64-bit versions map all eBPF registers to native MIPS\nCPU registers. There are also enough unmapped CPU registers available to\nallow all eBPF operations implemented natively by the JIT to use only CPU\nregisters without having to resort to stack scratch space.\n\nSome operations are deemed too complex to implement natively in the JIT.\nThose are instead implemented as a function call to a helper that performs\nthe operation. This is done in the following cases.\n\n  - 64-bit div and mod on a 32-bit CPU\n  - 64-bit atomics on a 32-bit CPU\n  - 32-bit atomics on a 32-bit CPU that lacks ll/sc instructions\n\nCPU errata workarounds\n----------------------\nThe JIT implements workarounds for R10000, Loongson-2F and Loongson-3 CPU\nerrata. For the Loongson workarounds, I have used the public information\navailable on the matter.\n\nLink: https://sourceware.org/legacy-ml/binutils/2009-11/msg00387.html\n\nTesting\n-------\nDuring the development of the JIT, I have added a number of new test cases\nto the test_bpf.ko test suite to be able to verify correctness of JIT\nimplementations in a more systematic way. The new additions increase the\ntest suite roughly three-fold, with many of the new tests being very\nextensive and even exhaustive when feasible.\n\nLink: https://lore.kernel.org/bpf/20211001130348.3670534-1-johan.almbladh@anyfinetworks.com/\nLink: https://lore.kernel.org/bpf/20210914091842.4186267-1-johan.almbladh@anyfinetworks.com/\nLink: https://lore.kernel.org/bpf/20210809091829.810076-1-johan.almbladh@anyfinetworks.com/\n\nThe JIT has been tested by running the test_bpf.ko test suite in QEMU with\nthe following MIPS ISAs, in both big and little endian mode, with and\nwithout JIT hardening enabled.\n\n  MIPS32r2, MIPS32r6, MIPS64r2, MIPS64r6\n\nFor the QEMU r2 targets, the correctness of pre-r2 code emitted has been\ntested by manually overriding each of the following macros with 0.\n\n  cpu_has_llsc, cpu_has_mips_2, cpu_has_mips_r1, cpu_has_mips_r2\n\nSimilarly, CPU errata workaround code has been tested by enabling the\neach of the following configurations for the MIPS64r2 targets.\n\n  CONFIG_WAR_R10000\n  CONFIG_CPU_LOONGSON3_WORKAROUNDS\n  CONFIG_CPU_NOP_WORKAROUNDS\n  CONFIG_CPU_JUMP_WORKAROUNDS\n\nThe JIT passes all tests in all configurations. Below is the summary for\nMIPS32r2 in little endian mode.\n\n  test_bpf: Summary: 1006 PASSED, 0 FAILED, [994/994 JIT'ed]\n  test_bpf: test_tail_calls: Summary: 8 PASSED, 0 FAILED, [8/8 JIT'ed]\n  test_bpf: test_skb_segment: Summary: 2 PASSED, 0 FAILED\n\nAccording to MIPS ISA reference documentation, the result of a 32-bit ALU\narithmetic operation on a 64-bit CPU is unpredictable if an operand\nregister value is not properly sign-extended to 64 bits. To verify the\ncode emitted by the JIT, the code generation engine in QEMU was modifed to\nflip all low 32 bits if the above condition was not met. With this\ntrip-wire installed, the kernel booted properly in qemu-system-mips64el\nand all test_bpf.ko tests passed.\n\nRemaining features\n------------------\nWhile the JIT is complete is terms of eBPF ISA support, this series does\nnot include support for BPF-to-BPF calls and BPF trampolines. Those\nfeatures are planned to be added in another patch series.\n\nThe BPF_ST | BPF_NOSPEC instruction currently emits nothing. This is\nconsistent with the behavior if the MIPS interpreter and the existing\neBPF JIT.\n\nWhy not build on the existing eBPF JIT?\n---------------------------------------\nThe existing eBPF JIT was originally written for MIPS64. An effort was\nmade to add MIPS32 support to it in commit 716850ab104d (\"MIPS: eBPF:\nInitial eBPF support for MIPS32 architecture.\"). That turned out to\ncontain a number of flaws, so eBPF support for MIPS32 was disabled in\ncommit 36366e367ee9 (\"MIPS: BPF: Restore MIPS32 cBPF JIT\").\n\nLink: https://lore.kernel.org/bpf/5deaa994.1c69fb81.97561.647e@mx.google.com/\n\nThe current eBPF JIT for MIPS64 lacks a lot of functionality regarding\nALU32, JMP32 and atomic operations. It also lacks 32-bit CPU support on a\nfundamental level, for example 32-bit CPU register mappings and o32 ABI\ncalling conventions. For optimization purposes, it tracks register usage\nthrough the program control flow in order to do zero-extension and sign-\nextension only when necessary, a static analysis of sorts. In my opinion,\nhaving this kind of complexity in JITs, and for which there is not\nadequate test coverage, is a problem. Such analysis should be done by the\nverifier, if needed at all. Finally, when I run the BPF test suite\ntest_bpf.ko on the current JIT, there are errors and warnings.\n\nI believe that an eBPF JIT should strive to be correct, complete and\noptimized, and in that order. The JIT runs after the verifer has audited\nthe program and given its approval. If the JIT then emits code that does\nsomething else, it will undermine the eBPF security model. A simple\nimplementation is easier to get correct than a complex one. Furthermore,\nthe real performance hit is not an extra CPU instruction here and there,\nbut when the JIT bails on an unimplemented eBPF instruction and cause the\nwhole program to fall back to the interpreter. My reasoning here boils\ndown to the following.\n\n* The JIT should not contain a static analyzer that tracks branches.\n\n* It is acceptable to emit possibly superfluous sign-/zero-extensions for\n  ALU32 and JMP32 operations on a 64-bit MIPS to guarantee correctness.\n\n* The JIT should handle all eBPF instructions on all MIPS CPUs.\n\nI conclude that the current eBPF MIPS JIT is complex, incomplete and\nincorrect. For the reasons stated above, I decided to not use the existing\nJIT implementation.\n====================\n\nSigned-off-by: Daniel Borkmann <daniel@iogearbox.net>\nSigned-off-by: Andrii Nakryiko <andrii@kernel.org>",
+  "author_name": "Daniel Borkmann",
+  "author_email": "daniel@iogearbox.net",
+  "author_date": "Wed Oct 6 15:52:24 2021 +0200",
+  "author_date_iso": "2021-10-06T15:52:24+02:00",
+  "committer_name": "Andrii Nakryiko",
+  "committer_email": "andrii@kernel.org",
+  "committer_date": "Wed Oct 6 12:32:56 2021 -0700",
+  "committer_date_iso": "2021-10-06T12:32:56-07:00",
+  "files_changed": [],
+  "files_changed_count": 0,
+  "stats": [
+    {
+      "file": "MAINTAINERS",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/mips/Kconfig",
+      "insertions": 4,
+      "deletions": 2
+    },
+    {
+      "file": "arch/mips/include/asm/uasm.h",
+      "insertions": 5,
+      "deletions": 0
+    },
+    {
+      "file": "arch/mips/mm/uasm-mips.c",
+      "insertions": 3,
+      "deletions": 1
+    },
+    {
+      "file": "arch/mips/mm/uasm.c",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "arch/mips/net/Makefile",
+      "insertions": 7,
+      "deletions": 1
+    },
+    {
+      "file": "arch/mips/net/bpf_jit.c",
+      "insertions": 0,
+      "deletions": 1299
+    },
+    {
+      "file": "arch/mips/net/bpf_jit.h",
+      "insertions": 0,
+      "deletions": 81
+    },
+    {
+      "file": "arch/mips/net/bpf_jit_asm.S",
+      "insertions": 0,
+      "deletions": 285
+    },
+    {
+      "file": "arch/mips/net/bpf_jit_comp.c",
+      "insertions": 1034,
+      "deletions": 0
+    },
+    {
+      "file": "arch/mips/net/bpf_jit_comp.h",
+      "insertions": 235,
+      "deletions": 0
+    },
+    {
+      "file": "arch/mips/net/bpf_jit_comp32.c",
+      "insertions": 1899,
+      "deletions": 0
+    },
+    {
+      "file": "arch/mips/net/bpf_jit_comp64.c",
+      "insertions": 1054,
+      "deletions": 0
+    },
+    {
+      "file": "arch/mips/net/ebpf_jit.c",
+      "insertions": 0,
+      "deletions": 1938
+    }
+  ],
+  "total_insertions": 4244,
+  "total_deletions": 3608,
+  "total_changes": 7852,
+  "parents": [
+    "9d05787223913171fce20a737ba54e3b6e7da13c",
+    "ebcbacfa50ecd7a828f40fefbb58d641f265da0d"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": true,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "hardening"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": []
+}

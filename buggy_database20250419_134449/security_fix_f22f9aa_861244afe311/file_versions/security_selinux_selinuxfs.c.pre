@@ -1,0 +1,75 @@
+commit a7e4676e8e2cb158a4d24123de778087955e1b36
+Author: Paul Moore <paul@paul-moore.com>
+Date:   Thu Mar 16 11:43:08 2023 -0400
+
+    selinux: remove the 'checkreqprot' functionality
+    
+    We originally promised that the SELinux 'checkreqprot' functionality
+    would be removed no sooner than June 2021, and now that it is March
+    2023 it seems like it is a good time to do the final removal.  The
+    deprecation notice in the kernel provides plenty of detail on why
+    'checkreqprot' is not desirable, with the key point repeated below:
+    
+      This was a compatibility mechanism for legacy userspace and
+      for the READ_IMPLIES_EXEC personality flag.  However, if set to
+      1, it weakens security by allowing mappings to be made executable
+      without authorization by policy.  The default value of checkreqprot
+      at boot was changed starting in Linux v4.4 to 0 (i.e. check the
+      actual protection), and Android and Linux distributions have been
+      explicitly writing a "0" to /sys/fs/selinux/checkreqprot during
+      initialization for some time.
+    
+    Along with the official deprecation notice, we have been discussing
+    this on-list and directly with several of the larger SELinux-based
+    distros and everyone is happy to see this feature finally removed.
+    In an attempt to catch all of the smaller, and DIY, Linux systems
+    we have been writing a deprecation notice URL into the kernel log,
+    along with a growing ssleep() penalty, when admins enabled
+    checkreqprot at runtime or via the kernel command line.  We have
+    yet to have anyone come to us and raise an objection to the
+    deprecation or planned removal.
+    
+    It is worth noting that while this patch removes the checkreqprot
+    functionality, it leaves the user visible interfaces (kernel command
+    line and selinuxfs file) intact, just inert.  This should help
+    prevent breakages with existing userspace tools that correctly, but
+    unnecessarily, disable checkreqprot at boot or runtime.  Admins
+    that attempt to enable checkreqprot will be met with a removal
+    message in the kernel log.
+    
+    Acked-by: Stephen Smalley <stephen.smalley.work@gmail.com>
+    Signed-off-by: Paul Moore <paul@paul-moore.com>
+
+diff --git a/security/selinux/selinuxfs.c b/security/selinux/selinuxfs.c
+index 08164d074e56..68688bc84912 100644
+--- a/security/selinux/selinuxfs.c
++++ b/security/selinux/selinuxfs.c
+@@ -728,23 +728,20 @@ static ssize_t sel_write_checkreqprot(struct file *file, const char __user *buf,
+ 	if (IS_ERR(page))
+ 		return PTR_ERR(page);
+ 
+-	length = -EINVAL;
+-	if (sscanf(page, "%u", &new_value) != 1)
++	if (sscanf(page, "%u", &new_value) != 1) {
++		length = -EINVAL;
+ 		goto out;
++	}
++	length = count;
+ 
+ 	if (new_value) {
+ 		char comm[sizeof(current->comm)];
+ 
+ 		memcpy(comm, current->comm, sizeof(comm));
+-		pr_err("SELinux: %s (%d) set checkreqprot to 1. This is deprecated and will be rejected in a future kernel release.\n",
++		pr_err("SELinux: %s (%d) set checkreqprot to 1. This is no longer supported.\n",
+ 		       comm, current->pid);
+ 	}
+ 
+-	checkreqprot_set((new_value ? 1 : 0));
+-	if (new_value)
+-		ssleep(15);
+-	length = count;
+-
+ 	selinux_ima_measure_state();
+ 
+ out:

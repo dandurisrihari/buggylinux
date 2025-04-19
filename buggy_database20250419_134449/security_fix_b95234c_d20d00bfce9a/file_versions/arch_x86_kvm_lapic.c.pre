@@ -1,0 +1,41 @@
+commit 76dfafd536730ef9b9d99b1cf596916d52be76d1
+Author: Paolo Bonzini <pbonzini@redhat.com>
+Date:   Mon Dec 19 17:17:11 2016 +0100
+
+    KVM: x86: do not scan IRR twice on APICv vmentry
+    
+    Calls to apic_find_highest_irr are scanning IRR twice, once
+    in vmx_sync_pir_from_irr and once in apic_search_irr.  Change
+    sync_pir_from_irr to get the new maximum IRR from kvm_apic_update_irr;
+    now that it does the computation, it can also do the RVI write.
+    
+    In order to avoid complications in svm.c, make the callback optional.
+    
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/lapic.c b/arch/x86/kvm/lapic.c
+index 8af6db9b64aa..7ed2400b2777 100644
+--- a/arch/x86/kvm/lapic.c
++++ b/arch/x86/kvm/lapic.c
+@@ -515,6 +515,7 @@ int kvm_lapic_find_highest_irr(struct kvm_vcpu *vcpu)
+ 	 */
+ 	return apic_find_highest_irr(vcpu->arch.apic);
+ }
++EXPORT_SYMBOL_GPL(kvm_lapic_find_highest_irr);
+ 
+ static int __apic_accept_irq(struct kvm_lapic *apic, int delivery_mode,
+ 			     int vector, int level, int trig_mode,
+@@ -580,9 +581,10 @@ static void pv_eoi_clr_pending(struct kvm_vcpu *vcpu)
+ static int apic_has_interrupt_for_ppr(struct kvm_lapic *apic, u32 ppr)
+ {
+ 	int highest_irr;
+-	if (apic->vcpu->arch.apicv_active)
+-		kvm_x86_ops->sync_pir_to_irr(apic->vcpu);
+-	highest_irr = apic_find_highest_irr(apic);
++	if (kvm_x86_ops->sync_pir_to_irr && apic->vcpu->arch.apicv_active)
++		highest_irr = kvm_x86_ops->sync_pir_to_irr(apic->vcpu);
++	else
++		highest_irr = apic_find_highest_irr(apic);
+ 	if (highest_irr == -1 || (highest_irr & 0xF0) <= ppr)
+ 		return -1;
+ 	return highest_irr;

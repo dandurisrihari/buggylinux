@@ -1,0 +1,60 @@
+commit febeca6d375531f2d3244b47bf0eb396180689e0
+Author: Chao Yu <chao@kernel.org>
+Date:   Mon Jun 5 18:29:08 2017 +0800
+
+    f2fs: don't track newly allocated nat entry in list
+    
+    We will never persist newly allocated nat entries during checkpoint(), so
+    we don't need to track such nat entries in nat dirty list in order to
+    avoid:
+    - more latency during traversing dirty list;
+    - sorting nat sets incorrectly due to recording wrong entry_cnt in nat
+    entry set.
+    
+    Signed-off-by: Chao Yu <yuchao0@huawei.com>
+    Signed-off-by: Jaegeuk Kim <jaegeuk@kernel.org>
+
+diff --git a/fs/f2fs/node.c b/fs/f2fs/node.c
+index d22db8ce0a69..05700e54f91e 100644
+--- a/fs/f2fs/node.c
++++ b/fs/f2fs/node.c
+@@ -158,9 +158,6 @@ static void __set_nat_cache_dirty(struct f2fs_nm_info *nm_i,
+ 	nid_t set = NAT_BLOCK_OFFSET(ne->ni.nid);
+ 	struct nat_entry_set *head;
+ 
+-	if (get_nat_flag(ne, IS_DIRTY))
+-		return;
+-
+ 	head = radix_tree_lookup(&nm_i->nat_set_root, set);
+ 	if (!head) {
+ 		head = f2fs_kmem_cache_alloc(nat_entry_set_slab, GFP_NOFS);
+@@ -171,10 +168,18 @@ static void __set_nat_cache_dirty(struct f2fs_nm_info *nm_i,
+ 		head->entry_cnt = 0;
+ 		f2fs_radix_tree_insert(&nm_i->nat_set_root, set, head);
+ 	}
+-	list_move_tail(&ne->list, &head->entry_list);
++
++	if (get_nat_flag(ne, IS_DIRTY))
++		goto refresh_list;
++
+ 	nm_i->dirty_nat_cnt++;
+ 	head->entry_cnt++;
+ 	set_nat_flag(ne, IS_DIRTY, true);
++refresh_list:
++	if (nat_get_blkaddr(ne) == NEW_ADDR)
++		list_del_init(&ne->list);
++	else
++		list_move_tail(&ne->list, &head->entry_list);
+ }
+ 
+ static void __clear_nat_cache_dirty(struct f2fs_nm_info *nm_i,
+@@ -2423,8 +2428,7 @@ static void __flush_nat_entry_set(struct f2fs_sb_info *sbi,
+ 		nid_t nid = nat_get_nid(ne);
+ 		int offset;
+ 
+-		if (nat_get_blkaddr(ne) == NEW_ADDR)
+-			continue;
++		f2fs_bug_on(sbi, nat_get_blkaddr(ne) == NEW_ADDR);
+ 
+ 		if (to_journal) {
+ 			offset = lookup_journal_in_cursum(journal,

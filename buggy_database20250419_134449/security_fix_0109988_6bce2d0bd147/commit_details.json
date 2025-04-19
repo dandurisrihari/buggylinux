@@ -1,0 +1,93 @@
+{
+  "hash": "010998815230792aa8923a4b72deef0fd0c5f2e5",
+  "hash_short": "01099881",
+  "subject": "Merge branch 'macsec'",
+  "body": "Sabrina Dubroca says:\n\n====================\nMACsec IEEE 802.1AE implementation\n\nMACsec (IEEE 802.1AE [0]) is a protocol that provides security for\nwired ethernet LANs.  MACsec offers two protection modes:\nauthentication only, or authenticated encryption.\n\nMACsec defines \"secure channels\" that allow transmission from one node\nto one or more others.  Communication on a channel is done over a\nsuccession of \"secure associations\", that each use a specific key.\nSecure associations are identified by their \"association number\" in\nthe range 0..3.  A secure association is retired when its 32-bit\npacket number would wrap, and the same association number can later be\nreused with a new key and packet number.\n\nThe standard mode of encryption is GCM AES with 128 bits keys,\nalthough an extension allows 256 bits keys [1] (not implemented in\nthis submission).\n\nWhen using MACsec, an extra header, called \"SecTAG\", is added between\nthe ethernet header and the original payload:\n\n +---------------------------------+----------------+----------------+\n |        (MACsec ethertype)       |     TCI_AN     |       SL       |\n +---------------------------------+----------------+----------------+\n |                           Packet Number                           |\n +-------------------------------------------------------------------+\n |                     Secure Channel Identifier                     |\n |                            (optional)                             |\n +-------------------------------------------------------------------+\n\nTCI_AN:\n version\n end_station\n sci_present\n scb\n encrypted\n changed_text\n association_number (2 bits)\nSL:\n short_length (6 bits)\n unused (2 bits)\n\nThe ethertype for the packet is set to 0x88E5, and the original\nethertype becomes part of the secure payload, which may be encrypted.\nThe ethernet header and the SecTAG are always transmitted in the\nclear, but are integrity-protected.\n\nMACsec supports optional replay protection with a configurable replay\nwindow.\n\nMACsec is designed to be used with the MKA extension to 802.1X (MACsec\nKey Agreement protocol) [2], which provides channel attribution and\nkey distribution to the nodes, but can also be used with static keys\ngetting fed manually by an administrator.\n\nOptional (not supported yet) features:\n - confidentiality offset: in encryption mode, part of the payload may\n   be left unencrypted.\n - choice of cipher suite: GCM AES with 256 bits has been standardised\n   [1].\n\nImplementation\n\nA netdevice is created on top of a real device for each TX secure\nchannel, like we do for VLANs.  Multiple TX channels can be created on\ntop of the same underlying device.\n\nSeveral other approaches were considered for the RX path:\n\n - dev_add_pack: doesn't work, because we want to filter out\n   unprotected packets\n - transparent mode: MACsec would be enabled directly on the real\n   netdevice.  For this, we cannot use a rx_handler directly because\n   MACsec must be available for underlying devices enslaved in a\n   bridge or in a bond, so we need a hook directly in\n   __netif_receive_skb_core.  This approach makes it harder to filter\n   non-encrypted packets on RX without forcing the user to setup some\n   rules, so the \"transparent\" mode is not so transparent after all.\n   It also makes TX more complex than with a dedicated netdevice.\n\nOne issue with the proposed implementation is that the qdisc layer for\nthe real device operates on already encrypted packets.\n\nNetlink API\n\nThis is currently a mix of rtnetlink (to create the device and set up\nthe TX channel) and genl (for RX channels, secure associations and\ntheir keys).  genl provides clean demultiplexing of the {TX,RX}{SC,SA}\ncommands.\n\nUse cases\n\nThe normal use case is wired LANs, including veth and slave devices\nfor bonding/teaming or bridges.\n\nMACsec can also be used on any device that makes a full ethernet\nheader visible, for example VXLAN.\nThe VXLAN+MACsec setup would be:\n\n         hypervisor        |     virtual machine\n    <real_dev>---<VXLAN>---|---<dev>---<macsec_dev>\n\nAnd the packets would look like this:\n\n| eth | IP | UDP | VXLAN | eth | MACsec | IP | ... | MACsec ICV |\n\nOne benefit on this approach to encryption in the cloud is that the\npayload is encrypted by the tenant, not by the tunnel provider, thus\nthe tenant has full control over the keys.\n\nChanges from v1:\n - rework netlink API after discussion with Johannes Berg\n   - nest attributes, rename\n   - export stats as separate attributes\n   - add some comments\n - misc small fixes (rcu, constants, struct organization)\n\nChanges from RFCv2:\n - fix ENCODING_SA param validation\n - add parent link to netlink ifdumps\n\nChanges from RFCv1:\n - addressed comments from Florian and Paolo + kbuild robot\n - also perform post-decrypt handling after crypto callback\n - fixed ->dellink behavior\n\nFuture plans:\n - offload to hardware, on nics that support it\n - implement optional features\n\n[0] http://standards.ieee.org/getieee802/download/802.1AE-2006.pdf\n[1] http://standards.ieee.org/getieee802/download/802.1AEbn-2011.pdf\n[2] http://standards.ieee.org/getieee802/download/802.1X-2010.pdf\n[3] RFCv1: http://www.spinics.net/lists/netdev/msg358151.html\n[4] RFCv2: http://www.spinics.net/lists/netdev/msg362389.html\n[5] v1: http://www.spinics.net/lists/netdev/msg367959.html\n====================\n\nSigned-off-by: David S. Miller <davem@davemloft.net>",
+  "full_message": "Merge branch 'macsec'\n\nSabrina Dubroca says:\n\n====================\nMACsec IEEE 802.1AE implementation\n\nMACsec (IEEE 802.1AE [0]) is a protocol that provides security for\nwired ethernet LANs.  MACsec offers two protection modes:\nauthentication only, or authenticated encryption.\n\nMACsec defines \"secure channels\" that allow transmission from one node\nto one or more others.  Communication on a channel is done over a\nsuccession of \"secure associations\", that each use a specific key.\nSecure associations are identified by their \"association number\" in\nthe range 0..3.  A secure association is retired when its 32-bit\npacket number would wrap, and the same association number can later be\nreused with a new key and packet number.\n\nThe standard mode of encryption is GCM AES with 128 bits keys,\nalthough an extension allows 256 bits keys [1] (not implemented in\nthis submission).\n\nWhen using MACsec, an extra header, called \"SecTAG\", is added between\nthe ethernet header and the original payload:\n\n +---------------------------------+----------------+----------------+\n |        (MACsec ethertype)       |     TCI_AN     |       SL       |\n +---------------------------------+----------------+----------------+\n |                           Packet Number                           |\n +-------------------------------------------------------------------+\n |                     Secure Channel Identifier                     |\n |                            (optional)                             |\n +-------------------------------------------------------------------+\n\nTCI_AN:\n version\n end_station\n sci_present\n scb\n encrypted\n changed_text\n association_number (2 bits)\nSL:\n short_length (6 bits)\n unused (2 bits)\n\nThe ethertype for the packet is set to 0x88E5, and the original\nethertype becomes part of the secure payload, which may be encrypted.\nThe ethernet header and the SecTAG are always transmitted in the\nclear, but are integrity-protected.\n\nMACsec supports optional replay protection with a configurable replay\nwindow.\n\nMACsec is designed to be used with the MKA extension to 802.1X (MACsec\nKey Agreement protocol) [2], which provides channel attribution and\nkey distribution to the nodes, but can also be used with static keys\ngetting fed manually by an administrator.\n\nOptional (not supported yet) features:\n - confidentiality offset: in encryption mode, part of the payload may\n   be left unencrypted.\n - choice of cipher suite: GCM AES with 256 bits has been standardised\n   [1].\n\nImplementation\n\nA netdevice is created on top of a real device for each TX secure\nchannel, like we do for VLANs.  Multiple TX channels can be created on\ntop of the same underlying device.\n\nSeveral other approaches were considered for the RX path:\n\n - dev_add_pack: doesn't work, because we want to filter out\n   unprotected packets\n - transparent mode: MACsec would be enabled directly on the real\n   netdevice.  For this, we cannot use a rx_handler directly because\n   MACsec must be available for underlying devices enslaved in a\n   bridge or in a bond, so we need a hook directly in\n   __netif_receive_skb_core.  This approach makes it harder to filter\n   non-encrypted packets on RX without forcing the user to setup some\n   rules, so the \"transparent\" mode is not so transparent after all.\n   It also makes TX more complex than with a dedicated netdevice.\n\nOne issue with the proposed implementation is that the qdisc layer for\nthe real device operates on already encrypted packets.\n\nNetlink API\n\nThis is currently a mix of rtnetlink (to create the device and set up\nthe TX channel) and genl (for RX channels, secure associations and\ntheir keys).  genl provides clean demultiplexing of the {TX,RX}{SC,SA}\ncommands.\n\nUse cases\n\nThe normal use case is wired LANs, including veth and slave devices\nfor bonding/teaming or bridges.\n\nMACsec can also be used on any device that makes a full ethernet\nheader visible, for example VXLAN.\nThe VXLAN+MACsec setup would be:\n\n         hypervisor        |     virtual machine\n    <real_dev>---<VXLAN>---|---<dev>---<macsec_dev>\n\nAnd the packets would look like this:\n\n| eth | IP | UDP | VXLAN | eth | MACsec | IP | ... | MACsec ICV |\n\nOne benefit on this approach to encryption in the cloud is that the\npayload is encrypted by the tenant, not by the tunnel provider, thus\nthe tenant has full control over the keys.\n\nChanges from v1:\n - rework netlink API after discussion with Johannes Berg\n   - nest attributes, rename\n   - export stats as separate attributes\n   - add some comments\n - misc small fixes (rcu, constants, struct organization)\n\nChanges from RFCv2:\n - fix ENCODING_SA param validation\n - add parent link to netlink ifdumps\n\nChanges from RFCv1:\n - addressed comments from Florian and Paolo + kbuild robot\n - also perform post-decrypt handling after crypto callback\n - fixed ->dellink behavior\n\nFuture plans:\n - offload to hardware, on nics that support it\n - implement optional features\n\n[0] http://standards.ieee.org/getieee802/download/802.1AE-2006.pdf\n[1] http://standards.ieee.org/getieee802/download/802.1AEbn-2011.pdf\n[2] http://standards.ieee.org/getieee802/download/802.1X-2010.pdf\n[3] RFCv1: http://www.spinics.net/lists/netdev/msg358151.html\n[4] RFCv2: http://www.spinics.net/lists/netdev/msg362389.html\n[5] v1: http://www.spinics.net/lists/netdev/msg367959.html\n====================\n\nSigned-off-by: David S. Miller <davem@davemloft.net>",
+  "author_name": "David S. Miller",
+  "author_email": "davem@davemloft.net",
+  "author_date": "Sun Mar 13 22:40:24 2016 -0400",
+  "author_date_iso": "2016-03-13T22:40:24-04:00",
+  "committer_name": "David S. Miller",
+  "committer_email": "davem@davemloft.net",
+  "committer_date": "Sun Mar 13 22:40:24 2016 -0400",
+  "committer_date_iso": "2016-03-13T22:40:24-04:00",
+  "files_changed": [],
+  "files_changed_count": 0,
+  "stats": [
+    {
+      "file": "drivers/net/Kconfig",
+      "insertions": 7,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/Makefile",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/macsec.c",
+      "insertions": 3297,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/netdevice.h",
+      "insertions": 8,
+      "deletions": 0
+    },
+    {
+      "file": "include/uapi/linux/Kbuild",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "include/uapi/linux/if_ether.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "include/uapi/linux/if_link.h",
+      "insertions": 29,
+      "deletions": 0
+    },
+    {
+      "file": "include/uapi/linux/if_macsec.h",
+      "insertions": 161,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 3505,
+  "total_deletions": 0,
+  "total_changes": 3505,
+  "parents": [
+    "f3c986908cc3b369b57f75de306c635a0074b76b",
+    "c09440f7dcb304002dfced8c0fea289eb25f2da0"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v4.10",
+    "v4.10-rc1",
+    "v4.10-rc2",
+    "v4.10-rc3",
+    "v4.10-rc4",
+    "v4.10-rc5",
+    "v4.10-rc6",
+    "v4.10-rc7",
+    "v4.10-rc8",
+    "v4.11"
+  ],
+  "is_merge": true,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "authentication"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": []
+}

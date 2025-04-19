@@ -1,0 +1,67 @@
+{
+  "hash": "6192bd536f96c6a0d969081bc71ae24f9319bfdc",
+  "hash_short": "6192bd53",
+  "subject": "epoll: optimizations and cleanups",
+  "body": "Epoll is doing multiple passes over the ready set at the moment, because of\nthe constraints over the f_op->poll() call.  Looking at the code again, I\nnoticed that we already hold the epoll semaphore in read, and this\n(together with other locking conditions that hold while doing an\nepoll_wait()) can lead to a smarter way [1] to \"ship\" events to userspace\n(in a single pass).\n\nThis is a stress application that can be used to test the new code.  It\nspwans multiple thread and call epoll_wait() and epoll_ctl() from many\nthreads.  Stress tested on my dual Opteron 254 w/out any problems.\n\nhttp://www.xmailserver.org/totalmess.c\n\nThis is not a benchmark, just something that tries to stress and exploit\npossible problems with the new code.\nAlso, I made a stupid micro-benchmark:\n\nhttp://www.xmailserver.org/epwbench.c\n\n[1] Considering that epoll must be thread-safe, there are five ways we can\n    be hit during an epoll_wait() transfer loop (ep_send_events()):\n\n    1) The epoll fd going away and calling ep_free\n       This just can't happen, since we did an fget() in sys_epoll_wait\n\n    2) An epoll_ctl(EPOLL_CTL_DEL)\n       This can't happen because epoll_ctl() gets ep->sem in write, and\n       we're holding it in read during ep_send_events()\n\n    3) An fd stored inside the epoll fd going away\n       This can't happen because in eventpoll_release_file() we get\n       ep->sem in write, and we're holding it in read during\n       ep_send_events()\n\n    4) Another epoll_wait() happening on another thread\n       They both can be inside ep_send_events() at the same time, we get\n       (splice) the ready-list under the spinlock, so each one will get\n       its own ready list. Note that an fd cannot be at the same time\n       inside more than one ready list, because ep_poll_callback() will\n       not re-queue it if it sees it already linked:\n\n       if (ep_is_linked(&epi->rdllink))\n                goto is_linked;\n\n       Another case that can happen, is two concurrent epoll_wait(),\n       coming in with a userspace event buffer of size, say, ten.\n       Suppose there are 50 event ready in the list. The first\n       epoll_wait() will \"steal\" the whole list, while the second, seeing\n       no events, will go to sleep. But at the end of ep_send_events() in\n       the first epoll_wait(), we will re-inject surplus ready fds, and we\n       will trigger the proper wake_up to the second epoll_wait().\n\n    5) ep_poll_callback() hitting us asyncronously\n       This is the tricky part. As I said above, the ep_is_linked() test\n       done inside ep_poll_callback(), will guarantee us that until the\n       item will result linked to a list, ep_poll_callback() will not try\n       to re-queue it again (read, write data on any of its members). When\n       we do a list_del() in ep_send_events(), the item will still satisfy\n       the ep_is_linked() test (whatever data is written in prev/next,\n       it'll never be its own pointer), so ep_poll_callback() will still\n       leave us alone. It's only after the eventual smp_mb()+INIT_LIST_HEAD(&epi->rdllink)\n       that it'll become visible to ep_poll_callback(), but at the point\n       we're already past it.\n\n[akpm@osdl.org: 80 cols]\nSigned-off-by: Davide Libenzi <davidel@xmailserver.org>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>\nSigned-off-by: Linus Torvalds <torvalds@linux-foundation.org>",
+  "full_message": "epoll: optimizations and cleanups\n\nEpoll is doing multiple passes over the ready set at the moment, because of\nthe constraints over the f_op->poll() call.  Looking at the code again, I\nnoticed that we already hold the epoll semaphore in read, and this\n(together with other locking conditions that hold while doing an\nepoll_wait()) can lead to a smarter way [1] to \"ship\" events to userspace\n(in a single pass).\n\nThis is a stress application that can be used to test the new code.  It\nspwans multiple thread and call epoll_wait() and epoll_ctl() from many\nthreads.  Stress tested on my dual Opteron 254 w/out any problems.\n\nhttp://www.xmailserver.org/totalmess.c\n\nThis is not a benchmark, just something that tries to stress and exploit\npossible problems with the new code.\nAlso, I made a stupid micro-benchmark:\n\nhttp://www.xmailserver.org/epwbench.c\n\n[1] Considering that epoll must be thread-safe, there are five ways we can\n    be hit during an epoll_wait() transfer loop (ep_send_events()):\n\n    1) The epoll fd going away and calling ep_free\n       This just can't happen, since we did an fget() in sys_epoll_wait\n\n    2) An epoll_ctl(EPOLL_CTL_DEL)\n       This can't happen because epoll_ctl() gets ep->sem in write, and\n       we're holding it in read during ep_send_events()\n\n    3) An fd stored inside the epoll fd going away\n       This can't happen because in eventpoll_release_file() we get\n       ep->sem in write, and we're holding it in read during\n       ep_send_events()\n\n    4) Another epoll_wait() happening on another thread\n       They both can be inside ep_send_events() at the same time, we get\n       (splice) the ready-list under the spinlock, so each one will get\n       its own ready list. Note that an fd cannot be at the same time\n       inside more than one ready list, because ep_poll_callback() will\n       not re-queue it if it sees it already linked:\n\n       if (ep_is_linked(&epi->rdllink))\n                goto is_linked;\n\n       Another case that can happen, is two concurrent epoll_wait(),\n       coming in with a userspace event buffer of size, say, ten.\n       Suppose there are 50 event ready in the list. The first\n       epoll_wait() will \"steal\" the whole list, while the second, seeing\n       no events, will go to sleep. But at the end of ep_send_events() in\n       the first epoll_wait(), we will re-inject surplus ready fds, and we\n       will trigger the proper wake_up to the second epoll_wait().\n\n    5) ep_poll_callback() hitting us asyncronously\n       This is the tricky part. As I said above, the ep_is_linked() test\n       done inside ep_poll_callback(), will guarantee us that until the\n       item will result linked to a list, ep_poll_callback() will not try\n       to re-queue it again (read, write data on any of its members). When\n       we do a list_del() in ep_send_events(), the item will still satisfy\n       the ep_is_linked() test (whatever data is written in prev/next,\n       it'll never be its own pointer), so ep_poll_callback() will still\n       leave us alone. It's only after the eventual smp_mb()+INIT_LIST_HEAD(&epi->rdllink)\n       that it'll become visible to ep_poll_callback(), but at the point\n       we're already past it.\n\n[akpm@osdl.org: 80 cols]\nSigned-off-by: Davide Libenzi <davidel@xmailserver.org>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>\nSigned-off-by: Linus Torvalds <torvalds@linux-foundation.org>",
+  "author_name": "Davide Libenzi",
+  "author_email": "davidel@xmailserver.org",
+  "author_date": "Tue May 8 00:25:41 2007 -0700",
+  "author_date_iso": "2007-05-08T00:25:41-07:00",
+  "committer_name": "Linus Torvalds",
+  "committer_email": "torvalds@woody.linux-foundation.org",
+  "committer_date": "Tue May 8 11:15:01 2007 -0700",
+  "committer_date_iso": "2007-05-08T11:15:01-07:00",
+  "files_changed": [
+    "fs/eventpoll.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "fs/eventpoll.c",
+      "insertions": 86,
+      "deletions": 147
+    }
+  ],
+  "total_insertions": 86,
+  "total_deletions": 147,
+  "total_changes": 233,
+  "parents": [
+    "44171df8e944f0bc8f7fa3f6d080f3e671431989"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v2.6.22",
+    "v2.6.22-rc1",
+    "v2.6.22-rc2",
+    "v2.6.22-rc3",
+    "v2.6.22-rc4",
+    "v2.6.22-rc5",
+    "v2.6.22-rc6",
+    "v2.6.22-rc7",
+    "v2.6.23",
+    "v2.6.23-rc1"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "exploit",
+      "inject"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "fs/eventpoll.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

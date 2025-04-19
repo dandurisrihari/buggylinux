@@ -1,0 +1,91 @@
+Commit Hash: 6e8ec2552c7d13991148e551e3325a624d73fac6
+Subject: random: use computational hash for entropy extraction
+
+
+Security Keywords:
+- vulnerability
+
+Full commit message:
+random: use computational hash for entropy extraction
+
+The current 4096-bit LFSR used for entropy collection had a few
+desirable attributes for the context in which it was created. For
+example, the state was huge, which meant that /dev/random would be able
+to output quite a bit of accumulated entropy before blocking. It was
+also, in its time, quite fast at accumulating entropy byte-by-byte,
+which matters given the varying contexts in which mix_pool_bytes() is
+called. And its diffusion was relatively high, which meant that changes
+would ripple across several words of state rather quickly.
+
+However, it also suffers from a few security vulnerabilities. In
+particular, inputs learned by an attacker can be undone, but moreover,
+if the state of the pool leaks, its contents can be controlled and
+entirely zeroed out. I've demonstrated this attack with this SMT2
+script, <https://xn--4db.cc/5o9xO8pb>, which Boolector/CaDiCal solves in
+a matter of seconds on a single core of my laptop, resulting in little
+proof of concept C demonstrators such as <https://xn--4db.cc/jCkvvIaH/c>.
+
+For basically all recent formal models of RNGs, these attacks represent
+a significant cryptographic flaw. But how does this manifest
+practically? If an attacker has access to the system to such a degree
+that he can learn the internal state of the RNG, arguably there are
+other lower hanging vulnerabilities -- side-channel, infoleak, or
+otherwise -- that might have higher priority. On the other hand, seed
+files are frequently used on systems that have a hard time generating
+much entropy on their own, and these seed files, being files, often leak
+or are duplicated and distributed accidentally, or are even seeded over
+the Internet intentionally, where their contents might be recorded or
+tampered with. Seen this way, an otherwise quasi-implausible
+vulnerability is a bit more practical than initially thought.
+
+Another aspect of the current mix_pool_bytes() function is that, while
+its performance was arguably competitive for the time in which it was
+created, it's no longer considered so. This patch improves performance
+significantly: on a high-end CPU, an i7-11850H, it improves performance
+of mix_pool_bytes() by 225%, and on a low-end CPU, a Cortex-A7, it
+improves performance by 103%.
+
+This commit replaces the LFSR of mix_pool_bytes() with a straight-
+forward cryptographic hash function, BLAKE2s, which is already in use
+for pool extraction. Universal hashing with a secret seed was considered
+too, something along the lines of <https://eprint.iacr.org/2013/338>,
+but the requirement for a secret seed makes for a chicken & egg problem.
+Instead we go with a formally proven scheme using a computational hash
+function, described in sections 5.1, 6.4, and B.1.8 of
+<https://eprint.iacr.org/2019/198>.
+
+BLAKE2s outputs 256 bits, which should give us an appropriate amount of
+min-entropy accumulation, and a wide enough margin of collision
+resistance against active attacks. mix_pool_bytes() becomes a simple
+call to blake2s_update(), for accumulation, while the extraction step
+becomes a blake2s_final() to generate a seed, with which we can then do
+a HKDF-like or BLAKE2X-like expansion, the first part of which we fold
+back as an init key for subsequent blake2s_update()s, and the rest we
+produce to the caller. This then is provided to our CRNG like usual. In
+that expansion step, we make opportunistic use of 32 bytes of RDRAND
+output, just as before. We also always reseed the crng with 32 bytes,
+unconditionally, or not at all, rather than sometimes with 16 as before,
+as we don't win anything by limiting beyond the 16 byte threshold.
+
+Going for a hash function as an entropy collector is a conservative,
+proven approach. The result of all this is a much simpler and much less
+bespoke construction than what's there now, which not only plugs a
+vulnerability but also improves performance considerably.
+
+Cc: Theodore Ts'o <tytso@mit.edu>
+Cc: Dominik Brodowski <linux@dominikbrodowski.net>
+Reviewed-by: Eric Biggers <ebiggers@google.com>
+Reviewed-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Reviewed-by: Jean-Philippe Aumasson <jeanphilippe.aumasson@gmail.com>
+Signed-off-by: Jason A. Donenfeld <Jason@zx2c4.com>
+
+Metadata:
+Author: Jason A. Donenfeld <Jason@zx2c4.com>
+Author Date: Sun Jan 16 14:23:10 2022 +0100
+Committer: Jason A. Donenfeld <Jason@zx2c4.com>
+Commit Date: Mon Feb 21 16:48:06 2022 +0100
+
+Files Changed: 1
+Lines Added: 55
+Lines Removed: 249
+Total Changes: 304

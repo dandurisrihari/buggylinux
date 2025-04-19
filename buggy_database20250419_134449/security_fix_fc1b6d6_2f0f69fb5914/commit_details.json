@@ -1,0 +1,258 @@
+{
+  "hash": "fc1b6d6de2208774efd2a20bf0daddb02d18b1e0",
+  "hash_short": "fc1b6d6d",
+  "subject": "tipc: introduce TIPC encryption & authentication",
+  "body": "This commit offers an option to encrypt and authenticate all messaging,\nincluding the neighbor discovery messages. The currently most advanced\nalgorithm supported is the AEAD AES-GCM (like IPSec or TLS). All\nencryption/decryption is done at the bearer layer, just before leaving\nor after entering TIPC.\n\nSupported features:\n- Encryption & authentication of all TIPC messages (header + data);\n- Two symmetric-key modes: Cluster and Per-node;\n- Automatic key switching;\n- Key-expired revoking (sequence number wrapped);\n- Lock-free encryption/decryption (RCU);\n- Asynchronous crypto, Intel AES-NI supported;\n- Multiple cipher transforms;\n- Logs & statistics;\n\nTwo key modes:\n- Cluster key mode: One single key is used for both TX & RX in all\nnodes in the cluster.\n- Per-node key mode: Each nodes in the cluster has one specific TX key.\nFor RX, a node requires its peers' TX key to be able to decrypt the\nmessages from those peers.\n\nKey setting from user-space is performed via netlink by a user program\n(e.g. the iproute2 'tipc' tool).\n\nInternal key state machine:\n\n                                 Attach    Align(RX)\n                                     +-+   +-+\n                                     | V   | V\n        +---------+      Attach     +---------+\n        |  IDLE   |---------------->| PENDING |(user = 0)\n        +---------+                 +---------+\n           A   A                   Switch|  A\n           |   |                         |  |\n           |   | Free(switch/revoked)    |  |\n     (Free)|   +----------------------+  |  |Timeout\n           |              (TX)        |  |  |(RX)\n           |                          |  |  |\n           |                          |  v  |\n        +---------+      Switch     +---------+\n        | PASSIVE |<----------------| ACTIVE  |\n        +---------+       (RX)      +---------+\n        (user = 1)                  (user >= 1)\n\nThe number of TFMs is 10 by default and can be changed via the procfs\n'net/tipc/max_tfms'. At this moment, as for simplicity, this file is\nalso used to print the crypto statistics at runtime:\n\necho 0xfff1 > /proc/sys/net/tipc/max_tfms\n\nThe patch defines a new TIPC version (v7) for the encryption message (-\nbackward compatibility as well). The message is basically encapsulated\nas follows:\n\n   +----------------------------------------------------------+\n   | TIPCv7 encryption  | Original TIPCv2    | Authentication |\n   | header             | packet (encrypted) | Tag            |\n   +----------------------------------------------------------+\n\nThe throughput is about ~40% for small messages (compared with non-\nencryption) and ~9% for large messages. With the support from hardware\ncrypto i.e. the Intel AES-NI CPU instructions, the throughput increases\nupto ~85% for small messages and ~55% for large messages.\n\nBy default, the new feature is inactive (i.e. no encryption) until user\nsets a key for TIPC. There is however also a new option - \"TIPC_CRYPTO\"\nin the kernel configuration to enable/disable the new code when needed.\n\nMAINTAINERS | add two new files 'crypto.h' & 'crypto.c' in tipc\n\nAcked-by: Ying Xue <ying.xue@windreiver.com>\nAcked-by: Jon Maloy <jon.maloy@ericsson.com>\nSigned-off-by: Tuong Lien <tuong.t.lien@dektech.com.au>\nSigned-off-by: David S. Miller <davem@davemloft.net>",
+  "full_message": "tipc: introduce TIPC encryption & authentication\n\nThis commit offers an option to encrypt and authenticate all messaging,\nincluding the neighbor discovery messages. The currently most advanced\nalgorithm supported is the AEAD AES-GCM (like IPSec or TLS). All\nencryption/decryption is done at the bearer layer, just before leaving\nor after entering TIPC.\n\nSupported features:\n- Encryption & authentication of all TIPC messages (header + data);\n- Two symmetric-key modes: Cluster and Per-node;\n- Automatic key switching;\n- Key-expired revoking (sequence number wrapped);\n- Lock-free encryption/decryption (RCU);\n- Asynchronous crypto, Intel AES-NI supported;\n- Multiple cipher transforms;\n- Logs & statistics;\n\nTwo key modes:\n- Cluster key mode: One single key is used for both TX & RX in all\nnodes in the cluster.\n- Per-node key mode: Each nodes in the cluster has one specific TX key.\nFor RX, a node requires its peers' TX key to be able to decrypt the\nmessages from those peers.\n\nKey setting from user-space is performed via netlink by a user program\n(e.g. the iproute2 'tipc' tool).\n\nInternal key state machine:\n\n                                 Attach    Align(RX)\n                                     +-+   +-+\n                                     | V   | V\n        +---------+      Attach     +---------+\n        |  IDLE   |---------------->| PENDING |(user = 0)\n        +---------+                 +---------+\n           A   A                   Switch|  A\n           |   |                         |  |\n           |   | Free(switch/revoked)    |  |\n     (Free)|   +----------------------+  |  |Timeout\n           |              (TX)        |  |  |(RX)\n           |                          |  |  |\n           |                          |  v  |\n        +---------+      Switch     +---------+\n        | PASSIVE |<----------------| ACTIVE  |\n        +---------+       (RX)      +---------+\n        (user = 1)                  (user >= 1)\n\nThe number of TFMs is 10 by default and can be changed via the procfs\n'net/tipc/max_tfms'. At this moment, as for simplicity, this file is\nalso used to print the crypto statistics at runtime:\n\necho 0xfff1 > /proc/sys/net/tipc/max_tfms\n\nThe patch defines a new TIPC version (v7) for the encryption message (-\nbackward compatibility as well). The message is basically encapsulated\nas follows:\n\n   +----------------------------------------------------------+\n   | TIPCv7 encryption  | Original TIPCv2    | Authentication |\n   | header             | packet (encrypted) | Tag            |\n   +----------------------------------------------------------+\n\nThe throughput is about ~40% for small messages (compared with non-\nencryption) and ~9% for large messages. With the support from hardware\ncrypto i.e. the Intel AES-NI CPU instructions, the throughput increases\nupto ~85% for small messages and ~55% for large messages.\n\nBy default, the new feature is inactive (i.e. no encryption) until user\nsets a key for TIPC. There is however also a new option - \"TIPC_CRYPTO\"\nin the kernel configuration to enable/disable the new code when needed.\n\nMAINTAINERS | add two new files 'crypto.h' & 'crypto.c' in tipc\n\nAcked-by: Ying Xue <ying.xue@windreiver.com>\nAcked-by: Jon Maloy <jon.maloy@ericsson.com>\nSigned-off-by: Tuong Lien <tuong.t.lien@dektech.com.au>\nSigned-off-by: David S. Miller <davem@davemloft.net>",
+  "author_name": "Tuong Lien",
+  "author_email": "tuong.t.lien@dektech.com.au",
+  "author_date": "Fri Nov 8 12:05:11 2019 +0700",
+  "author_date_iso": "2019-11-08T12:05:11+07:00",
+  "committer_name": "David S. Miller",
+  "committer_email": "davem@davemloft.net",
+  "committer_date": "Fri Nov 8 14:01:59 2019 -0800",
+  "committer_date_iso": "2019-11-08T14:01:59-08:00",
+  "files_changed": [
+    "net/tipc/Kconfig",
+    "net/tipc/Makefile",
+    "net/tipc/bcast.c",
+    "net/tipc/bearer.c",
+    "net/tipc/bearer.h",
+    "net/tipc/core.c",
+    "net/tipc/core.h",
+    "net/tipc/crypto.c",
+    "net/tipc/crypto.h",
+    "net/tipc/link.c",
+    "net/tipc/link.h",
+    "net/tipc/msg.c",
+    "net/tipc/msg.h",
+    "net/tipc/node.c",
+    "net/tipc/node.h",
+    "net/tipc/sysctl.c",
+    "net/tipc/udp_media.c"
+  ],
+  "files_changed_count": 17,
+  "stats": [
+    {
+      "file": "net/tipc/Kconfig",
+      "insertions": 15,
+      "deletions": 0
+    },
+    {
+      "file": "net/tipc/Makefile",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "net/tipc/bcast.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "net/tipc/bearer.c",
+      "insertions": 27,
+      "deletions": 8
+    },
+    {
+      "file": "net/tipc/bearer.h",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "net/tipc/core.c",
+      "insertions": 14,
+      "deletions": 0
+    },
+    {
+      "file": "net/tipc/core.h",
+      "insertions": 8,
+      "deletions": 0
+    },
+    {
+      "file": "net/tipc/crypto.c",
+      "insertions": 1986,
+      "deletions": 0
+    },
+    {
+      "file": "net/tipc/crypto.h",
+      "insertions": 167,
+      "deletions": 0
+    },
+    {
+      "file": "net/tipc/link.c",
+      "insertions": 14,
+      "deletions": 5
+    },
+    {
+      "file": "net/tipc/link.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "net/tipc/msg.c",
+      "insertions": 13,
+      "deletions": 2
+    },
+    {
+      "file": "net/tipc/msg.h",
+      "insertions": 36,
+      "deletions": 10
+    },
+    {
+      "file": "net/tipc/node.c",
+      "insertions": 80,
+      "deletions": 19
+    },
+    {
+      "file": "net/tipc/node.h",
+      "insertions": 8,
+      "deletions": 0
+    },
+    {
+      "file": "net/tipc/sysctl.c",
+      "insertions": 11,
+      "deletions": 0
+    },
+    {
+      "file": "net/tipc/udp_media.c",
+      "insertions": 1,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 2385,
+  "total_deletions": 46,
+  "total_changes": 2431,
+  "parents": [
+    "134bdac397661a5841d9f27f508190c68b26232b"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v5.5",
+    "v5.5-rc1",
+    "v5.5-rc2",
+    "v5.5-rc3",
+    "v5.5-rc4",
+    "v5.5-rc5",
+    "v5.5-rc6",
+    "v5.5-rc7",
+    "v5.6",
+    "v5.6-rc1"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "authentication"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "net/tipc/Makefile",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "net/tipc/crypto.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "net/tipc/bearer.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "net/tipc/Kconfig",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "net/tipc/bearer.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "net/tipc/core.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "net/tipc/core.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "net/tipc/bcast.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "net/tipc/link.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "net/tipc/node.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "net/tipc/msg.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "net/tipc/sysctl.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "net/tipc/msg.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "net/tipc/crypto.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "net/tipc/link.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "net/tipc/node.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "net/tipc/udp_media.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

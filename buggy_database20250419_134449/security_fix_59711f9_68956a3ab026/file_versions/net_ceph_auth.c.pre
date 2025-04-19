@@ -1,0 +1,56 @@
+commit 285ea34fc876aa0a2c5e65d310c4a41269e2e5f2
+Author: Ilya Dryomov <idryomov@gmail.com>
+Date:   Mon Oct 26 16:47:20 2020 +0100
+
+    libceph, ceph: incorporate nautilus cephx changes
+    
+    - request service tickets together with auth ticket.  Currently we get
+      auth ticket via CEPHX_GET_AUTH_SESSION_KEY op and then request service
+      tickets via CEPHX_GET_PRINCIPAL_SESSION_KEY op in a separate message.
+      Since nautilus, desired service tickets are shared togther with auth
+      ticket in CEPHX_GET_AUTH_SESSION_KEY reply.
+    
+    - propagate session key and connection secret, if any.  In preparation
+      for msgr2, update handle_reply() and verify_authorizer_reply() auth
+      ops to propagate session key and connection secret.  Since nautilus,
+      if secure mode is negotiated, connection secret is shared either in
+      CEPHX_GET_AUTH_SESSION_KEY reply (for mons) or in a final authorizer
+      reply (for osds and mdses).
+    
+    Signed-off-by: Ilya Dryomov <idryomov@gmail.com>
+
+diff --git a/net/ceph/auth.c b/net/ceph/auth.c
+index fbeee068ea14..40d3d95344d9 100644
+--- a/net/ceph/auth.c
++++ b/net/ceph/auth.c
+@@ -240,7 +240,8 @@ int ceph_handle_auth_reply(struct ceph_auth_client *ac,
+ 		ac->negotiating = false;
+ 	}
+ 
+-	ret = ac->ops->handle_reply(ac, result, payload, payload_end);
++	ret = ac->ops->handle_reply(ac, result, payload, payload_end,
++				    NULL, NULL, NULL, NULL);
+ 	if (ret == -EAGAIN) {
+ 		ret = ceph_build_auth_request(ac, reply_buf, reply_len);
+ 	} else if (ret) {
+@@ -332,13 +333,18 @@ int ceph_auth_add_authorizer_challenge(struct ceph_auth_client *ac,
+ EXPORT_SYMBOL(ceph_auth_add_authorizer_challenge);
+ 
+ int ceph_auth_verify_authorizer_reply(struct ceph_auth_client *ac,
+-				      struct ceph_authorizer *a)
++				      struct ceph_authorizer *a,
++				      void *reply, int reply_len,
++				      u8 *session_key, int *session_key_len,
++				      u8 *con_secret, int *con_secret_len)
+ {
+ 	int ret = 0;
+ 
+ 	mutex_lock(&ac->mutex);
+ 	if (ac->ops && ac->ops->verify_authorizer_reply)
+-		ret = ac->ops->verify_authorizer_reply(ac, a);
++		ret = ac->ops->verify_authorizer_reply(ac, a,
++			reply, reply_len, session_key, session_key_len,
++			con_secret, con_secret_len);
+ 	mutex_unlock(&ac->mutex);
+ 	return ret;
+ }

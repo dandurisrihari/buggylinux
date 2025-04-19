@@ -1,0 +1,108 @@
+commit 814165e9fd1f62332b5444d730b8d6e432328463
+Author: Brendan Jackman <jackmanb@google.com>
+Date:   Fri Dec 20 15:18:32 2024 +0000
+
+    x86/cpu: Add the 'setcpuid=' boot parameter
+    
+    In preparation for adding support to inject fake CPU bugs at boot-time,
+    add a general facility to force enablement of CPU flags.
+    
+    The flag taints the kernel and the documentation attempts to be clear
+    that this is highly unsuitable for uses outside of kernel development
+    and platform experimentation.
+    
+    The new arg is parsed just like clearcpuid, but instead of leading to
+    setup_clear_cpu_cap() it leads to setup_force_cpu_cap().
+    
+    I've tested this by booting a nested QEMU guest on an Intel host, which
+    with setcpuid=svm will claim that it supports AMD virtualization.
+    
+    Signed-off-by: Brendan Jackman <jackmanb@google.com>
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+    Link: https://lore.kernel.org/r/20241220-force-cpu-bug-v2-2-7dc71bce742a@google.com
+
+diff --git a/arch/x86/kernel/cpu/common.c b/arch/x86/kernel/cpu/common.c
+index 137d3e00a5be..ff483c9a56c3 100644
+--- a/arch/x86/kernel/cpu/common.c
++++ b/arch/x86/kernel/cpu/common.c
+@@ -1479,12 +1479,12 @@ static void detect_nopl(void)
+ #endif
+ }
+ 
+-static inline void parse_clearcpuid(char *arg)
++static inline void parse_set_clear_cpuid(char *arg, bool set)
+ {
+ 	char *opt;
+ 	int taint = 0;
+ 
+-	pr_info("Clearing CPUID bits:");
++	pr_info("%s CPUID bits:", set ? "Force-enabling" : "Clearing");
+ 
+ 	while (arg) {
+ 		bool found __maybe_unused = false;
+@@ -1505,7 +1505,10 @@ static inline void parse_clearcpuid(char *arg)
+ 				else
+ 					pr_cont(" " X86_CAP_FMT, x86_cap_flag(bit));
+ 
+-				setup_clear_cpu_cap(bit);
++				if (set)
++					setup_force_cpu_cap(bit);
++				else
++					setup_clear_cpu_cap(bit);
+ 				taint++;
+ 			}
+ 			/*
+@@ -1523,7 +1526,10 @@ static inline void parse_clearcpuid(char *arg)
+ 				continue;
+ 
+ 			pr_cont(" %s", opt);
+-			setup_clear_cpu_cap(bit);
++			if (set)
++				setup_force_cpu_cap(bit);
++			else
++				setup_clear_cpu_cap(bit);
+ 			taint++;
+ 			found = true;
+ 			break;
+@@ -1579,9 +1585,12 @@ static void __init cpu_parse_early_param(void)
+ 		setup_clear_cpu_cap(X86_FEATURE_FRED);
+ 
+ 	arglen = cmdline_find_option(boot_command_line, "clearcpuid", arg, sizeof(arg));
+-	if (arglen <= 0)
+-		return;
+-	parse_clearcpuid(arg);
++	if (arglen > 0)
++		parse_set_clear_cpuid(arg, false);
++
++	arglen = cmdline_find_option(boot_command_line, "setcpuid", arg, sizeof(arg));
++	if (arglen > 0)
++		parse_set_clear_cpuid(arg, true);
+ }
+ 
+ /*
+@@ -2013,15 +2022,23 @@ void print_cpu_info(struct cpuinfo_x86 *c)
+ }
+ 
+ /*
+- * clearcpuid= was already parsed in cpu_parse_early_param().  This dummy
+- * function prevents it from becoming an environment variable for init.
++ * clearcpuid= and setcpuid= were already parsed in cpu_parse_early_param().
++ * These dummy functions prevent them from becoming an environment variable for
++ * init.
+  */
++
+ static __init int setup_clearcpuid(char *arg)
+ {
+ 	return 1;
+ }
+ __setup("clearcpuid=", setup_clearcpuid);
+ 
++static __init int setup_setcpuid(char *arg)
++{
++	return 1;
++}
++__setup("setcpuid=", setup_setcpuid);
++
+ DEFINE_PER_CPU_ALIGNED(struct pcpu_hot, pcpu_hot) = {
+ 	.current_task	= &init_task,
+ 	.preempt_count	= INIT_PREEMPT_COUNT,

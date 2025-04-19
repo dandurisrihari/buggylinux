@@ -1,0 +1,65 @@
+Commit Hash: 23cc6ef6fd453b13502caae23130844e7d6ed0fe
+Subject: fs: remove accidental overflow during wraparound check
+
+
+Security Keywords:
+- hardening
+
+Full commit message:
+fs: remove accidental overflow during wraparound check
+
+Running syzkaller with the newly enabled signed integer overflow
+sanitizer produces this report:
+
+[  195.401651] ------------[ cut here ]------------
+[  195.404808] UBSAN: signed-integer-overflow in ../fs/open.c:321:15
+[  195.408739] 9223372036854775807 + 562984447377399 cannot be represented in type 'loff_t' (aka 'long long')
+[  195.414683] CPU: 1 PID: 703 Comm: syz-executor.0 Not tainted 6.8.0-rc2-00039-g14de58dbe653-dirty #11
+[  195.420138] Hardware name: QEMU Standard PC (i440FX + PIIX, 1996), BIOS 1.16.3-debian-1.16.3-2 04/01/2014
+[  195.425804] Call Trace:
+[  195.427360]  <TASK>
+[  195.428791]  dump_stack_lvl+0x93/0xd0
+[  195.431150]  handle_overflow+0x171/0x1b0
+[  195.433640]  vfs_fallocate+0x459/0x4f0
+...
+[  195.490053] ------------[ cut here ]------------
+[  195.493146] UBSAN: signed-integer-overflow in ../fs/open.c:321:61
+[  195.497030] 9223372036854775807 + 562984447377399 cannot be represented in type 'loff_t' (aka 'long long)
+[  195.502940] CPU: 1 PID: 703 Comm: syz-executor.0 Not tainted 6.8.0-rc2-00039-g14de58dbe653-dirty #11
+[  195.508395] Hardware name: QEMU Standard PC (i440FX + PIIX, 1996), BIOS 1.16.3-debian-1.16.3-2 04/01/2014
+[  195.514075] Call Trace:
+[  195.515636]  <TASK>
+[  195.517000]  dump_stack_lvl+0x93/0xd0
+[  195.519255]  handle_overflow+0x171/0x1b0
+[  195.521677]  vfs_fallocate+0x4cb/0x4f0
+[  195.524033]  __x64_sys_fallocate+0xb2/0xf0
+
+Historically, the signed integer overflow sanitizer did not work in the
+kernel due to its interaction with `-fwrapv` but this has since been
+changed [1] in the newest version of Clang. It was re-enabled in the
+kernel with Commit 557f8c582a9ba8ab ("ubsan: Reintroduce signed overflow
+sanitizer").
+
+Let's use the check_add_overflow helper to first verify the addition
+stays within the bounds of its type (long long); then we can use that
+sum for the following check.
+
+Link: https://github.com/llvm/llvm-project/pull/82432 [1]
+Closes: https://github.com/KSPP/linux/issues/356
+Cc: linux-hardening@vger.kernel.org
+Reviewed-by: Kees Cook <keescook@chromium.org>
+Signed-off-by: Justin Stitt <justinstitt@google.com>
+Link: https://lore.kernel.org/r/20240513-b4-sio-vfs_fallocate-v2-1-db415872fb16@google.com
+Reviewed-by: Jan Kara <jack@suse.cz>
+Signed-off-by: Christian Brauner <brauner@kernel.org>
+
+Metadata:
+Author: Justin Stitt <justinstitt@google.com>
+Author Date: Mon May 13 17:50:30 2024 +0000
+Committer: Christian Brauner <brauner@kernel.org>
+Commit Date: Mon May 27 15:58:46 2024 +0200
+
+Files Changed: 1
+Lines Added: 6
+Lines Removed: 2
+Total Changes: 8

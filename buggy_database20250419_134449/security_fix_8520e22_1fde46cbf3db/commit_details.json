@@ -1,0 +1,103 @@
+{
+  "hash": "8520e224f547cd070c7c8f97b1fc6d58cff7ccaa",
+  "hash_short": "8520e224",
+  "subject": "bpf, cgroups: Fix cgroup v2 fallback on v1/v2 mixed mode",
+  "body": "Fix cgroup v1 interference when non-root cgroup v2 BPF programs are used.\nBack in the days, commit bd1060a1d671 (\"sock, cgroup: add sock->sk_cgroup\")\nembedded per-socket cgroup information into sock->sk_cgrp_data and in order\nto save 8 bytes in struct sock made both mutually exclusive, that is, when\ncgroup v1 socket tagging (e.g. net_cls/net_prio) is used, then cgroup v2\nfalls back to the root cgroup in sock_cgroup_ptr() (&cgrp_dfl_root.cgrp).\n\nThe assumption made was \"there is no reason to mix the two and this is in line\nwith how legacy and v2 compatibility is handled\" as stated in bd1060a1d671.\nHowever, with Kubernetes more widely supporting cgroups v2 as well nowadays,\nthis assumption no longer holds, and the possibility of the v1/v2 mixed mode\nwith the v2 root fallback being hit becomes a real security issue.\n\nMany of the cgroup v2 BPF programs are also used for policy enforcement, just\nto pick _one_ example, that is, to programmatically deny socket related system\ncalls like connect(2) or bind(2). A v2 root fallback would implicitly cause\na policy bypass for the affected Pods.\n\nIn production environments, we have recently seen this case due to various\ncircumstances: i) a different 3rd party agent and/or ii) a container runtime\nsuch as [0] in the user's environment configuring legacy cgroup v1 net_cls\ntags, which triggered implicitly mentioned root fallback. Another case is\nKubernetes projects like kind [1] which create Kubernetes nodes in a container\nand also add cgroup namespaces to the mix, meaning programs which are attached\nto the cgroup v2 root of the cgroup namespace get attached to a non-root\ncgroup v2 path from init namespace point of view. And the latter's root is\nout of reach for agents on a kind Kubernetes node to configure. Meaning, any\nentity on the node setting cgroup v1 net_cls tag will trigger the bypass\ndespite cgroup v2 BPF programs attached to the namespace root.\n\nGenerally, this mutual exclusiveness does not hold anymore in today's user\nenvironments and makes cgroup v2 usage from BPF side fragile and unreliable.\nThis fix adds proper struct cgroup pointer for the cgroup v2 case to struct\nsock_cgroup_data in order to address these issues; this implicitly also fixes\nthe tradeoffs being made back then with regards to races and refcount leaks\nas stated in bd1060a1d671, and removes the fallback, so that cgroup v2 BPF\nprograms always operate as expected.\n\n  [0] https://github.com/nestybox/sysbox/\n  [1] https://kind.sigs.k8s.io/\n\nFixes: bd1060a1d671 (\"sock, cgroup: add sock->sk_cgroup\")\nSigned-off-by: Daniel Borkmann <daniel@iogearbox.net>\nSigned-off-by: Alexei Starovoitov <ast@kernel.org>\nAcked-by: Stanislav Fomichev <sdf@google.com>\nAcked-by: Tejun Heo <tj@kernel.org>\nLink: https://lore.kernel.org/bpf/20210913230759.2313-1-daniel@iogearbox.net",
+  "full_message": "bpf, cgroups: Fix cgroup v2 fallback on v1/v2 mixed mode\n\nFix cgroup v1 interference when non-root cgroup v2 BPF programs are used.\nBack in the days, commit bd1060a1d671 (\"sock, cgroup: add sock->sk_cgroup\")\nembedded per-socket cgroup information into sock->sk_cgrp_data and in order\nto save 8 bytes in struct sock made both mutually exclusive, that is, when\ncgroup v1 socket tagging (e.g. net_cls/net_prio) is used, then cgroup v2\nfalls back to the root cgroup in sock_cgroup_ptr() (&cgrp_dfl_root.cgrp).\n\nThe assumption made was \"there is no reason to mix the two and this is in line\nwith how legacy and v2 compatibility is handled\" as stated in bd1060a1d671.\nHowever, with Kubernetes more widely supporting cgroups v2 as well nowadays,\nthis assumption no longer holds, and the possibility of the v1/v2 mixed mode\nwith the v2 root fallback being hit becomes a real security issue.\n\nMany of the cgroup v2 BPF programs are also used for policy enforcement, just\nto pick _one_ example, that is, to programmatically deny socket related system\ncalls like connect(2) or bind(2). A v2 root fallback would implicitly cause\na policy bypass for the affected Pods.\n\nIn production environments, we have recently seen this case due to various\ncircumstances: i) a different 3rd party agent and/or ii) a container runtime\nsuch as [0] in the user's environment configuring legacy cgroup v1 net_cls\ntags, which triggered implicitly mentioned root fallback. Another case is\nKubernetes projects like kind [1] which create Kubernetes nodes in a container\nand also add cgroup namespaces to the mix, meaning programs which are attached\nto the cgroup v2 root of the cgroup namespace get attached to a non-root\ncgroup v2 path from init namespace point of view. And the latter's root is\nout of reach for agents on a kind Kubernetes node to configure. Meaning, any\nentity on the node setting cgroup v1 net_cls tag will trigger the bypass\ndespite cgroup v2 BPF programs attached to the namespace root.\n\nGenerally, this mutual exclusiveness does not hold anymore in today's user\nenvironments and makes cgroup v2 usage from BPF side fragile and unreliable.\nThis fix adds proper struct cgroup pointer for the cgroup v2 case to struct\nsock_cgroup_data in order to address these issues; this implicitly also fixes\nthe tradeoffs being made back then with regards to races and refcount leaks\nas stated in bd1060a1d671, and removes the fallback, so that cgroup v2 BPF\nprograms always operate as expected.\n\n  [0] https://github.com/nestybox/sysbox/\n  [1] https://kind.sigs.k8s.io/\n\nFixes: bd1060a1d671 (\"sock, cgroup: add sock->sk_cgroup\")\nSigned-off-by: Daniel Borkmann <daniel@iogearbox.net>\nSigned-off-by: Alexei Starovoitov <ast@kernel.org>\nAcked-by: Stanislav Fomichev <sdf@google.com>\nAcked-by: Tejun Heo <tj@kernel.org>\nLink: https://lore.kernel.org/bpf/20210913230759.2313-1-daniel@iogearbox.net",
+  "author_name": "Daniel Borkmann",
+  "author_email": "daniel@iogearbox.net",
+  "author_date": "Tue Sep 14 01:07:57 2021 +0200",
+  "author_date_iso": "2021-09-14T01:07:57+02:00",
+  "committer_name": "Alexei Starovoitov",
+  "committer_email": "ast@kernel.org",
+  "committer_date": "Mon Sep 13 16:35:58 2021 -0700",
+  "committer_date_iso": "2021-09-13T16:35:58-07:00",
+  "files_changed": [
+    "include/linux/cgroup-defs.h",
+    "include/linux/cgroup.h",
+    "kernel/cgroup/cgroup.c",
+    "net/core/netclassid_cgroup.c",
+    "net/core/netprio_cgroup.c"
+  ],
+  "files_changed_count": 5,
+  "stats": [
+    {
+      "file": "include/linux/cgroup-defs.h",
+      "insertions": 27,
+      "deletions": 80
+    },
+    {
+      "file": "include/linux/cgroup.h",
+      "insertions": 1,
+      "deletions": 21
+    },
+    {
+      "file": "kernel/cgroup/cgroup.c",
+      "insertions": 10,
+      "deletions": 40
+    },
+    {
+      "file": "net/core/netclassid_cgroup.c",
+      "insertions": 1,
+      "deletions": 6
+    },
+    {
+      "file": "net/core/netprio_cgroup.c",
+      "insertions": 2,
+      "deletions": 8
+    }
+  ],
+  "total_insertions": 41,
+  "total_deletions": 155,
+  "total_changes": 196,
+  "parents": [
+    "0e6491b559704da720f6da09dd0a52c4df44c514"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "security issue",
+      "bypass"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "include/linux/cgroup-defs.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/cgroup.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "kernel/cgroup/cgroup.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "net/core/netclassid_cgroup.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "net/core/netprio_cgroup.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

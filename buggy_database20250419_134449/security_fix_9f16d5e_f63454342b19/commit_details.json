@@ -1,0 +1,1092 @@
+{
+  "hash": "9f16d5e6f220661f73b36a4be1b21575651d8833",
+  "hash_short": "9f16d5e6",
+  "subject": "Merge tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm",
+  "body": "Pull kvm updates from Paolo Bonzini:\n \"The biggest change here is eliminating the awful idea that KVM had of\n  essentially guessing which pfns are refcounted pages.\n\n  The reason to do so was that KVM needs to map both non-refcounted\n  pages (for example BARs of VFIO devices) and VM_PFNMAP/VM_MIXMEDMAP\n  VMAs that contain refcounted pages.\n\n  However, the result was security issues in the past, and more recently\n  the inability to map VM_IO and VM_PFNMAP memory that _is_ backed by\n  struct page but is not refcounted. In particular this broke virtio-gpu\n  blob resources (which directly map host graphics buffers into the\n  guest as \"vram\" for the virtio-gpu device) with the amdgpu driver,\n  because amdgpu allocates non-compound higher order pages and the tail\n  pages could not be mapped into KVM.\n\n  This requires adjusting all uses of struct page in the\n  per-architecture code, to always work on the pfn whenever possible.\n  The large series that did this, from David Stevens and Sean\n  Christopherson, also cleaned up substantially the set of functions\n  that provided arch code with the pfn for a host virtual addresses.\n\n  The previous maze of twisty little passages, all different, is\n  replaced by five functions (__gfn_to_page, __kvm_faultin_pfn, the\n  non-__ versions of these two, and kvm_prefetch_pages) saving almost\n  200 lines of code.\n\n  ARM:\n\n   - Support for stage-1 permission indirection (FEAT_S1PIE) and\n     permission overlays (FEAT_S1POE), including nested virt + the\n     emulated page table walker\n\n   - Introduce PSCI SYSTEM_OFF2 support to KVM + client driver. This\n     call was introduced in PSCIv1.3 as a mechanism to request\n     hibernation, similar to the S4 state in ACPI\n\n   - Explicitly trap + hide FEAT_MPAM (QoS controls) from KVM guests. As\n     part of it, introduce trivial initialization of the host's MPAM\n     context so KVM can use the corresponding traps\n\n   - PMU support under nested virtualization, honoring the guest\n     hypervisor's trap configuration and event filtering when running a\n     nested guest\n\n   - Fixes to vgic ITS serialization where stale device/interrupt table\n     entries are not zeroed when the mapping is invalidated by the VM\n\n   - Avoid emulated MMIO completion if userspace has requested\n     synchronous external abort injection\n\n   - Various fixes and cleanups affecting pKVM, vCPU initialization, and\n     selftests\n\n  LoongArch:\n\n   - Add iocsr and mmio bus simulation in kernel.\n\n   - Add in-kernel interrupt controller emulation.\n\n   - Add support for virtualization extensions to the eiointc irqchip.\n\n  PPC:\n\n   - Drop lingering and utterly obsolete references to PPC970 KVM, which\n     was removed 10 years ago.\n\n   - Fix incorrect documentation references to non-existing ioctls\n\n  RISC-V:\n\n   - Accelerate KVM RISC-V when running as a guest\n\n   - Perf support to collect KVM guest statistics from host side\n\n  s390:\n\n   - New selftests: more ucontrol selftests and CPU model sanity checks\n\n   - Support for the gen17 CPU model\n\n   - List registers supported by KVM_GET/SET_ONE_REG in the\n     documentation\n\n  x86:\n\n   - Cleanup KVM's handling of Accessed and Dirty bits to dedup code,\n     improve documentation, harden against unexpected changes.\n\n     Even if the hardware A/D tracking is disabled, it is possible to\n     use the hardware-defined A/D bits to track if a PFN is Accessed\n     and/or Dirty, and that removes a lot of special cases.\n\n   - Elide TLB flushes when aging secondary PTEs, as has been done in\n     x86's primary MMU for over 10 years.\n\n   - Recover huge pages in-place in the TDP MMU when dirty page logging\n     is toggled off, instead of zapping them and waiting until the page\n     is re-accessed to create a huge mapping. This reduces vCPU jitter.\n\n   - Batch TLB flushes when dirty page logging is toggled off. This\n     reduces the time it takes to disable dirty logging by ~3x.\n\n   - Remove the shrinker that was (poorly) attempting to reclaim shadow\n     page tables in low-memory situations.\n\n   - Clean up and optimize KVM's handling of writes to\n     MSR_IA32_APICBASE.\n\n   - Advertise CPUIDs for new instructions in Clearwater Forest\n\n   - Quirk KVM's misguided behavior of initialized certain feature MSRs\n     to their maximum supported feature set, which can result in KVM\n     creating invalid vCPU state. E.g. initializing PERF_CAPABILITIES to\n     a non-zero value results in the vCPU having invalid state if\n     userspace hides PDCM from the guest, which in turn can lead to\n     save/restore failures.\n\n   - Fix KVM's handling of non-canonical checks for vCPUs that support\n     LA57 to better follow the \"architecture\", in quotes because the\n     actual behavior is poorly documented. E.g. most MSR writes and\n     descriptor table loads ignore CR4.LA57 and operate purely on\n     whether the CPU supports LA57.\n\n   - Bypass the register cache when querying CPL from kvm_sched_out(),\n     as filling the cache from IRQ context is generally unsafe; harden\n     the cache accessors to try to prevent similar issues from occuring\n     in the future. The issue that triggered this change was already\n     fixed in 6.12, but was still kinda latent.\n\n   - Advertise AMD_IBPB_RET to userspace, and fix a related bug where\n     KVM over-advertises SPEC_CTRL when trying to support cross-vendor\n     VMs.\n\n   - Minor cleanups\n\n   - Switch hugepage recovery thread to use vhost_task.\n\n     These kthreads can consume significant amounts of CPU time on\n     behalf of a VM or in response to how the VM behaves (for example\n     how it accesses its memory); therefore KVM tried to place the\n     thread in the VM's cgroups and charge the CPU time consumed by that\n     work to the VM's container.\n\n     However the kthreads did not process SIGSTOP/SIGCONT, and therefore\n     cgroups which had KVM instances inside could not complete freezing.\n\n     Fix this by replacing the kthread with a PF_USER_WORKER thread, via\n     the vhost_task abstraction. Another 100+ lines removed, with\n     generally better behavior too like having these threads properly\n     parented in the process tree.\n\n   - Revert a workaround for an old CPU erratum (Nehalem/Westmere) that\n     didn't really work; there was really nothing to work around anyway:\n     the broken patch was meant to fix nested virtualization, but the\n     PERF_GLOBAL_CTRL MSR is virtualized and therefore unaffected by the\n     erratum.\n\n   - Fix 6.12 regression where CONFIG_KVM will be built as a module even\n     if asked to be builtin, as long as neither KVM_INTEL nor KVM_AMD is\n     'y'.\n\n  x86 selftests:\n\n   - x86 selftests can now use AVX.\n\n  Documentation:\n\n   - Use rST internal links\n\n   - Reorganize the introduction to the API document\n\n  Generic:\n\n   - Protect vcpu->pid accesses outside of vcpu->mutex with a rwlock\n     instead of RCU, so that running a vCPU on a different task doesn't\n     encounter long due to having to wait for all CPUs become quiescent.\n\n     In general both reads and writes are rare, but userspace that\n     supports confidential computing is introducing the use of \"helper\"\n     vCPUs that may jump from one host processor to another. Those will\n     be very happy to trigger a synchronize_rcu(), and the effect on\n     performance is quite the disaster\"\n\n* tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm: (298 commits)\n  KVM: x86: Break CONFIG_KVM_X86's direct dependency on KVM_INTEL || KVM_AMD\n  KVM: x86: add back X86_LOCAL_APIC dependency\n  Revert \"KVM: VMX: Move LOAD_IA32_PERF_GLOBAL_CTRL errata handling out of setup_vmcs_config()\"\n  KVM: x86: switch hugepage recovery thread to vhost_task\n  KVM: x86: expose MSR_PLATFORM_INFO as a feature MSR\n  x86: KVM: Advertise CPUIDs for new instructions in Clearwater Forest\n  Documentation: KVM: fix malformed table\n  irqchip/loongson-eiointc: Add virt extension support\n  LoongArch: KVM: Add irqfd support\n  LoongArch: KVM: Add PCHPIC user mode read and write functions\n  LoongArch: KVM: Add PCHPIC read and write functions\n  LoongArch: KVM: Add PCHPIC device support\n  LoongArch: KVM: Add EIOINTC user mode read and write functions\n  LoongArch: KVM: Add EIOINTC read and write functions\n  LoongArch: KVM: Add EIOINTC device support\n  LoongArch: KVM: Add IPI user mode read and write function\n  LoongArch: KVM: Add IPI read and write function\n  LoongArch: KVM: Add IPI device support\n  LoongArch: KVM: Add iocsr and mmio bus simulation in kernel\n  KVM: arm64: Pass on SVE mapping failures\n  ...",
+  "full_message": "Merge tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm\n\nPull kvm updates from Paolo Bonzini:\n \"The biggest change here is eliminating the awful idea that KVM had of\n  essentially guessing which pfns are refcounted pages.\n\n  The reason to do so was that KVM needs to map both non-refcounted\n  pages (for example BARs of VFIO devices) and VM_PFNMAP/VM_MIXMEDMAP\n  VMAs that contain refcounted pages.\n\n  However, the result was security issues in the past, and more recently\n  the inability to map VM_IO and VM_PFNMAP memory that _is_ backed by\n  struct page but is not refcounted. In particular this broke virtio-gpu\n  blob resources (which directly map host graphics buffers into the\n  guest as \"vram\" for the virtio-gpu device) with the amdgpu driver,\n  because amdgpu allocates non-compound higher order pages and the tail\n  pages could not be mapped into KVM.\n\n  This requires adjusting all uses of struct page in the\n  per-architecture code, to always work on the pfn whenever possible.\n  The large series that did this, from David Stevens and Sean\n  Christopherson, also cleaned up substantially the set of functions\n  that provided arch code with the pfn for a host virtual addresses.\n\n  The previous maze of twisty little passages, all different, is\n  replaced by five functions (__gfn_to_page, __kvm_faultin_pfn, the\n  non-__ versions of these two, and kvm_prefetch_pages) saving almost\n  200 lines of code.\n\n  ARM:\n\n   - Support for stage-1 permission indirection (FEAT_S1PIE) and\n     permission overlays (FEAT_S1POE), including nested virt + the\n     emulated page table walker\n\n   - Introduce PSCI SYSTEM_OFF2 support to KVM + client driver. This\n     call was introduced in PSCIv1.3 as a mechanism to request\n     hibernation, similar to the S4 state in ACPI\n\n   - Explicitly trap + hide FEAT_MPAM (QoS controls) from KVM guests. As\n     part of it, introduce trivial initialization of the host's MPAM\n     context so KVM can use the corresponding traps\n\n   - PMU support under nested virtualization, honoring the guest\n     hypervisor's trap configuration and event filtering when running a\n     nested guest\n\n   - Fixes to vgic ITS serialization where stale device/interrupt table\n     entries are not zeroed when the mapping is invalidated by the VM\n\n   - Avoid emulated MMIO completion if userspace has requested\n     synchronous external abort injection\n\n   - Various fixes and cleanups affecting pKVM, vCPU initialization, and\n     selftests\n\n  LoongArch:\n\n   - Add iocsr and mmio bus simulation in kernel.\n\n   - Add in-kernel interrupt controller emulation.\n\n   - Add support for virtualization extensions to the eiointc irqchip.\n\n  PPC:\n\n   - Drop lingering and utterly obsolete references to PPC970 KVM, which\n     was removed 10 years ago.\n\n   - Fix incorrect documentation references to non-existing ioctls\n\n  RISC-V:\n\n   - Accelerate KVM RISC-V when running as a guest\n\n   - Perf support to collect KVM guest statistics from host side\n\n  s390:\n\n   - New selftests: more ucontrol selftests and CPU model sanity checks\n\n   - Support for the gen17 CPU model\n\n   - List registers supported by KVM_GET/SET_ONE_REG in the\n     documentation\n\n  x86:\n\n   - Cleanup KVM's handling of Accessed and Dirty bits to dedup code,\n     improve documentation, harden against unexpected changes.\n\n     Even if the hardware A/D tracking is disabled, it is possible to\n     use the hardware-defined A/D bits to track if a PFN is Accessed\n     and/or Dirty, and that removes a lot of special cases.\n\n   - Elide TLB flushes when aging secondary PTEs, as has been done in\n     x86's primary MMU for over 10 years.\n\n   - Recover huge pages in-place in the TDP MMU when dirty page logging\n     is toggled off, instead of zapping them and waiting until the page\n     is re-accessed to create a huge mapping. This reduces vCPU jitter.\n\n   - Batch TLB flushes when dirty page logging is toggled off. This\n     reduces the time it takes to disable dirty logging by ~3x.\n\n   - Remove the shrinker that was (poorly) attempting to reclaim shadow\n     page tables in low-memory situations.\n\n   - Clean up and optimize KVM's handling of writes to\n     MSR_IA32_APICBASE.\n\n   - Advertise CPUIDs for new instructions in Clearwater Forest\n\n   - Quirk KVM's misguided behavior of initialized certain feature MSRs\n     to their maximum supported feature set, which can result in KVM\n     creating invalid vCPU state. E.g. initializing PERF_CAPABILITIES to\n     a non-zero value results in the vCPU having invalid state if\n     userspace hides PDCM from the guest, which in turn can lead to\n     save/restore failures.\n\n   - Fix KVM's handling of non-canonical checks for vCPUs that support\n     LA57 to better follow the \"architecture\", in quotes because the\n     actual behavior is poorly documented. E.g. most MSR writes and\n     descriptor table loads ignore CR4.LA57 and operate purely on\n     whether the CPU supports LA57.\n\n   - Bypass the register cache when querying CPL from kvm_sched_out(),\n     as filling the cache from IRQ context is generally unsafe; harden\n     the cache accessors to try to prevent similar issues from occuring\n     in the future. The issue that triggered this change was already\n     fixed in 6.12, but was still kinda latent.\n\n   - Advertise AMD_IBPB_RET to userspace, and fix a related bug where\n     KVM over-advertises SPEC_CTRL when trying to support cross-vendor\n     VMs.\n\n   - Minor cleanups\n\n   - Switch hugepage recovery thread to use vhost_task.\n\n     These kthreads can consume significant amounts of CPU time on\n     behalf of a VM or in response to how the VM behaves (for example\n     how it accesses its memory); therefore KVM tried to place the\n     thread in the VM's cgroups and charge the CPU time consumed by that\n     work to the VM's container.\n\n     However the kthreads did not process SIGSTOP/SIGCONT, and therefore\n     cgroups which had KVM instances inside could not complete freezing.\n\n     Fix this by replacing the kthread with a PF_USER_WORKER thread, via\n     the vhost_task abstraction. Another 100+ lines removed, with\n     generally better behavior too like having these threads properly\n     parented in the process tree.\n\n   - Revert a workaround for an old CPU erratum (Nehalem/Westmere) that\n     didn't really work; there was really nothing to work around anyway:\n     the broken patch was meant to fix nested virtualization, but the\n     PERF_GLOBAL_CTRL MSR is virtualized and therefore unaffected by the\n     erratum.\n\n   - Fix 6.12 regression where CONFIG_KVM will be built as a module even\n     if asked to be builtin, as long as neither KVM_INTEL nor KVM_AMD is\n     'y'.\n\n  x86 selftests:\n\n   - x86 selftests can now use AVX.\n\n  Documentation:\n\n   - Use rST internal links\n\n   - Reorganize the introduction to the API document\n\n  Generic:\n\n   - Protect vcpu->pid accesses outside of vcpu->mutex with a rwlock\n     instead of RCU, so that running a vCPU on a different task doesn't\n     encounter long due to having to wait for all CPUs become quiescent.\n\n     In general both reads and writes are rare, but userspace that\n     supports confidential computing is introducing the use of \"helper\"\n     vCPUs that may jump from one host processor to another. Those will\n     be very happy to trigger a synchronize_rcu(), and the effect on\n     performance is quite the disaster\"\n\n* tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm: (298 commits)\n  KVM: x86: Break CONFIG_KVM_X86's direct dependency on KVM_INTEL || KVM_AMD\n  KVM: x86: add back X86_LOCAL_APIC dependency\n  Revert \"KVM: VMX: Move LOAD_IA32_PERF_GLOBAL_CTRL errata handling out of setup_vmcs_config()\"\n  KVM: x86: switch hugepage recovery thread to vhost_task\n  KVM: x86: expose MSR_PLATFORM_INFO as a feature MSR\n  x86: KVM: Advertise CPUIDs for new instructions in Clearwater Forest\n  Documentation: KVM: fix malformed table\n  irqchip/loongson-eiointc: Add virt extension support\n  LoongArch: KVM: Add irqfd support\n  LoongArch: KVM: Add PCHPIC user mode read and write functions\n  LoongArch: KVM: Add PCHPIC read and write functions\n  LoongArch: KVM: Add PCHPIC device support\n  LoongArch: KVM: Add EIOINTC user mode read and write functions\n  LoongArch: KVM: Add EIOINTC read and write functions\n  LoongArch: KVM: Add EIOINTC device support\n  LoongArch: KVM: Add IPI user mode read and write function\n  LoongArch: KVM: Add IPI read and write function\n  LoongArch: KVM: Add IPI device support\n  LoongArch: KVM: Add iocsr and mmio bus simulation in kernel\n  KVM: arm64: Pass on SVE mapping failures\n  ...",
+  "author_name": "Linus Torvalds",
+  "author_email": "torvalds@linux-foundation.org",
+  "author_date": "Sat Nov 23 16:00:50 2024 -0800",
+  "author_date_iso": "2024-11-23T16:00:50-08:00",
+  "committer_name": "Linus Torvalds",
+  "committer_email": "torvalds@linux-foundation.org",
+  "committer_date": "Sat Nov 23 16:00:50 2024 -0800",
+  "committer_date_iso": "2024-11-23T16:00:50-08:00",
+  "files_changed": [
+    "arch/arm64/include/asm/cpucaps.h",
+    "arch/arm64/include/asm/cpufeature.h",
+    "arch/arm64/include/asm/el2_setup.h",
+    "arch/arm64/include/asm/sysreg.h",
+    "arch/arm64/kernel/cpufeature.c",
+    "arch/arm64/kernel/cpuinfo.c",
+    "arch/arm64/kvm/guest.c",
+    "arch/arm64/kvm/mmu.c",
+    "arch/arm64/tools/cpucaps",
+    "arch/arm64/tools/sysreg",
+    "arch/powerpc/kvm/book3s_hv_nested.c",
+    "arch/powerpc/kvm/powerpc.c",
+    "arch/riscv/include/asm/perf_event.h",
+    "arch/riscv/kernel/perf_callchain.c",
+    "arch/s390/include/asm/kvm_host.h",
+    "arch/s390/kvm/kvm-s390.c",
+    "arch/s390/kvm/vsie.c",
+    "arch/x86/include/asm/cpufeatures.h",
+    "arch/x86/kvm/svm/sev.c"
+  ],
+  "files_changed_count": 19,
+  "stats": [
+    {
+      "file": "Documentation/arch/arm64/cpu-feature-registers.rst",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "Documentation/arch/loongarch/irq-chip-model.rst",
+      "insertions": 64,
+      "deletions": 0
+    },
+    {
+      "file": "Documentation/translations/zh_CN/arch/loongarch/irq-chip-model.rst",
+      "insertions": 55,
+      "deletions": 0
+    },
+    {
+      "file": "Documentation/virt/kvm/api.rst",
+      "insertions": 116,
+      "deletions": 74
+    },
+    {
+      "file": "Documentation/virt/kvm/locking.rst",
+      "insertions": 41,
+      "deletions": 39
+    },
+    {
+      "file": "Documentation/virt/kvm/x86/errata.rst",
+      "insertions": 12,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/include/asm/cpu.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/include/asm/cpucaps.h",
+      "insertions": 5,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/include/asm/cpufeature.h",
+      "insertions": 17,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/include/asm/el2_setup.h",
+      "insertions": 14,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/include/asm/kvm_arm.h",
+      "insertions": 1,
+      "deletions": 29
+    },
+    {
+      "file": "arch/arm64/include/asm/kvm_asm.h",
+      "insertions": 0,
+      "deletions": 1
+    },
+    {
+      "file": "arch/arm64/include/asm/kvm_emulate.h",
+      "insertions": 9,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/include/asm/kvm_host.h",
+      "insertions": 36,
+      "deletions": 10
+    },
+    {
+      "file": "arch/arm64/include/asm/kvm_pgtable.h",
+      "insertions": 1,
+      "deletions": 3
+    },
+    {
+      "file": "arch/arm64/include/asm/sysreg.h",
+      "insertions": 0,
+      "deletions": 12
+    },
+    {
+      "file": "arch/arm64/include/asm/vncr_mapping.h",
+      "insertions": 0,
+      "deletions": 1
+    },
+    {
+      "file": "arch/arm64/include/uapi/asm/kvm.h",
+      "insertions": 6,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/kernel/cpufeature.c",
+      "insertions": 96,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/kernel/cpuinfo.c",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/kvm/arch_timer.c",
+      "insertions": 1,
+      "deletions": 2
+    },
+    {
+      "file": "arch/arm64/kvm/arm.c",
+      "insertions": 3,
+      "deletions": 23
+    },
+    {
+      "file": "arch/arm64/kvm/at.c",
+      "insertions": 404,
+      "deletions": 66
+    },
+    {
+      "file": "arch/arm64/kvm/emulate-nested.c",
+      "insertions": 179,
+      "deletions": 122
+    },
+    {
+      "file": "arch/arm64/kvm/guest.c",
+      "insertions": 6,
+      "deletions": 8
+    },
+    {
+      "file": "arch/arm64/kvm/hyp/include/hyp/switch.h",
+      "insertions": 31,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/kvm/hyp/include/hyp/sysreg-sr.h",
+      "insertions": 6,
+      "deletions": 5
+    },
+    {
+      "file": "arch/arm64/kvm/hyp/include/nvhe/trap_handler.h",
+      "insertions": 0,
+      "deletions": 2
+    },
+    {
+      "file": "arch/arm64/kvm/hyp/nvhe/hyp-main.c",
+      "insertions": 3,
+      "deletions": 9
+    },
+    {
+      "file": "arch/arm64/kvm/hyp/nvhe/pkvm.c",
+      "insertions": 115,
+      "deletions": 1
+    },
+    {
+      "file": "arch/arm64/kvm/hyp/nvhe/psci-relay.c",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/kvm/hyp/nvhe/setup.c",
+      "insertions": 1,
+      "deletions": 19
+    },
+    {
+      "file": "arch/arm64/kvm/hyp/nvhe/sysreg-sr.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/arm64/kvm/hyp/pgtable.c",
+      "insertions": 2,
+      "deletions": 5
+    },
+    {
+      "file": "arch/arm64/kvm/hyp/vgic-v3-sr.c",
+      "insertions": 0,
+      "deletions": 3
+    },
+    {
+      "file": "arch/arm64/kvm/hyp/vhe/sysreg-sr.c",
+      "insertions": 158,
+      "deletions": 2
+    },
+    {
+      "file": "arch/arm64/kvm/hypercalls.c",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/kvm/mmio.c",
+      "insertions": 30,
+      "deletions": 2
+    },
+    {
+      "file": "arch/arm64/kvm/mmu.c",
+      "insertions": 8,
+      "deletions": 13
+    },
+    {
+      "file": "arch/arm64/kvm/nested.c",
+      "insertions": 73,
+      "deletions": 9
+    },
+    {
+      "file": "arch/arm64/kvm/pmu-emul.c",
+      "insertions": 124,
+      "deletions": 19
+    },
+    {
+      "file": "arch/arm64/kvm/psci.c",
+      "insertions": 43,
+      "deletions": 1
+    },
+    {
+      "file": "arch/arm64/kvm/reset.c",
+      "insertions": 0,
+      "deletions": 5
+    },
+    {
+      "file": "arch/arm64/kvm/sys_regs.c",
+      "insertions": 250,
+      "deletions": 59
+    },
+    {
+      "file": "arch/arm64/kvm/vgic/vgic-its.c",
+      "insertions": 17,
+      "deletions": 15
+    },
+    {
+      "file": "arch/arm64/kvm/vgic/vgic.h",
+      "insertions": 23,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/tools/cpucaps",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/tools/sysreg",
+      "insertions": 242,
+      "deletions": 5
+    },
+    {
+      "file": "arch/loongarch/include/asm/irq.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/loongarch/include/asm/kvm_eiointc.h",
+      "insertions": 123,
+      "deletions": 0
+    },
+    {
+      "file": "arch/loongarch/include/asm/kvm_host.h",
+      "insertions": 17,
+      "deletions": 1
+    },
+    {
+      "file": "arch/loongarch/include/asm/kvm_ipi.h",
+      "insertions": 45,
+      "deletions": 0
+    },
+    {
+      "file": "arch/loongarch/include/asm/kvm_pch_pic.h",
+      "insertions": 62,
+      "deletions": 0
+    },
+    {
+      "file": "arch/loongarch/include/uapi/asm/kvm.h",
+      "insertions": 20,
+      "deletions": 0
+    },
+    {
+      "file": "arch/loongarch/kvm/Kconfig",
+      "insertions": 4,
+      "deletions": 1
+    },
+    {
+      "file": "arch/loongarch/kvm/Makefile",
+      "insertions": 4,
+      "deletions": 0
+    },
+    {
+      "file": "arch/loongarch/kvm/exit.c",
+      "insertions": 58,
+      "deletions": 24
+    },
+    {
+      "file": "arch/loongarch/kvm/intc/eiointc.c",
+      "insertions": 1027,
+      "deletions": 0
+    },
+    {
+      "file": "arch/loongarch/kvm/intc/ipi.c",
+      "insertions": 475,
+      "deletions": 0
+    },
+    {
+      "file": "arch/loongarch/kvm/intc/pch_pic.c",
+      "insertions": 519,
+      "deletions": 0
+    },
+    {
+      "file": "arch/loongarch/kvm/irqfd.c",
+      "insertions": 89,
+      "deletions": 0
+    },
+    {
+      "file": "arch/loongarch/kvm/main.c",
+      "insertions": 17,
+      "deletions": 2
+    },
+    {
+      "file": "arch/loongarch/kvm/mmu.c",
+      "insertions": 12,
+      "deletions": 28
+    },
+    {
+      "file": "arch/loongarch/kvm/vcpu.c",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "arch/loongarch/kvm/vm.c",
+      "insertions": 21,
+      "deletions": 0
+    },
+    {
+      "file": "arch/mips/kvm/mmu.c",
+      "insertions": 8,
+      "deletions": 18
+    },
+    {
+      "file": "arch/powerpc/include/asm/kvm_book3s.h",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "arch/powerpc/kvm/book3s.c",
+      "insertions": 4,
+      "deletions": 3
+    },
+    {
+      "file": "arch/powerpc/kvm/book3s_32_mmu_host.c",
+      "insertions": 4,
+      "deletions": 3
+    },
+    {
+      "file": "arch/powerpc/kvm/book3s_64_mmu_host.c",
+      "insertions": 6,
+      "deletions": 6
+    },
+    {
+      "file": "arch/powerpc/kvm/book3s_64_mmu_hv.c",
+      "insertions": 4,
+      "deletions": 21
+    },
+    {
+      "file": "arch/powerpc/kvm/book3s_64_mmu_radix.c",
+      "insertions": 7,
+      "deletions": 28
+    },
+    {
+      "file": "arch/powerpc/kvm/book3s_hv_nested.c",
+      "insertions": 1,
+      "deletions": 3
+    },
+    {
+      "file": "arch/powerpc/kvm/book3s_hv_uvmem.c",
+      "insertions": 12,
+      "deletions": 13
+    },
+    {
+      "file": "arch/powerpc/kvm/book3s_pr.c",
+      "insertions": 6,
+      "deletions": 8
+    },
+    {
+      "file": "arch/powerpc/kvm/book3s_xive_native.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/powerpc/kvm/e500_mmu_host.c",
+      "insertions": 7,
+      "deletions": 12
+    },
+    {
+      "file": "arch/powerpc/kvm/powerpc.c",
+      "insertions": 0,
+      "deletions": 3
+    },
+    {
+      "file": "arch/riscv/include/asm/kvm_host.h",
+      "insertions": 10,
+      "deletions": 0
+    },
+    {
+      "file": "arch/riscv/include/asm/kvm_nacl.h",
+      "insertions": 245,
+      "deletions": 0
+    },
+    {
+      "file": "arch/riscv/include/asm/perf_event.h",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "arch/riscv/include/asm/sbi.h",
+      "insertions": 120,
+      "deletions": 0
+    },
+    {
+      "file": "arch/riscv/kernel/perf_callchain.c",
+      "insertions": 10,
+      "deletions": 0
+    },
+    {
+      "file": "arch/riscv/kvm/Kconfig",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/riscv/kvm/Makefile",
+      "insertions": 15,
+      "deletions": 12
+    },
+    {
+      "file": "arch/riscv/kvm/aia.c",
+      "insertions": 76,
+      "deletions": 38
+    },
+    {
+      "file": "arch/riscv/kvm/aia_aplic.c",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "arch/riscv/kvm/main.c",
+      "insertions": 59,
+      "deletions": 4
+    },
+    {
+      "file": "arch/riscv/kvm/mmu.c",
+      "insertions": 6,
+      "deletions": 7
+    },
+    {
+      "file": "arch/riscv/kvm/nacl.c",
+      "insertions": 152,
+      "deletions": 0
+    },
+    {
+      "file": "arch/riscv/kvm/tlb.c",
+      "insertions": 40,
+      "deletions": 17
+    },
+    {
+      "file": "arch/riscv/kvm/vcpu.c",
+      "insertions": 148,
+      "deletions": 43
+    },
+    {
+      "file": "arch/riscv/kvm/vcpu_sbi.c",
+      "insertions": 7,
+      "deletions": 4
+    },
+    {
+      "file": "arch/riscv/kvm/vcpu_switch.S",
+      "insertions": 87,
+      "deletions": 50
+    },
+    {
+      "file": "arch/riscv/kvm/vcpu_timer.c",
+      "insertions": 14,
+      "deletions": 14
+    },
+    {
+      "file": "arch/s390/include/asm/kvm_host.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/s390/include/uapi/asm/kvm.h",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "arch/s390/kvm/kvm-s390.c",
+      "insertions": 41,
+      "deletions": 2
+    },
+    {
+      "file": "arch/s390/kvm/vsie.c",
+      "insertions": 4,
+      "deletions": 3
+    },
+    {
+      "file": "arch/s390/tools/gen_facilities.c",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/include/asm/cpufeatures.h",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/include/asm/kvm-x86-ops.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/include/asm/kvm_host.h",
+      "insertions": 8,
+      "deletions": 5
+    },
+    {
+      "file": "arch/x86/include/uapi/asm/kvm.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/kvm/Kconfig",
+      "insertions": 4,
+      "deletions": 2
+    },
+    {
+      "file": "arch/x86/kvm/cpuid.c",
+      "insertions": 14,
+      "deletions": 8
+    },
+    {
+      "file": "arch/x86/kvm/cpuid.h",
+      "insertions": 0,
+      "deletions": 1
+    },
+    {
+      "file": "arch/x86/kvm/emulate.c",
+      "insertions": 9,
+      "deletions": 6
+    },
+    {
+      "file": "arch/x86/kvm/kvm_cache_regs.h",
+      "insertions": 17,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/kvm/kvm_emulate.h",
+      "insertions": 5,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/kvm/lapic.c",
+      "insertions": 35,
+      "deletions": 16
+    },
+    {
+      "file": "arch/x86/kvm/lapic.h",
+      "insertions": 6,
+      "deletions": 5
+    },
+    {
+      "file": "arch/x86/kvm/mmu.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/kvm/mmu/mmu.c",
+      "insertions": 151,
+      "deletions": 293
+    },
+    {
+      "file": "arch/x86/kvm/mmu/mmu_internal.h",
+      "insertions": 4,
+      "deletions": 6
+    },
+    {
+      "file": "arch/x86/kvm/mmu/paging_tmpl.h",
+      "insertions": 12,
+      "deletions": 19
+    },
+    {
+      "file": "arch/x86/kvm/mmu/spte.c",
+      "insertions": 65,
+      "deletions": 37
+    },
+    {
+      "file": "arch/x86/kvm/mmu/spte.h",
+      "insertions": 41,
+      "deletions": 37
+    },
+    {
+      "file": "arch/x86/kvm/mmu/tdp_mmu.c",
+      "insertions": 128,
+      "deletions": 148
+    },
+    {
+      "file": "arch/x86/kvm/mmu/tdp_mmu.h",
+      "insertions": 3,
+      "deletions": 3
+    },
+    {
+      "file": "arch/x86/kvm/mtrr.c",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/kvm/reverse_cpuid.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/kvm/svm/nested.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "arch/x86/kvm/svm/sev.c",
+      "insertions": 7,
+      "deletions": 5
+    },
+    {
+      "file": "arch/x86/kvm/svm/svm.c",
+      "insertions": 8,
+      "deletions": 5
+    },
+    {
+      "file": "arch/x86/kvm/vmx/hyperv.c",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/kvm/vmx/main.c",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/kvm/vmx/nested.c",
+      "insertions": 42,
+      "deletions": 35
+    },
+    {
+      "file": "arch/x86/kvm/vmx/pmu_intel.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/x86/kvm/vmx/sgx.c",
+      "insertions": 2,
+      "deletions": 3
+    },
+    {
+      "file": "arch/x86/kvm/vmx/vmx.c",
+      "insertions": 64,
+      "deletions": 61
+    },
+    {
+      "file": "arch/x86/kvm/vmx/vmx.h",
+      "insertions": 1,
+      "deletions": 2
+    },
+    {
+      "file": "arch/x86/kvm/vmx/vmx_ops.h",
+      "insertions": 8,
+      "deletions": 8
+    },
+    {
+      "file": "arch/x86/kvm/x86.c",
+      "insertions": 64,
+      "deletions": 77
+    },
+    {
+      "file": "arch/x86/kvm/x86.h",
+      "insertions": 46,
+      "deletions": 2
+    },
+    {
+      "file": "drivers/firmware/psci/psci.c",
+      "insertions": 45,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/irqchip/irq-loongson-eiointc.c",
+      "insertions": 87,
+      "deletions": 21
+    },
+    {
+      "file": "include/kvm/arm_arch_timer.h",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "include/kvm/arm_pmu.h",
+      "insertions": 16,
+      "deletions": 2
+    },
+    {
+      "file": "include/kvm/arm_psci.h",
+      "insertions": 3,
+      "deletions": 1
+    },
+    {
+      "file": "include/linux/kvm_host.h",
+      "insertions": 85,
+      "deletions": 46
+    },
+    {
+      "file": "include/trace/events/kvm.h",
+      "insertions": 35,
+      "deletions": 0
+    },
+    {
+      "file": "include/uapi/linux/kvm.h",
+      "insertions": 8,
+      "deletions": 0
+    },
+    {
+      "file": "include/uapi/linux/psci.h",
+      "insertions": 5,
+      "deletions": 0
+    },
+    {
+      "file": "kernel/power/hibernate.c",
+      "insertions": 4,
+      "deletions": 1
+    },
+    {
+      "file": "tools/arch/arm64/include/asm/brk-imm.h",
+      "insertions": 42,
+      "deletions": 0
+    },
+    {
+      "file": "tools/arch/arm64/include/asm/esr.h",
+      "insertions": 455,
+      "deletions": 0
+    },
+    {
+      "file": "tools/arch/s390/include/uapi/asm/kvm.h",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "tools/testing/selftests/kvm/Makefile",
+      "insertions": 4,
+      "deletions": 1
+    },
+    {
+      "file": "tools/testing/selftests/kvm/aarch64/debug-exceptions.c",
+      "insertions": 5,
+      "deletions": 5
+    },
+    {
+      "file": "tools/testing/selftests/kvm/aarch64/mmio_abort.c",
+      "insertions": 159,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/aarch64/no-vgic-v3.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/testing/selftests/kvm/aarch64/page_fault_test.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "tools/testing/selftests/kvm/aarch64/psci_test.c",
+      "insertions": 92,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/aarch64/set_id_regs.c",
+      "insertions": 98,
+      "deletions": 1
+    },
+    {
+      "file": "tools/testing/selftests/kvm/aarch64/vpmu_counter_access.c",
+      "insertions": 6,
+      "deletions": 6
+    },
+    {
+      "file": "tools/testing/selftests/kvm/hardware_disable_test.c",
+      "insertions": 0,
+      "deletions": 1
+    },
+    {
+      "file": "tools/testing/selftests/kvm/include/aarch64/processor.h",
+      "insertions": 2,
+      "deletions": 13
+    },
+    {
+      "file": "tools/testing/selftests/kvm/include/s390x/facility.h",
+      "insertions": 50,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/include/s390x/processor.h",
+      "insertions": 6,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/include/x86_64/processor.h",
+      "insertions": 5,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/lib/aarch64/processor.c",
+      "insertions": 3,
+      "deletions": 3
+    },
+    {
+      "file": "tools/testing/selftests/kvm/lib/kvm_util.c",
+      "insertions": 6,
+      "deletions": 4
+    },
+    {
+      "file": "tools/testing/selftests/kvm/lib/s390x/facility.c",
+      "insertions": 14,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/lib/x86_64/processor.c",
+      "insertions": 24,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/s390x/cpumodel_subfuncs_test.c",
+      "insertions": 301,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/s390x/ucontrol_test.c",
+      "insertions": 314,
+      "deletions": 8
+    },
+    {
+      "file": "tools/testing/selftests/kvm/x86_64/amx_test.c",
+      "insertions": 4,
+      "deletions": 19
+    },
+    {
+      "file": "tools/testing/selftests/kvm/x86_64/cpuid_test.c",
+      "insertions": 43,
+      "deletions": 26
+    },
+    {
+      "file": "tools/testing/selftests/kvm/x86_64/cr4_cpuid_sync_test.c",
+      "insertions": 36,
+      "deletions": 21
+    },
+    {
+      "file": "tools/testing/selftests/kvm/x86_64/debug_regs.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/testing/selftests/kvm/x86_64/feature_msrs_test.c",
+      "insertions": 113,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/x86_64/get_msr_index_features.c",
+      "insertions": 0,
+      "deletions": 35
+    },
+    {
+      "file": "tools/testing/selftests/kvm/x86_64/platform_info_test.c",
+      "insertions": 0,
+      "deletions": 2
+    },
+    {
+      "file": "tools/testing/selftests/kvm/x86_64/sev_smoke_test.c",
+      "insertions": 5,
+      "deletions": 14
+    },
+    {
+      "file": "tools/testing/selftests/kvm/x86_64/state_test.c",
+      "insertions": 0,
+      "deletions": 5
+    },
+    {
+      "file": "tools/testing/selftests/kvm/x86_64/vmx_pmu_caps_test.c",
+      "insertions": 23,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/x86_64/xcr0_cpuid_test.c",
+      "insertions": 8,
+      "deletions": 3
+    },
+    {
+      "file": "virt/kvm/Kconfig",
+      "insertions": 4,
+      "deletions": 0
+    },
+    {
+      "file": "virt/kvm/guest_memfd.c",
+      "insertions": 19,
+      "deletions": 9
+    },
+    {
+      "file": "virt/kvm/kvm_main.c",
+      "insertions": 302,
+      "deletions": 540
+    },
+    {
+      "file": "virt/kvm/kvm_mm.h",
+      "insertions": 34,
+      "deletions": 2
+    },
+    {
+      "file": "virt/kvm/pfncache.c",
+      "insertions": 14,
+      "deletions": 6
+    }
+  ],
+  "total_insertions": 9054,
+  "total_deletions": 2525,
+  "total_changes": 11579,
+  "parents": [
+    "42d9e8b7ccddee75989283cf7477305cfe3776ff",
+    "9ee62c33c0fe017ee02501a877f6f562363122fa"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": true,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "injection",
+      "Bypass"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/arm64/include/asm/cpucaps.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/include/asm/cpufeature.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/include/asm/el2_setup.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/kvm/mmu.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/include/asm/sysreg.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/kvm/guest.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/kernel/cpuinfo.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/powerpc/kvm/book3s_hv_nested.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/tools/cpucaps",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/riscv/include/asm/perf_event.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/tools/sysreg",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/powerpc/kvm/powerpc.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/kernel/cpufeature.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/s390/include/asm/kvm_host.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/riscv/kernel/perf_callchain.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/s390/kvm/vsie.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/include/asm/cpufeatures.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/s390/kvm/kvm-s390.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kvm/svm/sev.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

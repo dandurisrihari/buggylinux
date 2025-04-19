@@ -1,0 +1,93 @@
+commit 05e6295f7b5e05f09e369a3eb2882ec5b40fff20
+Merge: de630176bdf8 7a80e5b8c6fa
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Mon Feb 20 11:53:11 2023 -0800
+
+    Merge tag 'fs.idmapped.v6.3' of git://git.kernel.org/pub/scm/linux/kernel/git/vfs/idmapping
+    
+    Pull vfs idmapping updates from Christian Brauner:
+    
+     - Last cycle we introduced the dedicated struct mnt_idmap type for
+       mount idmapping and the required infrastucture in 256c8aed2b42 ("fs:
+       introduce dedicated idmap type for mounts"). As promised in last
+       cycle's pull request message this converts everything to rely on
+       struct mnt_idmap.
+    
+       Currently we still pass around the plain namespace that was attached
+       to a mount. This is in general pretty convenient but it makes it easy
+       to conflate namespaces that are relevant on the filesystem with
+       namespaces that are relevant on the mount level. Especially for
+       non-vfs developers without detailed knowledge in this area this was a
+       potential source for bugs.
+    
+       This finishes the conversion. Instead of passing the plain namespace
+       around this updates all places that currently take a pointer to a
+       mnt_userns with a pointer to struct mnt_idmap.
+    
+       Now that the conversion is done all helpers down to the really
+       low-level helpers only accept a struct mnt_idmap argument instead of
+       two namespace arguments.
+    
+       Conflating mount and other idmappings will now cause the compiler to
+       complain loudly thus eliminating the possibility of any bugs. This
+       makes it impossible for filesystem developers to mix up mount and
+       filesystem idmappings as they are two distinct types and require
+       distinct helpers that cannot be used interchangeably.
+    
+       Everything associated with struct mnt_idmap is moved into a single
+       separate file. With that change no code can poke around in struct
+       mnt_idmap. It can only be interacted with through dedicated helpers.
+       That means all filesystems are and all of the vfs is completely
+       oblivious to the actual implementation of idmappings.
+    
+       We are now also able to extend struct mnt_idmap as we see fit. For
+       example, we can decouple it completely from namespaces for users that
+       don't require or don't want to use them at all. We can also extend
+       the concept of idmappings so we can cover filesystem specific
+       requirements.
+    
+       In combination with the vfs{g,u}id_t work we finished in v6.2 this
+       makes this feature substantially more robust and thus difficult to
+       implement wrong by a given filesystem and also protects the vfs.
+    
+     - Enable idmapped mounts for tmpfs and fulfill a longstanding request.
+    
+       A long-standing request from users had been to make it possible to
+       create idmapped mounts for tmpfs. For example, to share the host's
+       tmpfs mount between multiple sandboxes. This is a prerequisite for
+       some advanced Kubernetes cases. Systemd also has a range of use-cases
+       to increase service isolation. And there are more users of this.
+    
+       However, with all of the other work going on this was way down on the
+       priority list but luckily someone other than ourselves picked this
+       up.
+    
+       As usual the patch is tiny as all the infrastructure work had been
+       done multiple kernel releases ago. In addition to all the tests that
+       we already have I requested that Rodrigo add a dedicated tmpfs
+       testsuite for idmapped mounts to xfstests. It is to be included into
+       xfstests during the v6.3 development cycle. This should add a slew of
+       additional tests.
+    
+    * tag 'fs.idmapped.v6.3' of git://git.kernel.org/pub/scm/linux/kernel/git/vfs/idmapping: (26 commits)
+      shmem: support idmapped mounts for tmpfs
+      fs: move mnt_idmap
+      fs: port vfs{g,u}id helpers to mnt_idmap
+      fs: port fs{g,u}id helpers to mnt_idmap
+      fs: port i_{g,u}id_into_vfs{g,u}id() to mnt_idmap
+      fs: port i_{g,u}id_{needs_}update() to mnt_idmap
+      quota: port to mnt_idmap
+      fs: port privilege checking helpers to mnt_idmap
+      fs: port inode_owner_or_capable() to mnt_idmap
+      fs: port inode_init_owner() to mnt_idmap
+      fs: port acl to mnt_idmap
+      fs: port xattr to mnt_idmap
+      fs: port ->permission() to pass mnt_idmap
+      fs: port ->fileattr_set() to pass mnt_idmap
+      fs: port ->set_acl() to pass mnt_idmap
+      fs: port ->get_acl() to pass mnt_idmap
+      fs: port ->tmpfile() to pass mnt_idmap
+      fs: port ->rename() to pass mnt_idmap
+      fs: port ->mknod() to pass mnt_idmap
+      fs: port ->mkdir() to pass mnt_idmap
+      ...

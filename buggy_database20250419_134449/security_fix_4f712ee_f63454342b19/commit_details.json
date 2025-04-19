@@ -1,0 +1,1183 @@
+{
+  "hash": "4f712ee0cbbd5c777d270427092bb301fc31044f",
+  "hash_short": "4f712ee0",
+  "subject": "Merge tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm",
+  "body": "Pull kvm updates from Paolo Bonzini:\n \"S390:\n\n   - Changes to FPU handling came in via the main s390 pull request\n\n   - Only deliver to the guest the SCLP events that userspace has\n     requested\n\n   - More virtual vs physical address fixes (only a cleanup since\n     virtual and physical address spaces are currently the same)\n\n   - Fix selftests undefined behavior\n\n  x86:\n\n   - Fix a restriction that the guest can't program a PMU event whose\n     encoding matches an architectural event that isn't included in the\n     guest CPUID. The enumeration of an architectural event only says\n     that if a CPU supports an architectural event, then the event can\n     be programmed *using the architectural encoding*. The enumeration\n     does NOT say anything about the encoding when the CPU doesn't\n     report support the event *in general*. It might support it, and it\n     might support it using the same encoding that made it into the\n     architectural PMU spec\n\n   - Fix a variety of bugs in KVM's emulation of RDPMC (more details on\n     individual commits) and add a selftest to verify KVM correctly\n     emulates RDMPC, counter availability, and a variety of other\n     PMC-related behaviors that depend on guest CPUID and therefore are\n     easier to validate with selftests than with custom guests (aka\n     kvm-unit-tests)\n\n   - Zero out PMU state on AMD if the virtual PMU is disabled, it does\n     not cause any bug but it wastes time in various cases where KVM\n     would check if a PMC event needs to be synthesized\n\n   - Optimize triggering of emulated events, with a nice ~10%\n     performance improvement in VM-Exit microbenchmarks when a vPMU is\n     exposed to the guest\n\n   - Tighten the check for \"PMI in guest\" to reduce false positives if\n     an NMI arrives in the host while KVM is handling an IRQ VM-Exit\n\n   - Fix a bug where KVM would report stale/bogus exit qualification\n     information when exiting to userspace with an internal error exit\n     code\n\n   - Add a VMX flag in /proc/cpuinfo to report 5-level EPT support\n\n   - Rework TDP MMU root unload, free, and alloc to run with mmu_lock\n     held for read, e.g. to avoid serializing vCPUs when userspace\n     deletes a memslot\n\n   - Tear down TDP MMU page tables at 4KiB granularity (used to be\n     1GiB). KVM doesn't support yielding in the middle of processing a\n     zap, and 1GiB granularity resulted in multi-millisecond lags that\n     are quite impolite for CONFIG_PREEMPT kernels\n\n   - Allocate write-tracking metadata on-demand to avoid the memory\n     overhead when a kernel is built with i915 virtualization support\n     but the workloads use neither shadow paging nor i915 virtualization\n\n   - Explicitly initialize a variety of on-stack variables in the\n     emulator that triggered KMSAN false positives\n\n   - Fix the debugregs ABI for 32-bit KVM\n\n   - Rework the \"force immediate exit\" code so that vendor code\n     ultimately decides how and when to force the exit, which allowed\n     some optimization for both Intel and AMD\n\n   - Fix a long-standing bug where kvm_has_noapic_vcpu could be left\n     elevated if vCPU creation ultimately failed, causing extra\n     unnecessary work\n\n   - Cleanup the logic for checking if the currently loaded vCPU is\n     in-kernel\n\n   - Harden against underflowing the active mmu_notifier invalidation\n     count, so that \"bad\" invalidations (usually due to bugs elsehwere\n     in the kernel) are detected earlier and are less likely to hang the\n     kernel\n\n  x86 Xen emulation:\n\n   - Overlay pages can now be cached based on host virtual address,\n     instead of guest physical addresses. This removes the need to\n     reconfigure and invalidate the cache if the guest changes the gpa\n     but the underlying host virtual address remains the same\n\n   - When possible, use a single host TSC value when computing the\n     deadline for Xen timers in order to improve the accuracy of the\n     timer emulation\n\n   - Inject pending upcall events when the vCPU software-enables its\n     APIC to fix a bug where an upcall can be lost (and to follow Xen's\n     behavior)\n\n   - Fall back to the slow path instead of warning if \"fast\" IRQ\n     delivery of Xen events fails, e.g. if the guest has aliased xAPIC\n     IDs\n\n  RISC-V:\n\n   - Support exception and interrupt handling in selftests\n\n   - New self test for RISC-V architectural timer (Sstc extension)\n\n   - New extension support (Ztso, Zacas)\n\n   - Support userspace emulation of random number seed CSRs\n\n  ARM:\n\n   - Infrastructure for building KVM's trap configuration based on the\n     architectural features (or lack thereof) advertised in the VM's ID\n     registers\n\n   - Support for mapping vfio-pci BARs as Normal-NC (vaguely similar to\n     x86's WC) at stage-2, improving the performance of interacting with\n     assigned devices that can tolerate it\n\n   - Conversion of KVM's representation of LPIs to an xarray, utilized\n     to address serialization some of the serialization on the LPI\n     injection path\n\n   - Support for _architectural_ VHE-only systems, advertised through\n     the absence of FEAT_E2H0 in the CPU's ID register\n\n   - Miscellaneous cleanups, fixes, and spelling corrections to KVM and\n     selftests\n\n  LoongArch:\n\n   - Set reserved bits as zero in CPUCFG\n\n   - Start SW timer only when vcpu is blocking\n\n   - Do not restart SW timer when it is expired\n\n   - Remove unnecessary CSR register saving during enter guest\n\n   - Misc cleanups and fixes as usual\n\n  Generic:\n\n   - Clean up Kconfig by removing CONFIG_HAVE_KVM, which was basically\n     always true on all architectures except MIPS (where Kconfig\n     determines the available depending on CPU capabilities). It is\n     replaced either by an architecture-dependent symbol for MIPS, and\n     IS_ENABLED(CONFIG_KVM) everywhere else\n\n   - Factor common \"select\" statements in common code instead of\n     requiring each architecture to specify it\n\n   - Remove thoroughly obsolete APIs from the uapi headers\n\n   - Move architecture-dependent stuff to uapi/asm/kvm.h\n\n   - Always flush the async page fault workqueue when a work item is\n     being removed, especially during vCPU destruction, to ensure that\n     there are no workers running in KVM code when all references to\n     KVM-the-module are gone, i.e. to prevent a very unlikely\n     use-after-free if kvm.ko is unloaded\n\n   - Grab a reference to the VM's mm_struct in the async #PF worker\n     itself instead of gifting the worker a reference, so that there's\n     no need to remember to *conditionally* clean up after the worker\n\n  Selftests:\n\n   - Reduce boilerplate especially when utilize selftest TAP\n     infrastructure\n\n   - Add basic smoke tests for SEV and SEV-ES, along with a pile of\n     library support for handling private/encrypted/protected memory\n\n   - Fix benign bugs where tests neglect to close() guest_memfd files\"\n\n* tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm: (246 commits)\n  selftests: kvm: remove meaningless assignments in Makefiles\n  KVM: riscv: selftests: Add Zacas extension to get-reg-list test\n  RISC-V: KVM: Allow Zacas extension for Guest/VM\n  KVM: riscv: selftests: Add Ztso extension to get-reg-list test\n  RISC-V: KVM: Allow Ztso extension for Guest/VM\n  RISC-V: KVM: Forward SEED CSR access to user space\n  KVM: riscv: selftests: Add sstc timer test\n  KVM: riscv: selftests: Change vcpu_has_ext to a common function\n  KVM: riscv: selftests: Add guest helper to get vcpu id\n  KVM: riscv: selftests: Add exception handling support\n  LoongArch: KVM: Remove unnecessary CSR register saving during enter guest\n  LoongArch: KVM: Do not restart SW timer when it is expired\n  LoongArch: KVM: Start SW timer only when vcpu is blocking\n  LoongArch: KVM: Set reserved bits as zero in CPUCFG\n  KVM: selftests: Explicitly close guest_memfd files in some gmem tests\n  KVM: x86/xen: fix recursive deadlock in timer injection\n  KVM: pfncache: simplify locking and make more self-contained\n  KVM: x86/xen: remove WARN_ON_ONCE() with false positives in evtchn delivery\n  KVM: x86/xen: inject vCPU upcall vector when local APIC is enabled\n  KVM: x86/xen: improve accuracy of Xen timers\n  ...",
+  "full_message": "Merge tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm\n\nPull kvm updates from Paolo Bonzini:\n \"S390:\n\n   - Changes to FPU handling came in via the main s390 pull request\n\n   - Only deliver to the guest the SCLP events that userspace has\n     requested\n\n   - More virtual vs physical address fixes (only a cleanup since\n     virtual and physical address spaces are currently the same)\n\n   - Fix selftests undefined behavior\n\n  x86:\n\n   - Fix a restriction that the guest can't program a PMU event whose\n     encoding matches an architectural event that isn't included in the\n     guest CPUID. The enumeration of an architectural event only says\n     that if a CPU supports an architectural event, then the event can\n     be programmed *using the architectural encoding*. The enumeration\n     does NOT say anything about the encoding when the CPU doesn't\n     report support the event *in general*. It might support it, and it\n     might support it using the same encoding that made it into the\n     architectural PMU spec\n\n   - Fix a variety of bugs in KVM's emulation of RDPMC (more details on\n     individual commits) and add a selftest to verify KVM correctly\n     emulates RDMPC, counter availability, and a variety of other\n     PMC-related behaviors that depend on guest CPUID and therefore are\n     easier to validate with selftests than with custom guests (aka\n     kvm-unit-tests)\n\n   - Zero out PMU state on AMD if the virtual PMU is disabled, it does\n     not cause any bug but it wastes time in various cases where KVM\n     would check if a PMC event needs to be synthesized\n\n   - Optimize triggering of emulated events, with a nice ~10%\n     performance improvement in VM-Exit microbenchmarks when a vPMU is\n     exposed to the guest\n\n   - Tighten the check for \"PMI in guest\" to reduce false positives if\n     an NMI arrives in the host while KVM is handling an IRQ VM-Exit\n\n   - Fix a bug where KVM would report stale/bogus exit qualification\n     information when exiting to userspace with an internal error exit\n     code\n\n   - Add a VMX flag in /proc/cpuinfo to report 5-level EPT support\n\n   - Rework TDP MMU root unload, free, and alloc to run with mmu_lock\n     held for read, e.g. to avoid serializing vCPUs when userspace\n     deletes a memslot\n\n   - Tear down TDP MMU page tables at 4KiB granularity (used to be\n     1GiB). KVM doesn't support yielding in the middle of processing a\n     zap, and 1GiB granularity resulted in multi-millisecond lags that\n     are quite impolite for CONFIG_PREEMPT kernels\n\n   - Allocate write-tracking metadata on-demand to avoid the memory\n     overhead when a kernel is built with i915 virtualization support\n     but the workloads use neither shadow paging nor i915 virtualization\n\n   - Explicitly initialize a variety of on-stack variables in the\n     emulator that triggered KMSAN false positives\n\n   - Fix the debugregs ABI for 32-bit KVM\n\n   - Rework the \"force immediate exit\" code so that vendor code\n     ultimately decides how and when to force the exit, which allowed\n     some optimization for both Intel and AMD\n\n   - Fix a long-standing bug where kvm_has_noapic_vcpu could be left\n     elevated if vCPU creation ultimately failed, causing extra\n     unnecessary work\n\n   - Cleanup the logic for checking if the currently loaded vCPU is\n     in-kernel\n\n   - Harden against underflowing the active mmu_notifier invalidation\n     count, so that \"bad\" invalidations (usually due to bugs elsehwere\n     in the kernel) are detected earlier and are less likely to hang the\n     kernel\n\n  x86 Xen emulation:\n\n   - Overlay pages can now be cached based on host virtual address,\n     instead of guest physical addresses. This removes the need to\n     reconfigure and invalidate the cache if the guest changes the gpa\n     but the underlying host virtual address remains the same\n\n   - When possible, use a single host TSC value when computing the\n     deadline for Xen timers in order to improve the accuracy of the\n     timer emulation\n\n   - Inject pending upcall events when the vCPU software-enables its\n     APIC to fix a bug where an upcall can be lost (and to follow Xen's\n     behavior)\n\n   - Fall back to the slow path instead of warning if \"fast\" IRQ\n     delivery of Xen events fails, e.g. if the guest has aliased xAPIC\n     IDs\n\n  RISC-V:\n\n   - Support exception and interrupt handling in selftests\n\n   - New self test for RISC-V architectural timer (Sstc extension)\n\n   - New extension support (Ztso, Zacas)\n\n   - Support userspace emulation of random number seed CSRs\n\n  ARM:\n\n   - Infrastructure for building KVM's trap configuration based on the\n     architectural features (or lack thereof) advertised in the VM's ID\n     registers\n\n   - Support for mapping vfio-pci BARs as Normal-NC (vaguely similar to\n     x86's WC) at stage-2, improving the performance of interacting with\n     assigned devices that can tolerate it\n\n   - Conversion of KVM's representation of LPIs to an xarray, utilized\n     to address serialization some of the serialization on the LPI\n     injection path\n\n   - Support for _architectural_ VHE-only systems, advertised through\n     the absence of FEAT_E2H0 in the CPU's ID register\n\n   - Miscellaneous cleanups, fixes, and spelling corrections to KVM and\n     selftests\n\n  LoongArch:\n\n   - Set reserved bits as zero in CPUCFG\n\n   - Start SW timer only when vcpu is blocking\n\n   - Do not restart SW timer when it is expired\n\n   - Remove unnecessary CSR register saving during enter guest\n\n   - Misc cleanups and fixes as usual\n\n  Generic:\n\n   - Clean up Kconfig by removing CONFIG_HAVE_KVM, which was basically\n     always true on all architectures except MIPS (where Kconfig\n     determines the available depending on CPU capabilities). It is\n     replaced either by an architecture-dependent symbol for MIPS, and\n     IS_ENABLED(CONFIG_KVM) everywhere else\n\n   - Factor common \"select\" statements in common code instead of\n     requiring each architecture to specify it\n\n   - Remove thoroughly obsolete APIs from the uapi headers\n\n   - Move architecture-dependent stuff to uapi/asm/kvm.h\n\n   - Always flush the async page fault workqueue when a work item is\n     being removed, especially during vCPU destruction, to ensure that\n     there are no workers running in KVM code when all references to\n     KVM-the-module are gone, i.e. to prevent a very unlikely\n     use-after-free if kvm.ko is unloaded\n\n   - Grab a reference to the VM's mm_struct in the async #PF worker\n     itself instead of gifting the worker a reference, so that there's\n     no need to remember to *conditionally* clean up after the worker\n\n  Selftests:\n\n   - Reduce boilerplate especially when utilize selftest TAP\n     infrastructure\n\n   - Add basic smoke tests for SEV and SEV-ES, along with a pile of\n     library support for handling private/encrypted/protected memory\n\n   - Fix benign bugs where tests neglect to close() guest_memfd files\"\n\n* tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm: (246 commits)\n  selftests: kvm: remove meaningless assignments in Makefiles\n  KVM: riscv: selftests: Add Zacas extension to get-reg-list test\n  RISC-V: KVM: Allow Zacas extension for Guest/VM\n  KVM: riscv: selftests: Add Ztso extension to get-reg-list test\n  RISC-V: KVM: Allow Ztso extension for Guest/VM\n  RISC-V: KVM: Forward SEED CSR access to user space\n  KVM: riscv: selftests: Add sstc timer test\n  KVM: riscv: selftests: Change vcpu_has_ext to a common function\n  KVM: riscv: selftests: Add guest helper to get vcpu id\n  KVM: riscv: selftests: Add exception handling support\n  LoongArch: KVM: Remove unnecessary CSR register saving during enter guest\n  LoongArch: KVM: Do not restart SW timer when it is expired\n  LoongArch: KVM: Start SW timer only when vcpu is blocking\n  LoongArch: KVM: Set reserved bits as zero in CPUCFG\n  KVM: selftests: Explicitly close guest_memfd files in some gmem tests\n  KVM: x86/xen: fix recursive deadlock in timer injection\n  KVM: pfncache: simplify locking and make more self-contained\n  KVM: x86/xen: remove WARN_ON_ONCE() with false positives in evtchn delivery\n  KVM: x86/xen: inject vCPU upcall vector when local APIC is enabled\n  KVM: x86/xen: improve accuracy of Xen timers\n  ...",
+  "author_name": "Linus Torvalds",
+  "author_email": "torvalds@linux-foundation.org",
+  "author_date": "Fri Mar 15 13:03:13 2024 -0700",
+  "author_date_iso": "2024-03-15T13:03:13-07:00",
+  "committer_name": "Linus Torvalds",
+  "committer_email": "torvalds@linux-foundation.org",
+  "committer_date": "Fri Mar 15 13:03:13 2024 -0700",
+  "committer_date_iso": "2024-03-15T13:03:13-07:00",
+  "files_changed": [
+    "arch/arm64/Kconfig",
+    "arch/arm64/include/asm/cpu.h",
+    "arch/arm64/include/asm/cpufeature.h",
+    "arch/arm64/include/asm/kvm_arm.h",
+    "arch/arm64/include/asm/kvm_emulate.h",
+    "arch/arm64/include/asm/kvm_host.h",
+    "arch/arm64/include/asm/memory.h",
+    "arch/arm64/kernel/cpufeature.c",
+    "arch/arm64/kernel/cpuinfo.c",
+    "arch/arm64/kernel/head.S",
+    "arch/arm64/kvm/fpsimd.c",
+    "arch/arm64/kvm/guest.c",
+    "arch/arm64/kvm/mmu.c",
+    "arch/arm64/tools/cpucaps",
+    "arch/arm64/tools/sysreg",
+    "arch/loongarch/Kconfig",
+    "arch/mips/Kconfig",
+    "arch/s390/Kconfig",
+    "arch/s390/kvm/gaccess.c",
+    "arch/s390/kvm/interrupt.c",
+    "arch/s390/kvm/kvm-s390.c",
+    "arch/x86/Kconfig",
+    "arch/x86/include/asm/idtentry.h",
+    "arch/x86/include/asm/kvm-x86-ops.h",
+    "arch/x86/include/asm/kvm_host.h",
+    "arch/x86/kernel/idt.c",
+    "arch/x86/kvm/lapic.c",
+    "arch/x86/kvm/mmu/mmu.c",
+    "arch/x86/kvm/svm/svm.c",
+    "arch/x86/kvm/vmx/vmx.c",
+    "arch/x86/kvm/x86.c",
+    "include/linux/kvm_host.h",
+    "include/linux/mm.h",
+    "scripts/gdb/linux/constants.py.in",
+    "tools/testing/selftests/kvm/s390x/memop.c"
+  ],
+  "files_changed_count": 35,
+  "stats": [
+    {
+      "file": "Documentation/virt/kvm/api.rst",
+      "insertions": 41,
+      "deletions": 12
+    },
+    {
+      "file": "arch/arm64/Kconfig",
+      "insertions": 0,
+      "deletions": 1
+    },
+    {
+      "file": "arch/arm64/include/asm/cpu.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/include/asm/cpufeature.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/include/asm/kvm_arm.h",
+      "insertions": 1,
+      "deletions": 3
+    },
+    {
+      "file": "arch/arm64/include/asm/kvm_emulate.h",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "arch/arm64/include/asm/kvm_host.h",
+      "insertions": 98,
+      "deletions": 1
+    },
+    {
+      "file": "arch/arm64/include/asm/kvm_hyp.h",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/arm64/include/asm/kvm_mmu.h",
+      "insertions": 20,
+      "deletions": 26
+    },
+    {
+      "file": "arch/arm64/include/asm/kvm_nested.h",
+      "insertions": 0,
+      "deletions": 1
+    },
+    {
+      "file": "arch/arm64/include/asm/kvm_pgtable.h",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/include/asm/memory.h",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/include/asm/sysreg.h",
+      "insertions": 4,
+      "deletions": 1
+    },
+    {
+      "file": "arch/arm64/include/uapi/asm/kvm.h",
+      "insertions": 9,
+      "deletions": 6
+    },
+    {
+      "file": "arch/arm64/kernel/cpufeature.c",
+      "insertions": 95,
+      "deletions": 10
+    },
+    {
+      "file": "arch/arm64/kernel/cpuinfo.c",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/kernel/head.S",
+      "insertions": 15,
+      "deletions": 8
+    },
+    {
+      "file": "arch/arm64/kvm/Kconfig",
+      "insertions": 12,
+      "deletions": 3
+    },
+    {
+      "file": "arch/arm64/kvm/arch_timer.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/arm64/kvm/arm.c",
+      "insertions": 13,
+      "deletions": 1
+    },
+    {
+      "file": "arch/arm64/kvm/check-res-bits.h",
+      "insertions": 125,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/kvm/debug.c",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "arch/arm64/kvm/emulate-nested.c",
+      "insertions": 176,
+      "deletions": 55
+    },
+    {
+      "file": "arch/arm64/kvm/fpsimd.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/arm64/kvm/guest.c",
+      "insertions": 5,
+      "deletions": 2
+    },
+    {
+      "file": "arch/arm64/kvm/hyp/aarch32.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "arch/arm64/kvm/hyp/include/hyp/switch.h",
+      "insertions": 68,
+      "deletions": 62
+    },
+    {
+      "file": "arch/arm64/kvm/hyp/include/hyp/sysreg-sr.h",
+      "insertions": 21,
+      "deletions": 3
+    },
+    {
+      "file": "arch/arm64/kvm/hyp/nvhe/debug-sr.c",
+      "insertions": 6,
+      "deletions": 6
+    },
+    {
+      "file": "arch/arm64/kvm/hyp/nvhe/host.S",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/arm64/kvm/hyp/nvhe/mm.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "arch/arm64/kvm/hyp/pgtable.c",
+      "insertions": 19,
+      "deletions": 5
+    },
+    {
+      "file": "arch/arm64/kvm/hyp/vhe/sysreg-sr.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/arm64/kvm/inject_fault.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/arm64/kvm/mmu.c",
+      "insertions": 11,
+      "deletions": 5
+    },
+    {
+      "file": "arch/arm64/kvm/nested.c",
+      "insertions": 273,
+      "deletions": 1
+    },
+    {
+      "file": "arch/arm64/kvm/pmu-emul.c",
+      "insertions": 8,
+      "deletions": 7
+    },
+    {
+      "file": "arch/arm64/kvm/sys_regs.c",
+      "insertions": 224,
+      "deletions": 42
+    },
+    {
+      "file": "arch/arm64/kvm/sys_regs.h",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/kvm/vgic/vgic-debug.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/arm64/kvm/vgic/vgic-init.c",
+      "insertions": 7,
+      "deletions": 3
+    },
+    {
+      "file": "arch/arm64/kvm/vgic/vgic-its.c",
+      "insertions": 40,
+      "deletions": 23
+    },
+    {
+      "file": "arch/arm64/kvm/vgic/vgic-v3.c",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "arch/arm64/kvm/vgic/vgic.c",
+      "insertions": 22,
+      "deletions": 40
+    },
+    {
+      "file": "arch/arm64/kvm/vgic/vgic.h",
+      "insertions": 11,
+      "deletions": 4
+    },
+    {
+      "file": "arch/arm64/tools/cpucaps",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/tools/sysreg",
+      "insertions": 44,
+      "deletions": 1
+    },
+    {
+      "file": "arch/loongarch/Kconfig",
+      "insertions": 0,
+      "deletions": 1
+    },
+    {
+      "file": "arch/loongarch/include/uapi/asm/kvm.h",
+      "insertions": 0,
+      "deletions": 2
+    },
+    {
+      "file": "arch/loongarch/kvm/Kconfig",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/loongarch/kvm/switch.S",
+      "insertions": 0,
+      "deletions": 6
+    },
+    {
+      "file": "arch/loongarch/kvm/timer.c",
+      "insertions": 10,
+      "deletions": 33
+    },
+    {
+      "file": "arch/loongarch/kvm/vcpu.c",
+      "insertions": 26,
+      "deletions": 7
+    },
+    {
+      "file": "arch/mips/Kconfig",
+      "insertions": 9,
+      "deletions": 9
+    },
+    {
+      "file": "arch/mips/include/uapi/asm/kvm.h",
+      "insertions": 0,
+      "deletions": 2
+    },
+    {
+      "file": "arch/mips/kvm/Kconfig",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "arch/powerpc/include/uapi/asm/kvm.h",
+      "insertions": 44,
+      "deletions": 1
+    },
+    {
+      "file": "arch/powerpc/kvm/Kconfig",
+      "insertions": 0,
+      "deletions": 1
+    },
+    {
+      "file": "arch/powerpc/kvm/powerpc.c",
+      "insertions": 1,
+      "deletions": 2
+    },
+    {
+      "file": "arch/riscv/include/uapi/asm/kvm.h",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "arch/riscv/kvm/Kconfig",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/riscv/kvm/vcpu_insn.c",
+      "insertions": 13,
+      "deletions": 0
+    },
+    {
+      "file": "arch/riscv/kvm/vcpu_onereg.c",
+      "insertions": 4,
+      "deletions": 0
+    },
+    {
+      "file": "arch/s390/Kconfig",
+      "insertions": 0,
+      "deletions": 1
+    },
+    {
+      "file": "arch/s390/include/uapi/asm/kvm.h",
+      "insertions": 314,
+      "deletions": 1
+    },
+    {
+      "file": "arch/s390/kvm/Kconfig",
+      "insertions": 0,
+      "deletions": 1
+    },
+    {
+      "file": "arch/s390/kvm/diag.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/s390/kvm/gaccess.c",
+      "insertions": 7,
+      "deletions": 7
+    },
+    {
+      "file": "arch/s390/kvm/interrupt.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "arch/s390/kvm/kvm-s390.c",
+      "insertions": 3,
+      "deletions": 3
+    },
+    {
+      "file": "arch/s390/kvm/priv.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "arch/s390/kvm/sigp.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/x86/Kconfig",
+      "insertions": 0,
+      "deletions": 1
+    },
+    {
+      "file": "arch/x86/include/asm/hardirq.h",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/x86/include/asm/idtentry.h",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/x86/include/asm/irq.h",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/x86/include/asm/irq_vectors.h",
+      "insertions": 0,
+      "deletions": 2
+    },
+    {
+      "file": "arch/x86/include/asm/kvm-x86-ops.h",
+      "insertions": 0,
+      "deletions": 1
+    },
+    {
+      "file": "arch/x86/include/asm/kvm-x86-pmu-ops.h",
+      "insertions": 1,
+      "deletions": 3
+    },
+    {
+      "file": "arch/x86/include/asm/kvm_host.h",
+      "insertions": 22,
+      "deletions": 6
+    },
+    {
+      "file": "arch/x86/include/asm/svm.h",
+      "insertions": 4,
+      "deletions": 4
+    },
+    {
+      "file": "arch/x86/include/asm/vmxfeatures.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/include/uapi/asm/kvm.h",
+      "insertions": 277,
+      "deletions": 8
+    },
+    {
+      "file": "arch/x86/include/uapi/asm/kvm_para.h",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/x86/kernel/cpu/feat_ctl.c",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/kernel/idt.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/x86/kernel/irq.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "arch/x86/kvm/Kconfig",
+      "insertions": 1,
+      "deletions": 3
+    },
+    {
+      "file": "arch/x86/kvm/debugfs.c",
+      "insertions": 1,
+      "deletions": 2
+    },
+    {
+      "file": "arch/x86/kvm/emulate.c",
+      "insertions": 20,
+      "deletions": 27
+    },
+    {
+      "file": "arch/x86/kvm/kvm_emulate.h",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "arch/x86/kvm/lapic.c",
+      "insertions": 30,
+      "deletions": 2
+    },
+    {
+      "file": "arch/x86/kvm/mmu/mmu.c",
+      "insertions": 24,
+      "deletions": 13
+    },
+    {
+      "file": "arch/x86/kvm/mmu/page_track.c",
+      "insertions": 66,
+      "deletions": 2
+    },
+    {
+      "file": "arch/x86/kvm/mmu/tdp_mmu.c",
+      "insertions": 87,
+      "deletions": 37
+    },
+    {
+      "file": "arch/x86/kvm/mmu/tdp_mmu.h",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/x86/kvm/pmu.c",
+      "insertions": 103,
+      "deletions": 60
+    },
+    {
+      "file": "arch/x86/kvm/pmu.h",
+      "insertions": 51,
+      "deletions": 6
+    },
+    {
+      "file": "arch/x86/kvm/smm.c",
+      "insertions": 4,
+      "deletions": 11
+    },
+    {
+      "file": "arch/x86/kvm/svm/pmu.c",
+      "insertions": 8,
+      "deletions": 14
+    },
+    {
+      "file": "arch/x86/kvm/svm/svm.c",
+      "insertions": 12,
+      "deletions": 13
+    },
+    {
+      "file": "arch/x86/kvm/trace.h",
+      "insertions": 6,
+      "deletions": 3
+    },
+    {
+      "file": "arch/x86/kvm/vmx/nested.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "arch/x86/kvm/vmx/pmu_intel.c",
+      "insertions": 85,
+      "deletions": 135
+    },
+    {
+      "file": "arch/x86/kvm/vmx/vmx.c",
+      "insertions": 84,
+      "deletions": 73
+    },
+    {
+      "file": "arch/x86/kvm/vmx/vmx.h",
+      "insertions": 0,
+      "deletions": 2
+    },
+    {
+      "file": "arch/x86/kvm/x86.c",
+      "insertions": 114,
+      "deletions": 114
+    },
+    {
+      "file": "arch/x86/kvm/x86.h",
+      "insertions": 1,
+      "deletions": 6
+    },
+    {
+      "file": "arch/x86/kvm/xen.c",
+      "insertions": 219,
+      "deletions": 96
+    },
+    {
+      "file": "arch/x86/kvm/xen.h",
+      "insertions": 18,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/vfio/pci/vfio_pci_core.c",
+      "insertions": 18,
+      "deletions": 1
+    },
+    {
+      "file": "drivers/vfio/vfio.h",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "drivers/vfio/vfio_main.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "include/kvm/arm_pmu.h",
+      "insertions": 0,
+      "deletions": 11
+    },
+    {
+      "file": "include/kvm/arm_vgic.h",
+      "insertions": 5,
+      "deletions": 4
+    },
+    {
+      "file": "include/linux/bits.h",
+      "insertions": 1,
+      "deletions": 7
+    },
+    {
+      "file": "include/linux/kvm_host.h",
+      "insertions": 46,
+      "deletions": 14
+    },
+    {
+      "file": "include/linux/kvm_types.h",
+      "insertions": 0,
+      "deletions": 8
+    },
+    {
+      "file": "include/linux/mm.h",
+      "insertions": 14,
+      "deletions": 0
+    },
+    {
+      "file": "include/uapi/asm-generic/bitsperlong.h",
+      "insertions": 4,
+      "deletions": 0
+    },
+    {
+      "file": "include/uapi/linux/bits.h",
+      "insertions": 15,
+      "deletions": 0
+    },
+    {
+      "file": "include/uapi/linux/kvm.h",
+      "insertions": 5,
+      "deletions": 684
+    },
+    {
+      "file": "scripts/gdb/linux/constants.py.in",
+      "insertions": 5,
+      "deletions": 1
+    },
+    {
+      "file": "scripts/gdb/linux/interrupts.py",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/arch/riscv/include/asm/csr.h",
+      "insertions": 541,
+      "deletions": 0
+    },
+    {
+      "file": "tools/arch/riscv/include/asm/vdso/processor.h",
+      "insertions": 32,
+      "deletions": 0
+    },
+    {
+      "file": "tools/arch/x86/include/asm/irq_vectors.h",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/testing/selftests/kvm/Makefile",
+      "insertions": 21,
+      "deletions": 10
+    },
+    {
+      "file": "tools/testing/selftests/kvm/aarch64/arch_timer.c",
+      "insertions": 22,
+      "deletions": 277
+    },
+    {
+      "file": "tools/testing/selftests/kvm/aarch64/debug-exceptions.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/testing/selftests/kvm/aarch64/hypercalls.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "tools/testing/selftests/kvm/aarch64/page_fault_test.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/testing/selftests/kvm/aarch64/set_id_regs.c",
+      "insertions": 11,
+      "deletions": 7
+    },
+    {
+      "file": "tools/testing/selftests/kvm/aarch64/vpmu_counter_access.c",
+      "insertions": 6,
+      "deletions": 22
+    },
+    {
+      "file": "tools/testing/selftests/kvm/arch_timer.c",
+      "insertions": 259,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/guest_memfd_test.c",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/include/aarch64/kvm_util_arch.h",
+      "insertions": 7,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/include/aarch64/processor.h",
+      "insertions": 0,
+      "deletions": 4
+    },
+    {
+      "file": "tools/testing/selftests/kvm/include/kvm_test_harness.h",
+      "insertions": 36,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/include/kvm_util_base.h",
+      "insertions": 59,
+      "deletions": 8
+    },
+    {
+      "file": "tools/testing/selftests/kvm/include/riscv/arch_timer.h",
+      "insertions": 71,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/include/riscv/kvm_util_arch.h",
+      "insertions": 7,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/include/riscv/processor.h",
+      "insertions": 64,
+      "deletions": 8
+    },
+    {
+      "file": "tools/testing/selftests/kvm/include/s390x/kvm_util_arch.h",
+      "insertions": 7,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/include/sparsebit.h",
+      "insertions": 38,
+      "deletions": 18
+    },
+    {
+      "file": "tools/testing/selftests/kvm/include/test_util.h",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/include/timer_test.h",
+      "insertions": 45,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/include/x86_64/kvm_util_arch.h",
+      "insertions": 23,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/include/x86_64/pmu.h",
+      "insertions": 97,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/include/x86_64/processor.h",
+      "insertions": 124,
+      "deletions": 32
+    },
+    {
+      "file": "tools/testing/selftests/kvm/include/x86_64/sev.h",
+      "insertions": 107,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/lib/aarch64/processor.c",
+      "insertions": 18,
+      "deletions": 6
+    },
+    {
+      "file": "tools/testing/selftests/kvm/lib/kvm_util.c",
+      "insertions": 114,
+      "deletions": 15
+    },
+    {
+      "file": "tools/testing/selftests/kvm/lib/riscv/handlers.S",
+      "insertions": 101,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/lib/riscv/processor.c",
+      "insertions": 93,
+      "deletions": 3
+    },
+    {
+      "file": "tools/testing/selftests/kvm/lib/s390x/processor.c",
+      "insertions": 7,
+      "deletions": 6
+    },
+    {
+      "file": "tools/testing/selftests/kvm/lib/sparsebit.c",
+      "insertions": 24,
+      "deletions": 24
+    },
+    {
+      "file": "tools/testing/selftests/kvm/lib/ucall_common.c",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "tools/testing/selftests/kvm/lib/x86_64/pmu.c",
+      "insertions": 31,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/lib/x86_64/processor.c",
+      "insertions": 53,
+      "deletions": 7
+    },
+    {
+      "file": "tools/testing/selftests/kvm/lib/x86_64/sev.c",
+      "insertions": 114,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/riscv/arch_timer.c",
+      "insertions": 111,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/riscv/get-reg-list.c",
+      "insertions": 9,
+      "deletions": 10
+    },
+    {
+      "file": "tools/testing/selftests/kvm/s390x/memop.c",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/x86_64/fix_hypercall_test.c",
+      "insertions": 18,
+      "deletions": 9
+    },
+    {
+      "file": "tools/testing/selftests/kvm/x86_64/pmu_counters_test.c",
+      "insertions": 620,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/x86_64/pmu_event_filter_test.c",
+      "insertions": 45,
+      "deletions": 98
+    },
+    {
+      "file": "tools/testing/selftests/kvm/x86_64/private_mem_conversions_test.c",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/x86_64/sev_migrate_tests.c",
+      "insertions": 18,
+      "deletions": 42
+    },
+    {
+      "file": "tools/testing/selftests/kvm/x86_64/sev_smoke_test.c",
+      "insertions": 88,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/x86_64/smaller_maxphyaddr_emulation_test.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/testing/selftests/kvm/x86_64/sync_regs_test.c",
+      "insertions": 90,
+      "deletions": 31
+    },
+    {
+      "file": "tools/testing/selftests/kvm/x86_64/userspace_msr_exit_test.c",
+      "insertions": 21,
+      "deletions": 57
+    },
+    {
+      "file": "tools/testing/selftests/kvm/x86_64/vmx_pmu_caps_test.c",
+      "insertions": 13,
+      "deletions": 41
+    },
+    {
+      "file": "tools/testing/selftests/kvm/x86_64/xen_shinfo_test.c",
+      "insertions": 50,
+      "deletions": 9
+    },
+    {
+      "file": "virt/kvm/Kconfig",
+      "insertions": 4,
+      "deletions": 3
+    },
+    {
+      "file": "virt/kvm/async_pf.c",
+      "insertions": 49,
+      "deletions": 24
+    },
+    {
+      "file": "virt/kvm/kvm_main.c",
+      "insertions": 27,
+      "deletions": 10
+    },
+    {
+      "file": "virt/kvm/pfncache.c",
+      "insertions": 143,
+      "deletions": 108
+    }
+  ],
+  "total_insertions": 6663,
+  "total_deletions": 2718,
+  "total_changes": 9381,
+  "parents": [
+    "8a2fbffcbfcb60378626e5d4144a6ff43f3b6776",
+    "4781179012d9380005649b0fe07f77dcaa2610e3"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": true,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "Inject"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/arm64/include/asm/cpu.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/include/asm/memory.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/include/asm/cpufeature.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/include/asm/kvm_host.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/include/asm/kvm_emulate.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/include/asm/kvm_arm.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/kernel/cpufeature.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/tools/cpucaps",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/Kconfig",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/kernel/head.S",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/kernel/cpuinfo.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/kvm/guest.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/kvm/mmu.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/kvm/fpsimd.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/mips/Kconfig",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/s390/kvm/gaccess.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/tools/sysreg",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/loongarch/Kconfig",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/s390/Kconfig",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/s390/kvm/interrupt.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/include/asm/idtentry.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/s390/kvm/kvm-s390.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/include/asm/kvm-x86-ops.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kvm/lapic.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/Kconfig",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kernel/idt.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/include/asm/kvm_host.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kvm/mmu/mmu.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "tools/testing/selftests/kvm/s390x/memop.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/kvm_host.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kvm/svm/svm.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kvm/x86.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "scripts/gdb/linux/constants.py.in",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/mm.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kvm/vmx/vmx.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

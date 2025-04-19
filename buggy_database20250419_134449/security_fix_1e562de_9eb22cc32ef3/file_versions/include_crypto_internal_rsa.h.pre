@@ -1,0 +1,65 @@
+commit 7964b0d4bd1271f82d6b455366a200d320f7dbf8
+Author: Lukas Wunner <lukas@wunner.de>
+Date:   Tue Sep 10 16:30:15 2024 +0200
+
+    crypto: rsa-pkcs1pad - Deduplicate set_{pub,priv}_key callbacks
+    
+    pkcs1pad_set_pub_key() and pkcs1pad_set_priv_key() are almost identical.
+    
+    The upcoming migration of sign/verify operations from rsa-pkcs1pad.c
+    into a separate crypto_template will require another copy of the exact
+    same functions.  When RSASSA-PSS and RSAES-OAEP are introduced, each
+    will need yet another copy.
+    
+    Deduplicate the functions into a single one which lives in a common
+    header file for reuse by RSASSA-PKCS1-v1_5, RSASSA-PSS and RSAES-OAEP.
+    
+    Signed-off-by: Lukas Wunner <lukas@wunner.de>
+    Reviewed-by: Stefan Berger <stefanb@linux.ibm.com>
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+diff --git a/include/crypto/internal/rsa.h b/include/crypto/internal/rsa.h
+index e870133f4b77..754f687134df 100644
+--- a/include/crypto/internal/rsa.h
++++ b/include/crypto/internal/rsa.h
+@@ -8,6 +8,7 @@
+ #ifndef _RSA_HELPER_
+ #define _RSA_HELPER_
+ #include <linux/types.h>
++#include <crypto/akcipher.h>
+ 
+ /**
+  * rsa_key - RSA key structure
+@@ -53,5 +54,32 @@ int rsa_parse_pub_key(struct rsa_key *rsa_key, const void *key,
+ int rsa_parse_priv_key(struct rsa_key *rsa_key, const void *key,
+ 		       unsigned int key_len);
+ 
++#define RSA_PUB (true)
++#define RSA_PRIV (false)
++
++static inline int rsa_set_key(struct crypto_akcipher *child,
++			      unsigned int *key_size, bool is_pubkey,
++			      const void *key, unsigned int keylen)
++{
++	int err;
++
++	*key_size = 0;
++
++	if (is_pubkey)
++		err = crypto_akcipher_set_pub_key(child, key, keylen);
++	else
++		err = crypto_akcipher_set_priv_key(child, key, keylen);
++	if (err)
++		return err;
++
++	/* Find out new modulus size from rsa implementation */
++	err = crypto_akcipher_maxsize(child);
++	if (err > PAGE_SIZE)
++		return -ENOTSUPP;
++
++	*key_size = err;
++	return 0;
++}
++
+ extern struct crypto_template rsa_pkcs1pad_tmpl;
+ #endif

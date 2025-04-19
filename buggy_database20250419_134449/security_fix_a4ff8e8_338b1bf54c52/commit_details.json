@@ -1,0 +1,126 @@
+{
+  "hash": "a4ff8e8620d3f4f50ac4b41e8067b7d395056843",
+  "hash_short": "a4ff8e86",
+  "subject": "mm: introduce MAP_FIXED_NOREPLACE",
+  "body": "Patch series \"mm: introduce MAP_FIXED_NOREPLACE\", v2.\n\nThis has started as a follow up discussion [3][4] resulting in the\nruntime failure caused by hardening patch [5] which removes MAP_FIXED\nfrom the elf loader because MAP_FIXED is inherently dangerous as it\nmight silently clobber an existing underlying mapping (e.g.  stack).\nThe reason for the failure is that some architectures enforce an\nalignment for the given address hint without MAP_FIXED used (e.g.  for\nshared or file backed mappings).\n\nOne way around this would be excluding those archs which do alignment\ntricks from the hardening [6].  The patch is really trivial but it has\nbeen objected, rightfully so, that this screams for a more generic\nsolution.  We basically want a non-destructive MAP_FIXED.\n\nThe first patch introduced MAP_FIXED_NOREPLACE which enforces the given\naddress but unlike MAP_FIXED it fails with EEXIST if the given range\nconflicts with an existing one.  The flag is introduced as a completely\nnew one rather than a MAP_FIXED extension because of the backward\ncompatibility.  We really want a never-clobber semantic even on older\nkernels which do not recognize the flag.  Unfortunately mmap sucks\nwrt flags evaluation because we do not EINVAL on unknown flags.  On\nthose kernels we would simply use the traditional hint based semantic so\nthe caller can still get a different address (which sucks) but at least\nnot silently corrupt an existing mapping.  I do not see a good way\naround that.  Except we won't export expose the new semantic to the\nuserspace at all.\n\nIt seems there are users who would like to have something like that.\nJemalloc has been mentioned by Michael Ellerman [7]\n\nFlorian Weimer has mentioned the following:\n: glibc ld.so currently maps DSOs without hints.  This means that the kernel\n: will map right next to each other, and the offsets between them a completely\n: predictable.  We would like to change that and supply a random address in a\n: window of the address space.  If there is a conflict, we do not want the\n: kernel to pick a non-random address. Instead, we would try again with a\n: random address.\n\nJohn Hubbard has mentioned CUDA example\n: a) Searches /proc/<pid>/maps for a \"suitable\" region of available\n: VA space.  \"Suitable\" generally means it has to have a base address\n: within a certain limited range (a particular device model might\n: have odd limitations, for example), it has to be large enough, and\n: alignment has to be large enough (again, various devices may have\n: constraints that lead us to do this).\n:\n: This is of course subject to races with other threads in the process.\n:\n: Let's say it finds a region starting at va.\n:\n: b) Next it does:\n:     p = mmap(va, ...)\n:\n: *without* setting MAP_FIXED, of course (so va is just a hint), to\n: attempt to safely reserve that region. If p != va, then in most cases,\n: this is a failure (almost certainly due to another thread getting a\n: mapping from that region before we did), and so this layer now has to\n: call munmap(), before returning a \"failure: retry\" to upper layers.\n:\n:     IMPROVEMENT: --> if instead, we could call this:\n:\n:             p = mmap(va, ... MAP_FIXED_NOREPLACE ...)\n:\n:         , then we could skip the munmap() call upon failure. This\n:         is a small thing, but it is useful here. (Thanks to Piotr\n:         Jaroszynski and Mark Hairgrove for helping me get that detail\n:         exactly right, btw.)\n:\n: c) After that, CUDA suballocates from p, via:\n:\n:      q = mmap(sub_region_start, ... MAP_FIXED ...)\n:\n: Interestingly enough, \"freeing\" is also done via MAP_FIXED, and\n: setting PROT_NONE to the subregion. Anyway, I just included (c) for\n: general interest.\n\nAtomic address range probing in the multithreaded programs in general\nsounds like an interesting thing to me.\n\nThe second patch simply replaces MAP_FIXED use in elf loader by\nMAP_FIXED_NOREPLACE.  I believe other places which rely on MAP_FIXED\nshould follow.  Actually real MAP_FIXED usages should be docummented\nproperly and they should be more of an exception.\n\n[1] http://lkml.kernel.org/r/20171116101900.13621-1-mhocko@kernel.org\n[2] http://lkml.kernel.org/r/20171129144219.22867-1-mhocko@kernel.org\n[3] http://lkml.kernel.org/r/20171107162217.382cd754@canb.auug.org.au\n[4] http://lkml.kernel.org/r/1510048229.12079.7.camel@abdul.in.ibm.com\n[5] http://lkml.kernel.org/r/20171023082608.6167-1-mhocko@kernel.org\n[6] http://lkml.kernel.org/r/20171113094203.aofz2e7kueitk55y@dhcp22.suse.cz\n[7] http://lkml.kernel.org/r/87efp1w7vy.fsf@concordia.ellerman.id.au\n\nThis patch (of 2):\n\nMAP_FIXED is used quite often to enforce mapping at the particular range.\nThe main problem of this flag is, however, that it is inherently dangerous\nbecause it unmaps existing mappings covered by the requested range.  This\ncan cause silent memory corruptions.  Some of them even with serious\nsecurity implications.  While the current semantic might be really\ndesiderable in many cases there are others which would want to enforce the\ngiven range but rather see a failure than a silent memory corruption on a\nclashing range.  Please note that there is no guarantee that a given range\nis obeyed by the mmap even when it is free - e.g.  arch specific code is\nallowed to apply an alignment.\n\nIntroduce a new MAP_FIXED_NOREPLACE flag for mmap to achieve this\nbehavior.  It has the same semantic as MAP_FIXED wrt.  the given address\nrequest with a single exception that it fails with EEXIST if the requested\naddress is already covered by an existing mapping.  We still do rely on\nget_unmaped_area to handle all the arch specific MAP_FIXED treatment and\ncheck for a conflicting vma after it returns.\n\nThe flag is introduced as a completely new one rather than a MAP_FIXED\nextension because of the backward compatibility.  We really want a\nnever-clobber semantic even on older kernels which do not recognize the\nflag.  Unfortunately mmap sucks wrt.  flags evaluation because we do not\nEINVAL on unknown flags.  On those kernels we would simply use the\ntraditional hint based semantic so the caller can still get a different\naddress (which sucks) but at least not silently corrupt an existing\nmapping.  I do not see a good way around that.\n\n[mpe@ellerman.id.au: fix whitespace]\n[fail on clashing range with EEXIST as per Florian Weimer]\n[set MAP_FIXED before round_hint_to_min as per Khalid Aziz]\nLink: http://lkml.kernel.org/r/20171213092550.2774-2-mhocko@kernel.org\nReviewed-by: Khalid Aziz <khalid.aziz@oracle.com>\nSigned-off-by: Michal Hocko <mhocko@suse.com>\nAcked-by: Michael Ellerman <mpe@ellerman.id.au>\nCc: Khalid Aziz <khalid.aziz@oracle.com>\nCc: Russell King - ARM Linux <linux@armlinux.org.uk>\nCc: Andrea Arcangeli <aarcange@redhat.com>\nCc: Florian Weimer <fweimer@redhat.com>\nCc: John Hubbard <jhubbard@nvidia.com>\nCc: Matthew Wilcox <willy@infradead.org>\nCc: Abdul Haleem <abdhalee@linux.vnet.ibm.com>\nCc: Joel Stanley <joel@jms.id.au>\nCc: Kees Cook <keescook@chromium.org>\nCc: Michal Hocko <mhocko@suse.com>\nCc: Jason Evans <jasone@google.com>\nCc: David Goldblatt <davidtgoldblatt@gmail.com>\nCc: Edward Tomasz Napiera\u0142a <trasz@FreeBSD.org>\nCc: Anshuman Khandual <khandual@linux.vnet.ibm.com>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>\nSigned-off-by: Linus Torvalds <torvalds@linux-foundation.org>",
+  "full_message": "mm: introduce MAP_FIXED_NOREPLACE\n\nPatch series \"mm: introduce MAP_FIXED_NOREPLACE\", v2.\n\nThis has started as a follow up discussion [3][4] resulting in the\nruntime failure caused by hardening patch [5] which removes MAP_FIXED\nfrom the elf loader because MAP_FIXED is inherently dangerous as it\nmight silently clobber an existing underlying mapping (e.g.  stack).\nThe reason for the failure is that some architectures enforce an\nalignment for the given address hint without MAP_FIXED used (e.g.  for\nshared or file backed mappings).\n\nOne way around this would be excluding those archs which do alignment\ntricks from the hardening [6].  The patch is really trivial but it has\nbeen objected, rightfully so, that this screams for a more generic\nsolution.  We basically want a non-destructive MAP_FIXED.\n\nThe first patch introduced MAP_FIXED_NOREPLACE which enforces the given\naddress but unlike MAP_FIXED it fails with EEXIST if the given range\nconflicts with an existing one.  The flag is introduced as a completely\nnew one rather than a MAP_FIXED extension because of the backward\ncompatibility.  We really want a never-clobber semantic even on older\nkernels which do not recognize the flag.  Unfortunately mmap sucks\nwrt flags evaluation because we do not EINVAL on unknown flags.  On\nthose kernels we would simply use the traditional hint based semantic so\nthe caller can still get a different address (which sucks) but at least\nnot silently corrupt an existing mapping.  I do not see a good way\naround that.  Except we won't export expose the new semantic to the\nuserspace at all.\n\nIt seems there are users who would like to have something like that.\nJemalloc has been mentioned by Michael Ellerman [7]\n\nFlorian Weimer has mentioned the following:\n: glibc ld.so currently maps DSOs without hints.  This means that the kernel\n: will map right next to each other, and the offsets between them a completely\n: predictable.  We would like to change that and supply a random address in a\n: window of the address space.  If there is a conflict, we do not want the\n: kernel to pick a non-random address. Instead, we would try again with a\n: random address.\n\nJohn Hubbard has mentioned CUDA example\n: a) Searches /proc/<pid>/maps for a \"suitable\" region of available\n: VA space.  \"Suitable\" generally means it has to have a base address\n: within a certain limited range (a particular device model might\n: have odd limitations, for example), it has to be large enough, and\n: alignment has to be large enough (again, various devices may have\n: constraints that lead us to do this).\n:\n: This is of course subject to races with other threads in the process.\n:\n: Let's say it finds a region starting at va.\n:\n: b) Next it does:\n:     p = mmap(va, ...)\n:\n: *without* setting MAP_FIXED, of course (so va is just a hint), to\n: attempt to safely reserve that region. If p != va, then in most cases,\n: this is a failure (almost certainly due to another thread getting a\n: mapping from that region before we did), and so this layer now has to\n: call munmap(), before returning a \"failure: retry\" to upper layers.\n:\n:     IMPROVEMENT: --> if instead, we could call this:\n:\n:             p = mmap(va, ... MAP_FIXED_NOREPLACE ...)\n:\n:         , then we could skip the munmap() call upon failure. This\n:         is a small thing, but it is useful here. (Thanks to Piotr\n:         Jaroszynski and Mark Hairgrove for helping me get that detail\n:         exactly right, btw.)\n:\n: c) After that, CUDA suballocates from p, via:\n:\n:      q = mmap(sub_region_start, ... MAP_FIXED ...)\n:\n: Interestingly enough, \"freeing\" is also done via MAP_FIXED, and\n: setting PROT_NONE to the subregion. Anyway, I just included (c) for\n: general interest.\n\nAtomic address range probing in the multithreaded programs in general\nsounds like an interesting thing to me.\n\nThe second patch simply replaces MAP_FIXED use in elf loader by\nMAP_FIXED_NOREPLACE.  I believe other places which rely on MAP_FIXED\nshould follow.  Actually real MAP_FIXED usages should be docummented\nproperly and they should be more of an exception.\n\n[1] http://lkml.kernel.org/r/20171116101900.13621-1-mhocko@kernel.org\n[2] http://lkml.kernel.org/r/20171129144219.22867-1-mhocko@kernel.org\n[3] http://lkml.kernel.org/r/20171107162217.382cd754@canb.auug.org.au\n[4] http://lkml.kernel.org/r/1510048229.12079.7.camel@abdul.in.ibm.com\n[5] http://lkml.kernel.org/r/20171023082608.6167-1-mhocko@kernel.org\n[6] http://lkml.kernel.org/r/20171113094203.aofz2e7kueitk55y@dhcp22.suse.cz\n[7] http://lkml.kernel.org/r/87efp1w7vy.fsf@concordia.ellerman.id.au\n\nThis patch (of 2):\n\nMAP_FIXED is used quite often to enforce mapping at the particular range.\nThe main problem of this flag is, however, that it is inherently dangerous\nbecause it unmaps existing mappings covered by the requested range.  This\ncan cause silent memory corruptions.  Some of them even with serious\nsecurity implications.  While the current semantic might be really\ndesiderable in many cases there are others which would want to enforce the\ngiven range but rather see a failure than a silent memory corruption on a\nclashing range.  Please note that there is no guarantee that a given range\nis obeyed by the mmap even when it is free - e.g.  arch specific code is\nallowed to apply an alignment.\n\nIntroduce a new MAP_FIXED_NOREPLACE flag for mmap to achieve this\nbehavior.  It has the same semantic as MAP_FIXED wrt.  the given address\nrequest with a single exception that it fails with EEXIST if the requested\naddress is already covered by an existing mapping.  We still do rely on\nget_unmaped_area to handle all the arch specific MAP_FIXED treatment and\ncheck for a conflicting vma after it returns.\n\nThe flag is introduced as a completely new one rather than a MAP_FIXED\nextension because of the backward compatibility.  We really want a\nnever-clobber semantic even on older kernels which do not recognize the\nflag.  Unfortunately mmap sucks wrt.  flags evaluation because we do not\nEINVAL on unknown flags.  On those kernels we would simply use the\ntraditional hint based semantic so the caller can still get a different\naddress (which sucks) but at least not silently corrupt an existing\nmapping.  I do not see a good way around that.\n\n[mpe@ellerman.id.au: fix whitespace]\n[fail on clashing range with EEXIST as per Florian Weimer]\n[set MAP_FIXED before round_hint_to_min as per Khalid Aziz]\nLink: http://lkml.kernel.org/r/20171213092550.2774-2-mhocko@kernel.org\nReviewed-by: Khalid Aziz <khalid.aziz@oracle.com>\nSigned-off-by: Michal Hocko <mhocko@suse.com>\nAcked-by: Michael Ellerman <mpe@ellerman.id.au>\nCc: Khalid Aziz <khalid.aziz@oracle.com>\nCc: Russell King - ARM Linux <linux@armlinux.org.uk>\nCc: Andrea Arcangeli <aarcange@redhat.com>\nCc: Florian Weimer <fweimer@redhat.com>\nCc: John Hubbard <jhubbard@nvidia.com>\nCc: Matthew Wilcox <willy@infradead.org>\nCc: Abdul Haleem <abdhalee@linux.vnet.ibm.com>\nCc: Joel Stanley <joel@jms.id.au>\nCc: Kees Cook <keescook@chromium.org>\nCc: Michal Hocko <mhocko@suse.com>\nCc: Jason Evans <jasone@google.com>\nCc: David Goldblatt <davidtgoldblatt@gmail.com>\nCc: Edward Tomasz Napiera\u0142a <trasz@FreeBSD.org>\nCc: Anshuman Khandual <khandual@linux.vnet.ibm.com>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>\nSigned-off-by: Linus Torvalds <torvalds@linux-foundation.org>",
+  "author_name": "Michal Hocko",
+  "author_email": "mhocko@suse.com",
+  "author_date": "Tue Apr 10 16:35:57 2018 -0700",
+  "author_date_iso": "2018-04-10T16:35:57-07:00",
+  "committer_name": "Linus Torvalds",
+  "committer_email": "torvalds@linux-foundation.org",
+  "committer_date": "Wed Apr 11 10:28:38 2018 -0700",
+  "committer_date_iso": "2018-04-11T10:28:38-07:00",
+  "files_changed": [
+    "arch/alpha/include/uapi/asm/mman.h",
+    "arch/mips/include/uapi/asm/mman.h",
+    "arch/parisc/include/uapi/asm/mman.h",
+    "arch/xtensa/include/uapi/asm/mman.h",
+    "include/uapi/asm-generic/mman-common.h",
+    "mm/mmap.c"
+  ],
+  "files_changed_count": 6,
+  "stats": [
+    {
+      "file": "arch/alpha/include/uapi/asm/mman.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/mips/include/uapi/asm/mman.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/parisc/include/uapi/asm/mman.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/xtensa/include/uapi/asm/mman.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "include/uapi/asm-generic/mman-common.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "mm/mmap.c",
+      "insertions": 11,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 16,
+  "total_deletions": 0,
+  "total_changes": 16,
+  "parents": [
+    "721d8b41aba3d99a9e9abaa398ad908e94053a30"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v4.17",
+    "v4.17-rc1",
+    "v4.17-rc2",
+    "v4.17-rc3",
+    "v4.17-rc4",
+    "v4.17-rc5",
+    "v4.17-rc6",
+    "v4.17-rc7",
+    "v4.18",
+    "v4.18-rc1"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "hardening"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/mips/include/uapi/asm/mman.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/alpha/include/uapi/asm/mman.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/parisc/include/uapi/asm/mman.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/uapi/asm-generic/mman-common.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/xtensa/include/uapi/asm/mman.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/mmap.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+{
+  "hash": "6c4ca03bd890566d873e3593b32d034bf2f5a087",
+  "hash_short": "6c4ca03b",
+  "subject": "net/tg3: resolve deadlock in tg3_reset_task() during EEH",
+  "body": "During EEH error injection testing, a deadlock was encountered in the tg3\ndriver when tg3_io_error_detected() was attempting to cancel outstanding\nreset tasks:\n\ncrash> foreach UN bt\n...\nPID: 159    TASK: c0000000067c6000  CPU: 8   COMMAND: \"eehd\"\n...\n #5 [c00000000681f990] __cancel_work_timer at c00000000019fd18\n #6 [c00000000681fa30] tg3_io_error_detected at c00800000295f098 [tg3]\n #7 [c00000000681faf0] eeh_report_error at c00000000004e25c\n...\n\nPID: 290    TASK: c000000036e5f800  CPU: 6   COMMAND: \"kworker/6:1\"\n...\n #4 [c00000003721fbc0] rtnl_lock at c000000000c940d8\n #5 [c00000003721fbe0] tg3_reset_task at c008000002969358 [tg3]\n #6 [c00000003721fc60] process_one_work at c00000000019e5c4\n...\n\nPID: 296    TASK: c000000037a65800  CPU: 21  COMMAND: \"kworker/21:1\"\n...\n #4 [c000000037247bc0] rtnl_lock at c000000000c940d8\n #5 [c000000037247be0] tg3_reset_task at c008000002969358 [tg3]\n #6 [c000000037247c60] process_one_work at c00000000019e5c4\n...\n\nPID: 655    TASK: c000000036f49000  CPU: 16  COMMAND: \"kworker/16:2\"\n...:1\n\n #4 [c0000000373ebbc0] rtnl_lock at c000000000c940d8\n #5 [c0000000373ebbe0] tg3_reset_task at c008000002969358 [tg3]\n #6 [c0000000373ebc60] process_one_work at c00000000019e5c4\n...\n\nCode inspection shows that both tg3_io_error_detected() and\ntg3_reset_task() attempt to acquire the RTNL lock at the beginning of\ntheir code blocks.  If tg3_reset_task() should happen to execute between\nthe times when tg3_io_error_deteced() acquires the RTNL lock and\ntg3_reset_task_cancel() is called, a deadlock will occur.\n\nMoving tg3_reset_task_cancel() call earlier within the code block, prior\nto acquiring RTNL, prevents this from happening, but also exposes another\ndeadlock issue where tg3_reset_task() may execute AFTER\ntg3_io_error_detected() has executed:\n\ncrash> foreach UN bt\nPID: 159    TASK: c0000000067d2000  CPU: 9   COMMAND: \"eehd\"\n...\n #4 [c000000006867a60] rtnl_lock at c000000000c940d8\n #5 [c000000006867a80] tg3_io_slot_reset at c0080000026c2ea8 [tg3]\n #6 [c000000006867b00] eeh_report_reset at c00000000004de88\n...\nPID: 363    TASK: c000000037564000  CPU: 6   COMMAND: \"kworker/6:1\"\n...\n #3 [c000000036c1bb70] msleep at c000000000259e6c\n #4 [c000000036c1bba0] napi_disable at c000000000c6b848\n #5 [c000000036c1bbe0] tg3_reset_task at c0080000026d942c [tg3]\n #6 [c000000036c1bc60] process_one_work at c00000000019e5c4\n...\n\nThis issue can be avoided by aborting tg3_reset_task() if EEH error\nrecovery is already in progress.\n\nFixes: db84bf43ef23 (\"tg3: tg3_reset_task() needs to use rtnl_lock to synchronize\")\nSigned-off-by: David Christensen <drc@linux.vnet.ibm.com>\nReviewed-by: Pavan Chebbi <pavan.chebbi@broadcom.com>\nLink: https://lore.kernel.org/r/20230124185339.225806-1-drc@linux.vnet.ibm.com\nSigned-off-by: Jakub Kicinski <kuba@kernel.org>",
+  "full_message": "net/tg3: resolve deadlock in tg3_reset_task() during EEH\n\nDuring EEH error injection testing, a deadlock was encountered in the tg3\ndriver when tg3_io_error_detected() was attempting to cancel outstanding\nreset tasks:\n\ncrash> foreach UN bt\n...\nPID: 159    TASK: c0000000067c6000  CPU: 8   COMMAND: \"eehd\"\n...\n #5 [c00000000681f990] __cancel_work_timer at c00000000019fd18\n #6 [c00000000681fa30] tg3_io_error_detected at c00800000295f098 [tg3]\n #7 [c00000000681faf0] eeh_report_error at c00000000004e25c\n...\n\nPID: 290    TASK: c000000036e5f800  CPU: 6   COMMAND: \"kworker/6:1\"\n...\n #4 [c00000003721fbc0] rtnl_lock at c000000000c940d8\n #5 [c00000003721fbe0] tg3_reset_task at c008000002969358 [tg3]\n #6 [c00000003721fc60] process_one_work at c00000000019e5c4\n...\n\nPID: 296    TASK: c000000037a65800  CPU: 21  COMMAND: \"kworker/21:1\"\n...\n #4 [c000000037247bc0] rtnl_lock at c000000000c940d8\n #5 [c000000037247be0] tg3_reset_task at c008000002969358 [tg3]\n #6 [c000000037247c60] process_one_work at c00000000019e5c4\n...\n\nPID: 655    TASK: c000000036f49000  CPU: 16  COMMAND: \"kworker/16:2\"\n...:1\n\n #4 [c0000000373ebbc0] rtnl_lock at c000000000c940d8\n #5 [c0000000373ebbe0] tg3_reset_task at c008000002969358 [tg3]\n #6 [c0000000373ebc60] process_one_work at c00000000019e5c4\n...\n\nCode inspection shows that both tg3_io_error_detected() and\ntg3_reset_task() attempt to acquire the RTNL lock at the beginning of\ntheir code blocks.  If tg3_reset_task() should happen to execute between\nthe times when tg3_io_error_deteced() acquires the RTNL lock and\ntg3_reset_task_cancel() is called, a deadlock will occur.\n\nMoving tg3_reset_task_cancel() call earlier within the code block, prior\nto acquiring RTNL, prevents this from happening, but also exposes another\ndeadlock issue where tg3_reset_task() may execute AFTER\ntg3_io_error_detected() has executed:\n\ncrash> foreach UN bt\nPID: 159    TASK: c0000000067d2000  CPU: 9   COMMAND: \"eehd\"\n...\n #4 [c000000006867a60] rtnl_lock at c000000000c940d8\n #5 [c000000006867a80] tg3_io_slot_reset at c0080000026c2ea8 [tg3]\n #6 [c000000006867b00] eeh_report_reset at c00000000004de88\n...\nPID: 363    TASK: c000000037564000  CPU: 6   COMMAND: \"kworker/6:1\"\n...\n #3 [c000000036c1bb70] msleep at c000000000259e6c\n #4 [c000000036c1bba0] napi_disable at c000000000c6b848\n #5 [c000000036c1bbe0] tg3_reset_task at c0080000026d942c [tg3]\n #6 [c000000036c1bc60] process_one_work at c00000000019e5c4\n...\n\nThis issue can be avoided by aborting tg3_reset_task() if EEH error\nrecovery is already in progress.\n\nFixes: db84bf43ef23 (\"tg3: tg3_reset_task() needs to use rtnl_lock to synchronize\")\nSigned-off-by: David Christensen <drc@linux.vnet.ibm.com>\nReviewed-by: Pavan Chebbi <pavan.chebbi@broadcom.com>\nLink: https://lore.kernel.org/r/20230124185339.225806-1-drc@linux.vnet.ibm.com\nSigned-off-by: Jakub Kicinski <kuba@kernel.org>",
+  "author_name": "David Christensen",
+  "author_email": "drc@linux.vnet.ibm.com",
+  "author_date": "Tue Jan 24 13:53:39 2023 -0500",
+  "author_date_iso": "2023-01-24T13:53:39-05:00",
+  "committer_name": "Jakub Kicinski",
+  "committer_email": "kuba@kernel.org",
+  "committer_date": "Wed Jan 25 22:35:42 2023 -0800",
+  "committer_date_iso": "2023-01-25T22:35:42-08:00",
+  "files_changed": [
+    "drivers/net/ethernet/broadcom/tg3.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "drivers/net/ethernet/broadcom/tg3.c",
+      "insertions": 4,
+      "deletions": 4
+    }
+  ],
+  "total_insertions": 4,
+  "total_deletions": 4,
+  "total_changes": 8,
+  "parents": [
+    "ac8d986cbf0b0ffdbf2c707fe59cf4a71d933a18"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "injection"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "drivers/net/ethernet/broadcom/tg3.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

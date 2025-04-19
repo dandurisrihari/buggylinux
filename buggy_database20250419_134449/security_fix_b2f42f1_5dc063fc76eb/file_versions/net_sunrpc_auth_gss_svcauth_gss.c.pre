@@ -1,0 +1,50 @@
+commit 7bb0dfb2234725ba085cacfd35f34c187def92b2
+Author: Chuck Lever <chuck.lever@oracle.com>
+Date:   Sun Jan 8 11:30:15 2023 -0500
+
+    SUNRPC: Convert unwrap data paths to use xdr_stream for replies
+    
+    We're now moving svcxdr_init_encode() to /before/ the flavor's
+    ->accept method has set rq_auth_slack. Add a helper that can
+    set rq_auth_slack /after/ svcxdr_init_encode() has been called.
+    
+    Reviewed-by: Jeff Layton <jlayton@kernel.org>
+    Signed-off-by: Chuck Lever <chuck.lever@oracle.com>
+
+diff --git a/net/sunrpc/auth_gss/svcauth_gss.c b/net/sunrpc/auth_gss/svcauth_gss.c
+index 5c41c34dd83e..7f8cbd6e2d4e 100644
+--- a/net/sunrpc/auth_gss/svcauth_gss.c
++++ b/net/sunrpc/auth_gss/svcauth_gss.c
+@@ -1685,24 +1685,22 @@ svcauth_gss_accept(struct svc_rqst *rqstp)
+ 			svcxdr_init_encode(rqstp);
+ 			break;
+ 		case RPC_GSS_SVC_INTEGRITY:
+-			/* placeholders for length and seq. number: */
+-			svc_putnl(resv, 0);
+-			svc_putnl(resv, 0);
++			svcxdr_init_encode(rqstp);
++			/* placeholders for body length and seq. number: */
++			xdr_reserve_space(&rqstp->rq_res_stream, XDR_UNIT * 2);
+ 			if (svcauth_gss_unwrap_integ(rqstp, gc->gc_seq,
+ 						     rsci->mechctx))
+ 				goto garbage_args;
+-			rqstp->rq_auth_slack = RPC_MAX_AUTH_SIZE;
+-			svcxdr_init_encode(rqstp);
++			svcxdr_set_auth_slack(rqstp, RPC_MAX_AUTH_SIZE);
+ 			break;
+ 		case RPC_GSS_SVC_PRIVACY:
+-			/* placeholders for length and seq. number: */
+-			svc_putnl(resv, 0);
+-			svc_putnl(resv, 0);
++			svcxdr_init_encode(rqstp);
++			/* placeholders for body length and seq. number: */
++			xdr_reserve_space(&rqstp->rq_res_stream, XDR_UNIT * 2);
+ 			if (svcauth_gss_unwrap_priv(rqstp, gc->gc_seq,
+ 						    rsci->mechctx))
+ 				goto garbage_args;
+-			rqstp->rq_auth_slack = RPC_MAX_AUTH_SIZE * 2;
+-			svcxdr_init_encode(rqstp);
++			svcxdr_set_auth_slack(rqstp, RPC_MAX_AUTH_SIZE * 2);
+ 			break;
+ 		default:
+ 			goto auth_err;

@@ -1,0 +1,81 @@
+commit 9efea843a906c6674ac6728f3f5db2cbfa3e1830
+Author: Quinn Tran <qutran@marvell.com>
+Date:   Wed Jun 23 22:26:02 2021 -0700
+
+    scsi: qla2xxx: edif: Add detection of secure device
+    
+    Some FC adapters from Marvell offer the ability to encrypt data in flight
+    (EDIF). This feature requires an application to act as an authenticator.
+    
+    There is no FC switch scan service that can indicate whether a device is
+    secure or non-secure.
+    
+    In order to detect whether the remote port supports encrypted operation,
+    driver must first do a PLOGI with the remote device. On completion of the
+    PLOGI, driver will query firmware to see if the device supports secure
+    login. To do that, driver + firmware must advertise the security bit via
+    PLOGI's service parameter. The remote device shall respond using the same
+    service parameter whether it supports it or not.
+    
+    Link: https://lore.kernel.org/r/20210624052606.21613-8-njavali@marvell.com
+    Reviewed-by: Hannes Reinecke <hare@suse.de>
+    Reviewed-by: Himanshu Madhani <himanshu.madhani@oracle.com>
+    Co-developed-by: Larry Wisneski <Larry.Wisneski@marvell.com>
+    Signed-off-by: Larry Wisneski <Larry.Wisneski@marvell.com>
+    Co-developed-by: Duane Grigsby <duane.grigsby@marvell.com>
+    Signed-off-by: Duane Grigsby <duane.grigsby@marvell.com>
+    Co-developed-by: Rick Hicksted Jr <rhicksted@marvell.com>
+    Signed-off-by: Rick Hicksted Jr <rhicksted@marvell.com>
+    Signed-off-by: Quinn Tran <qutran@marvell.com>
+    Signed-off-by: Nilesh Javali <njavali@marvell.com>
+    Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+
+diff --git a/drivers/scsi/qla2xxx/qla_os.c b/drivers/scsi/qla2xxx/qla_os.c
+index 0ae4d0fd622f..216f132dc5b2 100644
+--- a/drivers/scsi/qla2xxx/qla_os.c
++++ b/drivers/scsi/qla2xxx/qla_os.c
+@@ -1120,12 +1120,28 @@ static inline int test_fcport_count(scsi_qla_host_t *vha)
+ 	struct qla_hw_data *ha = vha->hw;
+ 	unsigned long flags;
+ 	int res;
++	/* Return 0 = sleep, x=wake */
+ 
+ 	spin_lock_irqsave(&ha->tgt.sess_lock, flags);
+ 	ql_dbg(ql_dbg_init, vha, 0x00ec,
+ 	    "tgt %p, fcport_count=%d\n",
+ 	    vha, vha->fcport_count);
+ 	res = (vha->fcport_count == 0);
++	if  (res) {
++		struct fc_port *fcport;
++
++		list_for_each_entry(fcport, &vha->vp_fcports, list) {
++			if (fcport->deleted != QLA_SESS_DELETED) {
++				/* session(s) may not be fully logged in
++				 * (ie fcport_count=0), but session
++				 * deletion thread(s) may be inflight.
++				 */
++
++				res = 0;
++				break;
++			}
++		}
++	}
+ 	spin_unlock_irqrestore(&ha->tgt.sess_lock, flags);
+ 
+ 	return res;
+@@ -3934,6 +3950,8 @@ void qla2x00_mark_device_lost(scsi_qla_host_t *vha, fc_port_t *fcport,
+ 		qla2x00_set_fcport_state(fcport, FCS_DEVICE_LOST);
+ 		qla2x00_schedule_rport_del(vha, fcport);
+ 	}
++
++	qla_edif_sess_down(vha, fcport);
+ 	/*
+ 	 * We may need to retry the login, so don't change the state of the
+ 	 * port but do the retries.
+@@ -5441,6 +5459,7 @@ void qla2x00_relogin(struct scsi_qla_host *vha)
+ 		if (atomic_read(&fcport->state) != FCS_ONLINE &&
+ 		    fcport->login_retry) {
+ 			if (fcport->scan_state != QLA_FCPORT_FOUND ||
++			    fcport->disc_state == DSC_LOGIN_AUTH_PEND ||
+ 			    fcport->disc_state == DSC_LOGIN_COMPLETE)
+ 				continue;

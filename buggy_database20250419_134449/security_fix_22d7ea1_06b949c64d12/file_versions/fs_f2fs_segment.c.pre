@@ -1,0 +1,40 @@
+commit abde73c718293b83c23b2ca137f18b3f8650a553
+Author: Sahitya Tummala <quic_stummala@quicinc.com>
+Date:   Fri Aug 31 15:09:26 2018 +0530
+
+    f2fs: fix unnecessary periodic wakeup of discard thread when dev is busy
+    
+    When dev is busy, discard thread wake up timeout can be aligned with the
+    exact time that it needs to wait for dev to come out of busy. This helps
+    to avoid unnecessary periodic wakeups and thus save some power.
+    
+    Signed-off-by: Sahitya Tummala <stummala@codeaurora.org>
+    Reviewed-by: Chao Yu <yuchao0@huawei.com>
+    Signed-off-by: Jaegeuk Kim <jaegeuk@kernel.org>
+
+diff --git a/fs/f2fs/segment.c b/fs/f2fs/segment.c
+index c372ff755818..f36a4b71595f 100644
+--- a/fs/f2fs/segment.c
++++ b/fs/f2fs/segment.c
+@@ -1564,6 +1564,8 @@ static int issue_discard_thread(void *data)
+ 	struct discard_policy dpolicy;
+ 	unsigned int wait_ms = DEF_MIN_DISCARD_ISSUE_TIME;
+ 	int issued;
++	unsigned long interval = sbi->interval_time[REQ_TIME] * HZ;
++	long delta;
+ 
+ 	set_freezable();
+ 
+@@ -1600,7 +1602,11 @@ static int issue_discard_thread(void *data)
+ 			__wait_all_discard_cmd(sbi, &dpolicy);
+ 			wait_ms = dpolicy.min_interval;
+ 		} else if (issued == -1){
+-			wait_ms = dpolicy.mid_interval;
++			delta = (sbi->last_time[REQ_TIME] + interval) - jiffies;
++			if (delta > 0)
++				wait_ms = jiffies_to_msecs(delta);
++			else
++				wait_ms = dpolicy.mid_interval;
+ 		} else {
+ 			wait_ms = dpolicy.max_interval;
+ 		}

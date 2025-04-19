@@ -1,0 +1,83 @@
+commit a61e147e6be6e763d9c6dec8061d2893c0bb3423
+Author: Mike Snitzer <snitzer@kernel.org>
+Date:   Thu Sep 5 15:09:49 2024 -0400
+
+    nfs_common: prepare for the NFS client to use nfsd_file for LOCALIO
+    
+    The next commit will introduce nfsd_open_local_fh() which returns an
+    nfsd_file structure.  This commit exposes LOCALIO's required NFSD
+    symbols to the NFS client:
+    
+    - Make nfsd_open_local_fh() symbol and other required NFSD symbols
+      available to NFS in a global 'nfs_to' nfsd_localio_operations
+      struct (global access suggested by Trond, nfsd_localio_operations
+      suggested by NeilBrown).  The next commit will also introduce
+      nfsd_localio_ops_init() that init_nfsd() will call to initialize
+      'nfs_to'.
+    
+    - Introduce nfsd_file_file() that provides access to nfsd_file's
+      backing file.  Keeps nfsd_file structure opaque to NFS client (as
+      suggested by Jeff Layton).
+    
+    - Introduce nfsd_file_put_local() that will put the reference to the
+      nfsd_file's associated nn->nfsd_serv and then put the reference to
+      the nfsd_file (as suggested by NeilBrown).
+    
+    Suggested-by: Trond Myklebust <trond.myklebust@hammerspace.com> # nfs_to
+    Suggested-by: NeilBrown <neilb@suse.de> # nfsd_localio_operations
+    Suggested-by: Jeff Layton <jlayton@kernel.org> # nfsd_file_file
+    Signed-off-by: Mike Snitzer <snitzer@kernel.org>
+    Reviewed-by: NeilBrown <neilb@suse.de>
+    Reviewed-by: Jeff Layton <jlayton@kernel.org>
+    Signed-off-by: Anna Schumaker <anna.schumaker@oracle.com>
+
+diff --git a/include/linux/nfslocalio.h b/include/linux/nfslocalio.h
+index 4165ff8390c1..1a39d7d727bd 100644
+--- a/include/linux/nfslocalio.h
++++ b/include/linux/nfslocalio.h
+@@ -9,6 +9,7 @@
+ #include <linux/module.h>
+ #include <linux/list.h>
+ #include <linux/uuid.h>
++#include <linux/sunrpc/clnt.h>
+ #include <linux/sunrpc/svcauth.h>
+ #include <linux/nfs.h>
+ #include <net/net_namespace.h>
+@@ -22,7 +23,7 @@
+ typedef struct {
+ 	uuid_t uuid;
+ 	struct list_head list;
+-	struct net *net; /* nfsd's network namespace */
++	struct net __rcu *net; /* nfsd's network namespace */
+ 	struct auth_domain *dom; /* auth_domain for localio */
+ } nfs_uuid_t;
+ 
+@@ -33,4 +34,28 @@ void nfs_uuid_is_local(const uuid_t *, struct list_head *,
+ void nfs_uuid_invalidate_clients(struct list_head *list);
+ void nfs_uuid_invalidate_one_client(nfs_uuid_t *nfs_uuid);
+ 
++struct nfsd_file;
++
++/* localio needs to map filehandle -> struct nfsd_file */
++extern struct nfsd_file *
++nfsd_open_local_fh(struct net *, struct auth_domain *, struct rpc_clnt *,
++		   const struct cred *, const struct nfs_fh *,
++		   const fmode_t) __must_hold(rcu);
++
++struct nfsd_localio_operations {
++	bool (*nfsd_serv_try_get)(struct net *);
++	void (*nfsd_serv_put)(struct net *);
++	struct nfsd_file *(*nfsd_open_local_fh)(struct net *,
++						struct auth_domain *,
++						struct rpc_clnt *,
++						const struct cred *,
++						const struct nfs_fh *,
++						const fmode_t);
++	void (*nfsd_file_put_local)(struct nfsd_file *);
++	struct file *(*nfsd_file_file)(struct nfsd_file *);
++} ____cacheline_aligned;
++
++extern void nfsd_localio_ops_init(void);
++extern const struct nfsd_localio_operations *nfs_to;
++
+ #endif  /* __LINUX_NFSLOCALIO_H */

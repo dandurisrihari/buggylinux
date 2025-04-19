@@ -1,0 +1,78 @@
+{
+  "hash": "97548575bef38abd06690a5a6f6816200c7e77f7",
+  "hash_short": "97548575",
+  "subject": "mmc: block: Convert RPMB to a character device",
+  "body": "The RPMB partition on the eMMC devices is a special area used\nfor storing cryptographically safe information signed by a\nspecial secret key. To write and read records from this special\narea, authentication is needed.\n\nThe RPMB area is *only* and *exclusively* accessed using\nioctl():s from userspace. It is not really a block device,\nas blocks cannot be read or written from the device, also\nthe signed chunks that can be stored on the RPMB are actually\n256 bytes, not 512 making a block device a real bad fit.\n\nCurrently the RPMB partition spawns a separate block device\nnamed /dev/mmcblkNrpmb for each device with an RPMB partition,\nincluding the creation of a block queue with its own kernel\nthread and all overhead associated with this. On the Ux500\nHREFv60 platform, for example, the two eMMCs means that two\nblock queues with separate threads are created for no use\nwhatsoever.\n\nI have concluded that this block device design for RPMB is\nactually pretty wrong. The RPMB area should have been designed\nto be accessed from /dev/mmcblkN directly, using ioctl()s on\nthe main block device. It is however way too late to change\nthat, since userspace expects to open an RPMB device in\n/dev/mmcblkNrpmb and we cannot break userspace.\n\nThis patch tries to amend the situation using the following\nstrategy:\n\n- Stop creating a block device for the RPMB partition/area\n\n- Instead create a custom, dynamic character device with\n  the same name.\n\n- Make this new character device support exactly the same\n  set of ioctl()s as the old block device.\n\n- Wrap the requests back to the same ioctl() handlers, but\n  issue them on the block queue of the main partition/area,\n  i.e. /dev/mmcblkN\n\nWe need to create a special \"rpmb\" bus type in order to get\nudev and/or busybox hot/coldplug to instantiate the device\nnode properly.\n\nBefore the patch, this appears in 'ps aux':\n\n101 root       0:00 [mmcqd/2rpmb]\n123 root       0:00 [mmcqd/3rpmb]\n\nAfter applying the patch these surplus block queue threads\nare gone, but RPMB is as usable as ever using the userspace\nMMC tools, such as 'mmc rpmb read-counter'.\n\nWe get instead those dynamice devices in /dev:\n\nbrw-rw----    1 root     root      179,   0 Jan  1  2000 mmcblk0\nbrw-rw----    1 root     root      179,   1 Jan  1  2000 mmcblk0p1\nbrw-rw----    1 root     root      179,   2 Jan  1  2000 mmcblk0p2\nbrw-rw----    1 root     root      179,   5 Jan  1  2000 mmcblk0p5\nbrw-rw----    1 root     root      179,   8 Jan  1  2000 mmcblk2\nbrw-rw----    1 root     root      179,  16 Jan  1  2000 mmcblk2boot0\nbrw-rw----    1 root     root      179,  24 Jan  1  2000 mmcblk2boot1\ncrw-rw----    1 root     root      248,   0 Jan  1  2000 mmcblk2rpmb\nbrw-rw----    1 root     root      179,  32 Jan  1  2000 mmcblk3\nbrw-rw----    1 root     root      179,  40 Jan  1  2000 mmcblk3boot0\nbrw-rw----    1 root     root      179,  48 Jan  1  2000 mmcblk3boot1\nbrw-rw----    1 root     root      179,  33 Jan  1  2000 mmcblk3p1\ncrw-rw----    1 root     root      248,   1 Jan  1  2000 mmcblk3rpmb\n\nNotice the (248,0) and (248,1) character devices for RPMB.\n\nCc: Tomas Winkler <tomas.winkler@intel.com>\nSigned-off-by: Linus Walleij <linus.walleij@linaro.org>\nSigned-off-by: Ulf Hansson <ulf.hansson@linaro.org>",
+  "full_message": "mmc: block: Convert RPMB to a character device\n\nThe RPMB partition on the eMMC devices is a special area used\nfor storing cryptographically safe information signed by a\nspecial secret key. To write and read records from this special\narea, authentication is needed.\n\nThe RPMB area is *only* and *exclusively* accessed using\nioctl():s from userspace. It is not really a block device,\nas blocks cannot be read or written from the device, also\nthe signed chunks that can be stored on the RPMB are actually\n256 bytes, not 512 making a block device a real bad fit.\n\nCurrently the RPMB partition spawns a separate block device\nnamed /dev/mmcblkNrpmb for each device with an RPMB partition,\nincluding the creation of a block queue with its own kernel\nthread and all overhead associated with this. On the Ux500\nHREFv60 platform, for example, the two eMMCs means that two\nblock queues with separate threads are created for no use\nwhatsoever.\n\nI have concluded that this block device design for RPMB is\nactually pretty wrong. The RPMB area should have been designed\nto be accessed from /dev/mmcblkN directly, using ioctl()s on\nthe main block device. It is however way too late to change\nthat, since userspace expects to open an RPMB device in\n/dev/mmcblkNrpmb and we cannot break userspace.\n\nThis patch tries to amend the situation using the following\nstrategy:\n\n- Stop creating a block device for the RPMB partition/area\n\n- Instead create a custom, dynamic character device with\n  the same name.\n\n- Make this new character device support exactly the same\n  set of ioctl()s as the old block device.\n\n- Wrap the requests back to the same ioctl() handlers, but\n  issue them on the block queue of the main partition/area,\n  i.e. /dev/mmcblkN\n\nWe need to create a special \"rpmb\" bus type in order to get\nudev and/or busybox hot/coldplug to instantiate the device\nnode properly.\n\nBefore the patch, this appears in 'ps aux':\n\n101 root       0:00 [mmcqd/2rpmb]\n123 root       0:00 [mmcqd/3rpmb]\n\nAfter applying the patch these surplus block queue threads\nare gone, but RPMB is as usable as ever using the userspace\nMMC tools, such as 'mmc rpmb read-counter'.\n\nWe get instead those dynamice devices in /dev:\n\nbrw-rw----    1 root     root      179,   0 Jan  1  2000 mmcblk0\nbrw-rw----    1 root     root      179,   1 Jan  1  2000 mmcblk0p1\nbrw-rw----    1 root     root      179,   2 Jan  1  2000 mmcblk0p2\nbrw-rw----    1 root     root      179,   5 Jan  1  2000 mmcblk0p5\nbrw-rw----    1 root     root      179,   8 Jan  1  2000 mmcblk2\nbrw-rw----    1 root     root      179,  16 Jan  1  2000 mmcblk2boot0\nbrw-rw----    1 root     root      179,  24 Jan  1  2000 mmcblk2boot1\ncrw-rw----    1 root     root      248,   0 Jan  1  2000 mmcblk2rpmb\nbrw-rw----    1 root     root      179,  32 Jan  1  2000 mmcblk3\nbrw-rw----    1 root     root      179,  40 Jan  1  2000 mmcblk3boot0\nbrw-rw----    1 root     root      179,  48 Jan  1  2000 mmcblk3boot1\nbrw-rw----    1 root     root      179,  33 Jan  1  2000 mmcblk3p1\ncrw-rw----    1 root     root      248,   1 Jan  1  2000 mmcblk3rpmb\n\nNotice the (248,0) and (248,1) character devices for RPMB.\n\nCc: Tomas Winkler <tomas.winkler@intel.com>\nSigned-off-by: Linus Walleij <linus.walleij@linaro.org>\nSigned-off-by: Ulf Hansson <ulf.hansson@linaro.org>",
+  "author_name": "Linus Walleij",
+  "author_email": "linus.walleij@linaro.org",
+  "author_date": "Wed Sep 20 10:02:00 2017 +0200",
+  "author_date_iso": "2017-09-20T10:02:00+02:00",
+  "committer_name": "Ulf Hansson",
+  "committer_email": "ulf.hansson@linaro.org",
+  "committer_date": "Mon Oct 30 11:40:10 2017 +0100",
+  "committer_date_iso": "2017-10-30T11:40:10+01:00",
+  "files_changed": [
+    "drivers/mmc/core/block.c",
+    "drivers/mmc/core/queue.h"
+  ],
+  "files_changed_count": 2,
+  "stats": [
+    {
+      "file": "drivers/mmc/core/block.c",
+      "insertions": 261,
+      "deletions": 22
+    },
+    {
+      "file": "drivers/mmc/core/queue.h",
+      "insertions": 2,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 263,
+  "total_deletions": 22,
+  "total_changes": 285,
+  "parents": [
+    "dd3f6983b4a468efca9e8caa0e2b4aa20946d801"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v4.15",
+    "v4.15-rc1",
+    "v4.15-rc2",
+    "v4.15-rc3",
+    "v4.15-rc4",
+    "v4.15-rc5",
+    "v4.15-rc6",
+    "v4.15-rc7",
+    "v4.15-rc8",
+    "v4.15-rc9"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "authentication"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "drivers/mmc/core/block.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "drivers/mmc/core/queue.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

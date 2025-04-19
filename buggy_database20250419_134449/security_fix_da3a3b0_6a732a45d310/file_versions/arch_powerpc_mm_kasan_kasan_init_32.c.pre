@@ -1,0 +1,69 @@
+commit 215b823707ce4e8e52b106915f70357fa474c669
+Author: Christophe Leroy <christophe.leroy@c-s.fr>
+Date:   Fri Apr 26 16:23:36 2019 +0000
+
+    powerpc/32s: set up an early static hash table for KASAN.
+    
+    KASAN requires early activation of hash table, before memblock()
+    functions are available.
+    
+    This patch implements an early hash_table statically defined in
+    __initdata.
+    
+    During early boot, a single page table is used.
+    
+    For hash32, when doing the final init, one page table is allocated
+    for each PGD entry because of the _PAGE_HASHPTE flag which can't be
+    common to several virt pages. This is done after memblock get
+    available but before switching to the final hash table, otherwise
+    there are issues with TLB flushing due to the shared entries.
+    
+    Signed-off-by: Christophe Leroy <christophe.leroy@c-s.fr>
+    Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+
+diff --git a/arch/powerpc/mm/kasan/kasan_init_32.c b/arch/powerpc/mm/kasan/kasan_init_32.c
+index 42617fcad828..ba8361487075 100644
+--- a/arch/powerpc/mm/kasan/kasan_init_32.c
++++ b/arch/powerpc/mm/kasan/kasan_init_32.c
+@@ -94,6 +94,13 @@ void __init kasan_mmu_init(void)
+ 	int ret;
+ 	struct memblock_region *reg;
+ 
++	if (early_mmu_has_feature(MMU_FTR_HPTE_TABLE)) {
++		ret = kasan_init_shadow_page_tables(KASAN_SHADOW_START, KASAN_SHADOW_END);
++
++		if (ret)
++			panic("kasan: kasan_init_shadow_page_tables() failed");
++	}
++
+ 	for_each_memblock(memory, reg) {
+ 		phys_addr_t base = reg->base;
+ 		phys_addr_t top = min(base + reg->size, total_lowmem);
+@@ -135,6 +142,20 @@ void *module_alloc(unsigned long size)
+ }
+ #endif
+ 
++#ifdef CONFIG_PPC_BOOK3S_32
++u8 __initdata early_hash[256 << 10] __aligned(256 << 10) = {0};
++
++static void __init kasan_early_hash_table(void)
++{
++	modify_instruction_site(&patch__hash_page_A0, 0xffff, __pa(early_hash) >> 16);
++	modify_instruction_site(&patch__flush_hash_A0, 0xffff, __pa(early_hash) >> 16);
++
++	Hash = (struct hash_pte *)early_hash;
++}
++#else
++static void __init kasan_early_hash_table(void) {}
++#endif
++
+ void __init kasan_early_init(void)
+ {
+ 	unsigned long addr = KASAN_SHADOW_START;
+@@ -152,5 +173,5 @@ void __init kasan_early_init(void)
+ 	} while (pmd++, addr = next, addr != end);
+ 
+ 	if (early_mmu_has_feature(MMU_FTR_HPTE_TABLE))
+-		WARN(true, "KASAN not supported on hash 6xx");
++		kasan_early_hash_table();
+ }

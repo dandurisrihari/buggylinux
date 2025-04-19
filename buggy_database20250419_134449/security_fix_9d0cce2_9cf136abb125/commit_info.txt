@@ -1,0 +1,68 @@
+Commit Hash: 9d0cce2bc3874dd03f7471ec00ae4acb5a77e43c
+Subject: rcu-tasks: Fix boot-time RCU tasks debug-only deadlock
+
+
+Security Keywords:
+- injection
+
+Full commit message:
+rcu-tasks: Fix boot-time RCU tasks debug-only deadlock
+
+In kernels built with CONFIG_PROVE_RCU=y (for example, lockdep kernels),
+the following sequence of events can occur:
+
+o	rcu_init_tasks_generic() is invoked just before init is spawned.
+	It invokes rcu_spawn_tasks_kthread() and friends.
+
+o	rcu_spawn_tasks_kthread() invokes rcu_spawn_tasks_kthread_generic(),
+	which uses kthread_run() to create the needed kthread.
+
+o	Control returns to rcu_init_tasks_generic(), which, because this
+	is a CONFIG_PROVE_RCU=y kernel, invokes the version of the
+	rcu_tasks_initiate_self_tests() function that actually does
+	something, including invoking synchronize_rcu_tasks(), which
+	in turn invokes synchronize_rcu_tasks_generic().
+
+o	synchronize_rcu_tasks_generic() sees that the ->kthread_ptr is
+	still NULL, because the newly spawned kthread has not yet
+	started.
+
+o	The new kthread starts, preempting synchronize_rcu_tasks_generic()
+	just after its check.  This kthread invokes rcu_tasks_one_gp(),
+	which acquires ->tasks_gp_mutex, and, seeing no work, blocks
+	in rcuwait_wait_event().  Note that this step requires either
+	a preemptible kernel or a fault-injection-style sleep at the
+	beginning of mutex_lock().
+
+o	synchronize_rcu_tasks_generic() resumes and invokes rcu_tasks_one_gp().
+
+o	rcu_tasks_one_gp() attempts to acquire ->tasks_gp_mutex, which
+	is still held by the newly spawned kthread's rcu_tasks_one_gp()
+	function.  Deadlock.
+
+Because the only reason for ->tasks_gp_mutex is to handle pre-kthread
+synchronous grace periods, this commit avoids this deadlock by having
+rcu_tasks_one_gp() momentarily release ->tasks_gp_mutex while invoking
+rcuwait_wait_event().  This allows the call to rcu_tasks_one_gp() from
+synchronize_rcu_tasks_generic() proceed.
+
+Note that it is not necessary to release the mutex anywhere else in
+rcu_tasks_one_gp() because rcuwait_wait_event() is the only function
+that can block indefinitely.
+
+Reported-by: Guenter Roeck <linux@roeck-us.net>
+Reported-by: Roy Hopkins <rhopkins@suse.de>
+Reported-by: Peter Zijlstra <peterz@infradead.org>
+Signed-off-by: Paul E. McKenney <paulmck@kernel.org>
+Tested-by: Roy Hopkins <rhopkins@suse.de>
+
+Metadata:
+Author: Paul E. McKenney <paulmck@kernel.org>
+Author Date: Tue Aug 1 12:11:18 2023 -0700
+Committer: Paul E. McKenney <paulmck@kernel.org>
+Commit Date: Mon Aug 14 14:58:25 2023 -0700
+
+Files Changed: 1
+Lines Added: 2
+Lines Removed: 0
+Total Changes: 2

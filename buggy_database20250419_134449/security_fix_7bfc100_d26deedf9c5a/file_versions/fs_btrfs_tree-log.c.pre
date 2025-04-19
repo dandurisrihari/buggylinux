@@ -1,0 +1,145 @@
+commit 10e958d523f82e976e5bdb13898da0e0b3af61e0
+Author: Nikolay Borisov <nborisov@suse.com>
+Date:   Mon Jan 20 16:09:11 2020 +0200
+
+    btrfs: Call btrfs_pin_reserved_extent only during active transaction
+    
+    Calling btrfs_pin_reserved_extent makes sense only with a valid
+    transaction since pinned extents are processed from transaction commit
+    in btrfs_finish_extent_commit. In case of error it's sufficient to
+    adjust the reserved counter to account for log tree extents allocated in
+    the last transaction.
+    
+    This commit moves btrfs_pin_reserved_extent to be called only with valid
+    transaction handle and otherwise uses the newly introduced
+    unaccount_log_buffer to adjust "reserved". If this is not done if a
+    failure occurs before transaction is committed WARN_ON are going to be
+    triggered on unmount. This was especially pronounced with generic/475
+    test.
+    
+    Reviewed-by: Josef Bacik <josef@toxicpanda.com>
+    Signed-off-by: Nikolay Borisov <nborisov@suse.com>
+    Reviewed-by: David Sterba <dsterba@suse.com>
+    Signed-off-by: David Sterba <dsterba@suse.com>
+
+diff --git a/fs/btrfs/tree-log.c b/fs/btrfs/tree-log.c
+index 32b087f543f2..c27e121603ac 100644
+--- a/fs/btrfs/tree-log.c
++++ b/fs/btrfs/tree-log.c
+@@ -2695,12 +2695,10 @@ static noinline int walk_down_log_tree(struct btrfs_trans_handle *trans,
+ 				   struct walk_control *wc)
+ {
+ 	struct btrfs_fs_info *fs_info = root->fs_info;
+-	u64 root_owner;
+ 	u64 bytenr;
+ 	u64 ptr_gen;
+ 	struct extent_buffer *next;
+ 	struct extent_buffer *cur;
+-	struct extent_buffer *parent;
+ 	u32 blocksize;
+ 	int ret = 0;
+ 
+@@ -2720,9 +2718,6 @@ static noinline int walk_down_log_tree(struct btrfs_trans_handle *trans,
+ 		btrfs_node_key_to_cpu(cur, &first_key, path->slots[*level]);
+ 		blocksize = fs_info->nodesize;
+ 
+-		parent = path->nodes[*level];
+-		root_owner = btrfs_header_owner(parent);
+-
+ 		next = btrfs_find_create_tree_block(fs_info, bytenr);
+ 		if (IS_ERR(next))
+ 			return PTR_ERR(next);
+@@ -2750,18 +2745,16 @@ static noinline int walk_down_log_tree(struct btrfs_trans_handle *trans,
+ 					btrfs_clean_tree_block(next);
+ 					btrfs_wait_tree_block_writeback(next);
+ 					btrfs_tree_unlock(next);
++					ret = btrfs_pin_reserved_extent(fs_info,
++							bytenr, blocksize);
++					if (ret) {
++						free_extent_buffer(next);
++						return ret;
++					}
+ 				} else {
+ 					if (test_and_clear_bit(EXTENT_BUFFER_DIRTY, &next->bflags))
+ 						clear_extent_buffer_dirty(next);
+-				}
+-
+-				WARN_ON(root_owner !=
+-					BTRFS_TREE_LOG_OBJECTID);
+-				ret = btrfs_pin_reserved_extent(fs_info,
+-							bytenr, blocksize);
+-				if (ret) {
+-					free_extent_buffer(next);
+-					return ret;
++					unaccount_log_buffer(fs_info, bytenr);
+ 				}
+ 			}
+ 			free_extent_buffer(next);
+@@ -2792,7 +2785,6 @@ static noinline int walk_up_log_tree(struct btrfs_trans_handle *trans,
+ 				 struct walk_control *wc)
+ {
+ 	struct btrfs_fs_info *fs_info = root->fs_info;
+-	u64 root_owner;
+ 	int i;
+ 	int slot;
+ 	int ret;
+@@ -2805,13 +2797,6 @@ static noinline int walk_up_log_tree(struct btrfs_trans_handle *trans,
+ 			WARN_ON(*level == 0);
+ 			return 0;
+ 		} else {
+-			struct extent_buffer *parent;
+-			if (path->nodes[*level] == root->node)
+-				parent = path->nodes[*level];
+-			else
+-				parent = path->nodes[*level + 1];
+-
+-			root_owner = btrfs_header_owner(parent);
+ 			ret = wc->process_func(root, path->nodes[*level], wc,
+ 				 btrfs_header_generation(path->nodes[*level]),
+ 				 *level);
+@@ -2829,17 +2814,18 @@ static noinline int walk_up_log_tree(struct btrfs_trans_handle *trans,
+ 					btrfs_clean_tree_block(next);
+ 					btrfs_wait_tree_block_writeback(next);
+ 					btrfs_tree_unlock(next);
++					ret = btrfs_pin_reserved_extent(fs_info,
++						     path->nodes[*level]->start,
++						     path->nodes[*level]->len);
++					if (ret)
++						return ret;
+ 				} else {
+ 					if (test_and_clear_bit(EXTENT_BUFFER_DIRTY, &next->bflags))
+ 						clear_extent_buffer_dirty(next);
+-				}
+ 
+-				WARN_ON(root_owner != BTRFS_TREE_LOG_OBJECTID);
+-				ret = btrfs_pin_reserved_extent(fs_info,
+-						path->nodes[*level]->start,
+-						path->nodes[*level]->len);
+-				if (ret)
+-					return ret;
++					unaccount_log_buffer(fs_info,
++						path->nodes[*level]->start);
++				}
+ 			}
+ 			free_extent_buffer(path->nodes[*level]);
+ 			path->nodes[*level] = NULL;
+@@ -2910,15 +2896,15 @@ static int walk_log_tree(struct btrfs_trans_handle *trans,
+ 				btrfs_clean_tree_block(next);
+ 				btrfs_wait_tree_block_writeback(next);
+ 				btrfs_tree_unlock(next);
++				ret = btrfs_pin_reserved_extent(fs_info,
++						next->start, next->len);
++				if (ret)
++					goto out;
+ 			} else {
+ 				if (test_and_clear_bit(EXTENT_BUFFER_DIRTY, &next->bflags))
+ 					clear_extent_buffer_dirty(next);
++				unaccount_log_buffer(fs_info, next->start);
+ 			}
+-
+-			ret = btrfs_pin_reserved_extent(fs_info, next->start,
+-							next->len);
+-			if (ret)
+-				goto out;
+ 		}
+ 	}

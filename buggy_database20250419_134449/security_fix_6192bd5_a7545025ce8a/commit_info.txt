@@ -1,0 +1,90 @@
+Commit Hash: 6192bd536f96c6a0d969081bc71ae24f9319bfdc
+Subject: epoll: optimizations and cleanups
+
+
+Security Keywords:
+- exploit
+- inject
+
+Full commit message:
+epoll: optimizations and cleanups
+
+Epoll is doing multiple passes over the ready set at the moment, because of
+the constraints over the f_op->poll() call.  Looking at the code again, I
+noticed that we already hold the epoll semaphore in read, and this
+(together with other locking conditions that hold while doing an
+epoll_wait()) can lead to a smarter way [1] to "ship" events to userspace
+(in a single pass).
+
+This is a stress application that can be used to test the new code.  It
+spwans multiple thread and call epoll_wait() and epoll_ctl() from many
+threads.  Stress tested on my dual Opteron 254 w/out any problems.
+
+http://www.xmailserver.org/totalmess.c
+
+This is not a benchmark, just something that tries to stress and exploit
+possible problems with the new code.
+Also, I made a stupid micro-benchmark:
+
+http://www.xmailserver.org/epwbench.c
+
+[1] Considering that epoll must be thread-safe, there are five ways we can
+    be hit during an epoll_wait() transfer loop (ep_send_events()):
+
+    1) The epoll fd going away and calling ep_free
+       This just can't happen, since we did an fget() in sys_epoll_wait
+
+    2) An epoll_ctl(EPOLL_CTL_DEL)
+       This can't happen because epoll_ctl() gets ep->sem in write, and
+       we're holding it in read during ep_send_events()
+
+    3) An fd stored inside the epoll fd going away
+       This can't happen because in eventpoll_release_file() we get
+       ep->sem in write, and we're holding it in read during
+       ep_send_events()
+
+    4) Another epoll_wait() happening on another thread
+       They both can be inside ep_send_events() at the same time, we get
+       (splice) the ready-list under the spinlock, so each one will get
+       its own ready list. Note that an fd cannot be at the same time
+       inside more than one ready list, because ep_poll_callback() will
+       not re-queue it if it sees it already linked:
+
+       if (ep_is_linked(&epi->rdllink))
+                goto is_linked;
+
+       Another case that can happen, is two concurrent epoll_wait(),
+       coming in with a userspace event buffer of size, say, ten.
+       Suppose there are 50 event ready in the list. The first
+       epoll_wait() will "steal" the whole list, while the second, seeing
+       no events, will go to sleep. But at the end of ep_send_events() in
+       the first epoll_wait(), we will re-inject surplus ready fds, and we
+       will trigger the proper wake_up to the second epoll_wait().
+
+    5) ep_poll_callback() hitting us asyncronously
+       This is the tricky part. As I said above, the ep_is_linked() test
+       done inside ep_poll_callback(), will guarantee us that until the
+       item will result linked to a list, ep_poll_callback() will not try
+       to re-queue it again (read, write data on any of its members). When
+       we do a list_del() in ep_send_events(), the item will still satisfy
+       the ep_is_linked() test (whatever data is written in prev/next,
+       it'll never be its own pointer), so ep_poll_callback() will still
+       leave us alone. It's only after the eventual smp_mb()+INIT_LIST_HEAD(&epi->rdllink)
+       that it'll become visible to ep_poll_callback(), but at the point
+       we're already past it.
+
+[akpm@osdl.org: 80 cols]
+Signed-off-by: Davide Libenzi <davidel@xmailserver.org>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+Metadata:
+Author: Davide Libenzi <davidel@xmailserver.org>
+Author Date: Tue May 8 00:25:41 2007 -0700
+Committer: Linus Torvalds <torvalds@woody.linux-foundation.org>
+Commit Date: Tue May 8 11:15:01 2007 -0700
+
+Files Changed: 1
+Lines Added: 86
+Lines Removed: 147
+Total Changes: 233

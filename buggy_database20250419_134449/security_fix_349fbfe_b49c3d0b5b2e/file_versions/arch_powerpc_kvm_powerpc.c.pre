@@ -1,0 +1,78 @@
+commit 3f831504482ab0d0d53d1966987959d1485345cc
+Author: Fabiano Rosas <farosas@linux.ibm.com>
+Date:   Tue Jan 25 18:56:53 2022 -0300
+
+    KVM: PPC: mmio: Reject instructions that access more than mmio.data size
+    
+    The MMIO interface between the kernel and userspace uses a structure
+    that supports a maximum of 8-bytes of data. Instructions that access
+    more than that need to be emulated in parts.
+    
+    We currently don't have generic support for splitting the emulation in
+    parts and each set of instructions needs to be explicitly included.
+    
+    There's already an error message being printed when a load or store
+    exceeds the mmio.data buffer but we don't fail the emulation until
+    later at kvmppc_complete_mmio_load and even then we allow userspace to
+    make a partial copy of the data, which ends up overwriting some fields
+    of the mmio structure.
+    
+    This patch makes the emulation fail earlier at kvmppc_handle_load|store,
+    which will send a Program interrupt to the guest. This is better than
+    allowing the guest to proceed with partial data.
+    
+    Note that this was caught in a somewhat artificial scenario using
+    quadword instructions (lq/stq), there's no account of an actual guest
+    in the wild running instructions that are not properly emulated.
+    
+    (While here, remove the "bad MMIO" messages. The caller already has an
+    error message.)
+    
+    Signed-off-by: Fabiano Rosas <farosas@linux.ibm.com>
+    Reviewed-by: Alexey Kardashevskiy <aik@ozlabs.ru>
+    Reviewed-by: Nicholas Piggin <npiggin@gmail.com>
+    Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+    Link: https://lore.kernel.org/r/20220125215655.1026224-4-farosas@linux.ibm.com
+
+diff --git a/arch/powerpc/kvm/powerpc.c b/arch/powerpc/kvm/powerpc.c
+index c2bd29e90314..27fb2b70f631 100644
+--- a/arch/powerpc/kvm/powerpc.c
++++ b/arch/powerpc/kvm/powerpc.c
+@@ -1114,10 +1114,8 @@ static void kvmppc_complete_mmio_load(struct kvm_vcpu *vcpu)
+ 	struct kvm_run *run = vcpu->run;
+ 	u64 gpr;
+ 
+-	if (run->mmio.len > sizeof(gpr)) {
+-		printk(KERN_ERR "bad MMIO length: %d\n", run->mmio.len);
++	if (run->mmio.len > sizeof(gpr))
+ 		return;
+-	}
+ 
+ 	if (!vcpu->arch.mmio_host_swabbed) {
+ 		switch (run->mmio.len) {
+@@ -1236,10 +1234,8 @@ static int __kvmppc_handle_load(struct kvm_vcpu *vcpu,
+ 		host_swabbed = !is_default_endian;
+ 	}
+ 
+-	if (bytes > sizeof(run->mmio.data)) {
+-		printk(KERN_ERR "%s: bad MMIO length: %d\n", __func__,
+-		       run->mmio.len);
+-	}
++	if (bytes > sizeof(run->mmio.data))
++		return EMULATE_FAIL;
+ 
+ 	run->mmio.phys_addr = vcpu->arch.paddr_accessed;
+ 	run->mmio.len = bytes;
+@@ -1325,10 +1321,8 @@ int kvmppc_handle_store(struct kvm_vcpu *vcpu,
+ 		host_swabbed = !is_default_endian;
+ 	}
+ 
+-	if (bytes > sizeof(run->mmio.data)) {
+-		printk(KERN_ERR "%s: bad MMIO length: %d\n", __func__,
+-		       run->mmio.len);
+-	}
++	if (bytes > sizeof(run->mmio.data))
++		return EMULATE_FAIL;
+ 
+ 	run->mmio.phys_addr = vcpu->arch.paddr_accessed;
+ 	run->mmio.len = bytes;

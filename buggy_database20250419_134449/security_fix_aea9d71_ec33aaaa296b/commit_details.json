@@ -1,0 +1,66 @@
+{
+  "hash": "aea9d711f3d68c656ad31ab578ecfb0bb5cd7f97",
+  "hash_short": "aea9d711",
+  "subject": "ipvs: Add missing locking during connection table hashing and unhashing",
+  "body": "The code that hashes and unhashes connections from the connection table\nis missing locking of the connection being modified, which opens up a\nrace condition and results in memory corruption when this race condition\nis hit.\n\nHere is what happens in pretty verbose form:\n\nCPU 0\t\t\t\t\tCPU 1\n------------\t\t\t\t------------\nAn active connection is terminated and\nwe schedule ip_vs_conn_expire() on this\nCPU to expire this connection.\n\n\t\t\t\t\tIRQ assignment is changed to this CPU,\n\t\t\t\t\tbut the expire timer stays scheduled on\n\t\t\t\t\tthe other CPU.\n\n\t\t\t\t\tNew connection from same ip:port comes\n\t\t\t\t\tin right before the timer expires, we\n\t\t\t\t\tfind the inactive connection in our\n\t\t\t\t\tconnection table and get a reference to\n\t\t\t\t\tit. We proper lock the connection in\n\t\t\t\t\ttcp_state_transition() and read the\n\t\t\t\t\tconnection flags in set_tcp_state().\n\nip_vs_conn_expire() gets called, we\nunhash the connection from our\nconnection table and remove the hashed\nflag in ip_vs_conn_unhash(), without\nproper locking!\n\n\t\t\t\t\tWhile still holding proper locks we\n\t\t\t\t\twrite the connection flags in\n\t\t\t\t\tset_tcp_state() and this sets the hashed\n\t\t\t\t\tflag again.\n\nip_vs_conn_expire() fails to expire the\nconnection, because the other CPU has\nincremented the reference count. We try\nto re-insert the connection into our\nconnection table, but this fails in\nip_vs_conn_hash(), because the hashed\nflag has been set by the other CPU. We\nre-schedule execution of\nip_vs_conn_expire(). Now this connection\nhas the hashed flag set, but isn't\nactually hashed in our connection table\nand has a dangling list_head.\n\n\t\t\t\t\tWe drop the reference we held on the\n\t\t\t\t\tconnection and schedule the expire timer\n\t\t\t\t\tfor timeouting the connection on this\n\t\t\t\t\tCPU. Further packets won't be able to\n\t\t\t\t\tfind this connection in our connection\n\t\t\t\t\ttable.\n\n\t\t\t\t\tip_vs_conn_expire() gets called again,\n\t\t\t\t\twe think it's already hashed, but the\n\t\t\t\t\tlist_head is dangling and while removing\n\t\t\t\t\tthe connection from our connection table\n\t\t\t\t\twe write to the memory location where\n\t\t\t\t\tthis list_head points to.\n\nThe result will probably be a kernel oops at some other point in time.\n\nThis race condition is pretty subtle, but it can be triggered remotely.\nIt needs the IRQ assignment change or another circumstance where packets\ncoming from the same ip:port for the same service are being processed on\ndifferent CPUs. And it involves hitting the exact time at which\nip_vs_conn_expire() gets called. It can be avoided by making sure that\nall packets from one connection are always processed on the same CPU and\ncan be made harder to exploit by changing the connection timeouts to\nsome custom values.\n\nSigned-off-by: Sven Wegener <sven.wegener@stealer.net>\nCc: stable@kernel.org\nAcked-by: Simon Horman <horms@verge.net.au>\nSigned-off-by: Patrick McHardy <kaber@trash.net>",
+  "full_message": "ipvs: Add missing locking during connection table hashing and unhashing\n\nThe code that hashes and unhashes connections from the connection table\nis missing locking of the connection being modified, which opens up a\nrace condition and results in memory corruption when this race condition\nis hit.\n\nHere is what happens in pretty verbose form:\n\nCPU 0\t\t\t\t\tCPU 1\n------------\t\t\t\t------------\nAn active connection is terminated and\nwe schedule ip_vs_conn_expire() on this\nCPU to expire this connection.\n\n\t\t\t\t\tIRQ assignment is changed to this CPU,\n\t\t\t\t\tbut the expire timer stays scheduled on\n\t\t\t\t\tthe other CPU.\n\n\t\t\t\t\tNew connection from same ip:port comes\n\t\t\t\t\tin right before the timer expires, we\n\t\t\t\t\tfind the inactive connection in our\n\t\t\t\t\tconnection table and get a reference to\n\t\t\t\t\tit. We proper lock the connection in\n\t\t\t\t\ttcp_state_transition() and read the\n\t\t\t\t\tconnection flags in set_tcp_state().\n\nip_vs_conn_expire() gets called, we\nunhash the connection from our\nconnection table and remove the hashed\nflag in ip_vs_conn_unhash(), without\nproper locking!\n\n\t\t\t\t\tWhile still holding proper locks we\n\t\t\t\t\twrite the connection flags in\n\t\t\t\t\tset_tcp_state() and this sets the hashed\n\t\t\t\t\tflag again.\n\nip_vs_conn_expire() fails to expire the\nconnection, because the other CPU has\nincremented the reference count. We try\nto re-insert the connection into our\nconnection table, but this fails in\nip_vs_conn_hash(), because the hashed\nflag has been set by the other CPU. We\nre-schedule execution of\nip_vs_conn_expire(). Now this connection\nhas the hashed flag set, but isn't\nactually hashed in our connection table\nand has a dangling list_head.\n\n\t\t\t\t\tWe drop the reference we held on the\n\t\t\t\t\tconnection and schedule the expire timer\n\t\t\t\t\tfor timeouting the connection on this\n\t\t\t\t\tCPU. Further packets won't be able to\n\t\t\t\t\tfind this connection in our connection\n\t\t\t\t\ttable.\n\n\t\t\t\t\tip_vs_conn_expire() gets called again,\n\t\t\t\t\twe think it's already hashed, but the\n\t\t\t\t\tlist_head is dangling and while removing\n\t\t\t\t\tthe connection from our connection table\n\t\t\t\t\twe write to the memory location where\n\t\t\t\t\tthis list_head points to.\n\nThe result will probably be a kernel oops at some other point in time.\n\nThis race condition is pretty subtle, but it can be triggered remotely.\nIt needs the IRQ assignment change or another circumstance where packets\ncoming from the same ip:port for the same service are being processed on\ndifferent CPUs. And it involves hitting the exact time at which\nip_vs_conn_expire() gets called. It can be avoided by making sure that\nall packets from one connection are always processed on the same CPU and\ncan be made harder to exploit by changing the connection timeouts to\nsome custom values.\n\nSigned-off-by: Sven Wegener <sven.wegener@stealer.net>\nCc: stable@kernel.org\nAcked-by: Simon Horman <horms@verge.net.au>\nSigned-off-by: Patrick McHardy <kaber@trash.net>",
+  "author_name": "Sven Wegener",
+  "author_email": "sven.wegener@stealer.net",
+  "author_date": "Wed Jun 9 16:10:57 2010 +0200",
+  "author_date_iso": "2010-06-09T16:10:57+02:00",
+  "committer_name": "Patrick McHardy",
+  "committer_email": "kaber@trash.net",
+  "committer_date": "Wed Jun 9 16:10:57 2010 +0200",
+  "committer_date_iso": "2010-06-09T16:10:57+02:00",
+  "files_changed": [
+    "net/netfilter/ipvs/ip_vs_conn.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "net/netfilter/ipvs/ip_vs_conn.c",
+      "insertions": 4,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 4,
+  "total_deletions": 0,
+  "total_changes": 4,
+  "parents": [
+    "7489aec8eed4f2f1eb3b4d35763bd3ea30b32ef5"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v2.6.35",
+    "v2.6.35-rc4",
+    "v2.6.35-rc5",
+    "v2.6.35-rc6",
+    "v2.6.36",
+    "v2.6.36-rc1",
+    "v2.6.36-rc2",
+    "v2.6.36-rc3",
+    "v2.6.36-rc4",
+    "v2.6.36-rc5"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "exploit"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "net/netfilter/ipvs/ip_vs_conn.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

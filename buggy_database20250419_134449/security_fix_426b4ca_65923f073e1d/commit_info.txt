@@ -1,0 +1,134 @@
+Commit Hash: 426b4ca2d6a5ab51f6b6175d06e4f8ddea434cdf
+Subject: Merge tag 'fs.setgid.v6.0' of git://git.kernel.org/pub/scm/linux/kernel/git/brauner/linux
+
+
+Security Keywords:
+- security
+     issue
+
+Full commit message:
+Merge tag 'fs.setgid.v6.0' of git://git.kernel.org/pub/scm/linux/kernel/git/brauner/linux
+
+Pull setgid updates from Christian Brauner:
+ "This contains the work to move setgid stripping out of individual
+  filesystems and into the VFS itself.
+
+  Creating files that have both the S_IXGRP and S_ISGID bit raised in
+  directories that themselves have the S_ISGID bit set requires
+  additional privileges to avoid security issues.
+
+  When a filesystem creates a new inode it needs to take care that the
+  caller is either in the group of the newly created inode or they have
+  CAP_FSETID in their current user namespace and are privileged over the
+  parent directory of the new inode. If any of these two conditions is
+  true then the S_ISGID bit can be raised for an S_IXGRP file and if not
+  it needs to be stripped.
+
+  However, there are several key issues with the current implementation:
+
+   - S_ISGID stripping logic is entangled with umask stripping.
+
+     For example, if the umask removes the S_IXGRP bit from the file
+     about to be created then the S_ISGID bit will be kept.
+
+     The inode_init_owner() helper is responsible for S_ISGID stripping
+     and is called before posix_acl_create(). So we can end up with two
+     different orderings:
+
+     1. FS without POSIX ACL support
+
+        First strip umask then strip S_ISGID in inode_init_owner().
+
+        In other words, if a filesystem doesn't support or enable POSIX
+        ACLs then umask stripping is done directly in the vfs before
+        calling into the filesystem:
+
+     2. FS with POSIX ACL support
+
+        First strip S_ISGID in inode_init_owner() then strip umask in
+        posix_acl_create().
+
+        In other words, if the filesystem does support POSIX ACLs then
+        unmask stripping may be done in the filesystem itself when
+        calling posix_acl_create().
+
+     Note that technically filesystems are free to impose their own
+     ordering between posix_acl_create() and inode_init_owner() meaning
+     that there's additional ordering issues that influence S_ISGID
+     inheritance.
+
+     (Note that the commit message of commit 1639a49ccdce ("fs: move
+     S_ISGID stripping into the vfs_*() helpers") gets the ordering
+     between inode_init_owner() and posix_acl_create() the wrong way
+     around. I realized this too late.)
+
+   - Filesystems that don't rely on inode_init_owner() don't get S_ISGID
+     stripping logic.
+
+     While that may be intentional (e.g. network filesystems might just
+     defer setgid stripping to a server) it is often just a security
+     issue.
+
+     Note that mandating the use of inode_init_owner() was proposed as
+     an alternative solution but that wouldn't fix the ordering issues
+     and there are examples such as afs where the use of
+     inode_init_owner() isn't possible.
+
+     In any case, we should also try the cleaner and generalized
+     solution first before resorting to this approach.
+
+   - We still have S_ISGID inheritance bugs years after the initial
+     round of S_ISGID inheritance fixes:
+
+       e014f37db1a2 ("xfs: use setattr_copy to set vfs inode attributes")
+       01ea173e103e ("xfs: fix up non-directory creation in SGID directories")
+       fd84bfdddd16 ("ceph: fix up non-directory creation in SGID directories")
+
+  All of this led us to conclude that the current state is too messy.
+  While we won't be able to make it completely clean as
+  posix_acl_create() is still a filesystem specific call we can improve
+  the S_SIGD stripping situation quite a bit by hoisting it out of
+  inode_init_owner() and into the respective vfs creation operations.
+
+  The obvious advantage is that we don't need to rely on individual
+  filesystems getting S_ISGID stripping right and instead can
+  standardize the ordering between S_ISGID and umask stripping directly
+  in the VFS.
+
+  A few short implementation notes:
+
+   - The stripping logic needs to happen in vfs_*() helpers for the sake
+     of stacking filesystems such as overlayfs that rely on these
+     helpers taking care of S_ISGID stripping.
+
+   - Security hooks have never seen the mode as it is ultimately seen by
+     the filesystem because of the ordering issue we mentioned. Nothing
+     is changed for them. We simply continue to strip the umask before
+     passing the mode down to the security hooks.
+
+   - The following filesystems use inode_init_owner() and thus relied on
+     S_ISGID stripping: spufs, 9p, bfs, btrfs, ext2, ext4, f2fs,
+     hfsplus, hugetlbfs, jfs, minix, nilfs2, ntfs3, ocfs2, omfs,
+     overlayfs, ramfs, reiserfs, sysv, ubifs, udf, ufs, xfs, zonefs,
+     bpf, tmpfs.
+
+     We've audited all callchains as best as we could. More details can
+     be found in the commit message to 1639a49ccdce ("fs: move S_ISGID
+     stripping into the vfs_*() helpers")"
+
+* tag 'fs.setgid.v6.0' of git://git.kernel.org/pub/scm/linux/kernel/git/brauner/linux:
+  ceph: rely on vfs for setgid stripping
+  fs: move S_ISGID stripping into the vfs_*() helpers
+  fs: Add missing umask strip in vfs_tmpfile
+  fs: add mode_strip_sgid() helper
+
+Metadata:
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Author Date: Tue Aug 9 09:52:28 2022 -0700
+Committer: Linus Torvalds <torvalds@linux-foundation.org>
+Commit Date: Tue Aug 9 09:52:28 2022 -0700
+
+Files Changed: 4
+Lines Added: 102
+Lines Removed: 19
+Total Changes: 121

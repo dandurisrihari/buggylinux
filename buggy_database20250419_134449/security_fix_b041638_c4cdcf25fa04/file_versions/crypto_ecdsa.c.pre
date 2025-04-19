@@ -1,0 +1,94 @@
+commit a2471684dae23a676b4badea306140d24e6507f5
+Author: Lukas Wunner <lukas@wunner.de>
+Date:   Tue Sep 10 16:30:27 2024 +0200
+
+    crypto: ecdsa - Move X9.62 signature size calculation into template
+    
+    software_key_query() returns the maximum signature and digest size for a
+    given key to user space.  When it only supported RSA keys, calculating
+    those sizes was trivial as they were always equivalent to the key size.
+    
+    However when ECDSA was added, the function grew somewhat complicated
+    calculations which take the ASN.1 encoding and curve into account.
+    This doesn't scale well and adjusting the calculations is easily
+    forgotten when adding support for new encodings or curves.  In fact,
+    when NIST P521 support was recently added, the function was initially
+    not amended:
+    
+    https://lore.kernel.org/all/b749d5ee-c3b8-4cbd-b252-7773e4536e07@linux.ibm.com/
+    
+    Introduce a ->max_size() callback to struct sig_alg and take advantage
+    of it to move the signature size calculations to ecdsa-x962.c.
+    
+    Introduce a ->digest_size() callback to struct sig_alg and move the
+    maximum ECDSA digest size to ecdsa.c.  It is common across ecdsa-x962.c
+    and the upcoming ecdsa-p1363.c and thus inherited by both of them.
+    
+    For all other algorithms, continue using the key size as maximum
+    signature and digest size.
+    
+    Signed-off-by: Lukas Wunner <lukas@wunner.de>
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+diff --git a/crypto/ecdsa.c b/crypto/ecdsa.c
+index 6cb0a6ce9de1..cf8e0c5d1dd8 100644
+--- a/crypto/ecdsa.c
++++ b/crypto/ecdsa.c
+@@ -7,6 +7,7 @@
+ #include <crypto/internal/ecc.h>
+ #include <crypto/internal/sig.h>
+ #include <crypto/ecdh.h>
++#include <crypto/sha2.h>
+ #include <crypto/sig.h>
+ 
+ struct ecc_ctx {
+@@ -169,6 +170,17 @@ static unsigned int ecdsa_key_size(struct crypto_sig *tfm)
+ 	return DIV_ROUND_UP(ctx->curve->nbits, 8);
+ }
+ 
++static unsigned int ecdsa_digest_size(struct crypto_sig *tfm)
++{
++	/*
++	 * ECDSA key sizes are much smaller than RSA, and thus could
++	 * operate on (hashed) inputs that are larger than the key size.
++	 * E.g. SHA384-hashed input used with secp256r1 based keys.
++	 * Return the largest supported hash size (SHA512).
++	 */
++	return SHA512_DIGEST_SIZE;
++}
++
+ static int ecdsa_nist_p521_init_tfm(struct crypto_sig *tfm)
+ {
+ 	struct ecc_ctx *ctx = crypto_sig_ctx(tfm);
+@@ -180,6 +192,7 @@ static struct sig_alg ecdsa_nist_p521 = {
+ 	.verify = ecdsa_verify,
+ 	.set_pub_key = ecdsa_set_pub_key,
+ 	.key_size = ecdsa_key_size,
++	.digest_size = ecdsa_digest_size,
+ 	.init = ecdsa_nist_p521_init_tfm,
+ 	.exit = ecdsa_exit_tfm,
+ 	.base = {
+@@ -202,6 +215,7 @@ static struct sig_alg ecdsa_nist_p384 = {
+ 	.verify = ecdsa_verify,
+ 	.set_pub_key = ecdsa_set_pub_key,
+ 	.key_size = ecdsa_key_size,
++	.digest_size = ecdsa_digest_size,
+ 	.init = ecdsa_nist_p384_init_tfm,
+ 	.exit = ecdsa_exit_tfm,
+ 	.base = {
+@@ -224,6 +238,7 @@ static struct sig_alg ecdsa_nist_p256 = {
+ 	.verify = ecdsa_verify,
+ 	.set_pub_key = ecdsa_set_pub_key,
+ 	.key_size = ecdsa_key_size,
++	.digest_size = ecdsa_digest_size,
+ 	.init = ecdsa_nist_p256_init_tfm,
+ 	.exit = ecdsa_exit_tfm,
+ 	.base = {
+@@ -246,6 +261,7 @@ static struct sig_alg ecdsa_nist_p192 = {
+ 	.verify = ecdsa_verify,
+ 	.set_pub_key = ecdsa_set_pub_key,
+ 	.key_size = ecdsa_key_size,
++	.digest_size = ecdsa_digest_size,
+ 	.init = ecdsa_nist_p192_init_tfm,
+ 	.exit = ecdsa_exit_tfm,
+ 	.base = {

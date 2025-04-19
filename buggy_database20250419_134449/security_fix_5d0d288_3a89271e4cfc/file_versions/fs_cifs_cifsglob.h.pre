@@ -1,0 +1,43 @@
+commit d7c86ff8cd00abc730fe5d031f43dc9138b6324e
+Author: Jeff Layton <jlayton@kernel.org>
+Date:   Mon Oct 11 15:07:19 2010 -0400
+
+    cifs: don't use vfsmount to pin superblock for oplock breaks
+    
+    Filesystems aren't really supposed to do anything with a vfsmount. It's
+    considered a layering violation since vfsmounts are entirely managed at
+    the VFS layer.
+    
+    CIFS currently keeps an active reference to a vfsmount in order to
+    prevent the superblock vanishing before an oplock break has completed.
+    What we really want to do instead is to keep sb->s_active high until the
+    oplock break has completed. This patch borrows the scheme that NFS uses
+    for handling sillyrenames.
+    
+    An atomic_t is added to the cifs_sb_info. When it transitions from 0 to
+    1, an extra reference to the superblock is taken (by bumping the
+    s_active value). When it transitions from 1 to 0, that reference is
+    dropped and a the superblock teardown may proceed if there are no more
+    references to it.
+    
+    Also, the vfsmount pointer is removed from cifsFileInfo and from
+    cifs_new_fileinfo, and some bogus forward declarations are removed from
+    cifsfs.h.
+    
+    Signed-off-by: Jeff Layton <jlayton@redhat.com>
+    Reviewed-by: Suresh Jayaraman <sjayaraman@suse.de>
+    Acked-by: Dave Kleikamp <shaggy@linux.vnet.ibm.com>
+    Signed-off-by: Steve French <sfrench@us.ibm.com>
+
+diff --git a/fs/cifs/cifsglob.h b/fs/cifs/cifsglob.h
+index 8289e61937a2..e2b760ef22ff 100644
+--- a/fs/cifs/cifsglob.h
++++ b/fs/cifs/cifsglob.h
+@@ -388,7 +388,6 @@ struct cifsFileInfo {
+ 	/* lock scope id (0 if none) */
+ 	struct file *pfile; /* needed for writepage */
+ 	struct dentry *dentry;
+-	struct vfsmount *mnt;
+ 	struct tcon_link *tlink;
+ 	struct mutex lock_mutex;
+ 	struct list_head llist; /* list of byte range locks we have. */

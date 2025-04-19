@@ -1,0 +1,66 @@
+{
+  "hash": "d0e1a1b5a833b625c93d3d49847609350ebd79db",
+  "hash_short": "d0e1a1b5",
+  "subject": "tcp: better validation of received ack sequences",
+  "body": "Paul Fiterau Brostean reported :\n\n<quote>\nLinux TCP stack we analyze exhibits behavior that seems odd to me.\nThe scenario is as follows (all packets have empty payloads, no window\nscaling, rcv/snd window size should not be a factor):\n\n       TEST HARNESS (CLIENT)                        LINUX SERVER\n\n   1.  -                                          LISTEN (server listen,\nthen accepts)\n\n   2.  - --> <SEQ=100><CTL=SYN>               --> SYN-RECEIVED\n\n   3.  - <-- <SEQ=300><ACK=101><CTL=SYN,ACK>  <-- SYN-RECEIVED\n\n   4.  - --> <SEQ=101><ACK=301><CTL=ACK>      --> ESTABLISHED\n\n   5.  - <-- <SEQ=301><ACK=101><CTL=FIN,ACK>  <-- FIN WAIT-1 (server\nopts to close the data connection calling \"close\" on the connection\nsocket)\n\n   6.  - --> <SEQ=101><ACK=99999><CTL=FIN,ACK> --> CLOSING (client sends\nFIN,ACK with not yet sent acknowledgement number)\n\n   7.  - <-- <SEQ=302><ACK=102><CTL=ACK>      <-- CLOSING (ACK is 102\ninstead of 101, why?)\n\n... (silence from CLIENT)\n\n   8.  - <-- <SEQ=301><ACK=102><CTL=FIN,ACK>  <-- CLOSING\n(retransmission, again ACK is 102)\n\nNow, note that packet 6 while having the expected sequence number,\nacknowledges something that wasn't sent by the server. So I would\nexpect\nthe packet to maybe prompt an ACK response from the server, and then be\nignored. Yet it is not ignored and actually leads to an increase of the\nacknowledgement number in the server's retransmission of the FIN,ACK\npacket. The explanation I found is that the FIN  in packet 6 was\nprocessed, despite the acknowledgement number being unacceptable.\nFurther experiments indeed show that the server processes this FIN,\ntransitioning to CLOSING, then on receiving an ACK for the FIN it had\nsend in packet 5, the server (or better said connection) transitions\nfrom CLOSING to TIME_WAIT (as signaled by netstat).\n\n</quote>\n\nIndeed, tcp_rcv_state_process() calls tcp_ack() but\ndoes not exploit the @acceptable status but for TCP_SYN_RECV\nstate.\n\nWhat we want here is to send a challenge ACK, if not in TCP_SYN_RECV\nstate. TCP_FIN_WAIT1 state is not the only state we should fix.\n\nAdd a FLAG_NO_CHALLENGE_ACK so that tcp_rcv_state_process()\ncan choose to send a challenge ACK and discard the packet instead\nof wrongly change socket state.\n\nWith help from Neal Cardwell.\n\nSigned-off-by: Eric Dumazet <edumazet@google.com>\nReported-by: Paul Fiterau Brostean <p.fiterau-brostean@science.ru.nl>\nCc: Neal Cardwell <ncardwell@google.com>\nCc: Yuchung Cheng <ycheng@google.com>\nCc: Soheil Hassas Yeganeh <soheil@google.com>\nSigned-off-by: David S. Miller <davem@davemloft.net>",
+  "full_message": "tcp: better validation of received ack sequences\n\nPaul Fiterau Brostean reported :\n\n<quote>\nLinux TCP stack we analyze exhibits behavior that seems odd to me.\nThe scenario is as follows (all packets have empty payloads, no window\nscaling, rcv/snd window size should not be a factor):\n\n       TEST HARNESS (CLIENT)                        LINUX SERVER\n\n   1.  -                                          LISTEN (server listen,\nthen accepts)\n\n   2.  - --> <SEQ=100><CTL=SYN>               --> SYN-RECEIVED\n\n   3.  - <-- <SEQ=300><ACK=101><CTL=SYN,ACK>  <-- SYN-RECEIVED\n\n   4.  - --> <SEQ=101><ACK=301><CTL=ACK>      --> ESTABLISHED\n\n   5.  - <-- <SEQ=301><ACK=101><CTL=FIN,ACK>  <-- FIN WAIT-1 (server\nopts to close the data connection calling \"close\" on the connection\nsocket)\n\n   6.  - --> <SEQ=101><ACK=99999><CTL=FIN,ACK> --> CLOSING (client sends\nFIN,ACK with not yet sent acknowledgement number)\n\n   7.  - <-- <SEQ=302><ACK=102><CTL=ACK>      <-- CLOSING (ACK is 102\ninstead of 101, why?)\n\n... (silence from CLIENT)\n\n   8.  - <-- <SEQ=301><ACK=102><CTL=FIN,ACK>  <-- CLOSING\n(retransmission, again ACK is 102)\n\nNow, note that packet 6 while having the expected sequence number,\nacknowledges something that wasn't sent by the server. So I would\nexpect\nthe packet to maybe prompt an ACK response from the server, and then be\nignored. Yet it is not ignored and actually leads to an increase of the\nacknowledgement number in the server's retransmission of the FIN,ACK\npacket. The explanation I found is that the FIN  in packet 6 was\nprocessed, despite the acknowledgement number being unacceptable.\nFurther experiments indeed show that the server processes this FIN,\ntransitioning to CLOSING, then on receiving an ACK for the FIN it had\nsend in packet 5, the server (or better said connection) transitions\nfrom CLOSING to TIME_WAIT (as signaled by netstat).\n\n</quote>\n\nIndeed, tcp_rcv_state_process() calls tcp_ack() but\ndoes not exploit the @acceptable status but for TCP_SYN_RECV\nstate.\n\nWhat we want here is to send a challenge ACK, if not in TCP_SYN_RECV\nstate. TCP_FIN_WAIT1 state is not the only state we should fix.\n\nAdd a FLAG_NO_CHALLENGE_ACK so that tcp_rcv_state_process()\ncan choose to send a challenge ACK and discard the packet instead\nof wrongly change socket state.\n\nWith help from Neal Cardwell.\n\nSigned-off-by: Eric Dumazet <edumazet@google.com>\nReported-by: Paul Fiterau Brostean <p.fiterau-brostean@science.ru.nl>\nCc: Neal Cardwell <ncardwell@google.com>\nCc: Yuchung Cheng <ycheng@google.com>\nCc: Soheil Hassas Yeganeh <soheil@google.com>\nSigned-off-by: David S. Miller <davem@davemloft.net>",
+  "author_name": "Eric Dumazet",
+  "author_email": "edumazet@google.com",
+  "author_date": "Tue May 23 15:24:46 2017 -0700",
+  "author_date_iso": "2017-05-23T15:24:46-07:00",
+  "committer_name": "David S. Miller",
+  "committer_email": "davem@davemloft.net",
+  "committer_date": "Thu May 25 12:46:55 2017 -0400",
+  "committer_date_iso": "2017-05-25T12:46:55-04:00",
+  "files_changed": [
+    "net/ipv4/tcp_input.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "net/ipv4/tcp_input.c",
+      "insertions": 11,
+      "deletions": 13
+    }
+  ],
+  "total_insertions": 11,
+  "total_deletions": 13,
+  "total_changes": 24,
+  "parents": [
+    "367a8ce896f14018cc2c6cf2681aa440fff274f4"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v4.13",
+    "v4.13-rc1",
+    "v4.13-rc2",
+    "v4.13-rc3",
+    "v4.13-rc4",
+    "v4.13-rc5",
+    "v4.13-rc6",
+    "v4.13-rc7",
+    "v4.14",
+    "v4.14-rc1"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "exploit"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "net/ipv4/tcp_input.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

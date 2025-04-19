@@ -1,0 +1,45 @@
+commit 5631792053f094a8e2f01d5ddcc2550ad4da22f0
+Author: David Hildenbrand <dahi@linux.vnet.ibm.com>
+Date:   Tue Jan 12 17:37:58 2016 +0100
+
+    KVM: s390: provide prog irq ilc on SIE faults
+    
+    On SIE faults, the ilc cannot be detected automatically, as the icptcode
+    is 0. The ilc indicated in the program irq will always be 0. Therefore we
+    have to manually specify the ilc in order to tell the guest which ilen was
+    used when forwarding the PSW.
+    
+    Reviewed-by: Christian Borntraeger <borntraeger@de.ibm.com>
+    Signed-off-by: David Hildenbrand <dahi@linux.vnet.ibm.com>
+    Signed-off-by: Christian Borntraeger <borntraeger@de.ibm.com>
+
+diff --git a/arch/s390/kvm/kvm-s390.c b/arch/s390/kvm/kvm-s390.c
+index aa51a8d5179f..12cec63eda27 100644
+--- a/arch/s390/kvm/kvm-s390.c
++++ b/arch/s390/kvm/kvm-s390.c
+@@ -2163,7 +2163,10 @@ static int vcpu_pre_run(struct kvm_vcpu *vcpu)
+ 
+ static int vcpu_post_run_fault_in_sie(struct kvm_vcpu *vcpu)
+ {
+-	u8 opcode;
++	struct kvm_s390_pgm_info pgm_info = {
++		.code = PGM_ADDRESSING,
++	};
++	u8 opcode, ilen;
+ 	int rc;
+ 
+ 	VCPU_EVENT(vcpu, 3, "%s", "fault in sie instruction");
+@@ -2180,9 +2183,10 @@ static int vcpu_post_run_fault_in_sie(struct kvm_vcpu *vcpu)
+ 	rc = read_guest_instr(vcpu, &opcode, 1);
+ 	if (rc)
+ 		return kvm_s390_inject_prog_cond(vcpu, rc);
+-	kvm_s390_forward_psw(vcpu, insn_length(opcode));
+-
+-	return kvm_s390_inject_program_int(vcpu, PGM_ADDRESSING);
++	ilen = insn_length(opcode);
++	pgm_info.flags = ilen | KVM_S390_PGM_FLAGS_ILC_VALID;
++	kvm_s390_forward_psw(vcpu, ilen);
++	return kvm_s390_inject_prog_irq(vcpu, &pgm_info);
+ }
+ 
+ static int vcpu_post_run(struct kvm_vcpu *vcpu, int exit_reason)

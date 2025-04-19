@@ -1,0 +1,54 @@
+{
+  "hash": "6e0b456547f41bafdad2dc3a72adc7f69326ca4c",
+  "hash_short": "6e0b4565",
+  "subject": "KVM: nVMX: Detect nested posted interrupt NV at nested VM-Exit injection",
+  "body": "When synthensizing a nested VM-Exit due to an external interrupt, pend a\nnested posted interrupt if the external interrupt vector matches L2's PI\nnotification vector, i.e. if the interrupt is a PI notification for L2.\nThis fixes a bug where KVM will incorrectly inject VM-Exit instead of\nprocessing nested posted interrupt when IPI virtualization is enabled.\n\nPer the SDM, detection of the notification vector doesn't occur until the\ninterrupt is acknowledge and deliver to the CPU core.\n\n  If the external-interrupt exiting VM-execution control is 1, any unmasked\n  external interrupt causes a VM exit (see Section 26.2). If the \"process\n  posted interrupts\" VM-execution control is also 1, this behavior is\n  changed and the processor handles an external interrupt as follows:\n\n    1. The local APIC is acknowledged; this provides the processor core\n       with an interrupt vector, called here the physical vector.\n    2. If the physical vector equals the posted-interrupt notification\n       vector, the logical processor continues to the next step. Otherwise,\n       a VM exit occurs as it would normally due to an external interrupt;\n       the vector is saved in the VM-exit interruption-information field.\n\nFor the most part, KVM has avoided problems because a PI NV for L2 that\narrives will L2 is active will be processed by hardware, and KVM checks\nfor a pending notification vector during nested VM-Enter.  Thus, to hit\nthe bug, the PI NV interrupt needs to sneak its way into L1's vIRR while\nL2 is active.\n\nWithout IPI virtualization, the scenario is practically impossible to hit,\nmodulo L1 doing weird things (see below), as the ordering between\nvmx_deliver_posted_interrupt() and nested VM-Enter effectively guarantees\nthat either the sender will see the vCPU as being in_guest_mode(), or the\nreceiver will see the interrupt in its vIRR.\n\nWith IPI virtualization, introduced by commit d588bb9be1da (\"KVM: VMX:\nenable IPI virtualization\"), the sending CPU effectively implements a rough\nequivalent of vmx_deliver_posted_interrupt(), sans the nested PI NV check.\nIf the target vCPU has a valid PID, the CPU will send a PI NV interrupt\nbased on _L1's_ PID, as the sender's because IPIv table points at L1 PIDs.\n\n  PIR := 32 bytes at PID_ADDR;\n  // under lock\n  PIR[V] := 1;\n  store PIR at PID_ADDR;\n  // release lock\n\n  NotifyInfo := 8 bytes at PID_ADDR + 32;\n  // under lock\n  IF NotifyInfo.ON = 0 AND NotifyInfo.SN = 0; THEN\n    NotifyInfo.ON := 1;\n    SendNotify := 1;\n  ELSE\n    SendNotify := 0;\n  FI;\n  store NotifyInfo at PID_ADDR + 32;\n  // release lock\n\n  IF SendNotify = 1; THEN\n    send an IPI specified by NotifyInfo.NDST and NotifyInfo.NV;\n  FI;\n\nAs a result, the target vCPU ends up receiving an interrupt on KVM's\nPOSTED_INTR_VECTOR while L2 is running, with an interrupt in L1's PIR for\nL2's nested PI NV.  The POSTED_INTR_VECTOR interrupt triggers a VM-Exit\nfrom L2 to L0, KVM moves the interrupt from L1's PIR to vIRR, triggers a\nKVM_REQ_EVENT prior to re-entry to L2, and calls vmx_check_nested_events(),\neffectively bypassing all of KVM's \"early\" checks on nested PI NV.\n\nWithout IPI virtualization, the bug can likely be hit only if L1 programs\nan assigned device to _post_ an interrupt to L2's notification vector, by\nway of L1's PID.PIR.  Doing so would allow the interrupt to get into L1's\nvIRR without KVM checking vmcs12's NV.  Which is architecturally allowed,\nbut unlikely behavior for a hypervisor.\n\nCc: Zeng Guang <guang.zeng@intel.com>\nReviewed-by: Chao Gao <chao.gao@intel.com>\nLink: https://lore.kernel.org/r/20240906043413.1049633-5-seanjc@google.com\nSigned-off-by: Sean Christopherson <seanjc@google.com>",
+  "full_message": "KVM: nVMX: Detect nested posted interrupt NV at nested VM-Exit injection\n\nWhen synthensizing a nested VM-Exit due to an external interrupt, pend a\nnested posted interrupt if the external interrupt vector matches L2's PI\nnotification vector, i.e. if the interrupt is a PI notification for L2.\nThis fixes a bug where KVM will incorrectly inject VM-Exit instead of\nprocessing nested posted interrupt when IPI virtualization is enabled.\n\nPer the SDM, detection of the notification vector doesn't occur until the\ninterrupt is acknowledge and deliver to the CPU core.\n\n  If the external-interrupt exiting VM-execution control is 1, any unmasked\n  external interrupt causes a VM exit (see Section 26.2). If the \"process\n  posted interrupts\" VM-execution control is also 1, this behavior is\n  changed and the processor handles an external interrupt as follows:\n\n    1. The local APIC is acknowledged; this provides the processor core\n       with an interrupt vector, called here the physical vector.\n    2. If the physical vector equals the posted-interrupt notification\n       vector, the logical processor continues to the next step. Otherwise,\n       a VM exit occurs as it would normally due to an external interrupt;\n       the vector is saved in the VM-exit interruption-information field.\n\nFor the most part, KVM has avoided problems because a PI NV for L2 that\narrives will L2 is active will be processed by hardware, and KVM checks\nfor a pending notification vector during nested VM-Enter.  Thus, to hit\nthe bug, the PI NV interrupt needs to sneak its way into L1's vIRR while\nL2 is active.\n\nWithout IPI virtualization, the scenario is practically impossible to hit,\nmodulo L1 doing weird things (see below), as the ordering between\nvmx_deliver_posted_interrupt() and nested VM-Enter effectively guarantees\nthat either the sender will see the vCPU as being in_guest_mode(), or the\nreceiver will see the interrupt in its vIRR.\n\nWith IPI virtualization, introduced by commit d588bb9be1da (\"KVM: VMX:\nenable IPI virtualization\"), the sending CPU effectively implements a rough\nequivalent of vmx_deliver_posted_interrupt(), sans the nested PI NV check.\nIf the target vCPU has a valid PID, the CPU will send a PI NV interrupt\nbased on _L1's_ PID, as the sender's because IPIv table points at L1 PIDs.\n\n  PIR := 32 bytes at PID_ADDR;\n  // under lock\n  PIR[V] := 1;\n  store PIR at PID_ADDR;\n  // release lock\n\n  NotifyInfo := 8 bytes at PID_ADDR + 32;\n  // under lock\n  IF NotifyInfo.ON = 0 AND NotifyInfo.SN = 0; THEN\n    NotifyInfo.ON := 1;\n    SendNotify := 1;\n  ELSE\n    SendNotify := 0;\n  FI;\n  store NotifyInfo at PID_ADDR + 32;\n  // release lock\n\n  IF SendNotify = 1; THEN\n    send an IPI specified by NotifyInfo.NDST and NotifyInfo.NV;\n  FI;\n\nAs a result, the target vCPU ends up receiving an interrupt on KVM's\nPOSTED_INTR_VECTOR while L2 is running, with an interrupt in L1's PIR for\nL2's nested PI NV.  The POSTED_INTR_VECTOR interrupt triggers a VM-Exit\nfrom L2 to L0, KVM moves the interrupt from L1's PIR to vIRR, triggers a\nKVM_REQ_EVENT prior to re-entry to L2, and calls vmx_check_nested_events(),\neffectively bypassing all of KVM's \"early\" checks on nested PI NV.\n\nWithout IPI virtualization, the bug can likely be hit only if L1 programs\nan assigned device to _post_ an interrupt to L2's notification vector, by\nway of L1's PID.PIR.  Doing so would allow the interrupt to get into L1's\nvIRR without KVM checking vmcs12's NV.  Which is architecturally allowed,\nbut unlikely behavior for a hypervisor.\n\nCc: Zeng Guang <guang.zeng@intel.com>\nReviewed-by: Chao Gao <chao.gao@intel.com>\nLink: https://lore.kernel.org/r/20240906043413.1049633-5-seanjc@google.com\nSigned-off-by: Sean Christopherson <seanjc@google.com>",
+  "author_name": "Sean Christopherson",
+  "author_email": "seanjc@google.com",
+  "author_date": "Thu Sep 5 21:34:10 2024 -0700",
+  "author_date_iso": "2024-09-05T21:34:10-07:00",
+  "committer_name": "Sean Christopherson",
+  "committer_email": "seanjc@google.com",
+  "committer_date": "Mon Sep 9 20:15:00 2024 -0700",
+  "committer_date_iso": "2024-09-09T20:15:00-07:00",
+  "files_changed": [
+    "arch/x86/kvm/vmx/nested.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "arch/x86/kvm/vmx/nested.c",
+      "insertions": 14,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 14,
+  "total_deletions": 0,
+  "total_changes": 14,
+  "parents": [
+    "8c23670f2b0004edb8f7135e314114f0c3452085"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "injection"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/x86/kvm/vmx/nested.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

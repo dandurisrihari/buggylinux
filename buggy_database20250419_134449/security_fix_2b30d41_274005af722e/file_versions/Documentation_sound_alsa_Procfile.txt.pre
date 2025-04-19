@@ -1,0 +1,78 @@
+commit f5914908a5b7b2338f210e56827a1ef35585dc6d
+Author: Takashi Iwai <tiwai@suse.de>
+Date:   Tue Nov 4 12:45:59 2014 +0100
+
+    ALSA: pcm: Replace PCM hwptr tracking with tracepoints
+    
+    ALSA PCM core has a mechanism tracking the PCM hwptr updates for
+    analyzing XRUNs.  But its log is limited (up to 10) and its log output
+    is a kernel message, which is hard to handle.
+    
+    In this patch, the hwptr logging is moved to the tracing
+    infrastructure instead of its own.  Not only the hwptr updates but
+    also XRUN and hwptr errors are recorded on the trace log, so that user
+    can see such events at the exact timing.
+    
+    The new "snd_pcm" entry will appear in the tracing events:
+      # ls -F /sys/kernel/debug/tracing/events/snd_pcm
+      enable  filter  hw_ptr_error/  hwptr/  xrun/
+    
+    The hwptr is for the regular hwptr update events.  An event trace
+    looks like:
+    
+      aplay-26187 [004] d..3  4012.834761: hwptr: pcmC0D0p/sub0: POS: pos=488, old=0, base=0, period=1024, buf=16384
+    
+    "POS" shows the hwptr update by the explicit position update call and
+    "IRQ" means the hwptr update by the interrupt,
+    i.e. snd_pcm_period_elapsed() call.  The "pos" is the passed
+    ring-buffer offset by the caller, "old" is the previous hwptr, "base"
+    is the hwptr base position, "period" and "buf" are period- and
+    buffer-size of the target PCM substream.
+    (Note that the hwptr position displayed here isn't the ring-buffer
+     offset.  It increments up to the PCM position boundary.)
+    
+    The XRUN event appears similarly, but without "pos" field.
+    The hwptr error events appear with the PCM identifier and its reason
+    string, such as "Lost interrupt?".
+    
+    The XRUN and hwptr error reports on kernel message are still left, can
+    be turned on/off via xrun_debug proc like before.  But the bit 3, 4, 5
+    and 6 bits of xrun_debug proc are dropped by this patch.  Also, along
+    with the change, the message strings have been reformatted to be a bit
+    more consistent.
+    
+    Last but not least, the hwptr reporting is enabled only when
+    CONFIG_SND_PCM_XRUN_DEBUG is set.
+    
+    Signed-off-by: Takashi Iwai <tiwai@suse.de>
+
+diff --git a/Documentation/sound/alsa/Procfile.txt b/Documentation/sound/alsa/Procfile.txt
+index 7fcd1ad96fcc..cfc49567b9dc 100644
+--- a/Documentation/sound/alsa/Procfile.txt
++++ b/Documentation/sound/alsa/Procfile.txt
+@@ -101,10 +101,6 @@ card*/pcm*/xrun_debug
+ 	  bit 0 = Enable XRUN/jiffies debug messages
+ 	  bit 1 = Show stack trace at XRUN / jiffies check
+ 	  bit 2 = Enable additional jiffies check
+-	  bit 3 = Log hwptr update at each period interrupt
+-	  bit 4 = Log hwptr update at each snd_pcm_update_hw_ptr()
+-	  bit 5 = Show last 10 positions on error
+-	  bit 6 = Do above only once
+ 
+ 	When the bit 0 is set, the driver will show the messages to
+ 	kernel log when an xrun is detected.  The debug message is
+@@ -121,15 +117,6 @@ card*/pcm*/xrun_debug
+ 	buggy) hardware that doesn't give smooth pointer updates.
+ 	This feature is enabled via the bit 2.
+ 
+-	Bits 3 and 4 are for logging the hwptr records.  Note that
+-	these will give flood of kernel messages.
+-
+-	When bit 5 is set, the driver logs the last 10 xrun errors and
+-	the proc file shows each jiffies, position, period_size,
+-	buffer_size, old_hw_ptr, and hw_ptr_base values.
+-
+-	When bit 6 is set, the full xrun log is shown only once.
+-
+ card*/pcm*/sub*/info
+ 	The general information of this PCM sub-stream.

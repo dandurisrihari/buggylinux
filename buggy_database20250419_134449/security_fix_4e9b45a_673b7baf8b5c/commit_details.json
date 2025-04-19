@@ -1,0 +1,90 @@
+{
+  "hash": "4e9b45a19241354daec281d7a785739829b52359",
+  "hash_short": "4e9b45a1",
+  "subject": "ipc, msg: fix message length check for negative values",
+  "body": "On 64 bit systems the test for negative message sizes is bogus as the\nsize, which may be positive when evaluated as a long, will get truncated\nto an int when passed to load_msg().  So a long might very well contain a\npositive value but when truncated to an int it would become negative.\n\nThat in combination with a small negative value of msg_ctlmax (which will\nbe promoted to an unsigned type for the comparison against msgsz, making\nit a big positive value and therefore make it pass the check) will lead to\ntwo problems: 1/ The kmalloc() call in alloc_msg() will allocate a too\nsmall buffer as the addition of alen is effectively a subtraction.  2/ The\ncopy_from_user() call in load_msg() will first overflow the buffer with\nuserland data and then, when the userland access generates an access\nviolation, the fixup handler copy_user_handle_tail() will try to fill the\nremainder with zeros -- roughly 4GB.  That almost instantly results in a\nsystem crash or reset.\n\n  ,-[ Reproducer (needs to be run as root) ]--\n  | #include <sys/stat.h>\n  | #include <sys/msg.h>\n  | #include <unistd.h>\n  | #include <fcntl.h>\n  |\n  | int main(void) {\n  |     long msg = 1;\n  |     int fd;\n  |\n  |     fd = open(\"/proc/sys/kernel/msgmax\", O_WRONLY);\n  |     write(fd, \"-1\", 2);\n  |     close(fd);\n  |\n  |     msgsnd(0, &msg, 0xfffffff0, IPC_NOWAIT);\n  |\n  |     return 0;\n  | }\n  '---\n\nFix the issue by preventing msgsz from getting truncated by consistently\nusing size_t for the message length.  This way the size checks in\ndo_msgsnd() could still be passed with a negative value for msg_ctlmax but\nwe would fail on the buffer allocation in that case and error out.\n\nAlso change the type of m_ts from int to size_t to avoid similar nastiness\nin other code paths -- it is used in similar constructs, i.e.  signed vs.\nunsigned checks.  It should never become negative under normal\ncircumstances, though.\n\nSetting msg_ctlmax to a negative value is an odd configuration and should\nbe prevented.  As that might break existing userland, it will be handled\nin a separate commit so it could easily be reverted and reworked without\nreintroducing the above described bug.\n\nHardening mechanisms for user copy operations would have catched that bug\nearly -- e.g.  checking slab object sizes on user copy operations as the\nusercopy feature of the PaX patch does.  Or, for that matter, detect the\nlong vs.  int sign change due to truncation, as the size overflow plugin\nof the very same patch does.\n\n[akpm@linux-foundation.org: fix i386 min() warnings]\nSigned-off-by: Mathias Krause <minipli@googlemail.com>\nCc: Pax Team <pageexec@freemail.hu>\nCc: Davidlohr Bueso <davidlohr@hp.com>\nCc: Brad Spengler <spender@grsecurity.net>\nCc: Manfred Spraul <manfred@colorfullife.com>\nCc: <stable@vger.kernel.org>\t[ v2.3.27+ -- yes, that old ;) ]\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>\nSigned-off-by: Linus Torvalds <torvalds@linux-foundation.org>",
+  "full_message": "ipc, msg: fix message length check for negative values\n\nOn 64 bit systems the test for negative message sizes is bogus as the\nsize, which may be positive when evaluated as a long, will get truncated\nto an int when passed to load_msg().  So a long might very well contain a\npositive value but when truncated to an int it would become negative.\n\nThat in combination with a small negative value of msg_ctlmax (which will\nbe promoted to an unsigned type for the comparison against msgsz, making\nit a big positive value and therefore make it pass the check) will lead to\ntwo problems: 1/ The kmalloc() call in alloc_msg() will allocate a too\nsmall buffer as the addition of alen is effectively a subtraction.  2/ The\ncopy_from_user() call in load_msg() will first overflow the buffer with\nuserland data and then, when the userland access generates an access\nviolation, the fixup handler copy_user_handle_tail() will try to fill the\nremainder with zeros -- roughly 4GB.  That almost instantly results in a\nsystem crash or reset.\n\n  ,-[ Reproducer (needs to be run as root) ]--\n  | #include <sys/stat.h>\n  | #include <sys/msg.h>\n  | #include <unistd.h>\n  | #include <fcntl.h>\n  |\n  | int main(void) {\n  |     long msg = 1;\n  |     int fd;\n  |\n  |     fd = open(\"/proc/sys/kernel/msgmax\", O_WRONLY);\n  |     write(fd, \"-1\", 2);\n  |     close(fd);\n  |\n  |     msgsnd(0, &msg, 0xfffffff0, IPC_NOWAIT);\n  |\n  |     return 0;\n  | }\n  '---\n\nFix the issue by preventing msgsz from getting truncated by consistently\nusing size_t for the message length.  This way the size checks in\ndo_msgsnd() could still be passed with a negative value for msg_ctlmax but\nwe would fail on the buffer allocation in that case and error out.\n\nAlso change the type of m_ts from int to size_t to avoid similar nastiness\nin other code paths -- it is used in similar constructs, i.e.  signed vs.\nunsigned checks.  It should never become negative under normal\ncircumstances, though.\n\nSetting msg_ctlmax to a negative value is an odd configuration and should\nbe prevented.  As that might break existing userland, it will be handled\nin a separate commit so it could easily be reverted and reworked without\nreintroducing the above described bug.\n\nHardening mechanisms for user copy operations would have catched that bug\nearly -- e.g.  checking slab object sizes on user copy operations as the\nusercopy feature of the PaX patch does.  Or, for that matter, detect the\nlong vs.  int sign change due to truncation, as the size overflow plugin\nof the very same patch does.\n\n[akpm@linux-foundation.org: fix i386 min() warnings]\nSigned-off-by: Mathias Krause <minipli@googlemail.com>\nCc: Pax Team <pageexec@freemail.hu>\nCc: Davidlohr Bueso <davidlohr@hp.com>\nCc: Brad Spengler <spender@grsecurity.net>\nCc: Manfred Spraul <manfred@colorfullife.com>\nCc: <stable@vger.kernel.org>\t[ v2.3.27+ -- yes, that old ;) ]\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>\nSigned-off-by: Linus Torvalds <torvalds@linux-foundation.org>",
+  "author_name": "Mathias Krause",
+  "author_email": "minipli@googlemail.com",
+  "author_date": "Tue Nov 12 15:11:47 2013 -0800",
+  "author_date_iso": "2013-11-12T15:11:47-08:00",
+  "committer_name": "Linus Torvalds",
+  "committer_email": "torvalds@linux-foundation.org",
+  "committer_date": "Wed Nov 13 12:09:36 2013 +0900",
+  "committer_date_iso": "2013-11-13T12:09:36+09:00",
+  "files_changed": [
+    "include/linux/msg.h",
+    "ipc/msgutil.c",
+    "ipc/util.h"
+  ],
+  "files_changed_count": 3,
+  "stats": [
+    {
+      "file": "include/linux/msg.h",
+      "insertions": 3,
+      "deletions": 3
+    },
+    {
+      "file": "ipc/msgutil.c",
+      "insertions": 10,
+      "deletions": 10
+    },
+    {
+      "file": "ipc/util.h",
+      "insertions": 2,
+      "deletions": 2
+    }
+  ],
+  "total_insertions": 15,
+  "total_deletions": 15,
+  "total_changes": 30,
+  "parents": [
+    "206fa940977260ede421151aae067e2509356116"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v3.13",
+    "v3.13-rc1",
+    "v3.13-rc2",
+    "v3.13-rc3",
+    "v3.13-rc4",
+    "v3.13-rc5",
+    "v3.13-rc6",
+    "v3.13-rc7",
+    "v3.13-rc8",
+    "v3.14"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "Hardening"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "include/linux/msg.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "ipc/msgutil.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "ipc/util.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

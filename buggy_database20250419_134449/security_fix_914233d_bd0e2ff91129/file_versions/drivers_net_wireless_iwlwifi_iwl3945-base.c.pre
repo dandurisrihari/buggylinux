@@ -1,0 +1,73 @@
+commit 25b3f57c1f4572d9b2d5671d60e99f26d2a7a26b
+Author: Rick Farrington <rickdic@hotmail.com>
+Date:   Mon Jun 30 17:23:28 2008 +0800
+
+    iwlwifi: fix incorrect monitor mode operation
+    
+    This patch fixes monitor mode operation for iwlwifi.
+    
+    Problems addressed:
+    1. when monitor mode was enabled, multiple, overlapped calls were being
+    made to 'iwl3945_bg_set_monitor'
+    
+    2. when monitor mode was disabled (via the configure_filter callback),
+    the driver was still enabling monitor mode
+    
+    3. when monitor mode was enabled, the selected channel was not set
+    (eg. 'iwconfig wlanx mode monitor channel n' DID NOT SET channel 'n'
+    when packet capture was subsequently enabled)
+    
+    Signed-off-by: Rick Farrington <rickdic@hotmail.com>
+    Signed-off-by: Zhu Yi <yi.zhu@intel.com>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/drivers/net/wireless/iwlwifi/iwl3945-base.c b/drivers/net/wireless/iwlwifi/iwl3945-base.c
+index 43cb8ff97939..4f0a18a0e664 100644
+--- a/drivers/net/wireless/iwlwifi/iwl3945-base.c
++++ b/drivers/net/wireless/iwlwifi/iwl3945-base.c
+@@ -2312,7 +2312,7 @@ static void iwl3945_connection_init_rx_config(struct iwl3945_priv *priv)
+ #endif
+ 
+ 	ch_info = iwl3945_get_channel_info(priv, priv->band,
+-				       le16_to_cpu(priv->staging_rxon.channel));
++				       le16_to_cpu(priv->active_rxon.channel));
+ 
+ 	if (!ch_info)
+ 		ch_info = &priv->channel_info[0];
+@@ -7006,26 +7006,18 @@ static void iwl3945_configure_filter(struct ieee80211_hw *hw,
+ 				 unsigned int *total_flags,
+ 				 int mc_count, struct dev_addr_list *mc_list)
+ {
+-	/*
+-	 * XXX: dummy
+-	 * see also iwl3945_connection_init_rx_config
+-	 */
+ 	struct iwl3945_priv *priv = hw->priv;
+-	int new_flags = 0;
+-	if (changed_flags & (FIF_PROMISC_IN_BSS | FIF_OTHER_BSS)) {
+-		if (*total_flags & (FIF_PROMISC_IN_BSS | FIF_OTHER_BSS)) {
+-			IWL_DEBUG_MAC80211("Enter: type %d (0x%x, 0x%x)\n",
+-					   IEEE80211_IF_TYPE_MNTR,
+-					   changed_flags, *total_flags);
+-			/* queue work 'cuz mac80211 is holding a lock which
+-			 * prevents us from issuing (synchronous) f/w cmds */
+-			queue_work(priv->workqueue, &priv->set_monitor);
+-			new_flags &= FIF_PROMISC_IN_BSS |
+-				     FIF_OTHER_BSS |
+-				     FIF_ALLMULTI;
+-		}
++
++	if (changed_flags & (*total_flags) & FIF_OTHER_BSS) {
++		IWL_DEBUG_MAC80211("Enter: type %d (0x%x, 0x%x)\n",
++				   IEEE80211_IF_TYPE_MNTR,
++				   changed_flags, *total_flags);
++		/* queue work 'cuz mac80211 is holding a lock which
++		 * prevents us from issuing (synchronous) f/w cmds */
++		queue_work(priv->workqueue, &priv->set_monitor);
+ 	}
+-	*total_flags = new_flags;
++	*total_flags &= FIF_OTHER_BSS | FIF_ALLMULTI |
++			FIF_BCN_PRBRESP_PROMISC | FIF_CONTROL;
+ }
+ 
+ static void iwl3945_mac_remove_interface(struct ieee80211_hw *hw,

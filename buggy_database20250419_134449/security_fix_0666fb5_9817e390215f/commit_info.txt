@@ -1,0 +1,71 @@
+Commit Hash: 0666fb51b1483f27506e212cc7f7b2645b5c7acc
+Subject: ptrace: ptrace_resume() shouldn't wake up !TASK_TRACED thread
+
+
+Security Keywords:
+- exploit
+
+Full commit message:
+ptrace: ptrace_resume() shouldn't wake up !TASK_TRACED thread
+
+It is not clear why ptrace_resume() does wake_up_process(). Unless the
+caller is PTRACE_KILL the tracee should be TASK_TRACED so we can use
+wake_up_state(__TASK_TRACED). If sys_ptrace() races with SIGKILL we do
+not need the extra and potentionally spurious wakeup.
+
+If the caller is PTRACE_KILL, wake_up_process() is even more wrong.
+The tracee can sleep in any state in any place, and if we have a buggy
+code which doesn't handle a spurious wakeup correctly PTRACE_KILL can
+be used to exploit it. For example:
+
+	int main(void)
+	{
+		int child, status;
+
+		child = fork();
+		if (!child) {
+			int ret;
+
+			assert(ptrace(PTRACE_TRACEME, 0,0,0) == 0);
+
+			ret = pause();
+			printf("pause: %d %m\n", ret);
+
+			return 0x23;
+		}
+
+		sleep(1);
+		assert(ptrace(PTRACE_KILL, child, 0,0) == 0);
+
+		assert(child == wait(&status));
+		printf("wait: %x\n", status);
+
+		return 0;
+	}
+
+prints "pause: -1 Unknown error 514", -ERESTARTNOHAND leaks to the
+userland. In this case sys_pause() is buggy as well and should be
+fixed.
+
+I do not know what was the original rationality behind PTRACE_KILL.
+The man page is simply wrong and afaics it was always wrong. Imho
+it should be deprecated, or may be it should do send_sig(SIGKILL)
+as Denys suggests, but in any case I do not think that the current
+behaviour was intentional.
+
+Note: there is another problem, ptrace_resume() changes ->exit_code
+and this can race with SIGKILL too. Eventually we should change ptrace
+to not use ->exit_code.
+
+Signed-off-by: Oleg Nesterov <oleg@redhat.com>
+
+Metadata:
+Author: Oleg Nesterov <oleg@redhat.com>
+Author Date: Wed May 25 19:20:21 2011 +0200
+Committer: Oleg Nesterov <oleg@redhat.com>
+Commit Date: Wed May 25 19:20:21 2011 +0200
+
+Files Changed: 1
+Lines Added: 1
+Lines Removed: 1
+Total Changes: 2

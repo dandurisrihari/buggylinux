@@ -1,0 +1,52 @@
+commit 09ab6f4c2376a0fc31abde1e2991513f900ea825
+Author: Marcel Holtmann <marcel@holtmann.org>
+Date:   Tue Sep 9 07:19:20 2008 +0200
+
+    [Bluetooth] Enforce correct authentication requirements
+    
+    With the introduction of Security Mode 4 and Simple Pairing from the
+    Bluetooth 2.1 specification it became mandatory that the initiator
+    requires authentication and encryption before any L2CAP channel can
+    be established. The only exception here is PSM 1 for the service
+    discovery protocol (SDP). It is meant to be used without any encryption
+    since it contains only public information. This is how Bluetooth 2.0
+    and before handle connections on PSM 1.
+    
+    For Bluetooth 2.1 devices the pairing procedure differentiates between
+    no bonding, general bonding and dedicated bonding. The L2CAP layer
+    wrongly uses always general bonding when creating new connections, but it
+    should not do this for SDP connections. In this case the authentication
+    requirement should be no bonding and the just-works model should be used,
+    but in case of non-SDP connection it is required to use general bonding.
+    
+    If the new connection requires man-in-the-middle (MITM) protection, it
+    also first wrongly creates an unauthenticated link key and then later on
+    requests an upgrade to an authenticated link key to provide full MITM
+    protection. With Simple Pairing the link key generation is an expensive
+    operation (compared to Bluetooth 2.0 and before) and doing this twice
+    during a connection setup causes a noticeable delay when establishing
+    a new connection. This should be avoided to not regress from the expected
+    Bluetooth 2.0 connection times. The authentication requirements are known
+    up-front and so enforce them.
+    
+    To fulfill these requirements the hci_connect() function has been extended
+    with an authentication requirement parameter that will be stored inside
+    the connection information and can be retrieved by userspace at any
+    time. This allows the correct IO capabilities exchange and results in
+    the expected behavior.
+    
+    Signed-off-by: Marcel Holtmann <marcel@holtmann.org>
+
+diff --git a/include/net/bluetooth/hci_core.h b/include/net/bluetooth/hci_core.h
+index cbf751094688..5e785b968e7e 100644
+--- a/include/net/bluetooth/hci_core.h
++++ b/include/net/bluetooth/hci_core.h
+@@ -325,7 +325,7 @@ int hci_conn_del(struct hci_conn *conn);
+ void hci_conn_hash_flush(struct hci_dev *hdev);
+ void hci_conn_check_pending(struct hci_dev *hdev);
+ 
+-struct hci_conn *hci_connect(struct hci_dev *hdev, int type, bdaddr_t *src);
++struct hci_conn *hci_connect(struct hci_dev *hdev, int type, bdaddr_t *dst, __u8 auth_type);
+ int hci_conn_auth(struct hci_conn *conn);
+ int hci_conn_encrypt(struct hci_conn *conn);
+ int hci_conn_change_link_key(struct hci_conn *conn);

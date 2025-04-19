@@ -1,0 +1,42 @@
+commit 77c8cd6b85af8840878063eb2df39780e808f74b
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Sat Feb 26 00:15:32 2022 +0000
+
+    KVM: x86/mmu: Skip remote TLB flush when zapping all of TDP MMU
+    
+    Don't flush the TLBs when zapping all TDP MMU pages, as the only time KVM
+    uses the slow version of "zap everything" is when the VM is being
+    destroyed or the owning mm has exited.  In either case, KVM_RUN is
+    unreachable for the VM, i.e. the guest TLB entries cannot be consumed.
+    
+    Signed-off-by: Sean Christopherson <seanjc@google.com>
+    Reviewed-by: Ben Gardon <bgardon@google.com>
+    Message-Id: <20220226001546.360188-15-seanjc@google.com>
+    Reviewed-by: Mingwei Zhang <mizhang@google.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/mmu/tdp_mmu.c b/arch/x86/kvm/mmu/tdp_mmu.c
+index dc9db5057f3b..f59f3ff5cb75 100644
+--- a/arch/x86/kvm/mmu/tdp_mmu.c
++++ b/arch/x86/kvm/mmu/tdp_mmu.c
+@@ -860,14 +860,15 @@ bool __kvm_tdp_mmu_zap_gfn_range(struct kvm *kvm, int as_id, gfn_t start,
+ 
+ void kvm_tdp_mmu_zap_all(struct kvm *kvm)
+ {
+-	bool flush = false;
+ 	int i;
+ 
++	/*
++	 * A TLB flush is unnecessary, KVM zaps everything if and only the VM
++	 * is being destroyed or the userspace VMM has exited.  In both cases,
++	 * KVM_RUN is unreachable, i.e. no vCPUs will ever service the request.
++	 */
+ 	for (i = 0; i < KVM_ADDRESS_SPACE_NUM; i++)
+-		flush = kvm_tdp_mmu_zap_gfn_range(kvm, i, 0, -1ull, flush);
+-
+-	if (flush)
+-		kvm_flush_remote_tlbs(kvm);
++		(void)kvm_tdp_mmu_zap_gfn_range(kvm, i, 0, -1ull, false);
+ }
+ 
+ static struct kvm_mmu_page *next_invalidated_root(struct kvm *kvm,

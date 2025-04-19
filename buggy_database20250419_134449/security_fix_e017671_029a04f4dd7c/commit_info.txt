@@ -1,0 +1,91 @@
+Commit Hash: e017671f534dd3f568db9e47b0583e853d2da9b5
+Subject: initramfs: avoid filename buffer overrun
+
+
+Security Keywords:
+- vulnerability
+- security
+vulnerability
+
+Full commit message:
+initramfs: avoid filename buffer overrun
+
+The initramfs filename field is defined in
+Documentation/driver-api/early-userspace/buffer-format.rst as:
+
+ 37 cpio_file := ALGN(4) + cpio_header + filename + "\0" + ALGN(4) + data
+...
+ 55 ============= ================== =========================
+ 56 Field name    Field size         Meaning
+ 57 ============= ================== =========================
+...
+ 70 c_namesize    8 bytes            Length of filename, including final \0
+
+When extracting an initramfs cpio archive, the kernel's do_name() path
+handler assumes a zero-terminated path at @collected, passing it
+directly to filp_open() / init_mkdir() / init_mknod().
+
+If a specially crafted cpio entry carries a non-zero-terminated filename
+and is followed by uninitialized memory, then a file may be created with
+trailing characters that represent the uninitialized memory. The ability
+to create an initramfs entry would imply already having full control of
+the system, so the buffer overrun shouldn't be considered a security
+vulnerability.
+
+Append the output of the following bash script to an existing initramfs
+and observe any created /initramfs_test_fname_overrunAA* path. E.g.
+  ./reproducer.sh | gzip >> /myinitramfs
+
+It's easiest to observe non-zero uninitialized memory when the output is
+gzipped, as it'll overflow the heap allocated @out_buf in __gunzip(),
+rather than the initrd_start+initrd_size block.
+
+---- reproducer.sh ----
+nilchar="A"	# change to "\0" to properly zero terminate / pad
+magic="070701"
+ino=1
+mode=$(( 0100777 ))
+uid=0
+gid=0
+nlink=1
+mtime=1
+filesize=0
+devmajor=0
+devminor=1
+rdevmajor=0
+rdevminor=0
+csum=0
+fname="initramfs_test_fname_overrun"
+namelen=$(( ${#fname} + 1 ))	# plus one to account for terminator
+
+printf "%s%08x%08x%08x%08x%08x%08x%08x%08x%08x%08x%08x%08x%08x%s" \
+	$magic $ino $mode $uid $gid $nlink $mtime $filesize \
+	$devmajor $devminor $rdevmajor $rdevminor $namelen $csum $fname
+
+termpadlen=$(( 1 + ((4 - ((110 + $namelen) & 3)) % 4) ))
+printf "%.s${nilchar}" $(seq 1 $termpadlen)
+---- reproducer.sh ----
+
+Symlink filename fields handled in do_symlink() won't overrun past the
+data segment, due to the explicit zero-termination of the symlink
+target.
+
+Fix filename buffer overrun by aborting the initramfs FSM if any cpio
+entry doesn't carry a zero-terminator at the expected (name_len - 1)
+offset.
+
+Fixes: 1da177e4c3f41 ("Linux-2.6.12-rc2")
+Signed-off-by: David Disseldorp <ddiss@suse.de>
+Link: https://lore.kernel.org/r/20241030035509.20194-2-ddiss@suse.de
+Signed-off-by: Christian Brauner <brauner@kernel.org>
+
+Metadata:
+Author: David Disseldorp <ddiss@suse.de>
+Author Date: Wed Oct 30 03:55:10 2024 +0000
+Committer: Christian Brauner <brauner@kernel.org>
+Commit Date: Thu Oct 31 13:05:38 2024 +0100
+
+Files Changed: 1
+Lines Added: 15
+Lines Removed: 0
+Total Changes: 15

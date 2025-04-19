@@ -1,0 +1,248 @@
+{
+  "hash": "5185ad616bb4d17e4874b29043d4b4069d8b2fb7",
+  "hash_short": "5185ad61",
+  "subject": "Merge tag 'mlx5-updates-2017-06-27' of git://git.kernel.org/pub/scm/linux/kernel/git/saeed/linux",
+  "body": "Saeed Mahameed says:\n\n====================\nmlx5-updates-2017-06-27 (Innova IPsec offload support)\n\nThis patchset adds support for Innova IPSec network interface card.\n\nAbout Innova device:\n--------------------\nInnova is a network card with a ConnectX chip and an FPGA chip as a\n bump-on-the-wire.\n\n               Internal\n+----------+   Link       +-----------------+\n|          +--------------+      FPGA       |  +------+\n| ConnectX |              |  Shell          +--+ QSFP |\n|          +--------------+    +-------+    |  | Port |\n+----------+      I2C     |    |  SBU  |    |  +------+\n                          |    +-------+    |\n                          +--+----------+---+\n                             |          |\n                          +--+--+   +---+---+\n                          | DDR |   | Flash |\n                          +-----+   +-------+\n\nThe FPGA synthesized logic is loaded from dedicated flash storage and has\n access to its own dedicated DDR RAM.\nThe ConnectX chip firmware programs the FPGA by accessing its configuration\nspace over either the slow internal I2C link or the high-speed internal link.\n\nThe FPGA logic is divided into a \"Shell\" and a \"Sandbox Unit\" (SBU).\nmlx5_core driver (with CONFIG_MLX5_FPGA) handles all shell functionality,\nwhile other components may handle the various SBU functionalities.\n\nThe driver opens high-speed reliable communication channels with the shell and\nthe SBU over the internal link.\nThese channels may be used for high-bandwidth configuration or for SBU-specific\nout-of-band data paths.\n\nAbout Innova IPSec device:\n--------------------------\nInnova IPSec is a network card that allows offloading IPSec cryptography operations\nfrom the host CPU to the NIC. It is an Innova card with an IPSec SBU.\nThe hardware keeps the database of IPSec Security Associations (SADB) in the FPGA's\nDDR memory.\n\n               Internal\n+----------+   Link       +-----------------+\n|          +--------------+      FPGA       |  +------+\n| ConnectX |              |  Shell          +--+ QSFP |\n|          +--------------+    +-------+    |  | Port |\n+----------+ Internal I2C |    | IPSec |    |  +------+\n                          |    |  SBU  |    |\n                          |    +-------+    |\n                          +--+----------+---+\n                             |          |\n                          +--+--+   +---+---+\n                          | DDR |   |       |\n                          |     |   | Flash |\n                          |SADB |   |       |\n                          +-----+   +-------+\n\nModes and ciphers:\nCurrently the following modes and ciphers are supported:\nIPv4 and IPv6\nESP tunnel and transport modes\nAES 128 and 256 bit encryption, with GCM authentication (RFC4106)\n\nIV is generated using seqiv, in sync with Linux's geniv.\n\nMore modes and ciphers may be added later.\n\nNotes:\nIn the future similar functionality will be included in a single-chip NIC.\n\nAbout the driver:\n-----------------\nPatches 1-4 prepare some existing driver code for the new feature:\n  * Add support for reserved GIDs in the hardware GID table\n  * Allow multiple modules to enable hardware RoCE support independently\nPatches 5-6 define structs and helper functions for QP work-queues.\nPatches 7-11 add various FPGA-related features required for Innova.\nIPSec.\nPatch 12 adds abstraction layer for Mellanox IPSec-offload capable devices.\natches 13-16 add IPSec offload support to the mlx5 netdevice.\n\nThis driver services the new IPSec offload API introduced in commit\nd77e38e612a0 (\"xfrm: Add an IPsec hardware offloading API\")\n\nConfiguration Path:\nIf Innova IPSec device is detected, the mlx5e netdevice gets the new\nNETIF_F_HW_ESP feature and the xdo callbacks, indicating ESP offload\ncapabilities, and also the matching TX checksum and GSO features.\n\nThe driver configures offloaded Security Associations (SAs) by sending\nan ADD_SA or DEL_SA message to the IPSec SBU, which updates the SADB in DDR.\nThese messages and their responses are sent over a high-speed channel.\nCounters for ethtool are retrieved by the driver from the SBU.\n\nData path:\nOn receive path, the SBU decrypts ESP packets which match the offloaded SADB,\nbut keeps them encapsulated.\nThe SBU injects metadata (Mellanox owned ethertype) indicating that crypto-offload\nhas taken place, the SA with which it was done, and the authentication result.\n\nThe ConnectX chip performs RX checksum offload on the packet, and RSS using the\nESP SPI value.  The driver detects the special ethertype, and attaches a struct\nsecpath to the RX SKB, including flags to indicate that crypto offload took place,\nthe authentication result, and which xfrm_state was used for decryption, in the\nolen and ovec members. The RX SKB may have useful CHECKSUM_COMPLETE. A separate\npatchset will add support for that in the xfrm stack.\n\nOn transmit path, the stack encapsulates the packet but does not encrypt it, and\nindicates in the SKB's secpath that crypto offload is to be performed and the SA\nto use to do so.\nThe driver avoids performing crypto-offload for ESP fragments, and packets with\nIP options, as the SBU cannot currently do that.  For eligible packets, the driver\nprepends a special ethertype with metadata instructing the hardware to perform crypto offload.\nThe stack builds regular (non-GSO) SKBs so that they contain a placeholder for the ESP trailer.\nThe driver trims it off, because the SBU automatically appends the trailer for offloaded packets.\nThe ConnectX chip performs TX checksum offload on inner UDP or TCP packets,\nand GSO for TCP packets (duplicating the prepended metadata).\nThe segmented packets then undergo encryption in the SBU before going on the wire.\n\nPerformance:\nWe measure single stream of TCP on Intel(R) Xeon(R) CPU E5-2643 v2 @3.50GHz\nUsing AES-NI with ESP GSO we get constant 4.1 Gbps.\nUsing crypto offload we get constant 18 Gbps.\n\nNote that these numbers require CHECKSUM_COMPLETE support in XFRM, which we submit separately.\n\n-  Ilan Tayari\n====================\n\nSigned-off-by: David S. Miller <davem@davemloft.net>",
+  "full_message": "Merge tag 'mlx5-updates-2017-06-27' of git://git.kernel.org/pub/scm/linux/kernel/git/saeed/linux\n\nSaeed Mahameed says:\n\n====================\nmlx5-updates-2017-06-27 (Innova IPsec offload support)\n\nThis patchset adds support for Innova IPSec network interface card.\n\nAbout Innova device:\n--------------------\nInnova is a network card with a ConnectX chip and an FPGA chip as a\n bump-on-the-wire.\n\n               Internal\n+----------+   Link       +-----------------+\n|          +--------------+      FPGA       |  +------+\n| ConnectX |              |  Shell          +--+ QSFP |\n|          +--------------+    +-------+    |  | Port |\n+----------+      I2C     |    |  SBU  |    |  +------+\n                          |    +-------+    |\n                          +--+----------+---+\n                             |          |\n                          +--+--+   +---+---+\n                          | DDR |   | Flash |\n                          +-----+   +-------+\n\nThe FPGA synthesized logic is loaded from dedicated flash storage and has\n access to its own dedicated DDR RAM.\nThe ConnectX chip firmware programs the FPGA by accessing its configuration\nspace over either the slow internal I2C link or the high-speed internal link.\n\nThe FPGA logic is divided into a \"Shell\" and a \"Sandbox Unit\" (SBU).\nmlx5_core driver (with CONFIG_MLX5_FPGA) handles all shell functionality,\nwhile other components may handle the various SBU functionalities.\n\nThe driver opens high-speed reliable communication channels with the shell and\nthe SBU over the internal link.\nThese channels may be used for high-bandwidth configuration or for SBU-specific\nout-of-band data paths.\n\nAbout Innova IPSec device:\n--------------------------\nInnova IPSec is a network card that allows offloading IPSec cryptography operations\nfrom the host CPU to the NIC. It is an Innova card with an IPSec SBU.\nThe hardware keeps the database of IPSec Security Associations (SADB) in the FPGA's\nDDR memory.\n\n               Internal\n+----------+   Link       +-----------------+\n|          +--------------+      FPGA       |  +------+\n| ConnectX |              |  Shell          +--+ QSFP |\n|          +--------------+    +-------+    |  | Port |\n+----------+ Internal I2C |    | IPSec |    |  +------+\n                          |    |  SBU  |    |\n                          |    +-------+    |\n                          +--+----------+---+\n                             |          |\n                          +--+--+   +---+---+\n                          | DDR |   |       |\n                          |     |   | Flash |\n                          |SADB |   |       |\n                          +-----+   +-------+\n\nModes and ciphers:\nCurrently the following modes and ciphers are supported:\nIPv4 and IPv6\nESP tunnel and transport modes\nAES 128 and 256 bit encryption, with GCM authentication (RFC4106)\n\nIV is generated using seqiv, in sync with Linux's geniv.\n\nMore modes and ciphers may be added later.\n\nNotes:\nIn the future similar functionality will be included in a single-chip NIC.\n\nAbout the driver:\n-----------------\nPatches 1-4 prepare some existing driver code for the new feature:\n  * Add support for reserved GIDs in the hardware GID table\n  * Allow multiple modules to enable hardware RoCE support independently\nPatches 5-6 define structs and helper functions for QP work-queues.\nPatches 7-11 add various FPGA-related features required for Innova.\nIPSec.\nPatch 12 adds abstraction layer for Mellanox IPSec-offload capable devices.\natches 13-16 add IPSec offload support to the mlx5 netdevice.\n\nThis driver services the new IPSec offload API introduced in commit\nd77e38e612a0 (\"xfrm: Add an IPsec hardware offloading API\")\n\nConfiguration Path:\nIf Innova IPSec device is detected, the mlx5e netdevice gets the new\nNETIF_F_HW_ESP feature and the xdo callbacks, indicating ESP offload\ncapabilities, and also the matching TX checksum and GSO features.\n\nThe driver configures offloaded Security Associations (SAs) by sending\nan ADD_SA or DEL_SA message to the IPSec SBU, which updates the SADB in DDR.\nThese messages and their responses are sent over a high-speed channel.\nCounters for ethtool are retrieved by the driver from the SBU.\n\nData path:\nOn receive path, the SBU decrypts ESP packets which match the offloaded SADB,\nbut keeps them encapsulated.\nThe SBU injects metadata (Mellanox owned ethertype) indicating that crypto-offload\nhas taken place, the SA with which it was done, and the authentication result.\n\nThe ConnectX chip performs RX checksum offload on the packet, and RSS using the\nESP SPI value.  The driver detects the special ethertype, and attaches a struct\nsecpath to the RX SKB, including flags to indicate that crypto offload took place,\nthe authentication result, and which xfrm_state was used for decryption, in the\nolen and ovec members. The RX SKB may have useful CHECKSUM_COMPLETE. A separate\npatchset will add support for that in the xfrm stack.\n\nOn transmit path, the stack encapsulates the packet but does not encrypt it, and\nindicates in the SKB's secpath that crypto offload is to be performed and the SA\nto use to do so.\nThe driver avoids performing crypto-offload for ESP fragments, and packets with\nIP options, as the SBU cannot currently do that.  For eligible packets, the driver\nprepends a special ethertype with metadata instructing the hardware to perform crypto offload.\nThe stack builds regular (non-GSO) SKBs so that they contain a placeholder for the ESP trailer.\nThe driver trims it off, because the SBU automatically appends the trailer for offloaded packets.\nThe ConnectX chip performs TX checksum offload on inner UDP or TCP packets,\nand GSO for TCP packets (duplicating the prepended metadata).\nThe segmented packets then undergo encryption in the SBU before going on the wire.\n\nPerformance:\nWe measure single stream of TCP on Intel(R) Xeon(R) CPU E5-2643 v2 @3.50GHz\nUsing AES-NI with ESP GSO we get constant 4.1 Gbps.\nUsing crypto offload we get constant 18 Gbps.\n\nNote that these numbers require CHECKSUM_COMPLETE support in XFRM, which we submit separately.\n\n-  Ilan Tayari\n====================\n\nSigned-off-by: David S. Miller <davem@davemloft.net>",
+  "author_name": "David S. Miller",
+  "author_email": "davem@davemloft.net",
+  "author_date": "Thu Jun 29 12:30:16 2017 -0400",
+  "author_date_iso": "2017-06-29T12:30:16-04:00",
+  "committer_name": "David S. Miller",
+  "committer_email": "davem@davemloft.net",
+  "committer_date": "Thu Jun 29 12:30:16 2017 -0400",
+  "committer_date_iso": "2017-06-29T12:30:16-04:00",
+  "files_changed": [],
+  "files_changed_count": 0,
+  "stats": [
+    {
+      "file": "MAINTAINERS",
+      "insertions": 10,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/infiniband/hw/mlx5/main.c",
+      "insertions": 53,
+      "deletions": 66
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/Kconfig",
+      "insertions": 16,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/Makefile",
+      "insertions": 8,
+      "deletions": 2
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/accel/ipsec.c",
+      "insertions": 78,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/accel/ipsec.h",
+      "insertions": 138,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/cmd.c",
+      "insertions": 10,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/en.h",
+      "insertions": 4,
+      "deletions": 1
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/en_accel/ipsec.c",
+      "insertions": 461,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/en_accel/ipsec.h",
+      "insertions": 140,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/en_accel/ipsec_rxtx.c",
+      "insertions": 378,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/en_accel/ipsec_rxtx.h",
+      "insertions": 55,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/en_accel/ipsec_stats.c",
+      "insertions": 133,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/en_ethtool.c",
+      "insertions": 9,
+      "deletions": 1
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/en_main.c",
+      "insertions": 46,
+      "deletions": 3
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/en_rx.c",
+      "insertions": 43,
+      "deletions": 2
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/en_tx.c",
+      "insertions": 18,
+      "deletions": 9
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/en_txrx.c",
+      "insertions": 1,
+      "deletions": 18
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/fpga/cmd.c",
+      "insertions": 174,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/fpga/cmd.h",
+      "insertions": 25,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/fpga/conn.c",
+      "insertions": 1042,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/fpga/conn.h",
+      "insertions": 96,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/fpga/core.c",
+      "insertions": 84,
+      "deletions": 3
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/fpga/core.h",
+      "insertions": 18,
+      "deletions": 4
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/fpga/ipsec.c",
+      "insertions": 376,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/fpga/ipsec.h",
+      "insertions": 94,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/fpga/sdk.c",
+      "insertions": 164,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/fpga/sdk.h",
+      "insertions": 204,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/lib/gid.c",
+      "insertions": 154,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/lib/mlx5.h",
+      "insertions": 43,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/main.c",
+      "insertions": 32,
+      "deletions": 14
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/vport.c",
+      "insertions": 4,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/wq.c",
+      "insertions": 46,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/wq.h",
+      "insertions": 27,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/mlx5/device.h",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/mlx5/driver.h",
+      "insertions": 19,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/mlx5/mlx5_ifc.h",
+      "insertions": 12,
+      "deletions": 2
+    },
+    {
+      "file": "include/linux/mlx5/mlx5_ifc_fpga.h",
+      "insertions": 288,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/mlx5/qp.h",
+      "insertions": 12,
+      "deletions": 2
+    }
+  ],
+  "total_insertions": 4518,
+  "total_deletions": 127,
+  "total_changes": 4645,
+  "parents": [
+    "869684a70d69e69352eb08fdd22dfd3315637dcd",
+    "164f16f7021406795729916e100c7edd53ae954f"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v4.13",
+    "v4.13-rc1",
+    "v4.13-rc2",
+    "v4.13-rc3",
+    "v4.13-rc4",
+    "v4.13-rc5",
+    "v4.13-rc6",
+    "v4.13-rc7",
+    "v4.14",
+    "v4.14-rc1"
+  ],
+  "is_merge": true,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "authentication"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": []
+}

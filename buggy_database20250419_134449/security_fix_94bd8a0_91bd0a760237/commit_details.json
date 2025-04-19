@@ -1,0 +1,78 @@
+{
+  "hash": "94bd8a05cd4de344a9a57e52ef7d99550251984f",
+  "hash_short": "94bd8a05",
+  "subject": "Fix 'acccess_ok()' on alpha and SH",
+  "body": "Commit 594cc251fdd0 (\"make 'user_access_begin()' do 'access_ok()'\")\nbroke both alpha and SH booting in qemu, as noticed by Guenter Roeck.\n\nIt turns out that the bug wasn't actually in that commit itself (which\nwould have been surprising: it was mostly a no-op), but in how the\naddition of access_ok() to the strncpy_from_user() and strnlen_user()\nfunctions now triggered the case where those functions would test the\naccess of the very last byte of the user address space.\n\nThe string functions actually did that user range test before too, but\nthey did it manually by just comparing against user_addr_max().  But\nwith user_access_begin() doing the check (using \"access_ok()\"), it now\nexposed problems in the architecture implementations of that function.\n\nFor example, on alpha, the access_ok() helper macro looked like this:\n\n  #define __access_ok(addr, size) \\\n        ((get_fs().seg & (addr | size | (addr+size))) == 0)\n\nand what it basically tests is of any of the high bits get set (the\nUSER_DS masking value is 0xfffffc0000000000).\n\nAnd that's completely wrong for the \"addr+size\" check.  Because it's\noff-by-one for the case where we check to the very end of the user\naddress space, which is exactly what the strn*_user() functions do.\n\nWhy? Because \"addr+size\" will be exactly the size of the address space,\nso trying to access the last byte of the user address space will fail\nthe __access_ok() check, even though it shouldn't.  As a result, the\nuser string accessor functions failed consistently - because they\nliterally don't know how long the string is going to be, and the max\naccess is going to be that last byte of the user address space.\n\nSide note: that alpha macro is buggy for another reason too - it re-uses\nthe arguments twice.\n\nAnd SH has another version of almost the exact same bug:\n\n  #define __addr_ok(addr) \\\n        ((unsigned long __force)(addr) < current_thread_info()->addr_limit.seg)\n\nso far so good: yes, a user address must be below the limit.  But then:\n\n  #define __access_ok(addr, size)         \\\n        (__addr_ok((addr) + (size)))\n\nis wrong with the exact same off-by-one case: the case when \"addr+size\"\nis exactly _equal_ to the limit is actually perfectly fine (think \"one\nbyte access at the last address of the user address space\")\n\nThe SH version is actually seriously buggy in another way: it doesn't\nactually check for overflow, even though it did copy the _comment_ that\ntalks about overflow.\n\nSo it turns out that both SH and alpha actually have completely buggy\nimplementations of access_ok(), but they happened to work in practice\n(although the SH overflow one is a serious serious security bug, not\nthat anybody likely cares about SH security).\n\nThis fixes the problems by using a similar macro on both alpha and SH.\nIt isn't trying to be clever, the end address is based on this logic:\n\n        unsigned long __ao_end = __ao_a + __ao_b - !!__ao_b;\n\nwhich basically says \"add start and length, and then subtract one unless\nthe length was zero\".  We can't subtract one for a zero length, or we'd\njust hit an underflow instead.\n\nFor a lot of access_ok() users the length is a constant, so this isn't\nactually as expensive as it initially looks.\n\nReported-and-tested-by: Guenter Roeck <linux@roeck-us.net>\nCc: Matt Turner <mattst88@gmail.com>\nCc: Yoshinori Sato <ysato@users.sourceforge.jp>\nSigned-off-by: Linus Torvalds <torvalds@linux-foundation.org>",
+  "full_message": "Fix 'acccess_ok()' on alpha and SH\n\nCommit 594cc251fdd0 (\"make 'user_access_begin()' do 'access_ok()'\")\nbroke both alpha and SH booting in qemu, as noticed by Guenter Roeck.\n\nIt turns out that the bug wasn't actually in that commit itself (which\nwould have been surprising: it was mostly a no-op), but in how the\naddition of access_ok() to the strncpy_from_user() and strnlen_user()\nfunctions now triggered the case where those functions would test the\naccess of the very last byte of the user address space.\n\nThe string functions actually did that user range test before too, but\nthey did it manually by just comparing against user_addr_max().  But\nwith user_access_begin() doing the check (using \"access_ok()\"), it now\nexposed problems in the architecture implementations of that function.\n\nFor example, on alpha, the access_ok() helper macro looked like this:\n\n  #define __access_ok(addr, size) \\\n        ((get_fs().seg & (addr | size | (addr+size))) == 0)\n\nand what it basically tests is of any of the high bits get set (the\nUSER_DS masking value is 0xfffffc0000000000).\n\nAnd that's completely wrong for the \"addr+size\" check.  Because it's\noff-by-one for the case where we check to the very end of the user\naddress space, which is exactly what the strn*_user() functions do.\n\nWhy? Because \"addr+size\" will be exactly the size of the address space,\nso trying to access the last byte of the user address space will fail\nthe __access_ok() check, even though it shouldn't.  As a result, the\nuser string accessor functions failed consistently - because they\nliterally don't know how long the string is going to be, and the max\naccess is going to be that last byte of the user address space.\n\nSide note: that alpha macro is buggy for another reason too - it re-uses\nthe arguments twice.\n\nAnd SH has another version of almost the exact same bug:\n\n  #define __addr_ok(addr) \\\n        ((unsigned long __force)(addr) < current_thread_info()->addr_limit.seg)\n\nso far so good: yes, a user address must be below the limit.  But then:\n\n  #define __access_ok(addr, size)         \\\n        (__addr_ok((addr) + (size)))\n\nis wrong with the exact same off-by-one case: the case when \"addr+size\"\nis exactly _equal_ to the limit is actually perfectly fine (think \"one\nbyte access at the last address of the user address space\")\n\nThe SH version is actually seriously buggy in another way: it doesn't\nactually check for overflow, even though it did copy the _comment_ that\ntalks about overflow.\n\nSo it turns out that both SH and alpha actually have completely buggy\nimplementations of access_ok(), but they happened to work in practice\n(although the SH overflow one is a serious serious security bug, not\nthat anybody likely cares about SH security).\n\nThis fixes the problems by using a similar macro on both alpha and SH.\nIt isn't trying to be clever, the end address is based on this logic:\n\n        unsigned long __ao_end = __ao_a + __ao_b - !!__ao_b;\n\nwhich basically says \"add start and length, and then subtract one unless\nthe length was zero\".  We can't subtract one for a zero length, or we'd\njust hit an underflow instead.\n\nFor a lot of access_ok() users the length is a constant, so this isn't\nactually as expensive as it initially looks.\n\nReported-and-tested-by: Guenter Roeck <linux@roeck-us.net>\nCc: Matt Turner <mattst88@gmail.com>\nCc: Yoshinori Sato <ysato@users.sourceforge.jp>\nSigned-off-by: Linus Torvalds <torvalds@linux-foundation.org>",
+  "author_name": "Linus Torvalds",
+  "author_email": "torvalds@linux-foundation.org",
+  "author_date": "Sun Jan 6 11:15:04 2019 -0800",
+  "author_date_iso": "2019-01-06T11:15:04-08:00",
+  "committer_name": "Linus Torvalds",
+  "committer_email": "torvalds@linux-foundation.org",
+  "committer_date": "Sun Jan 6 13:25:45 2019 -0800",
+  "committer_date_iso": "2019-01-06T13:25:45-08:00",
+  "files_changed": [
+    "arch/alpha/include/asm/uaccess.h",
+    "arch/sh/include/asm/uaccess.h"
+  ],
+  "files_changed_count": 2,
+  "stats": [
+    {
+      "file": "arch/alpha/include/asm/uaccess.h",
+      "insertions": 5,
+      "deletions": 3
+    },
+    {
+      "file": "arch/sh/include/asm/uaccess.h",
+      "insertions": 5,
+      "deletions": 2
+    }
+  ],
+  "total_insertions": 10,
+  "total_deletions": 5,
+  "total_changes": 15,
+  "parents": [
+    "baa6707381285e68cc472efba58e7e736057aacc"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v5.0",
+    "v5.0-rc1",
+    "v5.0-rc2",
+    "v5.0-rc3",
+    "v5.0-rc4",
+    "v5.0-rc5",
+    "v5.0-rc6",
+    "v5.0-rc7",
+    "v5.0-rc8",
+    "v5.1"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "security bug"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/alpha/include/asm/uaccess.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/sh/include/asm/uaccess.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

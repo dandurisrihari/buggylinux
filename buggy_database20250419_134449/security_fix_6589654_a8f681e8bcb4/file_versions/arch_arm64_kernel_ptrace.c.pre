@@ -1,0 +1,76 @@
+commit 20b8547277a6e8ee1d928792c1b2782c9a2a6cf5
+Author: Dave Martin <Dave.Martin@arm.com>
+Date:   Wed Mar 28 10:50:48 2018 +0100
+
+    arm64: fpsimd: Split cpu field out from struct fpsimd_state
+    
+    In preparation for using a common representation of the FPSIMD
+    state for tasks and KVM vcpus, this patch separates out the "cpu"
+    field that is used to track the cpu on which the state was most
+    recently loaded.
+    
+    This will allow common code to operate on task and vcpu contexts
+    without requiring the cpu field to be stored at the same offset
+    from the FPSIMD register data in both cases.  This should avoid the
+    need for messing with the definition of those parts of struct
+    vcpu_arch that are exposed in the KVM user ABI.
+    
+    The resulting change is also convenient for grouping and defining
+    the set of thread_struct fields that are supposed to be accessible
+    to copy_{to,from}_user(), which includes user_fpsimd_state but
+    should exclude the cpu field.  This patch does not amend the
+    usercopy whitelist to match: that will be addressed in a subsequent
+    patch.
+    
+    Signed-off-by: Dave Martin <Dave.Martin@arm.com>
+    [will: inline fpsimd_flush_state for now]
+    Signed-off-by: Will Deacon <will.deacon@arm.com>
+
+diff --git a/arch/arm64/kernel/ptrace.c b/arch/arm64/kernel/ptrace.c
+index 6228476e74ba..fd9e8ed22b70 100644
+--- a/arch/arm64/kernel/ptrace.c
++++ b/arch/arm64/kernel/ptrace.c
+@@ -629,7 +629,7 @@ static int __fpr_get(struct task_struct *target,
+ 
+ 	sve_sync_to_fpsimd(target);
+ 
+-	uregs = &target->thread.fpsimd_state.user_fpsimd;
++	uregs = &target->thread.fpsimd_state;
+ 
+ 	return user_regset_copyout(&pos, &count, &kbuf, &ubuf, uregs,
+ 				   start_pos, start_pos + sizeof(*uregs));
+@@ -660,14 +660,14 @@ static int __fpr_set(struct task_struct *target,
+ 	 */
+ 	sve_sync_to_fpsimd(target);
+ 
+-	newstate = target->thread.fpsimd_state.user_fpsimd;
++	newstate = target->thread.fpsimd_state;
+ 
+ 	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf, &newstate,
+ 				 start_pos, start_pos + sizeof(newstate));
+ 	if (ret)
+ 		return ret;
+ 
+-	target->thread.fpsimd_state.user_fpsimd = newstate;
++	target->thread.fpsimd_state = newstate;
+ 
+ 	return ret;
+ }
+@@ -1169,7 +1169,7 @@ static int compat_vfp_get(struct task_struct *target,
+ 	compat_ulong_t fpscr;
+ 	int ret, vregs_end_pos;
+ 
+-	uregs = &target->thread.fpsimd_state.user_fpsimd;
++	uregs = &target->thread.fpsimd_state;
+ 
+ 	if (target == current)
+ 		fpsimd_preserve_current_state();
+@@ -1202,7 +1202,7 @@ static int compat_vfp_set(struct task_struct *target,
+ 	compat_ulong_t fpscr;
+ 	int ret, vregs_end_pos;
+ 
+-	uregs = &target->thread.fpsimd_state.user_fpsimd;
++	uregs = &target->thread.fpsimd_state;
+ 
+ 	vregs_end_pos = VFP_STATE_SIZE - sizeof(compat_ulong_t);
+ 	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf, uregs, 0,

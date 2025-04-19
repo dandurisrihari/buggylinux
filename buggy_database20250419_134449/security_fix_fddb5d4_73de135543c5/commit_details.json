@@ -1,0 +1,365 @@
+{
+  "hash": "fddb5d430ad9fa91b49b1d34d0202ffe2fa0e179",
+  "hash_short": "fddb5d43",
+  "subject": "open: introduce openat2(2) syscall",
+  "body": "/* Background. */\nFor a very long time, extending openat(2) with new features has been\nincredibly frustrating. This stems from the fact that openat(2) is\npossibly the most famous counter-example to the mantra \"don't silently\naccept garbage from userspace\" -- it doesn't check whether unknown flags\nare present[1].\n\nThis means that (generally) the addition of new flags to openat(2) has\nbeen fraught with backwards-compatibility issues (O_TMPFILE has to be\ndefined as __O_TMPFILE|O_DIRECTORY|[O_RDWR or O_WRONLY] to ensure old\nkernels gave errors, since it's insecure to silently ignore the\nflag[2]). All new security-related flags therefore have a tough road to\nbeing added to openat(2).\n\nUserspace also has a hard time figuring out whether a particular flag is\nsupported on a particular kernel. While it is now possible with\ncontemporary kernels (thanks to [3]), older kernels will expose unknown\nflag bits through fcntl(F_GETFL). Giving a clear -EINVAL during\nopenat(2) time matches modern syscall designs and is far more\nfool-proof.\n\nIn addition, the newly-added path resolution restriction LOOKUP flags\n(which we would like to expose to user-space) don't feel related to the\npre-existing O_* flag set -- they affect all components of path lookup.\nWe'd therefore like to add a new flag argument.\n\nAdding a new syscall allows us to finally fix the flag-ignoring problem,\nand we can make it extensible enough so that we will hopefully never\nneed an openat3(2).\n\n/* Syscall Prototype. */\n  /*\n   * open_how is an extensible structure (similar in interface to\n   * clone3(2) or sched_setattr(2)). The size parameter must be set to\n   * sizeof(struct open_how), to allow for future extensions. All future\n   * extensions will be appended to open_how, with their zero value\n   * acting as a no-op default.\n   */\n  struct open_how { /* ... */ };\n\n  int openat2(int dfd, const char *pathname,\n              struct open_how *how, size_t size);\n\n/* Description. */\nThe initial version of 'struct open_how' contains the following fields:\n\n  flags\n    Used to specify openat(2)-style flags. However, any unknown flag\n    bits or otherwise incorrect flag combinations (like O_PATH|O_RDWR)\n    will result in -EINVAL. In addition, this field is 64-bits wide to\n    allow for more O_ flags than currently permitted with openat(2).\n\n  mode\n    The file mode for O_CREAT or O_TMPFILE.\n\n    Must be set to zero if flags does not contain O_CREAT or O_TMPFILE.\n\n  resolve\n    Restrict path resolution (in contrast to O_* flags they affect all\n    path components). The current set of flags are as follows (at the\n    moment, all of the RESOLVE_ flags are implemented as just passing\n    the corresponding LOOKUP_ flag).\n\n    RESOLVE_NO_XDEV       => LOOKUP_NO_XDEV\n    RESOLVE_NO_SYMLINKS   => LOOKUP_NO_SYMLINKS\n    RESOLVE_NO_MAGICLINKS => LOOKUP_NO_MAGICLINKS\n    RESOLVE_BENEATH       => LOOKUP_BENEATH\n    RESOLVE_IN_ROOT       => LOOKUP_IN_ROOT\n\nopen_how does not contain an embedded size field, because it is of\nlittle benefit (userspace can figure out the kernel open_how size at\nruntime fairly easily without it). It also only contains u64s (even\nthough ->mode arguably should be a u16) to avoid having padding fields\nwhich are never used in the future.\n\nNote that as a result of the new how->flags handling, O_PATH|O_TMPFILE\nis no longer permitted for openat(2). As far as I can tell, this has\nalways been a bug and appears to not be used by userspace (and I've not\nseen any problems on my machines by disallowing it). If it turns out\nthis breaks something, we can special-case it and only permit it for\nopenat(2) but not openat2(2).\n\nAfter input from Florian Weimer, the new open_how and flag definitions\nare inside a separate header from uapi/linux/fcntl.h, to avoid problems\nthat glibc has with importing that header.\n\n/* Testing. */\nIn a follow-up patch there are over 200 selftests which ensure that this\nsyscall has the correct semantics and will correctly handle several\nattack scenarios.\n\nIn addition, I've written a userspace library[4] which provides\nconvenient wrappers around openat2(RESOLVE_IN_ROOT) (this is necessary\nbecause no other syscalls support RESOLVE_IN_ROOT, and thus lots of care\nmust be taken when using RESOLVE_IN_ROOT'd file descriptors with other\nsyscalls). During the development of this patch, I've run numerous\nverification tests using libpathrs (showing that the API is reasonably\nusable by userspace).\n\n/* Future Work. */\nAdditional RESOLVE_ flags have been suggested during the review period.\nThese can be easily implemented separately (such as blocking auto-mount\nduring resolution).\n\nFurthermore, there are some other proposed changes to the openat(2)\ninterface (the most obvious example is magic-link hardening[5]) which\nwould be a good opportunity to add a way for userspace to restrict how\nO_PATH file descriptors can be re-opened.\n\nAnother possible avenue of future work would be some kind of\nCHECK_FIELDS[6] flag which causes the kernel to indicate to userspace\nwhich openat2(2) flags and fields are supported by the current kernel\n(to avoid userspace having to go through several guesses to figure it\nout).\n\n[1]: https://lwn.net/Articles/588444/\n[2]: https://lore.kernel.org/lkml/CA+55aFyyxJL1LyXZeBsf2ypriraj5ut1XkNDsunRBqgVjZU_6Q@mail.gmail.com\n[3]: commit 629e014bb834 (\"fs: completely ignore unknown open flags\")\n[4]: https://sourceware.org/bugzilla/show_bug.cgi?id=17523\n[5]: https://lore.kernel.org/lkml/20190930183316.10190-2-cyphar@cyphar.com/\n[6]: https://youtu.be/ggD-eb3yPVs\n\nSuggested-by: Christian Brauner <christian.brauner@ubuntu.com>\nSigned-off-by: Aleksa Sarai <cyphar@cyphar.com>\nSigned-off-by: Al Viro <viro@zeniv.linux.org.uk>",
+  "full_message": "open: introduce openat2(2) syscall\n\n/* Background. */\nFor a very long time, extending openat(2) with new features has been\nincredibly frustrating. This stems from the fact that openat(2) is\npossibly the most famous counter-example to the mantra \"don't silently\naccept garbage from userspace\" -- it doesn't check whether unknown flags\nare present[1].\n\nThis means that (generally) the addition of new flags to openat(2) has\nbeen fraught with backwards-compatibility issues (O_TMPFILE has to be\ndefined as __O_TMPFILE|O_DIRECTORY|[O_RDWR or O_WRONLY] to ensure old\nkernels gave errors, since it's insecure to silently ignore the\nflag[2]). All new security-related flags therefore have a tough road to\nbeing added to openat(2).\n\nUserspace also has a hard time figuring out whether a particular flag is\nsupported on a particular kernel. While it is now possible with\ncontemporary kernels (thanks to [3]), older kernels will expose unknown\nflag bits through fcntl(F_GETFL). Giving a clear -EINVAL during\nopenat(2) time matches modern syscall designs and is far more\nfool-proof.\n\nIn addition, the newly-added path resolution restriction LOOKUP flags\n(which we would like to expose to user-space) don't feel related to the\npre-existing O_* flag set -- they affect all components of path lookup.\nWe'd therefore like to add a new flag argument.\n\nAdding a new syscall allows us to finally fix the flag-ignoring problem,\nand we can make it extensible enough so that we will hopefully never\nneed an openat3(2).\n\n/* Syscall Prototype. */\n  /*\n   * open_how is an extensible structure (similar in interface to\n   * clone3(2) or sched_setattr(2)). The size parameter must be set to\n   * sizeof(struct open_how), to allow for future extensions. All future\n   * extensions will be appended to open_how, with their zero value\n   * acting as a no-op default.\n   */\n  struct open_how { /* ... */ };\n\n  int openat2(int dfd, const char *pathname,\n              struct open_how *how, size_t size);\n\n/* Description. */\nThe initial version of 'struct open_how' contains the following fields:\n\n  flags\n    Used to specify openat(2)-style flags. However, any unknown flag\n    bits or otherwise incorrect flag combinations (like O_PATH|O_RDWR)\n    will result in -EINVAL. In addition, this field is 64-bits wide to\n    allow for more O_ flags than currently permitted with openat(2).\n\n  mode\n    The file mode for O_CREAT or O_TMPFILE.\n\n    Must be set to zero if flags does not contain O_CREAT or O_TMPFILE.\n\n  resolve\n    Restrict path resolution (in contrast to O_* flags they affect all\n    path components). The current set of flags are as follows (at the\n    moment, all of the RESOLVE_ flags are implemented as just passing\n    the corresponding LOOKUP_ flag).\n\n    RESOLVE_NO_XDEV       => LOOKUP_NO_XDEV\n    RESOLVE_NO_SYMLINKS   => LOOKUP_NO_SYMLINKS\n    RESOLVE_NO_MAGICLINKS => LOOKUP_NO_MAGICLINKS\n    RESOLVE_BENEATH       => LOOKUP_BENEATH\n    RESOLVE_IN_ROOT       => LOOKUP_IN_ROOT\n\nopen_how does not contain an embedded size field, because it is of\nlittle benefit (userspace can figure out the kernel open_how size at\nruntime fairly easily without it). It also only contains u64s (even\nthough ->mode arguably should be a u16) to avoid having padding fields\nwhich are never used in the future.\n\nNote that as a result of the new how->flags handling, O_PATH|O_TMPFILE\nis no longer permitted for openat(2). As far as I can tell, this has\nalways been a bug and appears to not be used by userspace (and I've not\nseen any problems on my machines by disallowing it). If it turns out\nthis breaks something, we can special-case it and only permit it for\nopenat(2) but not openat2(2).\n\nAfter input from Florian Weimer, the new open_how and flag definitions\nare inside a separate header from uapi/linux/fcntl.h, to avoid problems\nthat glibc has with importing that header.\n\n/* Testing. */\nIn a follow-up patch there are over 200 selftests which ensure that this\nsyscall has the correct semantics and will correctly handle several\nattack scenarios.\n\nIn addition, I've written a userspace library[4] which provides\nconvenient wrappers around openat2(RESOLVE_IN_ROOT) (this is necessary\nbecause no other syscalls support RESOLVE_IN_ROOT, and thus lots of care\nmust be taken when using RESOLVE_IN_ROOT'd file descriptors with other\nsyscalls). During the development of this patch, I've run numerous\nverification tests using libpathrs (showing that the API is reasonably\nusable by userspace).\n\n/* Future Work. */\nAdditional RESOLVE_ flags have been suggested during the review period.\nThese can be easily implemented separately (such as blocking auto-mount\nduring resolution).\n\nFurthermore, there are some other proposed changes to the openat(2)\ninterface (the most obvious example is magic-link hardening[5]) which\nwould be a good opportunity to add a way for userspace to restrict how\nO_PATH file descriptors can be re-opened.\n\nAnother possible avenue of future work would be some kind of\nCHECK_FIELDS[6] flag which causes the kernel to indicate to userspace\nwhich openat2(2) flags and fields are supported by the current kernel\n(to avoid userspace having to go through several guesses to figure it\nout).\n\n[1]: https://lwn.net/Articles/588444/\n[2]: https://lore.kernel.org/lkml/CA+55aFyyxJL1LyXZeBsf2ypriraj5ut1XkNDsunRBqgVjZU_6Q@mail.gmail.com\n[3]: commit 629e014bb834 (\"fs: completely ignore unknown open flags\")\n[4]: https://sourceware.org/bugzilla/show_bug.cgi?id=17523\n[5]: https://lore.kernel.org/lkml/20190930183316.10190-2-cyphar@cyphar.com/\n[6]: https://youtu.be/ggD-eb3yPVs\n\nSuggested-by: Christian Brauner <christian.brauner@ubuntu.com>\nSigned-off-by: Aleksa Sarai <cyphar@cyphar.com>\nSigned-off-by: Al Viro <viro@zeniv.linux.org.uk>",
+  "author_name": "Aleksa Sarai",
+  "author_email": "cyphar@cyphar.com",
+  "author_date": "Sat Jan 18 23:07:59 2020 +1100",
+  "author_date_iso": "2020-01-18T23:07:59+11:00",
+  "committer_name": "Al Viro",
+  "committer_email": "viro@zeniv.linux.org.uk",
+  "committer_date": "Sat Jan 18 09:19:18 2020 -0500",
+  "committer_date_iso": "2020-01-18T09:19:18-05:00",
+  "files_changed": [
+    "CREDITS",
+    "MAINTAINERS",
+    "arch/alpha/kernel/syscalls/syscall.tbl",
+    "arch/arm/tools/syscall.tbl",
+    "arch/arm64/include/asm/unistd.h",
+    "arch/arm64/include/asm/unistd32.h",
+    "arch/ia64/kernel/syscalls/syscall.tbl",
+    "arch/m68k/kernel/syscalls/syscall.tbl",
+    "arch/microblaze/kernel/syscalls/syscall.tbl",
+    "arch/mips/kernel/syscalls/syscall_n32.tbl",
+    "arch/mips/kernel/syscalls/syscall_n64.tbl",
+    "arch/mips/kernel/syscalls/syscall_o32.tbl",
+    "arch/parisc/kernel/syscalls/syscall.tbl",
+    "arch/powerpc/kernel/syscalls/syscall.tbl",
+    "arch/s390/kernel/syscalls/syscall.tbl",
+    "arch/sh/kernel/syscalls/syscall.tbl",
+    "arch/sparc/kernel/syscalls/syscall.tbl",
+    "arch/x86/entry/syscalls/syscall_32.tbl",
+    "arch/x86/entry/syscalls/syscall_64.tbl",
+    "arch/xtensa/kernel/syscalls/syscall.tbl",
+    "fs/open.c",
+    "include/linux/fcntl.h",
+    "include/linux/syscalls.h",
+    "include/uapi/asm-generic/unistd.h",
+    "include/uapi/linux/fcntl.h",
+    "include/uapi/linux/openat2.h"
+  ],
+  "files_changed_count": 26,
+  "stats": [
+    {
+      "file": "CREDITS",
+      "insertions": 3,
+      "deletions": 1
+    },
+    {
+      "file": "MAINTAINERS",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/alpha/kernel/syscalls/syscall.tbl",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm/tools/syscall.tbl",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/include/asm/unistd.h",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/arm64/include/asm/unistd32.h",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "arch/ia64/kernel/syscalls/syscall.tbl",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/m68k/kernel/syscalls/syscall.tbl",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/microblaze/kernel/syscalls/syscall.tbl",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/mips/kernel/syscalls/syscall_n32.tbl",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/mips/kernel/syscalls/syscall_n64.tbl",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/mips/kernel/syscalls/syscall_o32.tbl",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/parisc/kernel/syscalls/syscall.tbl",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/powerpc/kernel/syscalls/syscall.tbl",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/s390/kernel/syscalls/syscall.tbl",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/sh/kernel/syscalls/syscall.tbl",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/sparc/kernel/syscalls/syscall.tbl",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/entry/syscalls/syscall_32.tbl",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/entry/syscalls/syscall_64.tbl",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/xtensa/kernel/syscalls/syscall.tbl",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "fs/open.c",
+      "insertions": 113,
+      "deletions": 34
+    },
+    {
+      "file": "include/linux/fcntl.h",
+      "insertions": 15,
+      "deletions": 1
+    },
+    {
+      "file": "include/linux/syscalls.h",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "include/uapi/asm-generic/unistd.h",
+      "insertions": 4,
+      "deletions": 1
+    },
+    {
+      "file": "include/uapi/linux/fcntl.h",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "include/uapi/linux/openat2.h",
+      "insertions": 39,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 198,
+  "total_deletions": 39,
+  "total_changes": 237,
+  "parents": [
+    "ab87f9a56c8ee9fa6856cb13d8f2905db913baae"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v5.6",
+    "v5.6-rc1",
+    "v5.6-rc2",
+    "v5.6-rc3",
+    "v5.6-rc4",
+    "v5.6-rc5",
+    "v5.6-rc6",
+    "v5.6-rc7",
+    "v5.7-rc1"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "hardening"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "CREDITS",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/alpha/kernel/syscalls/syscall.tbl",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm/tools/syscall.tbl",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/include/asm/unistd.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/m68k/kernel/syscalls/syscall.tbl",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/include/asm/unistd32.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/ia64/kernel/syscalls/syscall.tbl",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/mips/kernel/syscalls/syscall_n64.tbl",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/microblaze/kernel/syscalls/syscall.tbl",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/mips/kernel/syscalls/syscall_n32.tbl",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/mips/kernel/syscalls/syscall_o32.tbl",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/parisc/kernel/syscalls/syscall.tbl",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "MAINTAINERS",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/s390/kernel/syscalls/syscall.tbl",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/powerpc/kernel/syscalls/syscall.tbl",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/sh/kernel/syscalls/syscall.tbl",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/entry/syscalls/syscall_32.tbl",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/entry/syscalls/syscall_64.tbl",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/xtensa/kernel/syscalls/syscall.tbl",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/uapi/asm-generic/unistd.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/fcntl.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/open.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/sparc/kernel/syscalls/syscall.tbl",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/syscalls.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/uapi/linux/fcntl.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/uapi/linux/openat2.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

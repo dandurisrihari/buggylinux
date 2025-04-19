@@ -1,0 +1,150 @@
+{
+  "hash": "6bf37e5aa90f18baf5acf4874bca505dd667c37f",
+  "hash_short": "6bf37e5a",
+  "subject": "crypto: crypto_memneq - add equality testing of memory regions w/o timing leaks",
+  "body": "When comparing MAC hashes, AEAD authentication tags, or other hash\nvalues in the context of authentication or integrity checking, it\nis important not to leak timing information to a potential attacker,\ni.e. when communication happens over a network.\n\nBytewise memory comparisons (such as memcmp) are usually optimized so\nthat they return a nonzero value as soon as a mismatch is found. E.g,\non x86_64/i5 for 512 bytes this can be ~50 cyc for a full mismatch\nand up to ~850 cyc for a full match (cold). This early-return behavior\ncan leak timing information as a side channel, allowing an attacker to\niteratively guess the correct result.\n\nThis patch adds a new method crypto_memneq (\"memory not equal to each\nother\") to the crypto API that compares memory areas of the same length\nin roughly \"constant time\" (cache misses could change the timing, but\nsince they don't reveal information about the content of the strings\nbeing compared, they are effectively benign). Iow, best and worst case\nbehaviour take the same amount of time to complete (in contrast to\nmemcmp).\n\nNote that crypto_memneq (unlike memcmp) can only be used to test for\nequality or inequality, NOT for lexicographical order. This, however,\nis not an issue for its use-cases within the crypto API.\n\nWe tried to locate all of the places in the crypto API where memcmp was\nbeing used for authentication or integrity checking, and convert them\nover to crypto_memneq.\n\ncrypto_memneq is declared noinline, placed in its own source file,\nand compiled with optimizations that might increase code size disabled\n(\"Os\") because a smart compiler (or LTO) might notice that the return\nvalue is always compared against zero/nonzero, and might then\nreintroduce the same early-return optimization that we are trying to\navoid.\n\nUsing #pragma or __attribute__ optimization annotations of the code\nfor disabling optimization was avoided as it seems to be considered\nbroken or unmaintained for long time in GCC [1]. Therefore, we work\naround that by specifying the compile flag for memneq.o directly in\nthe Makefile. We found that this seems to be most appropriate.\n\nAs we use (\"Os\"), this patch also provides a loop-free \"fast-path\" for\nfrequently used 16 byte digests. Similarly to kernel library string\nfunctions, leave an option for future even further optimized architecture\nspecific assembler implementations.\n\nThis was a joint work of James Yonan and Daniel Borkmann. Also thanks\nfor feedback from Florian Weimer on this and earlier proposals [2].\n\n  [1] http://gcc.gnu.org/ml/gcc/2012-07/msg00211.html\n  [2] https://lkml.org/lkml/2013/2/10/131\n\nSigned-off-by: James Yonan <james@openvpn.net>\nSigned-off-by: Daniel Borkmann <dborkman@redhat.com>\nCc: Florian Weimer <fw@deneb.enyo.de>\nSigned-off-by: Herbert Xu <herbert@gondor.apana.org.au>",
+  "full_message": "crypto: crypto_memneq - add equality testing of memory regions w/o timing leaks\n\nWhen comparing MAC hashes, AEAD authentication tags, or other hash\nvalues in the context of authentication or integrity checking, it\nis important not to leak timing information to a potential attacker,\ni.e. when communication happens over a network.\n\nBytewise memory comparisons (such as memcmp) are usually optimized so\nthat they return a nonzero value as soon as a mismatch is found. E.g,\non x86_64/i5 for 512 bytes this can be ~50 cyc for a full mismatch\nand up to ~850 cyc for a full match (cold). This early-return behavior\ncan leak timing information as a side channel, allowing an attacker to\niteratively guess the correct result.\n\nThis patch adds a new method crypto_memneq (\"memory not equal to each\nother\") to the crypto API that compares memory areas of the same length\nin roughly \"constant time\" (cache misses could change the timing, but\nsince they don't reveal information about the content of the strings\nbeing compared, they are effectively benign). Iow, best and worst case\nbehaviour take the same amount of time to complete (in contrast to\nmemcmp).\n\nNote that crypto_memneq (unlike memcmp) can only be used to test for\nequality or inequality, NOT for lexicographical order. This, however,\nis not an issue for its use-cases within the crypto API.\n\nWe tried to locate all of the places in the crypto API where memcmp was\nbeing used for authentication or integrity checking, and convert them\nover to crypto_memneq.\n\ncrypto_memneq is declared noinline, placed in its own source file,\nand compiled with optimizations that might increase code size disabled\n(\"Os\") because a smart compiler (or LTO) might notice that the return\nvalue is always compared against zero/nonzero, and might then\nreintroduce the same early-return optimization that we are trying to\navoid.\n\nUsing #pragma or __attribute__ optimization annotations of the code\nfor disabling optimization was avoided as it seems to be considered\nbroken or unmaintained for long time in GCC [1]. Therefore, we work\naround that by specifying the compile flag for memneq.o directly in\nthe Makefile. We found that this seems to be most appropriate.\n\nAs we use (\"Os\"), this patch also provides a loop-free \"fast-path\" for\nfrequently used 16 byte digests. Similarly to kernel library string\nfunctions, leave an option for future even further optimized architecture\nspecific assembler implementations.\n\nThis was a joint work of James Yonan and Daniel Borkmann. Also thanks\nfor feedback from Florian Weimer on this and earlier proposals [2].\n\n  [1] http://gcc.gnu.org/ml/gcc/2012-07/msg00211.html\n  [2] https://lkml.org/lkml/2013/2/10/131\n\nSigned-off-by: James Yonan <james@openvpn.net>\nSigned-off-by: Daniel Borkmann <dborkman@redhat.com>\nCc: Florian Weimer <fw@deneb.enyo.de>\nSigned-off-by: Herbert Xu <herbert@gondor.apana.org.au>",
+  "author_name": "James Yonan",
+  "author_email": "james@openvpn.net",
+  "author_date": "Thu Sep 26 02:20:39 2013 -0600",
+  "author_date_iso": "2013-09-26T02:20:39-06:00",
+  "committer_name": "Herbert Xu",
+  "committer_email": "herbert@gondor.apana.org.au",
+  "committer_date": "Mon Oct 7 14:17:06 2013 +0800",
+  "committer_date_iso": "2013-10-07T14:17:06+08:00",
+  "files_changed": [
+    "crypto/Makefile",
+    "crypto/asymmetric_keys/rsa.c",
+    "crypto/authenc.c",
+    "crypto/authencesn.c",
+    "crypto/ccm.c",
+    "crypto/gcm.c",
+    "crypto/memneq.c",
+    "include/crypto/algapi.h"
+  ],
+  "files_changed_count": 8,
+  "stats": [
+    {
+      "file": "crypto/Makefile",
+      "insertions": 6,
+      "deletions": 1
+    },
+    {
+      "file": "crypto/asymmetric_keys/rsa.c",
+      "insertions": 3,
+      "deletions": 2
+    },
+    {
+      "file": "crypto/authenc.c",
+      "insertions": 3,
+      "deletions": 3
+    },
+    {
+      "file": "crypto/authencesn.c",
+      "insertions": 4,
+      "deletions": 4
+    },
+    {
+      "file": "crypto/ccm.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "crypto/gcm.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "crypto/memneq.c",
+      "insertions": 138,
+      "deletions": 0
+    },
+    {
+      "file": "include/crypto/algapi.h",
+      "insertions": 17,
+      "deletions": 1
+    }
+  ],
+  "total_insertions": 174,
+  "total_deletions": 14,
+  "total_changes": 188,
+  "parents": [
+    "d319fe2a0af3509f959d5195fb8916accbf14857"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v3.13",
+    "v3.13-rc2",
+    "v3.13-rc3",
+    "v3.13-rc4",
+    "v3.13-rc5",
+    "v3.13-rc6",
+    "v3.13-rc7",
+    "v3.13-rc8",
+    "v3.14",
+    "v3.14-rc1"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "authentication"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "crypto/Makefile",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "crypto/memneq.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "crypto/asymmetric_keys/rsa.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "crypto/ccm.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "crypto/authenc.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "crypto/authencesn.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "crypto/gcm.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/crypto/algapi.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

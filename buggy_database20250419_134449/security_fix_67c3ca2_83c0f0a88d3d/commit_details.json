@@ -1,0 +1,102 @@
+{
+  "hash": "67c3ca2c5cfe6a50772514e3349b5e7b3b0fac03",
+  "hash_short": "67c3ca2c",
+  "subject": "net: mscc: ocelot: use ocelot_xmit_get_vlan_info() also for FDMA and register injection",
+  "body": "Problem description\n-------------------\n\nOn an NXP LS1028A (felix DSA driver) with the following configuration:\n\n- ocelot-8021q tagging protocol\n- VLAN-aware bridge (with STP) spanning at least swp0 and swp1\n- 8021q VLAN upper interfaces on swp0 and swp1: swp0.700, swp1.700\n- ptp4l on swp0.700 and swp1.700\n\nwe see that the ptp4l instances do not see each other's traffic,\nand they all go to the grand master state due to the\nANNOUNCE_RECEIPT_TIMEOUT_EXPIRES condition.\n\nJumping to the conclusion for the impatient\n-------------------------------------------\n\nThere is a zero-day bug in the ocelot switchdev driver in the way it\nhandles VLAN-tagged packet injection. The correct logic already exists in\nthe source code, in function ocelot_xmit_get_vlan_info() added by commit\n5ca721c54d86 (\"net: dsa: tag_ocelot: set the classified VLAN during xmit\").\nBut it is used only for normal NPI-based injection with the DSA \"ocelot\"\ntagging protocol. The other injection code paths (register-based and\nFDMA-based) roll their own wrong logic. This affects and was noticed on\nthe DSA \"ocelot-8021q\" protocol because it uses register-based injection.\n\nBy moving ocelot_xmit_get_vlan_info() to a place that's common for both\nthe DSA tagger and the ocelot switch library, it can also be called from\nocelot_port_inject_frame() in ocelot.c.\n\nWe need to touch the lines with ocelot_ifh_port_set()'s prototype\nanyway, so let's rename it to something clearer regarding what it does,\nand add a kernel-doc. ocelot_ifh_set_basic() should do.\n\nInvestigation notes\n-------------------\n\nDebugging reveals that PTP event (aka those carrying timestamps, like\nSync) frames injected into swp0.700 (but also swp1.700) hit the wire\nwith two VLAN tags:\n\n00000000: 01 1b 19 00 00 00 00 01 02 03 04 05 81 00 02 bc\n                                              ~~~~~~~~~~~\n00000010: 81 00 02 bc 88 f7 00 12 00 2c 00 00 02 00 00 00\n          ~~~~~~~~~~~\n00000020: 00 00 00 00 00 00 00 00 00 00 00 01 02 ff fe 03\n00000030: 04 05 00 01 00 04 00 00 00 00 00 00 00 00 00 00\n00000040: 00 00\n\nThe second (unexpected) VLAN tag makes felix_check_xtr_pkt() ->\nptp_classify_raw() fail to see these as PTP packets at the link\npartner's receiving end, and return PTP_CLASS_NONE (because the BPF\nclassifier is not written to expect 2 VLAN tags).\n\nThe reason why packets have 2 VLAN tags is because the transmission\ncode treats VLAN incorrectly.\n\nNeither ocelot switchdev, nor felix DSA, declare the NETIF_F_HW_VLAN_CTAG_TX\nfeature. Therefore, at xmit time, all VLANs should be in the skb head,\nand none should be in the hwaccel area. This is done by:\n\nstatic struct sk_buff *validate_xmit_vlan(struct sk_buff *skb,\n\t\t\t\t\t  netdev_features_t features)\n{\n\tif (skb_vlan_tag_present(skb) &&\n\t    !vlan_hw_offload_capable(features, skb->vlan_proto))\n\t\tskb = __vlan_hwaccel_push_inside(skb);\n\treturn skb;\n}\n\nBut ocelot_port_inject_frame() handles things incorrectly:\n\n\tocelot_ifh_port_set(ifh, port, rew_op, skb_vlan_tag_get(skb));\n\nvoid ocelot_ifh_port_set(struct sk_buff *skb, void *ifh, int port, u32 rew_op)\n{\n\t(...)\n\tif (vlan_tag)\n\t\tocelot_ifh_set_vlan_tci(ifh, vlan_tag);\n\t(...)\n}\n\nThe way __vlan_hwaccel_push_inside() pushes the tag inside the skb head\nis by calling:\n\nstatic inline void __vlan_hwaccel_clear_tag(struct sk_buff *skb)\n{\n\tskb->vlan_present = 0;\n}\n\nwhich does _not_ zero out skb->vlan_tci as seen by skb_vlan_tag_get().\nThis means that ocelot, when it calls skb_vlan_tag_get(), sees\n(and uses) a residual skb->vlan_tci, while the same VLAN tag is\n_already_ in the skb head.\n\nThe trivial fix for double VLAN headers is to replace the content of\nocelot_ifh_port_set() with:\n\n\tif (skb_vlan_tag_present(skb))\n\t\tocelot_ifh_set_vlan_tci(ifh, skb_vlan_tag_get(skb));\n\nbut this would not be correct either, because, as mentioned,\nvlan_hw_offload_capable() is false for us, so we'd be inserting dead\ncode and we'd always transmit packets with VID=0 in the injection frame\nheader.\n\nI can't actually test the ocelot switchdev driver and rely exclusively\non code inspection, but I don't think traffic from 8021q uppers has ever\nbeen injected properly, and not double-tagged. Thus I'm blaming the\nintroduction of VLAN fields in the injection header - early driver code.\n\nAs hinted at in the early conclusion, what we _want_ to happen for\nVLAN transmission was already described once in commit 5ca721c54d86\n(\"net: dsa: tag_ocelot: set the classified VLAN during xmit\").\n\nocelot_xmit_get_vlan_info() intends to ensure that if the port through\nwhich we're transmitting is under a VLAN-aware bridge, the outer VLAN\ntag from the skb head is stripped from there and inserted into the\ninjection frame header (so that the packet is processed in hardware\nthrough that actual VLAN). And in all other cases, the packet is sent\nwith VID=0 in the injection frame header, since the port is VLAN-unaware\nand has logic to strip this VID on egress (making it invisible to the\nwire).\n\nFixes: 08d02364b12f (\"net: mscc: fix the injection header\")\nSigned-off-by: Vladimir Oltean <vladimir.oltean@nxp.com>\nSigned-off-by: David S. Miller <davem@davemloft.net>",
+  "full_message": "net: mscc: ocelot: use ocelot_xmit_get_vlan_info() also for FDMA and register injection\n\nProblem description\n-------------------\n\nOn an NXP LS1028A (felix DSA driver) with the following configuration:\n\n- ocelot-8021q tagging protocol\n- VLAN-aware bridge (with STP) spanning at least swp0 and swp1\n- 8021q VLAN upper interfaces on swp0 and swp1: swp0.700, swp1.700\n- ptp4l on swp0.700 and swp1.700\n\nwe see that the ptp4l instances do not see each other's traffic,\nand they all go to the grand master state due to the\nANNOUNCE_RECEIPT_TIMEOUT_EXPIRES condition.\n\nJumping to the conclusion for the impatient\n-------------------------------------------\n\nThere is a zero-day bug in the ocelot switchdev driver in the way it\nhandles VLAN-tagged packet injection. The correct logic already exists in\nthe source code, in function ocelot_xmit_get_vlan_info() added by commit\n5ca721c54d86 (\"net: dsa: tag_ocelot: set the classified VLAN during xmit\").\nBut it is used only for normal NPI-based injection with the DSA \"ocelot\"\ntagging protocol. The other injection code paths (register-based and\nFDMA-based) roll their own wrong logic. This affects and was noticed on\nthe DSA \"ocelot-8021q\" protocol because it uses register-based injection.\n\nBy moving ocelot_xmit_get_vlan_info() to a place that's common for both\nthe DSA tagger and the ocelot switch library, it can also be called from\nocelot_port_inject_frame() in ocelot.c.\n\nWe need to touch the lines with ocelot_ifh_port_set()'s prototype\nanyway, so let's rename it to something clearer regarding what it does,\nand add a kernel-doc. ocelot_ifh_set_basic() should do.\n\nInvestigation notes\n-------------------\n\nDebugging reveals that PTP event (aka those carrying timestamps, like\nSync) frames injected into swp0.700 (but also swp1.700) hit the wire\nwith two VLAN tags:\n\n00000000: 01 1b 19 00 00 00 00 01 02 03 04 05 81 00 02 bc\n                                              ~~~~~~~~~~~\n00000010: 81 00 02 bc 88 f7 00 12 00 2c 00 00 02 00 00 00\n          ~~~~~~~~~~~\n00000020: 00 00 00 00 00 00 00 00 00 00 00 01 02 ff fe 03\n00000030: 04 05 00 01 00 04 00 00 00 00 00 00 00 00 00 00\n00000040: 00 00\n\nThe second (unexpected) VLAN tag makes felix_check_xtr_pkt() ->\nptp_classify_raw() fail to see these as PTP packets at the link\npartner's receiving end, and return PTP_CLASS_NONE (because the BPF\nclassifier is not written to expect 2 VLAN tags).\n\nThe reason why packets have 2 VLAN tags is because the transmission\ncode treats VLAN incorrectly.\n\nNeither ocelot switchdev, nor felix DSA, declare the NETIF_F_HW_VLAN_CTAG_TX\nfeature. Therefore, at xmit time, all VLANs should be in the skb head,\nand none should be in the hwaccel area. This is done by:\n\nstatic struct sk_buff *validate_xmit_vlan(struct sk_buff *skb,\n\t\t\t\t\t  netdev_features_t features)\n{\n\tif (skb_vlan_tag_present(skb) &&\n\t    !vlan_hw_offload_capable(features, skb->vlan_proto))\n\t\tskb = __vlan_hwaccel_push_inside(skb);\n\treturn skb;\n}\n\nBut ocelot_port_inject_frame() handles things incorrectly:\n\n\tocelot_ifh_port_set(ifh, port, rew_op, skb_vlan_tag_get(skb));\n\nvoid ocelot_ifh_port_set(struct sk_buff *skb, void *ifh, int port, u32 rew_op)\n{\n\t(...)\n\tif (vlan_tag)\n\t\tocelot_ifh_set_vlan_tci(ifh, vlan_tag);\n\t(...)\n}\n\nThe way __vlan_hwaccel_push_inside() pushes the tag inside the skb head\nis by calling:\n\nstatic inline void __vlan_hwaccel_clear_tag(struct sk_buff *skb)\n{\n\tskb->vlan_present = 0;\n}\n\nwhich does _not_ zero out skb->vlan_tci as seen by skb_vlan_tag_get().\nThis means that ocelot, when it calls skb_vlan_tag_get(), sees\n(and uses) a residual skb->vlan_tci, while the same VLAN tag is\n_already_ in the skb head.\n\nThe trivial fix for double VLAN headers is to replace the content of\nocelot_ifh_port_set() with:\n\n\tif (skb_vlan_tag_present(skb))\n\t\tocelot_ifh_set_vlan_tci(ifh, skb_vlan_tag_get(skb));\n\nbut this would not be correct either, because, as mentioned,\nvlan_hw_offload_capable() is false for us, so we'd be inserting dead\ncode and we'd always transmit packets with VID=0 in the injection frame\nheader.\n\nI can't actually test the ocelot switchdev driver and rely exclusively\non code inspection, but I don't think traffic from 8021q uppers has ever\nbeen injected properly, and not double-tagged. Thus I'm blaming the\nintroduction of VLAN fields in the injection header - early driver code.\n\nAs hinted at in the early conclusion, what we _want_ to happen for\nVLAN transmission was already described once in commit 5ca721c54d86\n(\"net: dsa: tag_ocelot: set the classified VLAN during xmit\").\n\nocelot_xmit_get_vlan_info() intends to ensure that if the port through\nwhich we're transmitting is under a VLAN-aware bridge, the outer VLAN\ntag from the skb head is stripped from there and inserted into the\ninjection frame header (so that the packet is processed in hardware\nthrough that actual VLAN). And in all other cases, the packet is sent\nwith VID=0 in the injection frame header, since the port is VLAN-unaware\nand has logic to strip this VID on egress (making it invisible to the\nwire).\n\nFixes: 08d02364b12f (\"net: mscc: fix the injection header\")\nSigned-off-by: Vladimir Oltean <vladimir.oltean@nxp.com>\nSigned-off-by: David S. Miller <davem@davemloft.net>",
+  "author_name": "Vladimir Oltean",
+  "author_email": "vladimir.oltean@nxp.com",
+  "author_date": "Thu Aug 15 03:07:02 2024 +0300",
+  "author_date_iso": "2024-08-15T03:07:02+03:00",
+  "committer_name": "David S. Miller",
+  "committer_email": "davem@davemloft.net",
+  "committer_date": "Fri Aug 16 09:59:32 2024 +0100",
+  "committer_date_iso": "2024-08-16T09:59:32+01:00",
+  "files_changed": [
+    "drivers/net/ethernet/mscc/ocelot.c",
+    "drivers/net/ethernet/mscc/ocelot_fdma.c",
+    "include/linux/dsa/ocelot.h",
+    "include/soc/mscc/ocelot.h",
+    "net/dsa/tag_ocelot.c"
+  ],
+  "files_changed_count": 5,
+  "stats": [
+    {
+      "file": "drivers/net/ethernet/mscc/ocelot.c",
+      "insertions": 23,
+      "deletions": 6
+    },
+    {
+      "file": "drivers/net/ethernet/mscc/ocelot_fdma.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "include/linux/dsa/ocelot.h",
+      "insertions": 47,
+      "deletions": 0
+    },
+    {
+      "file": "include/soc/mscc/ocelot.h",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "net/dsa/tag_ocelot.c",
+      "insertions": 2,
+      "deletions": 35
+    }
+  ],
+  "total_insertions": 75,
+  "total_deletions": 43,
+  "total_changes": 118,
+  "parents": [
+    "e29b82ef27616777e21c07dc263a8769cbdaa358"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "injection"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "drivers/net/ethernet/mscc/ocelot.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "drivers/net/ethernet/mscc/ocelot_fdma.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/dsa/ocelot.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/soc/mscc/ocelot.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "net/dsa/tag_ocelot.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

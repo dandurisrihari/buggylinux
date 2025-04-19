@@ -1,0 +1,78 @@
+{
+  "hash": "1201f226c863b7da739f7420ddba818cedf372fc",
+  "hash_short": "1201f226",
+  "subject": "KVM: x86: Cache CPUID.0xD XSTATE offsets+sizes during module init",
+  "body": "Snapshot the output of CPUID.0xD.[1..n] during kvm.ko initiliaization to\navoid the overead of CPUID during runtime.  The offset, size, and metadata\nfor CPUID.0xD.[1..n] sub-leaves does not depend on XCR0 or XSS values, i.e.\nis constant for a given CPU, and thus can be cached during module load.\n\nOn Intel's Emerald Rapids, CPUID is *wildly* expensive, to the point where\nrecomputing XSAVE offsets and sizes results in a 4x increase in latency of\nnested VM-Enter and VM-Exit (nested transitions can trigger\nxstate_required_size() multiple times per transition), relative to using\ncached values.  The issue is easily visible by running `perf top` while\ntriggering nested transitions: kvm_update_cpuid_runtime() shows up at a\nwhopping 50%.\n\nAs measured via RDTSC from L2 (using KVM-Unit-Test's CPUID VM-Exit test\nand a slightly modified L1 KVM to handle CPUID in the fastpath), a nested\nroundtrip to emulate CPUID on Skylake (SKX), Icelake (ICX), and Emerald\nRapids (EMR) takes:\n\n  SKX 11650\n  ICX 22350\n  EMR 28850\n\nUsing cached values, the latency drops to:\n\n  SKX 6850\n  ICX 9000\n  EMR 7900\n\nThe underlying issue is that CPUID itself is slow on ICX, and comically\nslow on EMR.  The problem is exacerbated on CPUs which support XSAVES\nand/or XSAVEC, as KVM invokes xstate_required_size() twice on each\nruntime CPUID update, and because there are more supported XSAVE features\n(CPUID for supported XSAVE feature sub-leafs is significantly slower).\n\n SKX:\n  CPUID.0xD.2  = 348 cycles\n  CPUID.0xD.3  = 400 cycles\n  CPUID.0xD.4  = 276 cycles\n  CPUID.0xD.5  = 236 cycles\n  <other sub-leaves are similar>\n\n EMR:\n  CPUID.0xD.2  = 1138 cycles\n  CPUID.0xD.3  = 1362 cycles\n  CPUID.0xD.4  = 1068 cycles\n  CPUID.0xD.5  = 910 cycles\n  CPUID.0xD.6  = 914 cycles\n  CPUID.0xD.7  = 1350 cycles\n  CPUID.0xD.8  = 734 cycles\n  CPUID.0xD.9  = 766 cycles\n  CPUID.0xD.10 = 732 cycles\n  CPUID.0xD.11 = 718 cycles\n  CPUID.0xD.12 = 734 cycles\n  CPUID.0xD.13 = 1700 cycles\n  CPUID.0xD.14 = 1126 cycles\n  CPUID.0xD.15 = 898 cycles\n  CPUID.0xD.16 = 716 cycles\n  CPUID.0xD.17 = 748 cycles\n  CPUID.0xD.18 = 776 cycles\n\nNote, updating runtime CPUID information multiple times per nested\ntransition is itself a flaw, especially since CPUID is a mandotory\nintercept on both Intel and AMD.  E.g. KVM doesn't need to ensure emulated\nCPUID state is up-to-date while running L2.  That flaw will be fixed in a\nfuture patch, as deferring runtime CPUID updates is more subtle than it\nappears at first glance, the benefits aren't super critical to have once\nthe XSAVE issue is resolved, and caching CPUID output is desirable even if\nKVM's updates are deferred.\n\nCc: Jim Mattson <jmattson@google.com>\nCc: stable@vger.kernel.org\nSigned-off-by: Sean Christopherson <seanjc@google.com>\nMessage-ID: <20241211013302.1347853-2-seanjc@google.com>\nSigned-off-by: Paolo Bonzini <pbonzini@redhat.com>",
+  "full_message": "KVM: x86: Cache CPUID.0xD XSTATE offsets+sizes during module init\n\nSnapshot the output of CPUID.0xD.[1..n] during kvm.ko initiliaization to\navoid the overead of CPUID during runtime.  The offset, size, and metadata\nfor CPUID.0xD.[1..n] sub-leaves does not depend on XCR0 or XSS values, i.e.\nis constant for a given CPU, and thus can be cached during module load.\n\nOn Intel's Emerald Rapids, CPUID is *wildly* expensive, to the point where\nrecomputing XSAVE offsets and sizes results in a 4x increase in latency of\nnested VM-Enter and VM-Exit (nested transitions can trigger\nxstate_required_size() multiple times per transition), relative to using\ncached values.  The issue is easily visible by running `perf top` while\ntriggering nested transitions: kvm_update_cpuid_runtime() shows up at a\nwhopping 50%.\n\nAs measured via RDTSC from L2 (using KVM-Unit-Test's CPUID VM-Exit test\nand a slightly modified L1 KVM to handle CPUID in the fastpath), a nested\nroundtrip to emulate CPUID on Skylake (SKX), Icelake (ICX), and Emerald\nRapids (EMR) takes:\n\n  SKX 11650\n  ICX 22350\n  EMR 28850\n\nUsing cached values, the latency drops to:\n\n  SKX 6850\n  ICX 9000\n  EMR 7900\n\nThe underlying issue is that CPUID itself is slow on ICX, and comically\nslow on EMR.  The problem is exacerbated on CPUs which support XSAVES\nand/or XSAVEC, as KVM invokes xstate_required_size() twice on each\nruntime CPUID update, and because there are more supported XSAVE features\n(CPUID for supported XSAVE feature sub-leafs is significantly slower).\n\n SKX:\n  CPUID.0xD.2  = 348 cycles\n  CPUID.0xD.3  = 400 cycles\n  CPUID.0xD.4  = 276 cycles\n  CPUID.0xD.5  = 236 cycles\n  <other sub-leaves are similar>\n\n EMR:\n  CPUID.0xD.2  = 1138 cycles\n  CPUID.0xD.3  = 1362 cycles\n  CPUID.0xD.4  = 1068 cycles\n  CPUID.0xD.5  = 910 cycles\n  CPUID.0xD.6  = 914 cycles\n  CPUID.0xD.7  = 1350 cycles\n  CPUID.0xD.8  = 734 cycles\n  CPUID.0xD.9  = 766 cycles\n  CPUID.0xD.10 = 732 cycles\n  CPUID.0xD.11 = 718 cycles\n  CPUID.0xD.12 = 734 cycles\n  CPUID.0xD.13 = 1700 cycles\n  CPUID.0xD.14 = 1126 cycles\n  CPUID.0xD.15 = 898 cycles\n  CPUID.0xD.16 = 716 cycles\n  CPUID.0xD.17 = 748 cycles\n  CPUID.0xD.18 = 776 cycles\n\nNote, updating runtime CPUID information multiple times per nested\ntransition is itself a flaw, especially since CPUID is a mandotory\nintercept on both Intel and AMD.  E.g. KVM doesn't need to ensure emulated\nCPUID state is up-to-date while running L2.  That flaw will be fixed in a\nfuture patch, as deferring runtime CPUID updates is more subtle than it\nappears at first glance, the benefits aren't super critical to have once\nthe XSAVE issue is resolved, and caching CPUID output is desirable even if\nKVM's updates are deferred.\n\nCc: Jim Mattson <jmattson@google.com>\nCc: stable@vger.kernel.org\nSigned-off-by: Sean Christopherson <seanjc@google.com>\nMessage-ID: <20241211013302.1347853-2-seanjc@google.com>\nSigned-off-by: Paolo Bonzini <pbonzini@redhat.com>",
+  "author_name": "Sean Christopherson",
+  "author_email": "seanjc@google.com",
+  "author_date": "Tue Dec 10 17:32:58 2024 -0800",
+  "author_date_iso": "2024-12-10T17:32:58-08:00",
+  "committer_name": "Paolo Bonzini",
+  "committer_email": "pbonzini@redhat.com",
+  "committer_date": "Fri Dec 13 13:58:10 2024 -0500",
+  "committer_date_iso": "2024-12-13T13:58:10-05:00",
+  "files_changed": [
+    "arch/x86/kvm/cpuid.c",
+    "arch/x86/kvm/cpuid.h",
+    "arch/x86/kvm/x86.c"
+  ],
+  "files_changed_count": 3,
+  "stats": [
+    {
+      "file": "arch/x86/kvm/cpuid.c",
+      "insertions": 26,
+      "deletions": 5
+    },
+    {
+      "file": "arch/x86/kvm/cpuid.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/kvm/x86.c",
+      "insertions": 2,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 29,
+  "total_deletions": 5,
+  "total_changes": 34,
+  "parents": [
+    "3154bddf8cf2112cf63918b8ab867efe80403208"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "XSS"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/x86/kvm/cpuid.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kvm/cpuid.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kvm/x86.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

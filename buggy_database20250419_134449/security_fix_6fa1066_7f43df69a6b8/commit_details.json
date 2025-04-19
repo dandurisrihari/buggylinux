@@ -1,0 +1,54 @@
+{
+  "hash": "6fa1066fc5d00cb9f1b0e83b7ff6ef98d26ba2aa",
+  "hash_short": "6fa1066f",
+  "subject": "mm/mremap: fix move_normal_pmd/retract_page_tables race",
+  "body": "In mremap(), move_page_tables() looks at the type of the PMD entry and the\nspecified address range to figure out by which method the next chunk of\npage table entries should be moved.\n\nAt that point, the mmap_lock is held in write mode, but no rmap locks are\nheld yet.  For PMD entries that point to page tables and are fully covered\nby the source address range, move_pgt_entry(NORMAL_PMD, ...) is called,\nwhich first takes rmap locks, then does move_normal_pmd(). \nmove_normal_pmd() takes the necessary page table locks at source and\ndestination, then moves an entire page table from the source to the\ndestination.\n\nThe problem is: The rmap locks, which protect against concurrent page\ntable removal by retract_page_tables() in the THP code, are only taken\nafter the PMD entry has been read and it has been decided how to move it. \nSo we can race as follows (with two processes that have mappings of the\nsame tmpfs file that is stored on a tmpfs mount with huge=advise); note\nthat process A accesses page tables through the MM while process B does it\nthrough the file rmap:\n\nprocess A                      process B\n=========                      =========\nmremap\n  mremap_to\n    move_vma\n      move_page_tables\n        get_old_pmd\n        alloc_new_pmd\n                      *** PREEMPT ***\n                               madvise(MADV_COLLAPSE)\n                                 do_madvise\n                                   madvise_walk_vmas\n                                     madvise_vma_behavior\n                                       madvise_collapse\n                                         hpage_collapse_scan_file\n                                           collapse_file\n                                             retract_page_tables\n                                               i_mmap_lock_read(mapping)\n                                               pmdp_collapse_flush\n                                               i_mmap_unlock_read(mapping)\n        move_pgt_entry(NORMAL_PMD, ...)\n          take_rmap_locks\n          move_normal_pmd\n          drop_rmap_locks\n\nWhen this happens, move_normal_pmd() can end up creating bogus PMD entries\nin the line `pmd_populate(mm, new_pmd, pmd_pgtable(pmd))`.  The effect\ndepends on arch-specific and machine-specific details; on x86, you can end\nup with physical page 0 mapped as a page table, which is likely\nexploitable for user->kernel privilege escalation.\n\nFix the race by letting process B recheck that the PMD still points to a\npage table after the rmap locks have been taken.  Otherwise, we bail and\nlet the caller fall back to the PTE-level copying path, which will then\nbail immediately at the pmd_none() check.\n\nBug reachability: Reaching this bug requires that you can create\nshmem/file THP mappings - anonymous THP uses different code that doesn't\nzap stuff under rmap locks.  File THP is gated on an experimental config\nflag (CONFIG_READ_ONLY_THP_FOR_FS), so on normal distro kernels you need\nshmem THP to hit this bug.  As far as I know, getting shmem THP normally\nrequires that you can mount your own tmpfs with the right mount flags,\nwhich would require creating your own user+mount namespace; though I don't\nknow if some distros maybe enable shmem THP by default or something like\nthat.\n\nBug impact: This issue can likely be used for user->kernel privilege\nescalation when it is reachable.\n\nLink: https://lkml.kernel.org/r/20241007-move_normal_pmd-vs-collapse-fix-2-v1-1-5ead9631f2ea@google.com\nFixes: 1d65b771bc08 (\"mm/khugepaged: retract_page_tables() without mmap or vma lock\")\nSigned-off-by: Jann Horn <jannh@google.com>\nSigned-off-by: David Hildenbrand <david@redhat.com>\nCo-developed-by: David Hildenbrand <david@redhat.com>\nCloses: https://project-zero.issues.chromium.org/371047675\nAcked-by: Qi Zheng <zhengqi.arch@bytedance.com>\nReviewed-by: Lorenzo Stoakes <lorenzo.stoakes@oracle.com>\nCc: Hugh Dickins <hughd@google.com>\nCc: Joel Fernandes <joel@joelfernandes.org>\nCc: Matthew Wilcox <willy@infradead.org>\nCc: <stable@vger.kernel.org>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>",
+  "full_message": "mm/mremap: fix move_normal_pmd/retract_page_tables race\n\nIn mremap(), move_page_tables() looks at the type of the PMD entry and the\nspecified address range to figure out by which method the next chunk of\npage table entries should be moved.\n\nAt that point, the mmap_lock is held in write mode, but no rmap locks are\nheld yet.  For PMD entries that point to page tables and are fully covered\nby the source address range, move_pgt_entry(NORMAL_PMD, ...) is called,\nwhich first takes rmap locks, then does move_normal_pmd(). \nmove_normal_pmd() takes the necessary page table locks at source and\ndestination, then moves an entire page table from the source to the\ndestination.\n\nThe problem is: The rmap locks, which protect against concurrent page\ntable removal by retract_page_tables() in the THP code, are only taken\nafter the PMD entry has been read and it has been decided how to move it. \nSo we can race as follows (with two processes that have mappings of the\nsame tmpfs file that is stored on a tmpfs mount with huge=advise); note\nthat process A accesses page tables through the MM while process B does it\nthrough the file rmap:\n\nprocess A                      process B\n=========                      =========\nmremap\n  mremap_to\n    move_vma\n      move_page_tables\n        get_old_pmd\n        alloc_new_pmd\n                      *** PREEMPT ***\n                               madvise(MADV_COLLAPSE)\n                                 do_madvise\n                                   madvise_walk_vmas\n                                     madvise_vma_behavior\n                                       madvise_collapse\n                                         hpage_collapse_scan_file\n                                           collapse_file\n                                             retract_page_tables\n                                               i_mmap_lock_read(mapping)\n                                               pmdp_collapse_flush\n                                               i_mmap_unlock_read(mapping)\n        move_pgt_entry(NORMAL_PMD, ...)\n          take_rmap_locks\n          move_normal_pmd\n          drop_rmap_locks\n\nWhen this happens, move_normal_pmd() can end up creating bogus PMD entries\nin the line `pmd_populate(mm, new_pmd, pmd_pgtable(pmd))`.  The effect\ndepends on arch-specific and machine-specific details; on x86, you can end\nup with physical page 0 mapped as a page table, which is likely\nexploitable for user->kernel privilege escalation.\n\nFix the race by letting process B recheck that the PMD still points to a\npage table after the rmap locks have been taken.  Otherwise, we bail and\nlet the caller fall back to the PTE-level copying path, which will then\nbail immediately at the pmd_none() check.\n\nBug reachability: Reaching this bug requires that you can create\nshmem/file THP mappings - anonymous THP uses different code that doesn't\nzap stuff under rmap locks.  File THP is gated on an experimental config\nflag (CONFIG_READ_ONLY_THP_FOR_FS), so on normal distro kernels you need\nshmem THP to hit this bug.  As far as I know, getting shmem THP normally\nrequires that you can mount your own tmpfs with the right mount flags,\nwhich would require creating your own user+mount namespace; though I don't\nknow if some distros maybe enable shmem THP by default or something like\nthat.\n\nBug impact: This issue can likely be used for user->kernel privilege\nescalation when it is reachable.\n\nLink: https://lkml.kernel.org/r/20241007-move_normal_pmd-vs-collapse-fix-2-v1-1-5ead9631f2ea@google.com\nFixes: 1d65b771bc08 (\"mm/khugepaged: retract_page_tables() without mmap or vma lock\")\nSigned-off-by: Jann Horn <jannh@google.com>\nSigned-off-by: David Hildenbrand <david@redhat.com>\nCo-developed-by: David Hildenbrand <david@redhat.com>\nCloses: https://project-zero.issues.chromium.org/371047675\nAcked-by: Qi Zheng <zhengqi.arch@bytedance.com>\nReviewed-by: Lorenzo Stoakes <lorenzo.stoakes@oracle.com>\nCc: Hugh Dickins <hughd@google.com>\nCc: Joel Fernandes <joel@joelfernandes.org>\nCc: Matthew Wilcox <willy@infradead.org>\nCc: <stable@vger.kernel.org>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>",
+  "author_name": "Jann Horn",
+  "author_email": "jannh@google.com",
+  "author_date": "Mon Oct 7 23:42:04 2024 +0200",
+  "author_date_iso": "2024-10-07T23:42:04+02:00",
+  "committer_name": "Andrew Morton",
+  "committer_email": "akpm@linux-foundation.org",
+  "committer_date": "Thu Oct 17 00:28:07 2024 -0700",
+  "committer_date_iso": "2024-10-17T00:28:07-07:00",
+  "files_changed": [
+    "mm/mremap.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "mm/mremap.c",
+      "insertions": 9,
+      "deletions": 2
+    }
+  ],
+  "total_insertions": 9,
+  "total_deletions": 2,
+  "total_changes": 11,
+  "parents": [
+    "8f3ce3d996bf1e2f8474ec3ddabdb8765c19e6ea"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "privilege escalation"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "mm/mremap.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

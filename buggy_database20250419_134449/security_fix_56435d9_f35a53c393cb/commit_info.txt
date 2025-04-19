@@ -1,0 +1,120 @@
+Commit Hash: 56435d9145f5b97decca66244d2049e2d5e4616d
+Subject: Merge branch 'tag_8021q-for-ocelot-switches'
+
+
+Security Keywords:
+- injection
+
+Full commit message:
+Merge branch 'tag_8021q-for-ocelot-switches'
+
+Vladimir Oltean says:
+
+====================
+tag_8021q for Ocelot switches
+
+The Felix switch inside LS1028A has an issue. It has a 2.5G CPU port,
+and the external ports, in the majority of use cases, run at 1G. This
+means that, when the CPU injects traffic into the switch, it is very
+easy to run into congestion. This is not to say that it is impossible to
+enter congestion even with all ports running at the same speed, just
+that the default configuration is already very prone to that by design.
+
+Normally, the way to deal with that is using Ethernet flow control
+(PAUSE frames).
+
+However, this functionality is not working today with the ENETC - Felix
+switch pair. The hardware issue is undergoing documentation right now as
+an erratum within NXP, but several customers have been requesting a
+reasonable workaround for it.
+
+In truth, the LS1028A has 2 internal port pairs. The lack of flow control
+is an issue only when NPI mode (Node Processor Interface, aka the mode
+where the "CPU port module", which carries DSA-style tagged packets, is
+connected to a regular Ethernet port) is used, and NPI mode is supported
+by Felix on a single port.
+
+In past BSPs, we have had setups where both internal port pairs were
+enabled. We were advertising the following setup:
+
+"data port"     "control port"
+  (2.5G)            (1G)
+
+   eno2             eno3
+    ^                ^
+    |                |
+    | regular        | DSA-tagged
+    | frames         | frames
+    |                |
+    v                v
+   swp4             swp5
+
+This works but is highly unpractical, due to NXP shifting the task of
+designing a functional system (choosing which port to use, depending on
+type of traffic required) up to the end user. The swpN interfaces would
+have to be bridged with swp4, in order for the eno2 "data port" to have
+access to the outside network. And the swpN interfaces would still be
+capable of IP networking. So running a DHCP client would give us two IP
+interfaces from the same subnet, one assigned to eno2, and the other to
+swpN (0, 1, 2, 3).
+
+Also, the dual port design doesn't scale. When attaching another DSA
+switch to a Felix port, the end result is that the "data port" cannot
+carry any meaningful data to the external world, since it lacks the DSA
+tags required to traverse the sja1105 switches below. All that traffic
+needs to go through the "control port".
+
+So in newer BSPs there was a desire to simplify that setup, and only
+have one internal port pair:
+
+   eno2            eno3
+    ^
+    |
+    | DSA-tagged    x disabled
+    | frames
+    |
+    v
+   swp4            swp5
+
+However, this setup only exacerbates the issue of not having flow
+control on the NPI port, since that is the only port now. Also, there
+are use cases that still require the "data port", such as IEEE 802.1CB
+(TSN stream identification doesn't work over an NPI port), source
+MAC address learning over NPI, etc.
+
+Again, there is a desire to keep the simplicity of the single internal
+port setup, while regaining the benefits of having a dedicated data port
+as well. And this series attempts to deliver just that.
+
+So the NPI functionality is disabled conditionally. Its purpose was:
+- To ensure individually addressable ports on TX. This can be replaced
+  by using some designated VLAN tags which are pushed by the DSA tagger
+  code, then removed by the switch (so they are invisible to the outside
+  world and to the user).
+- To ensure source port identification on RX. Again, this can be
+  replaced by using some designated VLAN tags to encapsulate all RX
+  traffic (each VLAN uniquely identifies a source port). The DSA tagger
+  determines which port it was based on the VLAN number, then removes
+  that header.
+- To deliver PTP timestamps. This cannot be obtained through VLAN
+  headers, so we need to take a step back and see how else we can do
+  that. The Microchip Ocelot-1 (VSC7514 MIPS) driver performs manual
+  injection/extraction from the CPU port module using register-based
+  MMIO, and not over Ethernet. We will need to do the same from DSA,
+  which makes this tagger a sort of hybrid between DSA and pure
+  switchdev.
+====================
+
+Link: https://lore.kernel.org/r/20210129010009.3959398-1-olteanv@gmail.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+Metadata:
+Author: Jakub Kicinski <kuba@kernel.org>
+Author Date: Fri Jan 29 21:25:27 2021 -0800
+Committer: Jakub Kicinski <kuba@kernel.org>
+Commit Date: Fri Jan 29 21:29:32 2021 -0800
+
+Files Changed: 0
+Lines Added: 1341
+Lines Removed: 430
+Total Changes: 1771

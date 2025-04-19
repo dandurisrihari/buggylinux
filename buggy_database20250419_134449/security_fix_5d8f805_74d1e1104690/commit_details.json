@@ -1,0 +1,66 @@
+{
+  "hash": "5d8f805789072ea7fd39504694b7bd17e5f751c4",
+  "hash_short": "5d8f8057",
+  "subject": "cachefiles: fix slab-use-after-free in cachefiles_withdraw_cookie()",
+  "body": "We got the following issue in our fault injection stress test:\n\n==================================================================\nBUG: KASAN: slab-use-after-free in cachefiles_withdraw_cookie+0x4d9/0x600\nRead of size 8 at addr ffff888118efc000 by task kworker/u78:0/109\n\nCPU: 13 PID: 109 Comm: kworker/u78:0 Not tainted 6.8.0-dirty #566\nCall Trace:\n <TASK>\n kasan_report+0x93/0xc0\n cachefiles_withdraw_cookie+0x4d9/0x600\n fscache_cookie_state_machine+0x5c8/0x1230\n fscache_cookie_worker+0x91/0x1c0\n process_one_work+0x7fa/0x1800\n [...]\n\nAllocated by task 117:\n kmalloc_trace+0x1b3/0x3c0\n cachefiles_acquire_volume+0xf3/0x9c0\n fscache_create_volume_work+0x97/0x150\n process_one_work+0x7fa/0x1800\n [...]\n\nFreed by task 120301:\n kfree+0xf1/0x2c0\n cachefiles_withdraw_cache+0x3fa/0x920\n cachefiles_put_unbind_pincount+0x1f6/0x250\n cachefiles_daemon_release+0x13b/0x290\n __fput+0x204/0xa00\n task_work_run+0x139/0x230\n do_exit+0x87a/0x29b0\n [...]\n==================================================================\n\nFollowing is the process that triggers the issue:\n\n           p1                |             p2\n------------------------------------------------------------\n                              fscache_begin_lookup\n                               fscache_begin_volume_access\n                                fscache_cache_is_live(fscache_cache)\ncachefiles_daemon_release\n cachefiles_put_unbind_pincount\n  cachefiles_daemon_unbind\n   cachefiles_withdraw_cache\n    fscache_withdraw_cache\n     fscache_set_cache_state(cache, FSCACHE_CACHE_IS_WITHDRAWN);\n    cachefiles_withdraw_objects(cache)\n    fscache_wait_for_objects(fscache)\n      atomic_read(&fscache_cache->object_count) == 0\n                              fscache_perform_lookup\n                               cachefiles_lookup_cookie\n                                cachefiles_alloc_object\n                                 refcount_set(&object->ref, 1);\n                                 object->volume = volume\n                                 fscache_count_object(vcookie->cache);\n                                  atomic_inc(&fscache_cache->object_count)\n    cachefiles_withdraw_volumes\n     cachefiles_withdraw_volume\n      fscache_withdraw_volume\n      __cachefiles_free_volume\n       kfree(cachefiles_volume)\n                              fscache_cookie_state_machine\n                               cachefiles_withdraw_cookie\n                                cache = object->volume->cache;\n                                // cachefiles_volume UAF !!!\n\nAfter setting FSCACHE_CACHE_IS_WITHDRAWN, wait for all the cookie lookups\nto complete first, and then wait for fscache_cache->object_count == 0 to\navoid the cookie exiting after the volume has been freed and triggering\nthe above issue. Therefore call fscache_withdraw_volume() before calling\ncachefiles_withdraw_objects().\n\nThis way, after setting FSCACHE_CACHE_IS_WITHDRAWN, only the following two\ncases will occur:\n1) fscache_begin_lookup fails in fscache_begin_volume_access().\n2) fscache_withdraw_volume() will ensure that fscache_count_object() has\n   been executed before calling fscache_wait_for_objects().\n\nFixes: fe2140e2f57f (\"cachefiles: Implement volume support\")\nSuggested-by: Hou Tao <houtao1@huawei.com>\nSigned-off-by: Baokun Li <libaokun1@huawei.com>\nLink: https://lore.kernel.org/r/20240628062930.2467993-4-libaokun@huaweicloud.com\nSigned-off-by: Christian Brauner <brauner@kernel.org>",
+  "full_message": "cachefiles: fix slab-use-after-free in cachefiles_withdraw_cookie()\n\nWe got the following issue in our fault injection stress test:\n\n==================================================================\nBUG: KASAN: slab-use-after-free in cachefiles_withdraw_cookie+0x4d9/0x600\nRead of size 8 at addr ffff888118efc000 by task kworker/u78:0/109\n\nCPU: 13 PID: 109 Comm: kworker/u78:0 Not tainted 6.8.0-dirty #566\nCall Trace:\n <TASK>\n kasan_report+0x93/0xc0\n cachefiles_withdraw_cookie+0x4d9/0x600\n fscache_cookie_state_machine+0x5c8/0x1230\n fscache_cookie_worker+0x91/0x1c0\n process_one_work+0x7fa/0x1800\n [...]\n\nAllocated by task 117:\n kmalloc_trace+0x1b3/0x3c0\n cachefiles_acquire_volume+0xf3/0x9c0\n fscache_create_volume_work+0x97/0x150\n process_one_work+0x7fa/0x1800\n [...]\n\nFreed by task 120301:\n kfree+0xf1/0x2c0\n cachefiles_withdraw_cache+0x3fa/0x920\n cachefiles_put_unbind_pincount+0x1f6/0x250\n cachefiles_daemon_release+0x13b/0x290\n __fput+0x204/0xa00\n task_work_run+0x139/0x230\n do_exit+0x87a/0x29b0\n [...]\n==================================================================\n\nFollowing is the process that triggers the issue:\n\n           p1                |             p2\n------------------------------------------------------------\n                              fscache_begin_lookup\n                               fscache_begin_volume_access\n                                fscache_cache_is_live(fscache_cache)\ncachefiles_daemon_release\n cachefiles_put_unbind_pincount\n  cachefiles_daemon_unbind\n   cachefiles_withdraw_cache\n    fscache_withdraw_cache\n     fscache_set_cache_state(cache, FSCACHE_CACHE_IS_WITHDRAWN);\n    cachefiles_withdraw_objects(cache)\n    fscache_wait_for_objects(fscache)\n      atomic_read(&fscache_cache->object_count) == 0\n                              fscache_perform_lookup\n                               cachefiles_lookup_cookie\n                                cachefiles_alloc_object\n                                 refcount_set(&object->ref, 1);\n                                 object->volume = volume\n                                 fscache_count_object(vcookie->cache);\n                                  atomic_inc(&fscache_cache->object_count)\n    cachefiles_withdraw_volumes\n     cachefiles_withdraw_volume\n      fscache_withdraw_volume\n      __cachefiles_free_volume\n       kfree(cachefiles_volume)\n                              fscache_cookie_state_machine\n                               cachefiles_withdraw_cookie\n                                cache = object->volume->cache;\n                                // cachefiles_volume UAF !!!\n\nAfter setting FSCACHE_CACHE_IS_WITHDRAWN, wait for all the cookie lookups\nto complete first, and then wait for fscache_cache->object_count == 0 to\navoid the cookie exiting after the volume has been freed and triggering\nthe above issue. Therefore call fscache_withdraw_volume() before calling\ncachefiles_withdraw_objects().\n\nThis way, after setting FSCACHE_CACHE_IS_WITHDRAWN, only the following two\ncases will occur:\n1) fscache_begin_lookup fails in fscache_begin_volume_access().\n2) fscache_withdraw_volume() will ensure that fscache_count_object() has\n   been executed before calling fscache_wait_for_objects().\n\nFixes: fe2140e2f57f (\"cachefiles: Implement volume support\")\nSuggested-by: Hou Tao <houtao1@huawei.com>\nSigned-off-by: Baokun Li <libaokun1@huawei.com>\nLink: https://lore.kernel.org/r/20240628062930.2467993-4-libaokun@huaweicloud.com\nSigned-off-by: Christian Brauner <brauner@kernel.org>",
+  "author_name": "Baokun Li",
+  "author_email": "libaokun1@huawei.com",
+  "author_date": "Fri Jun 28 14:29:24 2024 +0800",
+  "author_date_iso": "2024-06-28T14:29:24+08:00",
+  "committer_name": "Christian Brauner",
+  "committer_email": "brauner@kernel.org",
+  "committer_date": "Wed Jul 3 10:36:15 2024 +0200",
+  "committer_date_iso": "2024-07-03T10:36:15+02:00",
+  "files_changed": [
+    "fs/cachefiles/cache.c",
+    "fs/cachefiles/volume.c"
+  ],
+  "files_changed_count": 2,
+  "stats": [
+    {
+      "file": "fs/cachefiles/cache.c",
+      "insertions": 34,
+      "deletions": 1
+    },
+    {
+      "file": "fs/cachefiles/volume.c",
+      "insertions": 0,
+      "deletions": 1
+    }
+  ],
+  "total_insertions": 34,
+  "total_deletions": 2,
+  "total_changes": 36,
+  "parents": [
+    "522018a0de6b6fcce60c04f86dfc5f0e4b6a1b36"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "injection"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "fs/cachefiles/cache.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/cachefiles/volume.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

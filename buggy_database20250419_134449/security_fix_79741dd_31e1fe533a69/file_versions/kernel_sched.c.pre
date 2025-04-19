@@ -1,0 +1,129 @@
+commit 457533a7d3402d1d91fbc125c8bd1bd16dcd3cd4
+Author: Martin Schwidefsky <schwidefsky@de.ibm.com>
+Date:   Wed Dec 31 15:11:37 2008 +0100
+
+    [PATCH] fix scaled & unscaled cputime accounting
+    
+    The utimescaled / stimescaled fields in the task structure and the
+    global cpustat should be set on all architectures. On s390 the calls
+    to account_user_time_scaled and account_system_time_scaled never have
+    been added. In addition system time that is accounted as guest time
+    to the user time of a process is accounted to the scaled system time
+    instead of the scaled user time.
+    To fix the bugs and to prevent future forgetfulness this patch merges
+    account_system_time_scaled into account_system_time and
+    account_user_time_scaled into account_user_time.
+    
+    Cc: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+    Cc: Hidetoshi Seto <seto.hidetoshi@jp.fujitsu.com>
+    Cc: Tony Luck <tony.luck@intel.com>
+    Cc: Jeremy Fitzhardinge <jeremy@xensource.com>
+    Cc: Chris Wright <chrisw@sous-sol.org>
+    Cc: Michael Neuling <mikey@neuling.org>
+    Acked-by: Paul Mackerras <paulus@samba.org>
+    Signed-off-by: Martin Schwidefsky <schwidefsky@de.ibm.com>
+
+diff --git a/kernel/sched.c b/kernel/sched.c
+index fff1c4a20b65..5b03679ff712 100644
+--- a/kernel/sched.c
++++ b/kernel/sched.c
+@@ -4080,13 +4080,17 @@ unsigned long long task_delta_exec(struct task_struct *p)
+  * Account user cpu time to a process.
+  * @p: the process that the cpu time gets accounted to
+  * @cputime: the cpu time spent in user space since the last update
++ * @cputime_scaled: cputime scaled by cpu frequency
+  */
+-void account_user_time(struct task_struct *p, cputime_t cputime)
++void account_user_time(struct task_struct *p, cputime_t cputime,
++		       cputime_t cputime_scaled)
+ {
+ 	struct cpu_usage_stat *cpustat = &kstat_this_cpu.cpustat;
+ 	cputime64_t tmp;
+ 
++	/* Add user time to process. */
+ 	p->utime = cputime_add(p->utime, cputime);
++	p->utimescaled = cputime_add(p->utimescaled, cputime_scaled);
+ 	account_group_user_time(p, cputime);
+ 
+ 	/* Add user time to cpustat. */
+@@ -4103,51 +4107,49 @@ void account_user_time(struct task_struct *p, cputime_t cputime)
+  * Account guest cpu time to a process.
+  * @p: the process that the cpu time gets accounted to
+  * @cputime: the cpu time spent in virtual machine since the last update
++ * @cputime_scaled: cputime scaled by cpu frequency
+  */
+-static void account_guest_time(struct task_struct *p, cputime_t cputime)
++static void account_guest_time(struct task_struct *p, cputime_t cputime,
++			       cputime_t cputime_scaled)
+ {
+ 	cputime64_t tmp;
+ 	struct cpu_usage_stat *cpustat = &kstat_this_cpu.cpustat;
+ 
+ 	tmp = cputime_to_cputime64(cputime);
+ 
++	/* Add guest time to process. */
+ 	p->utime = cputime_add(p->utime, cputime);
++	p->utimescaled = cputime_add(p->utimescaled, cputime_scaled);
+ 	account_group_user_time(p, cputime);
+ 	p->gtime = cputime_add(p->gtime, cputime);
+ 
++	/* Add guest time to cpustat. */
+ 	cpustat->user = cputime64_add(cpustat->user, tmp);
+ 	cpustat->guest = cputime64_add(cpustat->guest, tmp);
+ }
+ 
+-/*
+- * Account scaled user cpu time to a process.
+- * @p: the process that the cpu time gets accounted to
+- * @cputime: the cpu time spent in user space since the last update
+- */
+-void account_user_time_scaled(struct task_struct *p, cputime_t cputime)
+-{
+-	p->utimescaled = cputime_add(p->utimescaled, cputime);
+-}
+-
+ /*
+  * Account system cpu time to a process.
+  * @p: the process that the cpu time gets accounted to
+  * @hardirq_offset: the offset to subtract from hardirq_count()
+  * @cputime: the cpu time spent in kernel space since the last update
++ * @cputime_scaled: cputime scaled by cpu frequency
+  */
+ void account_system_time(struct task_struct *p, int hardirq_offset,
+-			 cputime_t cputime)
++			 cputime_t cputime, cputime_t cputime_scaled)
+ {
+ 	struct cpu_usage_stat *cpustat = &kstat_this_cpu.cpustat;
+ 	struct rq *rq = this_rq();
+ 	cputime64_t tmp;
+ 
+ 	if ((p->flags & PF_VCPU) && (irq_count() - hardirq_offset == 0)) {
+-		account_guest_time(p, cputime);
++		account_guest_time(p, cputime, cputime_scaled);
+ 		return;
+ 	}
+ 
++	/* Add system time to process. */
+ 	p->stime = cputime_add(p->stime, cputime);
++	p->stimescaled = cputime_add(p->stimescaled, cputime_scaled);
+ 	account_group_system_time(p, cputime);
+ 
+ 	/* Add system time to cpustat. */
+@@ -4166,17 +4168,6 @@ void account_system_time(struct task_struct *p, int hardirq_offset,
+ 	acct_update_integrals(p);
+ }
+ 
+-/*
+- * Account scaled system cpu time to a process.
+- * @p: the process that the cpu time gets accounted to
+- * @hardirq_offset: the offset to subtract from hardirq_count()
+- * @cputime: the cpu time spent in kernel space since the last update
+- */
+-void account_system_time_scaled(struct task_struct *p, cputime_t cputime)
+-{
+-	p->stimescaled = cputime_add(p->stimescaled, cputime);
+-}
+-
+ /*
+  * Account for involuntary wait time.
+  * @p: the process from which the cpu time has been stolen

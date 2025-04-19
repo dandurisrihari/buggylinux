@@ -1,0 +1,74 @@
+commit 376c6d285017419e35c7177bc60abe7915fb7497
+Author: Tom Lendacky <thomas.lendacky@amd.com>
+Date:   Thu Dec 10 11:10:06 2020 -0600
+
+    KVM: SVM: Provide support for SEV-ES vCPU creation/loading
+    
+    An SEV-ES vCPU requires additional VMCB initialization requirements for
+    vCPU creation and vCPU load/put requirements. This includes:
+    
+    General VMCB initialization changes:
+      - Set a VMCB control bit to enable SEV-ES support on the vCPU.
+      - Set the VMCB encrypted VM save area address.
+      - CRx registers are part of the encrypted register state and cannot be
+        updated. Remove the CRx register read and write intercepts and replace
+        them with CRx register write traps to track the CRx register values.
+      - Certain MSR values are part of the encrypted register state and cannot
+        be updated. Remove certain MSR intercepts (EFER, CR_PAT, etc.).
+      - Remove the #GP intercept (no support for "enable_vmware_backdoor").
+      - Remove the XSETBV intercept since the hypervisor cannot modify XCR0.
+    
+    General vCPU creation changes:
+      - Set the initial GHCB gpa value as per the GHCB specification.
+    
+    Signed-off-by: Tom Lendacky <thomas.lendacky@amd.com>
+    Message-Id: <3a8aef366416eddd5556dfa3fdc212aafa1ad0a2.1607620209.git.thomas.lendacky@amd.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/include/asm/svm.h b/arch/x86/include/asm/svm.h
+index caa8628f5fba..a57331de59e2 100644
+--- a/arch/x86/include/asm/svm.h
++++ b/arch/x86/include/asm/svm.h
+@@ -98,6 +98,16 @@ enum {
+ 	INTERCEPT_MWAIT_COND,
+ 	INTERCEPT_XSETBV,
+ 	INTERCEPT_RDPRU,
++	TRAP_EFER_WRITE,
++	TRAP_CR0_WRITE,
++	TRAP_CR1_WRITE,
++	TRAP_CR2_WRITE,
++	TRAP_CR3_WRITE,
++	TRAP_CR4_WRITE,
++	TRAP_CR5_WRITE,
++	TRAP_CR6_WRITE,
++	TRAP_CR7_WRITE,
++	TRAP_CR8_WRITE,
+ 	/* Byte offset 014h (word 5) */
+ 	INTERCEPT_INVLPGB = 160,
+ 	INTERCEPT_INVLPGB_ILLEGAL,
+@@ -144,6 +154,8 @@ struct __attribute__ ((__packed__)) vmcb_control_area {
+ 	u8 reserved_6[8];	/* Offset 0xe8 */
+ 	u64 avic_logical_id;	/* Offset 0xf0 */
+ 	u64 avic_physical_id;	/* Offset 0xf8 */
++	u8 reserved_7[8];
++	u64 vmsa_pa;		/* Used for an SEV-ES guest */
+ };
+ 
+ 
+@@ -198,6 +210,7 @@ struct __attribute__ ((__packed__)) vmcb_control_area {
+ 
+ #define SVM_NESTED_CTL_NP_ENABLE	BIT(0)
+ #define SVM_NESTED_CTL_SEV_ENABLE	BIT(1)
++#define SVM_NESTED_CTL_SEV_ES_ENABLE	BIT(2)
+ 
+ struct vmcb_seg {
+ 	u16 selector;
+@@ -295,7 +308,7 @@ struct ghcb {
+ 
+ 
+ #define EXPECTED_VMCB_SAVE_AREA_SIZE		1032
+-#define EXPECTED_VMCB_CONTROL_AREA_SIZE		256
++#define EXPECTED_VMCB_CONTROL_AREA_SIZE		272
+ #define EXPECTED_GHCB_SIZE			PAGE_SIZE
+ 
+ static inline void __unused_size_checks(void)

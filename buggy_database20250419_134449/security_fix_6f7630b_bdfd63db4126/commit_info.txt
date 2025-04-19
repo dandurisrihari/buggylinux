@@ -1,0 +1,54 @@
+Commit Hash: 6f7630b1b5bc672b54c1285ee6aba752b446672c
+Subject: fortify: Capture __bos() results in const temp vars
+
+
+Security Keywords:
+- hardening
+
+Full commit message:
+fortify: Capture __bos() results in const temp vars
+
+In two recent run-time memcpy() bound checking bug reports (NFS[1] and
+JFS[2]), the _detection_ was working correctly (in the sense that the
+requested copy size was larger than the destination field size), but
+the _warning text_ was showing the destination field size as SIZE_MAX
+("unknown size"). This should be impossible, since the detection function
+will explicitly give up if the destination field size is unknown. For
+example, the JFS warning was:
+
+  memcpy: detected field-spanning write (size 132) of single field "ip->i_link" at fs/jfs/namei.c:950 (size 18446744073709551615)
+
+Other cases of this warning (e.g.[3]) have reported correctly,
+and the reproducer only happens under GCC (at least 10.2 and 12.1),
+so this currently appears to be a GCC bug. Explicitly capturing the
+__builtin_object_size() results in const temporary variables fixes the
+report. For example, the JFS reproducer now correctly reports the field
+size (128):
+
+  memcpy: detected field-spanning write (size 132) of single field "ip->i_link" at fs/jfs/namei.c:950 (size 128)
+
+Examination of the .text delta (which is otherwise identical), shows
+the literal value used in the report changing:
+
+-     mov    $0xffffffffffffffff,%rcx
++     mov    $0x80,%ecx
+
+[1] https://lore.kernel.org/lkml/Y0zEzZwhOxTDcBTB@codemonkey.org.uk/
+[2] https://syzkaller.appspot.com/bug?id=23d613df5259b977dac1696bec77f61a85890e3d
+[3] https://lore.kernel.org/all/202210110948.26b43120-yujie.liu@intel.com/
+
+Cc: "Dr. David Alan Gilbert" <linux@treblig.org>
+Cc: llvm@lists.linux.dev
+Cc: linux-hardening@vger.kernel.org
+Signed-off-by: Kees Cook <keescook@chromium.org>
+
+Metadata:
+Author: Kees Cook <keescook@chromium.org>
+Author Date: Fri Oct 28 15:32:07 2022 -0700
+Committer: Kees Cook <keescook@chromium.org>
+Commit Date: Fri Oct 28 16:07:01 2022 -0700
+
+Files Changed: 1
+Lines Added: 9
+Lines Removed: 4
+Total Changes: 13

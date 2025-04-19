@@ -1,0 +1,84 @@
+commit f592cc5794747b81e53b53dd6e80219ee25f0611
+Author: Maulik Shah <quic_mkshah@quicinc.com>
+Date:   Thu Feb 15 10:55:44 2024 +0530
+
+    soc: qcom: rpmh-rsc: Enhance check for VRM in-flight request
+    
+    Each RPMh VRM accelerator resource has 3 or 4 contiguous 4-byte aligned
+    addresses associated with it. These control voltage, enable state, mode,
+    and in legacy targets, voltage headroom. The current in-flight request
+    checking logic looks for exact address matches. Requests for different
+    addresses of the same RPMh resource as thus not detected as in-flight.
+    
+    Add new cmd-db API cmd_db_match_resource_addr() to enhance the in-flight
+    request check for VRM requests by ignoring the address offset.
+    
+    This ensures that only one request is allowed to be in-flight for a given
+    VRM resource. This is needed to avoid scenarios where request commands are
+    carried out by RPMh hardware out-of-order leading to LDO regulator
+    over-current protection triggering.
+    
+    Fixes: 658628e7ef78 ("drivers: qcom: rpmh-rsc: add RPMH controller for QCOM SoCs")
+    Cc: stable@vger.kernel.org
+    Reviewed-by: Konrad Dybcio <konrad.dybcio@linaro.org>
+    Tested-by: Elliot Berman <quic_eberman@quicinc.com> # sm8650-qrd
+    Signed-off-by: Maulik Shah <quic_mkshah@quicinc.com>
+    Link: https://lore.kernel.org/r/20240215-rpmh-rsc-fixes-v4-1-9cbddfcba05b@quicinc.com
+    Signed-off-by: Bjorn Andersson <andersson@kernel.org>
+
+diff --git a/drivers/soc/qcom/cmd-db.c b/drivers/soc/qcom/cmd-db.c
+index c344107bc36c..b4e613c34a5c 100644
+--- a/drivers/soc/qcom/cmd-db.c
++++ b/drivers/soc/qcom/cmd-db.c
+@@ -1,6 +1,10 @@
+ /* SPDX-License-Identifier: GPL-2.0 */
+-/* Copyright (c) 2016-2018, 2020, The Linux Foundation. All rights reserved. */
++/*
++ * Copyright (c) 2016-2018, 2020, The Linux Foundation. All rights reserved.
++ * Copyright (c) 2024, Qualcomm Innovation Center, Inc. All rights reserved.
++ */
+ 
++#include <linux/bitfield.h>
+ #include <linux/debugfs.h>
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+@@ -17,6 +21,8 @@
+ #define MAX_SLV_ID		8
+ #define SLAVE_ID_MASK		0x7
+ #define SLAVE_ID_SHIFT		16
++#define SLAVE_ID(addr)		FIELD_GET(GENMASK(19, 16), addr)
++#define VRM_ADDR(addr)		FIELD_GET(GENMASK(19, 4), addr)
+ 
+ /**
+  * struct entry_header: header for each entry in cmddb
+@@ -220,6 +226,30 @@ const void *cmd_db_read_aux_data(const char *id, size_t *len)
+ }
+ EXPORT_SYMBOL_GPL(cmd_db_read_aux_data);
+ 
++/**
++ * cmd_db_match_resource_addr() - Compare if both Resource addresses are same
++ *
++ * @addr1: Resource address to compare
++ * @addr2: Resource address to compare
++ *
++ * Return: true if two addresses refer to the same resource, false otherwise
++ */
++bool cmd_db_match_resource_addr(u32 addr1, u32 addr2)
++{
++	/*
++	 * Each RPMh VRM accelerator resource has 3 or 4 contiguous 4-byte
++	 * aligned addresses associated with it. Ignore the offset to check
++	 * for VRM requests.
++	 */
++	if (addr1 == addr2)
++		return true;
++	else if (SLAVE_ID(addr1) == CMD_DB_HW_VRM && VRM_ADDR(addr1) == VRM_ADDR(addr2))
++		return true;
++
++	return false;
++}
++EXPORT_SYMBOL_GPL(cmd_db_match_resource_addr);
++
+ /**
+  * cmd_db_read_slave_id - Get the slave ID for a given resource address
+  *

@@ -1,0 +1,80 @@
+commit 547eede070eb981f1442e494f08f4567dcf1d1c7
+Author: Ilan Tayari <ilant@mellanox.com>
+Date:   Tue Apr 18 16:04:28 2017 +0300
+
+    net/mlx5e: IPSec, Innova IPSec offload infrastructure
+    
+    Add Innova IPSec ESP crypto offload configuration paths.
+    Detect Innova IPSec device and set the NETIF_F_HW_ESP flag.
+    Configure Security Associations using the API introduced in a previous
+    patch.
+    
+    Add Software-parser hardware descriptor layout
+    Software-Parser (swp) is a hardware feature in ConnectX which allows the
+    host software to specify protocol header offsets in the TX path, thus
+    overriding the hardware parser.
+    This is useful for protocols that the ASIC may not be able to parse on
+    its own.
+    
+    Note that due to inline metadata, XDP is not supported in Innova IPSec.
+    
+    Signed-off-by: Ilan Tayari <ilant@mellanox.com>
+    Signed-off-by: Yossi Kuperman <yossiku@mellanox.com>
+    Signed-off-by: Yevgeny Kliteynik <kliteyn@mellanox.com>
+    Signed-off-by: Boris Pismenny <borisp@mellanox.com>
+    Signed-off-by: Saeed Mahameed <saeedm@mellanox.com>
+
+diff --git a/drivers/net/ethernet/mellanox/mlx5/core/en_main.c b/drivers/net/ethernet/mellanox/mlx5/core/en_main.c
+index 9f99f624004f..aa5a7aa59ff3 100644
+--- a/drivers/net/ethernet/mellanox/mlx5/core/en_main.c
++++ b/drivers/net/ethernet/mellanox/mlx5/core/en_main.c
+@@ -39,6 +39,7 @@
+ #include "en.h"
+ #include "en_tc.h"
+ #include "en_rep.h"
++#include "en_accel/ipsec.h"
+ #include "vxlan.h"
+ 
+ struct mlx5e_rq_param {
+@@ -3555,6 +3556,12 @@ static int mlx5e_xdp_set(struct net_device *netdev, struct bpf_prog *prog)
+ 		goto unlock;
+ 	}
+ 
++	if ((netdev->features & NETIF_F_HW_ESP) && prog) {
++		netdev_warn(netdev, "can't set XDP with IPSec offload\n");
++		err = -EINVAL;
++		goto unlock;
++	}
++
+ 	was_opened = test_bit(MLX5E_STATE_OPENED, &priv->state);
+ 	/* no need for full reset when exchanging programs */
+ 	reset = (!priv->channels.params.xdp_prog || !prog);
+@@ -4046,6 +4053,8 @@ static void mlx5e_build_nic_netdev(struct net_device *netdev)
+ 	if (MLX5_CAP_GEN(mdev, vport_group_manager))
+ 		netdev->switchdev_ops = &mlx5e_switchdev_ops;
+ #endif
++
++	mlx5e_ipsec_build_netdev(priv);
+ }
+ 
+ static void mlx5e_create_q_counter(struct mlx5e_priv *priv)
+@@ -4074,14 +4083,19 @@ static void mlx5e_nic_init(struct mlx5_core_dev *mdev,
+ 			   void *ppriv)
+ {
+ 	struct mlx5e_priv *priv = netdev_priv(netdev);
++	int err;
+ 
+ 	mlx5e_build_nic_netdev_priv(mdev, netdev, profile, ppriv);
++	err = mlx5e_ipsec_init(priv);
++	if (err)
++		mlx5_core_err(mdev, "IPSec initialization failed, %d\n", err);
+ 	mlx5e_build_nic_netdev(netdev);
+ 	mlx5e_vxlan_init(priv);
+ }
+ 
+ static void mlx5e_nic_cleanup(struct mlx5e_priv *priv)
+ {
++	mlx5e_ipsec_cleanup(priv);
+ 	mlx5e_vxlan_cleanup(priv);
+ 
+ 	if (priv->channels.params.xdp_prog)

@@ -1,0 +1,66 @@
+{
+  "hash": "4b23a68f953628eb4e4b7fe1294ebf93d4b8ceee",
+  "hash_short": "4b23a68f",
+  "subject": "mm/page_alloc: protect PCP lists with a spinlock",
+  "body": "Currently the PCP lists are protected by using local_lock_irqsave to\nprevent migration and IRQ reentrancy but this is inconvenient.  Remote\ndraining of the lists is impossible and a workqueue is required and every\ntask allocation/free must disable then enable interrupts which is\nexpensive.\n\nAs preparation for dealing with both of those problems, protect the\nlists with a spinlock.  The IRQ-unsafe version of the lock is used\nbecause IRQs are already disabled by local_lock_irqsave.  spin_trylock\nis used in combination with local_lock_irqsave() but later will be\nreplaced with a spin_trylock_irqsave when the local_lock is removed.\n\nThe per_cpu_pages still fits within the same number of cache lines after\nthis patch relative to before the series.\n\nstruct per_cpu_pages {\n        spinlock_t                 lock;                 /*     0     4 */\n        int                        count;                /*     4     4 */\n        int                        high;                 /*     8     4 */\n        int                        batch;                /*    12     4 */\n        short int                  free_factor;          /*    16     2 */\n        short int                  expire;               /*    18     2 */\n\n        /* XXX 4 bytes hole, try to pack */\n\n        struct list_head           lists[13];            /*    24   208 */\n\n        /* size: 256, cachelines: 4, members: 7 */\n        /* sum members: 228, holes: 1, sum holes: 4 */\n        /* padding: 24 */\n} __attribute__((__aligned__(64)));\n\nThere is overhead in the fast path due to acquiring the spinlock even\nthough the spinlock is per-cpu and uncontended in the common case.  Page\nFault Test (PFT) running on a 1-socket reported the following results on a\n1 socket machine.\n\n                                     5.19.0-rc3               5.19.0-rc3\n                                        vanilla      mm-pcpspinirq-v5r16\nHmean     faults/sec-1   869275.7381 (   0.00%)   874597.5167 *   0.61%*\nHmean     faults/sec-3  2370266.6681 (   0.00%)  2379802.0362 *   0.40%*\nHmean     faults/sec-5  2701099.7019 (   0.00%)  2664889.7003 *  -1.34%*\nHmean     faults/sec-7  3517170.9157 (   0.00%)  3491122.8242 *  -0.74%*\nHmean     faults/sec-8  3965729.6187 (   0.00%)  3939727.0243 *  -0.66%*\n\nThere is a small hit in the number of faults per second but given that the\nresults are more stable, it's borderline noise.\n\n[akpm@linux-foundation.org: add missing local_unlock_irqrestore() on contention path]\nLink: https://lkml.kernel.org/r/20220624125423.6126-6-mgorman@techsingularity.net\nSigned-off-by: Mel Gorman <mgorman@techsingularity.net>\nTested-by: Yu Zhao <yuzhao@google.com>\nReviewed-by: Nicolas Saenz Julienne <nsaenzju@redhat.com>\nTested-by: Nicolas Saenz Julienne <nsaenzju@redhat.com>\nAcked-by: Vlastimil Babka <vbabka@suse.cz>\nCc: Hugh Dickins <hughd@google.com>\nCc: Marcelo Tosatti <mtosatti@redhat.com>\nCc: Marek Szyprowski <m.szyprowski@samsung.com>\nCc: Michal Hocko <mhocko@kernel.org>\nCc: Minchan Kim <minchan@kernel.org>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>",
+  "full_message": "mm/page_alloc: protect PCP lists with a spinlock\n\nCurrently the PCP lists are protected by using local_lock_irqsave to\nprevent migration and IRQ reentrancy but this is inconvenient.  Remote\ndraining of the lists is impossible and a workqueue is required and every\ntask allocation/free must disable then enable interrupts which is\nexpensive.\n\nAs preparation for dealing with both of those problems, protect the\nlists with a spinlock.  The IRQ-unsafe version of the lock is used\nbecause IRQs are already disabled by local_lock_irqsave.  spin_trylock\nis used in combination with local_lock_irqsave() but later will be\nreplaced with a spin_trylock_irqsave when the local_lock is removed.\n\nThe per_cpu_pages still fits within the same number of cache lines after\nthis patch relative to before the series.\n\nstruct per_cpu_pages {\n        spinlock_t                 lock;                 /*     0     4 */\n        int                        count;                /*     4     4 */\n        int                        high;                 /*     8     4 */\n        int                        batch;                /*    12     4 */\n        short int                  free_factor;          /*    16     2 */\n        short int                  expire;               /*    18     2 */\n\n        /* XXX 4 bytes hole, try to pack */\n\n        struct list_head           lists[13];            /*    24   208 */\n\n        /* size: 256, cachelines: 4, members: 7 */\n        /* sum members: 228, holes: 1, sum holes: 4 */\n        /* padding: 24 */\n} __attribute__((__aligned__(64)));\n\nThere is overhead in the fast path due to acquiring the spinlock even\nthough the spinlock is per-cpu and uncontended in the common case.  Page\nFault Test (PFT) running on a 1-socket reported the following results on a\n1 socket machine.\n\n                                     5.19.0-rc3               5.19.0-rc3\n                                        vanilla      mm-pcpspinirq-v5r16\nHmean     faults/sec-1   869275.7381 (   0.00%)   874597.5167 *   0.61%*\nHmean     faults/sec-3  2370266.6681 (   0.00%)  2379802.0362 *   0.40%*\nHmean     faults/sec-5  2701099.7019 (   0.00%)  2664889.7003 *  -1.34%*\nHmean     faults/sec-7  3517170.9157 (   0.00%)  3491122.8242 *  -0.74%*\nHmean     faults/sec-8  3965729.6187 (   0.00%)  3939727.0243 *  -0.66%*\n\nThere is a small hit in the number of faults per second but given that the\nresults are more stable, it's borderline noise.\n\n[akpm@linux-foundation.org: add missing local_unlock_irqrestore() on contention path]\nLink: https://lkml.kernel.org/r/20220624125423.6126-6-mgorman@techsingularity.net\nSigned-off-by: Mel Gorman <mgorman@techsingularity.net>\nTested-by: Yu Zhao <yuzhao@google.com>\nReviewed-by: Nicolas Saenz Julienne <nsaenzju@redhat.com>\nTested-by: Nicolas Saenz Julienne <nsaenzju@redhat.com>\nAcked-by: Vlastimil Babka <vbabka@suse.cz>\nCc: Hugh Dickins <hughd@google.com>\nCc: Marcelo Tosatti <mtosatti@redhat.com>\nCc: Marek Szyprowski <m.szyprowski@samsung.com>\nCc: Michal Hocko <mhocko@kernel.org>\nCc: Minchan Kim <minchan@kernel.org>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>",
+  "author_name": "Mel Gorman",
+  "author_email": "mgorman@techsingularity.net",
+  "author_date": "Fri Jun 24 13:54:21 2022 +0100",
+  "author_date_iso": "2022-06-24T13:54:21+01:00",
+  "committer_name": "akpm",
+  "committer_email": "akpm@linux-foundation.org",
+  "committer_date": "Sun Jul 17 17:14:35 2022 -0700",
+  "committer_date_iso": "2022-07-17T17:14:35-07:00",
+  "files_changed": [
+    "include/linux/mmzone.h",
+    "mm/page_alloc.c"
+  ],
+  "files_changed_count": 2,
+  "stats": [
+    {
+      "file": "include/linux/mmzone.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "mm/page_alloc.c",
+      "insertions": 98,
+      "deletions": 21
+    }
+  ],
+  "total_insertions": 99,
+  "total_deletions": 21,
+  "total_changes": 120,
+  "parents": [
+    "e2a66c21b774a4e8d0079089fafdc30a31414d40"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "sec-1"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "include/linux/mmzone.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/page_alloc.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

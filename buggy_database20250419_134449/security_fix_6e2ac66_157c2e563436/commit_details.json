@@ -1,0 +1,66 @@
+{
+  "hash": "6e2ac66470976ad7f57e0948572669b2bdfea2d0",
+  "hash_short": "6e2ac664",
+  "subject": "[PATCH] CPEI gets warning at kernel/irq/migration.c:27/move_masked_irq()",
+  "body": "While running my MCA test (hardware error injection) on 2.6.19,\nI got some warning like following:\n\n> BUG: warning at kernel/irq/migration.c:27/move_masked_irq()\n>\n> Call Trace:\n>  [<a000000100013d20>] show_stack+0x40/0xa0\n>                                 sp=e00000006b2578d0 bsp=e00000006b2510b0\n>  [<a000000100013db0>] dump_stack+0x30/0x60\n>                                 sp=e00000006b257aa0 bsp=e00000006b251098\n>  [<a0000001000de430>] move_masked_irq+0xb0/0x240\n>                                 sp=e00000006b257aa0 bsp=e00000006b251070\n>  [<a0000001000de6a0>] move_native_irq+0xe0/0x180\n>                                 sp=e00000006b257aa0 bsp=e00000006b251040\n>  [<a00000010004ff50>] iosapic_end_level_irq+0x30/0xe0\n>                                 sp=e00000006b257aa0 bsp=e00000006b251020\n>  [<a0000001000d94d0>] __do_IRQ+0x170/0x400\n>                                 sp=e00000006b257aa0 bsp=e00000006b250fd8\n>  [<a0000001000116f0>] ia64_handle_irq+0x1b0/0x260\n>                                 sp=e00000006b257aa0 bsp=e00000006b250fa8\n>  [<a00000010000c3a0>] ia64_leave_kernel+0x0/0x280\n>                                 sp=e00000006b257aa0 bsp=e00000006b250fa8\n>  [<a000000100690cf0>] _spin_unlock_irqrestore+0x30/0x60\n>                                 sp=e00000006b257c70 bsp=e00000006b250f90\n\nIt comes from:\n\n[kernel/irq/migration.c]\n  26         if (CHECK_IRQ_PER_CPU(desc->status)) {\n  27                 WARN_ON(1);\n  28                 return;\n  29         }\n\nBy putting some printk in kernel, I found that irqbalance is trying to\nmove CPEI which is handled as PER_CPU irq. That's why.\n\nCPEI(Corrected Platform Error Interrupt) is ia64 specific irq, is\nallowed to pin to particular processor which selected by the platform, and\neven it is PER_CPU but it has set_affinity handler (=iosapic_set_affinity)\nas same as other IO-SAPIC-level interrupts. (I don't know why, but\nI guess that there would be typical situation where the handler for\nmigration is needed, such as hotplug - the processor going to be\noffline/hot-removed.)\n\nTo shut up this warning, there are 2 way at least:\n a) fix CPEI stuff\n b) prohibit setting affinity to PER_CPU irq\n\nI'm not sure what stuff of CPEI need to be fixed, but I think that\nreturning error to attempting move PER_CPU irq is useful for all\napplications since it will never work.\n\nFollowing small patch takes b) style.\nIt works, the warning disappeared and irqbalance still runs well.\n\nSigned-off-by: Hidetoshi Seto <seto.hidetoshi@jp.fujitsu.com>\nCc: Arjan van de Ven <arjan@infradead.org>\nAcked-by: Ingo Molnar <mingo@elte.hu>\nAcked-by: Thomas Gleixner <tglx@linutronix.de>\nSigned-off-by: Andrew Morton <akpm@osdl.org>\nSigned-off-by: Linus Torvalds <torvalds@osdl.org>",
+  "full_message": "[PATCH] CPEI gets warning at kernel/irq/migration.c:27/move_masked_irq()\n\nWhile running my MCA test (hardware error injection) on 2.6.19,\nI got some warning like following:\n\n> BUG: warning at kernel/irq/migration.c:27/move_masked_irq()\n>\n> Call Trace:\n>  [<a000000100013d20>] show_stack+0x40/0xa0\n>                                 sp=e00000006b2578d0 bsp=e00000006b2510b0\n>  [<a000000100013db0>] dump_stack+0x30/0x60\n>                                 sp=e00000006b257aa0 bsp=e00000006b251098\n>  [<a0000001000de430>] move_masked_irq+0xb0/0x240\n>                                 sp=e00000006b257aa0 bsp=e00000006b251070\n>  [<a0000001000de6a0>] move_native_irq+0xe0/0x180\n>                                 sp=e00000006b257aa0 bsp=e00000006b251040\n>  [<a00000010004ff50>] iosapic_end_level_irq+0x30/0xe0\n>                                 sp=e00000006b257aa0 bsp=e00000006b251020\n>  [<a0000001000d94d0>] __do_IRQ+0x170/0x400\n>                                 sp=e00000006b257aa0 bsp=e00000006b250fd8\n>  [<a0000001000116f0>] ia64_handle_irq+0x1b0/0x260\n>                                 sp=e00000006b257aa0 bsp=e00000006b250fa8\n>  [<a00000010000c3a0>] ia64_leave_kernel+0x0/0x280\n>                                 sp=e00000006b257aa0 bsp=e00000006b250fa8\n>  [<a000000100690cf0>] _spin_unlock_irqrestore+0x30/0x60\n>                                 sp=e00000006b257c70 bsp=e00000006b250f90\n\nIt comes from:\n\n[kernel/irq/migration.c]\n  26         if (CHECK_IRQ_PER_CPU(desc->status)) {\n  27                 WARN_ON(1);\n  28                 return;\n  29         }\n\nBy putting some printk in kernel, I found that irqbalance is trying to\nmove CPEI which is handled as PER_CPU irq. That's why.\n\nCPEI(Corrected Platform Error Interrupt) is ia64 specific irq, is\nallowed to pin to particular processor which selected by the platform, and\neven it is PER_CPU but it has set_affinity handler (=iosapic_set_affinity)\nas same as other IO-SAPIC-level interrupts. (I don't know why, but\nI guess that there would be typical situation where the handler for\nmigration is needed, such as hotplug - the processor going to be\noffline/hot-removed.)\n\nTo shut up this warning, there are 2 way at least:\n a) fix CPEI stuff\n b) prohibit setting affinity to PER_CPU irq\n\nI'm not sure what stuff of CPEI need to be fixed, but I think that\nreturning error to attempting move PER_CPU irq is useful for all\napplications since it will never work.\n\nFollowing small patch takes b) style.\nIt works, the warning disappeared and irqbalance still runs well.\n\nSigned-off-by: Hidetoshi Seto <seto.hidetoshi@jp.fujitsu.com>\nCc: Arjan van de Ven <arjan@infradead.org>\nAcked-by: Ingo Molnar <mingo@elte.hu>\nAcked-by: Thomas Gleixner <tglx@linutronix.de>\nSigned-off-by: Andrew Morton <akpm@osdl.org>\nSigned-off-by: Linus Torvalds <torvalds@osdl.org>",
+  "author_name": "Hidetoshi Seto",
+  "author_email": "seto.hidetoshi@jp.fujitsu.com",
+  "author_date": "Fri Dec 8 02:35:58 2006 -0800",
+  "author_date_iso": "2006-12-08T02:35:58-08:00",
+  "committer_name": "Linus Torvalds",
+  "committer_email": "torvalds@woody.osdl.org",
+  "committer_date": "Fri Dec 8 08:28:37 2006 -0800",
+  "committer_date_iso": "2006-12-08T08:28:37-08:00",
+  "files_changed": [
+    "kernel/irq/proc.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "kernel/irq/proc.c",
+      "insertions": 2,
+      "deletions": 1
+    }
+  ],
+  "total_insertions": 2,
+  "total_deletions": 1,
+  "total_changes": 3,
+  "parents": [
+    "aad094701c6355cb2b3d74a07ec0496f4a48c787"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v2.6.20",
+    "v2.6.20-rc1",
+    "v2.6.20-rc2",
+    "v2.6.20-rc3",
+    "v2.6.20-rc4",
+    "v2.6.20-rc5",
+    "v2.6.20-rc6",
+    "v2.6.20-rc7",
+    "v2.6.21",
+    "v2.6.21-rc1"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "injection"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "kernel/irq/proc.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

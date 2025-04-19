@@ -1,0 +1,73 @@
+commit 1f15b76f1ec973d1eb5d21b6d98b21aebb9025f1
+Author: Chris Wilson <chris@chris-wilson.co.uk>
+Date:   Fri Jul 1 17:23:14 2016 +0100
+
+    drm/i915: Separate GPU hang waitqueue from advance
+    
+    Currently __i915_wait_request uses a per-engine wait_queue_t for the dual
+    purpose of waking after the GPU advances or for waking after an error.
+    In the future, we may add even more wake sources and require greater
+    separation, but for now we can conceptually simplify wakeups by separating
+    the two sources. In particular, this allows us to use different wait-queues
+    (e.g. one on the engine advancement, a global one for errors and one on
+    each requests) without any hassle.
+    
+    Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+    Link: http://patchwork.freedesktop.org/patch/msgid/1467390209-3576-5-git-send-email-chris@chris-wilson.co.uk
+
+diff --git a/drivers/gpu/drm/i915/i915_irq.c b/drivers/gpu/drm/i915/i915_irq.c
+index 83f40baeb1f3..6c17596d75dd 100644
+--- a/drivers/gpu/drm/i915/i915_irq.c
++++ b/drivers/gpu/drm/i915/i915_irq.c
+@@ -2488,11 +2488,8 @@ static irqreturn_t gen8_irq_handler(int irq, void *arg)
+ 	return ret;
+ }
+ 
+-static void i915_error_wake_up(struct drm_i915_private *dev_priv,
+-			       bool reset_completed)
++static void i915_error_wake_up(struct drm_i915_private *dev_priv)
+ {
+-	struct intel_engine_cs *engine;
+-
+ 	/*
+ 	 * Notify all waiters for GPU completion events that reset state has
+ 	 * been changed, and that they need to restart their wait after
+@@ -2501,18 +2498,10 @@ static void i915_error_wake_up(struct drm_i915_private *dev_priv,
+ 	 */
+ 
+ 	/* Wake up __wait_seqno, potentially holding dev->struct_mutex. */
+-	for_each_engine(engine, dev_priv)
+-		wake_up_all(&engine->irq_queue);
++	wake_up_all(&dev_priv->gpu_error.wait_queue);
+ 
+ 	/* Wake up intel_crtc_wait_for_pending_flips, holding crtc->mutex. */
+ 	wake_up_all(&dev_priv->pending_flip_queue);
+-
+-	/*
+-	 * Signal tasks blocked in i915_gem_wait_for_error that the pending
+-	 * reset state is cleared.
+-	 */
+-	if (reset_completed)
+-		wake_up_all(&dev_priv->gpu_error.reset_queue);
+ }
+ 
+ /**
+@@ -2577,7 +2566,7 @@ static void i915_reset_and_wakeup(struct drm_i915_private *dev_priv)
+ 		 * Note: The wake_up also serves as a memory barrier so that
+ 		 * waiters see the update value of the reset counter atomic_t.
+ 		 */
+-		i915_error_wake_up(dev_priv, true);
++		wake_up_all(&dev_priv->gpu_error.reset_queue);
+ 	}
+ }
+ 
+@@ -2714,7 +2703,7 @@ void i915_handle_error(struct drm_i915_private *dev_priv,
+ 		 * ensure that the waiters see the updated value of the reset
+ 		 * counter atomic_t.
+ 		 */
+-		i915_error_wake_up(dev_priv, false);
++		i915_error_wake_up(dev_priv);
+ 	}
+ 
+ 	i915_reset_and_wakeup(dev_priv);

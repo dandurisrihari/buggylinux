@@ -1,0 +1,88 @@
+commit cb88f7f51bc6f351a529ff61d0a706c6eae1417a
+Author: Paul E. McKenney <paulmck@kernel.org>
+Date:   Fri Jul 28 13:33:02 2023 -0700
+
+    rcu-tasks: Permit use of debug-objects with RCU Tasks flavors
+    
+    Currently, cblist_init_generic() holds a raw spinlock when invoking
+    INIT_WORK().  This fails in kernels built with CONFIG_DEBUG_OBJECTS=y
+    due to memory allocation being forbidden while holding a raw spinlock.
+    But the only reason for holding the raw spinlock is to synchronize
+    with early boot calls to call_rcu_tasks(), call_rcu_tasks_rude, and,
+    last but not least, call_rcu_tasks_trace().  These calls also invoke
+    cblist_init_generic() in order to support early boot queueing of
+    callbacks.
+    
+    Except that there are no early boot calls to either of these three
+    functions, and the BPF guys confirm that they have no plans to add any
+    such calls.
+    
+    This commit therefore removes the synchronization and adds a
+    WARN_ON_ONCE() to catch the case of now-prohibited early boot RCU Tasks
+    callback queueing.
+    
+    If early boot queueing is needed, an "initialized" flag may be added to
+    the rcu_tasks structure.  Then queueing a callback before this flag is set
+    would initialize the callback list (if needed) and queue the callback.
+    The decision as to where to queue the callback given the possibility of
+    non-zero boot CPUs is left as an exercise for the reader.
+    
+    Reported-by: Jakub Kicinski <kuba@kernel.org>
+    Signed-off-by: Paul E. McKenney <paulmck@kernel.org>
+
+diff --git a/kernel/rcu/tasks.h b/kernel/rcu/tasks.h
+index 291d536b1789..a4cd4ea2402c 100644
+--- a/kernel/rcu/tasks.h
++++ b/kernel/rcu/tasks.h
+@@ -236,7 +236,7 @@ static const char *tasks_gp_state_getname(struct rcu_tasks *rtp)
+ #endif /* #ifndef CONFIG_TINY_RCU */
+ 
+ // Initialize per-CPU callback lists for the specified flavor of
+-// Tasks RCU.
++// Tasks RCU.  Do not enqueue callbacks before this function is invoked.
+ static void cblist_init_generic(struct rcu_tasks *rtp)
+ {
+ 	int cpu;
+@@ -244,7 +244,6 @@ static void cblist_init_generic(struct rcu_tasks *rtp)
+ 	int lim;
+ 	int shift;
+ 
+-	raw_spin_lock_irqsave(&rtp->cbs_gbl_lock, flags);
+ 	if (rcu_task_enqueue_lim < 0) {
+ 		rcu_task_enqueue_lim = 1;
+ 		rcu_task_cb_adjust = true;
+@@ -267,17 +266,16 @@ static void cblist_init_generic(struct rcu_tasks *rtp)
+ 		WARN_ON_ONCE(!rtpcp);
+ 		if (cpu)
+ 			raw_spin_lock_init(&ACCESS_PRIVATE(rtpcp, lock));
+-		raw_spin_lock_rcu_node(rtpcp); // irqs already disabled.
++		local_irq_save(flags);  // serialize initialization
+ 		if (rcu_segcblist_empty(&rtpcp->cblist))
+ 			rcu_segcblist_init(&rtpcp->cblist);
++		local_irq_restore(flags);
+ 		INIT_WORK(&rtpcp->rtp_work, rcu_tasks_invoke_cbs_wq);
+ 		rtpcp->cpu = cpu;
+ 		rtpcp->rtpp = rtp;
+ 		if (!rtpcp->rtp_blkd_tasks.next)
+ 			INIT_LIST_HEAD(&rtpcp->rtp_blkd_tasks);
+-		raw_spin_unlock_rcu_node(rtpcp); // irqs remain disabled.
+ 	}
+-	raw_spin_unlock_irqrestore(&rtp->cbs_gbl_lock, flags);
+ 
+ 	pr_info("%s: Setting shift to %d and lim to %d rcu_task_cb_adjust=%d.\n", rtp->name,
+ 			data_race(rtp->percpu_enqueue_shift), data_race(rtp->percpu_enqueue_lim), rcu_task_cb_adjust);
+@@ -351,11 +349,9 @@ static void call_rcu_tasks_generic(struct rcu_head *rhp, rcu_callback_t func,
+ 		    READ_ONCE(rtp->percpu_enqueue_lim) != nr_cpu_ids)
+ 			needadjust = true;  // Defer adjustment to avoid deadlock.
+ 	}
+-	if (!rcu_segcblist_is_enabled(&rtpcp->cblist)) {
+-		raw_spin_unlock_rcu_node(rtpcp); // irqs remain disabled.
+-		cblist_init_generic(rtp);
+-		raw_spin_lock_rcu_node(rtpcp); // irqs already disabled.
+-	}
++	// Queuing callbacks before initialization not yet supported.
++	if (WARN_ON_ONCE(!rcu_segcblist_is_enabled(&rtpcp->cblist)))
++		rcu_segcblist_init(&rtpcp->cblist);
+ 	needwake = (func == wakeme_after_rcu) ||
+ 		   (rcu_segcblist_n_cbs(&rtpcp->cblist) == rcu_task_lazy_lim);
+ 	if (havekthread && !needwake && !timer_pending(&rtpcp->lazy_timer)) {

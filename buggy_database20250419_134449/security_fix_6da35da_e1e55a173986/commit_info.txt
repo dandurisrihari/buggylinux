@@ -1,0 +1,94 @@
+Commit Hash: 6da35da1a36c8c7a4cb9b25695c5e95f0c1620d8
+Subject: selftests/bpf: test correct loop_entry update in copy_verifier_state
+
+
+Security Keywords:
+- exploit
+
+Full commit message:
+selftests/bpf: test correct loop_entry update in copy_verifier_state
+
+A somewhat cumbersome test case sensitive to correct copying of
+bpf_verifier_state->loop_entry fields in
+verifier.c:copy_verifier_state().
+W/o the fix from a previous commit the program is accepted as safe.
+
+     1:  /* poison block */
+     2:  if (random() != 24) {       // assume false branch is placed first
+     3:    i = iter_new();
+     4:    while (iter_next(i));
+     5:    iter_destroy(i);
+     6:    return;
+     7:  }
+     8:
+     9:  /* dfs_depth block */
+    10:  for (i = 10; i > 0; i--);
+    11:
+    12:  /* main block */
+    13:  i = iter_new();             // fp[-16]
+    14:  b = -24;                    // r8
+    15:  for (;;) {
+    16:    if (iter_next(i))
+    17:      break;
+    18:    if (random() == 77) {     // assume false branch is placed first
+    19:      *(u64 *)(r10 + b) = 7;  // this is not safe when b == -25
+    20:      iter_destroy(i);
+    21:      return;
+    22:    }
+    23:    if (random() == 42) {     // assume false branch is placed first
+    24:      b = -25;
+    25:    }
+    26:  }
+    27:  iter_destroy(i);
+
+The goal of this example is to:
+(a) poison env->cur_state->loop_entry with a state S,
+    such that S->branches == 0;
+(b) set state S as a loop_entry for all checkpoints in
+    /* main block */, thus forcing NOT_EXACT states comparisons;
+(c) exploit incorrect loop_entry set for checkpoint at line 18
+    by first creating a checkpoint with b == -24 and then
+    pruning the state with b == -25 using that checkpoint.
+
+The /* poison block */ is responsible for goal (a).
+It forces verifier to first validate some unrelated iterator based
+loop, which leads to an update_loop_entry() call in is_state_visited(),
+which places checkpoint created at line 4 as env->cur_state->loop_entry.
+Starting from line 8, the branch count for that checkpoint is 0.
+
+The /* dfs_depth block */ is responsible for goal (b).
+It abuses the fact that update_loop_entry(cur, hdr) only updates
+cur->loop_entry when hdr->dfs_depth <= cur->dfs_depth.
+After line 12 every state has dfs_depth bigger then dfs_depth of
+poisoned env->cur_state->loop_entry. Thus the above condition is never
+true for lines 12-27.
+
+The /* main block */ is responsible for goal (c).
+Verification proceeds as follows:
+- checkpoint {b=-24,i=active} created at line 16;
+- jump 18->23 is verified first, jump to 19 pushed to stack;
+- jump 23->26 is verified first, jump to 24 pushed to stack;
+- checkpoint {b=-24,i=active} created at line 15;
+- current state is pruned by checkpoint created at line 16,
+  this sets branches count for checkpoint at line 15 to 0;
+- jump to 24 is popped from stack;
+- line 16 is reached in state {b=-25,i=active};
+- this is pruned by a previous checkpoint {b=-24,i=active}:
+  - checkpoint's loop_entry is poisoned and has branch count of 0,
+    hence states are compared using NOT_EXACT rules;
+  - b is not marked precise yet.
+
+Signed-off-by: Eduard Zingerman <eddyz87@gmail.com>
+Link: https://lore.kernel.org/r/20250215110411.3236773-3-eddyz87@gmail.com
+Signed-off-by: Alexei Starovoitov <ast@kernel.org>
+
+Metadata:
+Author: Eduard Zingerman <eddyz87@gmail.com>
+Author Date: Sat Feb 15 03:03:53 2025 -0800
+Committer: Alexei Starovoitov <ast@kernel.org>
+Commit Date: Tue Feb 18 19:22:58 2025 -0800
+
+Files Changed: 1
+Lines Added: 116
+Lines Removed: 0
+Total Changes: 116

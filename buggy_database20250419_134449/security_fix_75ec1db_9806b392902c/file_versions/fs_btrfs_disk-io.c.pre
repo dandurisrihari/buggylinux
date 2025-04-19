@@ -1,0 +1,35 @@
+commit c94bec2c6190a5d13f59c0f36a660be5e2d85644
+Author: Josef Bacik <josef@toxicpanda.com>
+Date:   Fri Feb 14 15:05:01 2020 -0500
+
+    btrfs: bail out of uuid tree scanning if we're closing
+    
+    In doing my fsstress+EIO stress testing I started running into issues
+    where umount would get stuck forever because the uuid checker was
+    chewing through the thousands of subvolumes I had created.
+    
+    We shouldn't block umount on this, simply bail if we're unmounting the
+    fs.  We need to make sure we don't mark the UUID tree as ok, so we only
+    set that bit if we made it through the whole rescan operation, but
+    otherwise this is completely safe.
+    
+    Reviewed-by: Johannes Thumshirn <johannes.thumshirn@wdc.com>
+    Signed-off-by: Josef Bacik <josef@toxicpanda.com>
+    Reviewed-by: David Sterba <dsterba@suse.com>
+    Signed-off-by: David Sterba <dsterba@suse.com>
+
+diff --git a/fs/btrfs/disk-io.c b/fs/btrfs/disk-io.c
+index 074b77041f89..864ffc6c81c1 100644
+--- a/fs/btrfs/disk-io.c
++++ b/fs/btrfs/disk-io.c
+@@ -2847,7 +2847,9 @@ static int btrfs_uuid_rescan_kthread(void *data)
+ 	 */
+ 	ret = btrfs_uuid_tree_iterate(fs_info);
+ 	if (ret < 0) {
+-		btrfs_warn(fs_info, "iterating uuid_tree failed %d", ret);
++		if (ret != -EINTR)
++			btrfs_warn(fs_info, "iterating uuid_tree failed %d",
++				   ret);
+ 		up(&fs_info->uuid_tree_rescan_sem);
+ 		return ret;
+ 	}

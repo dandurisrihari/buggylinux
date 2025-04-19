@@ -1,0 +1,94 @@
+commit c726200dd106d4c58a281eea7159b8ba28a4ab34
+Author: Christoffer Dall <christoffer.dall@arm.com>
+Date:   Fri Oct 11 13:07:05 2019 +0200
+
+    KVM: arm/arm64: Allow reporting non-ISV data aborts to userspace
+    
+    For a long time, if a guest accessed memory outside of a memslot using
+    any of the load/store instructions in the architecture which doesn't
+    supply decoding information in the ESR_EL2 (the ISV bit is not set), the
+    kernel would print the following message and terminate the VM as a
+    result of returning -ENOSYS to userspace:
+    
+      load/store instruction decoding not implemented
+    
+    The reason behind this message is that KVM assumes that all accesses
+    outside a memslot is an MMIO access which should be handled by
+    userspace, and we originally expected to eventually implement some sort
+    of decoding of load/store instructions where the ISV bit was not set.
+    
+    However, it turns out that many of the instructions which don't provide
+    decoding information on abort are not safe to use for MMIO accesses, and
+    the remaining few that would potentially make sense to use on MMIO
+    accesses, such as those with register writeback, are not used in
+    practice.  It also turns out that fetching an instruction from guest
+    memory can be a pretty horrible affair, involving stopping all CPUs on
+    SMP systems, handling multiple corner cases of address translation in
+    software, and more.  It doesn't appear likely that we'll ever implement
+    this in the kernel.
+    
+    What is much more common is that a user has misconfigured his/her guest
+    and is actually not accessing an MMIO region, but just hitting some
+    random hole in the IPA space.  In this scenario, the error message above
+    is almost misleading and has led to a great deal of confusion over the
+    years.
+    
+    It is, nevertheless, ABI to userspace, and we therefore need to
+    introduce a new capability that userspace explicitly enables to change
+    behavior.
+    
+    This patch introduces KVM_CAP_ARM_NISV_TO_USER (NISV meaning Non-ISV)
+    which does exactly that, and introduces a new exit reason to report the
+    event to userspace.  User space can then emulate an exception to the
+    guest, restart the guest, suspend the guest, or take any other
+    appropriate action as per the policy of the running system.
+    
+    Reported-by: Heinrich Schuchardt <xypron.glpk@gmx.de>
+    Signed-off-by: Christoffer Dall <christoffer.dall@arm.com>
+    Reviewed-by: Alexander Graf <graf@amazon.com>
+    Signed-off-by: Marc Zyngier <maz@kernel.org>
+
+diff --git a/Documentation/virt/kvm/api.txt b/Documentation/virt/kvm/api.txt
+index 4833904d32a5..7403f15657c2 100644
+--- a/Documentation/virt/kvm/api.txt
++++ b/Documentation/virt/kvm/api.txt
+@@ -4468,6 +4468,39 @@ Hyper-V SynIC state change. Notification is used to remap SynIC
+ event/message pages and to enable/disable SynIC messages/events processing
+ in userspace.
+ 
++		/* KVM_EXIT_ARM_NISV */
++		struct {
++			__u64 esr_iss;
++			__u64 fault_ipa;
++		} arm_nisv;
++
++Used on arm and arm64 systems. If a guest accesses memory not in a memslot,
++KVM will typically return to userspace and ask it to do MMIO emulation on its
++behalf. However, for certain classes of instructions, no instruction decode
++(direction, length of memory access) is provided, and fetching and decoding
++the instruction from the VM is overly complicated to live in the kernel.
++
++Historically, when this situation occurred, KVM would print a warning and kill
++the VM. KVM assumed that if the guest accessed non-memslot memory, it was
++trying to do I/O, which just couldn't be emulated, and the warning message was
++phrased accordingly. However, what happened more often was that a guest bug
++caused access outside the guest memory areas which should lead to a more
++meaningful warning message and an external abort in the guest, if the access
++did not fall within an I/O window.
++
++Userspace implementations can query for KVM_CAP_ARM_NISV_TO_USER, and enable
++this capability at VM creation. Once this is done, these types of errors will
++instead return to userspace with KVM_EXIT_ARM_NISV, with the valid bits from
++the HSR (arm) and ESR_EL2 (arm64) in the esr_iss field, and the faulting IPA
++in the fault_ipa field. Userspace can either fix up the access if it's
++actually an I/O access by decoding the instruction from guest memory (if it's
++very brave) and continue executing the guest, or it can decide to suspend,
++dump, or restart the guest.
++
++Note that KVM does not skip the faulting instruction as it does for
++KVM_EXIT_MMIO, but userspace has to emulate any change to the processing state
++if it decides to decode and emulate the instruction.
++
+ 		/* Fix the size of the union. */
+ 		char padding[256];
+ 	};

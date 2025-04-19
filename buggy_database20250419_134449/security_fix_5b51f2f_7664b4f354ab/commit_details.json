@@ -1,0 +1,66 @@
+{
+  "hash": "5b51f2f80b3b906ce59bd4dce6eca3c7f34cb1b9",
+  "hash_short": "5b51f2f8",
+  "subject": "sched: Make __update_entity_runnable_avg() fast",
+  "body": "__update_entity_runnable_avg forms the core of maintaining an entity's runnable\nload average.  In this function we charge the accumulated run-time since last\nupdate and handle appropriate decay.  In some cases, e.g. a waking task, this\ntime interval may be much larger than our period unit.\n\nFortunately we can exploit some properties of our series to perform decay for a\nblocked update in constant time and account the contribution for a running\nupdate in essentially-constant* time.\n\n[*]: For any running entity they should be performing updates at the tick which\ngives us a soft limit of 1 jiffy between updates, and we can compute up to a\n32 jiffy update in a single pass.\n\nC program to generate the magic constants in the arrays:\n\n  #include <math.h>\n  #include <stdio.h>\n\n  #define N 32\n  #define WMULT_SHIFT 32\n\n  const long WMULT_CONST = ((1UL << N) - 1);\n  double y;\n\n  long runnable_avg_yN_inv[N];\n  void calc_mult_inv() {\n  \tint i;\n  \tdouble yn = 0;\n\n  \tprintf(\"inverses\\n\");\n  \tfor (i = 0; i < N; i++) {\n  \t\tyn = (double)WMULT_CONST * pow(y, i);\n  \t\trunnable_avg_yN_inv[i] = yn;\n  \t\tprintf(\"%2d: 0x%8lx\\n\", i, runnable_avg_yN_inv[i]);\n  \t}\n  \tprintf(\"\\n\");\n  }\n\n  long mult_inv(long c, int n) {\n  \treturn (c * runnable_avg_yN_inv[n]) >>  WMULT_SHIFT;\n  }\n\n  void calc_yn_sum(int n)\n  {\n  \tint i;\n  \tdouble sum = 0, sum_fl = 0, diff = 0;\n\n  \t/*\n  \t * We take the floored sum to ensure the sum of partial sums is never\n  \t * larger than the actual sum.\n  \t */\n  \tprintf(\"sum y^n\\n\");\n  \tprintf(\"   %8s  %8s %8s\\n\", \"exact\", \"floor\", \"error\");\n  \tfor (i = 1; i <= n; i++) {\n  \t\tsum = (y * sum + y * 1024);\n  \t\tsum_fl = floor(y * sum_fl+ y * 1024);\n  \t\tprintf(\"%2d: %8.0f  %8.0f %8.0f\\n\", i, sum, sum_fl,\n  \t\t\tsum_fl - sum);\n  \t}\n  \tprintf(\"\\n\");\n  }\n\n  void calc_conv(long n) {\n  \tlong old_n;\n  \tint i = -1;\n\n  \tprintf(\"convergence (LOAD_AVG_MAX, LOAD_AVG_MAX_N)\\n\");\n  \tdo {\n  \t\told_n = n;\n  \t\tn = mult_inv(n, 1) + 1024;\n  \t\ti++;\n  \t} while (n != old_n);\n  \tprintf(\"%d> %ld\\n\", i - 1, n);\n  \tprintf(\"\\n\");\n  }\n\n  void main() {\n  \ty = pow(0.5, 1/(double)N);\n  \tcalc_mult_inv();\n  \tcalc_conv(1024);\n  \tcalc_yn_sum(N);\n  }\n\n[ Compile with -lm ]\nSigned-off-by: Paul Turner <pjt@google.com>\nReviewed-by: Ben Segall <bsegall@google.com>\nSigned-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>\nLink: http://lkml.kernel.org/r/20120823141507.277808946@google.com\nSigned-off-by: Ingo Molnar <mingo@kernel.org>",
+  "full_message": "sched: Make __update_entity_runnable_avg() fast\n\n__update_entity_runnable_avg forms the core of maintaining an entity's runnable\nload average.  In this function we charge the accumulated run-time since last\nupdate and handle appropriate decay.  In some cases, e.g. a waking task, this\ntime interval may be much larger than our period unit.\n\nFortunately we can exploit some properties of our series to perform decay for a\nblocked update in constant time and account the contribution for a running\nupdate in essentially-constant* time.\n\n[*]: For any running entity they should be performing updates at the tick which\ngives us a soft limit of 1 jiffy between updates, and we can compute up to a\n32 jiffy update in a single pass.\n\nC program to generate the magic constants in the arrays:\n\n  #include <math.h>\n  #include <stdio.h>\n\n  #define N 32\n  #define WMULT_SHIFT 32\n\n  const long WMULT_CONST = ((1UL << N) - 1);\n  double y;\n\n  long runnable_avg_yN_inv[N];\n  void calc_mult_inv() {\n  \tint i;\n  \tdouble yn = 0;\n\n  \tprintf(\"inverses\\n\");\n  \tfor (i = 0; i < N; i++) {\n  \t\tyn = (double)WMULT_CONST * pow(y, i);\n  \t\trunnable_avg_yN_inv[i] = yn;\n  \t\tprintf(\"%2d: 0x%8lx\\n\", i, runnable_avg_yN_inv[i]);\n  \t}\n  \tprintf(\"\\n\");\n  }\n\n  long mult_inv(long c, int n) {\n  \treturn (c * runnable_avg_yN_inv[n]) >>  WMULT_SHIFT;\n  }\n\n  void calc_yn_sum(int n)\n  {\n  \tint i;\n  \tdouble sum = 0, sum_fl = 0, diff = 0;\n\n  \t/*\n  \t * We take the floored sum to ensure the sum of partial sums is never\n  \t * larger than the actual sum.\n  \t */\n  \tprintf(\"sum y^n\\n\");\n  \tprintf(\"   %8s  %8s %8s\\n\", \"exact\", \"floor\", \"error\");\n  \tfor (i = 1; i <= n; i++) {\n  \t\tsum = (y * sum + y * 1024);\n  \t\tsum_fl = floor(y * sum_fl+ y * 1024);\n  \t\tprintf(\"%2d: %8.0f  %8.0f %8.0f\\n\", i, sum, sum_fl,\n  \t\t\tsum_fl - sum);\n  \t}\n  \tprintf(\"\\n\");\n  }\n\n  void calc_conv(long n) {\n  \tlong old_n;\n  \tint i = -1;\n\n  \tprintf(\"convergence (LOAD_AVG_MAX, LOAD_AVG_MAX_N)\\n\");\n  \tdo {\n  \t\told_n = n;\n  \t\tn = mult_inv(n, 1) + 1024;\n  \t\ti++;\n  \t} while (n != old_n);\n  \tprintf(\"%d> %ld\\n\", i - 1, n);\n  \tprintf(\"\\n\");\n  }\n\n  void main() {\n  \ty = pow(0.5, 1/(double)N);\n  \tcalc_mult_inv();\n  \tcalc_conv(1024);\n  \tcalc_yn_sum(N);\n  }\n\n[ Compile with -lm ]\nSigned-off-by: Paul Turner <pjt@google.com>\nReviewed-by: Ben Segall <bsegall@google.com>\nSigned-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>\nLink: http://lkml.kernel.org/r/20120823141507.277808946@google.com\nSigned-off-by: Ingo Molnar <mingo@kernel.org>",
+  "author_name": "Paul Turner",
+  "author_email": "pjt@google.com",
+  "author_date": "Thu Oct 4 13:18:32 2012 +0200",
+  "author_date_iso": "2012-10-04T13:18:32+02:00",
+  "committer_name": "Ingo Molnar",
+  "committer_email": "mingo@kernel.org",
+  "committer_date": "Wed Oct 24 10:27:30 2012 +0200",
+  "committer_date_iso": "2012-10-24T10:27:30+02:00",
+  "files_changed": [
+    "kernel/sched/fair.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "kernel/sched/fair.c",
+      "insertions": 101,
+      "deletions": 24
+    }
+  ],
+  "total_insertions": 101,
+  "total_deletions": 24,
+  "total_changes": 125,
+  "parents": [
+    "f269ae0469fc882332bdfb5db15d3c1315fe2a10"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v3.10",
+    "v3.10-rc1",
+    "v3.10-rc2",
+    "v3.10-rc3",
+    "v3.10-rc4",
+    "v3.10-rc5",
+    "v3.10-rc6",
+    "v3.10-rc7",
+    "v3.11",
+    "v3.11-rc1"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "exploit"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "kernel/sched/fair.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

@@ -1,0 +1,135 @@
+commit b6f1250edb4462e38d72c7f6cce35911df21d31b
+Author: Nadav Har'El <nyh@il.ibm.com>
+Date:   Wed May 25 23:13:06 2011 +0300
+
+    KVM: nVMX: Correct handling of interrupt injection
+    
+    The code in this patch correctly emulates external-interrupt injection
+    while a nested guest L2 is running.
+    
+    Because of this code's relative un-obviousness, I include here a longer-than-
+    usual justification for what it does - much longer than the code itself ;-)
+    
+    To understand how to correctly emulate interrupt injection while L2 is
+    running, let's look first at what we need to emulate: How would things look
+    like if the extra L0 hypervisor layer is removed, and instead of L0 injecting
+    an interrupt, we had hardware delivering an interrupt?
+    
+    Now we have L1 running on bare metal with a guest L2, and the hardware
+    generates an interrupt. Assuming that L1 set PIN_BASED_EXT_INTR_MASK to 1, and
+    VM_EXIT_ACK_INTR_ON_EXIT to 0 (we'll revisit these assumptions below), what
+    happens now is this: The processor exits from L2 to L1, with an external-
+    interrupt exit reason but without an interrupt vector. L1 runs, with
+    interrupts disabled, and it doesn't yet know what the interrupt was. Soon
+    after, it enables interrupts and only at that moment, it gets the interrupt
+    from the processor. when L1 is KVM, Linux handles this interrupt.
+    
+    Now we need exactly the same thing to happen when that L1->L2 system runs
+    on top of L0, instead of real hardware. This is how we do this:
+    
+    When L0 wants to inject an interrupt, it needs to exit from L2 to L1, with
+    external-interrupt exit reason (with an invalid interrupt vector), and run L1.
+    Just like in the bare metal case, it likely can't deliver the interrupt to
+    L1 now because L1 is running with interrupts disabled, in which case it turns
+    on the interrupt window when running L1 after the exit. L1 will soon enable
+    interrupts, and at that point L0 will gain control again and inject the
+    interrupt to L1.
+    
+    Finally, there is an extra complication in the code: when nested_run_pending,
+    we cannot return to L1 now, and must launch L2. We need to remember the
+    interrupt we wanted to inject (and not clear it now), and do it on the
+    next exit.
+    
+    The above explanation shows that the relative strangeness of the nested
+    interrupt injection code in this patch, and the extra interrupt-window
+    exit incurred, are in fact necessary for accurate emulation, and are not
+    just an unoptimized implementation.
+    
+    Let's revisit now the two assumptions made above:
+    
+    If L1 turns off PIN_BASED_EXT_INTR_MASK (no hypervisor that I know
+    does, by the way), things are simple: L0 may inject the interrupt directly
+    to the L2 guest - using the normal code path that injects to any guest.
+    We support this case in the code below.
+    
+    If L1 turns on VM_EXIT_ACK_INTR_ON_EXIT, things look very different from the
+    description above: L1 expects to see an exit from L2 with the interrupt vector
+    already filled in the exit information, and does not expect to be interrupted
+    again with this interrupt. The current code does not (yet) support this case,
+    so we do not allow the VM_EXIT_ACK_INTR_ON_EXIT exit-control to be turned on
+    by L1.
+    
+    Signed-off-by: Nadav Har'El <nyh@il.ibm.com>
+    Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
+
+diff --git a/arch/x86/kvm/vmx.c b/arch/x86/kvm/vmx.c
+index 7f62dc36af9b..ab218da8b956 100644
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -1790,6 +1790,7 @@ static __init void nested_vmx_setup_ctls_msrs(void)
+ 
+ 	/* exit controls */
+ 	nested_vmx_exit_ctls_low = 0;
++	/* Note that guest use of VM_EXIT_ACK_INTR_ON_EXIT is not supported. */
+ #ifdef CONFIG_X86_64
+ 	nested_vmx_exit_ctls_high = VM_EXIT_HOST_ADDR_SPACE_SIZE;
+ #else
+@@ -3744,9 +3745,25 @@ static int vmx_vcpu_reset(struct kvm_vcpu *vcpu)
+ 	return ret;
+ }
+ 
++/*
++ * In nested virtualization, check if L1 asked to exit on external interrupts.
++ * For most existing hypervisors, this will always return true.
++ */
++static bool nested_exit_on_intr(struct kvm_vcpu *vcpu)
++{
++	return get_vmcs12(vcpu)->pin_based_vm_exec_control &
++		PIN_BASED_EXT_INTR_MASK;
++}
++
+ static void enable_irq_window(struct kvm_vcpu *vcpu)
+ {
+ 	u32 cpu_based_vm_exec_control;
++	if (is_guest_mode(vcpu) && nested_exit_on_intr(vcpu))
++		/* We can get here when nested_run_pending caused
++		 * vmx_interrupt_allowed() to return false. In this case, do
++		 * nothing - the interrupt will be injected later.
++		 */
++		return;
+ 
+ 	cpu_based_vm_exec_control = vmcs_read32(CPU_BASED_VM_EXEC_CONTROL);
+ 	cpu_based_vm_exec_control |= CPU_BASED_VIRTUAL_INTR_PENDING;
+@@ -3869,6 +3886,17 @@ static void vmx_set_nmi_mask(struct kvm_vcpu *vcpu, bool masked)
+ 
+ static int vmx_interrupt_allowed(struct kvm_vcpu *vcpu)
+ {
++	if (is_guest_mode(vcpu) && nested_exit_on_intr(vcpu)) {
++		struct vmcs12 *vmcs12;
++		if (to_vmx(vcpu)->nested.nested_run_pending)
++			return 0;
++		nested_vmx_vmexit(vcpu);
++		vmcs12 = get_vmcs12(vcpu);
++		vmcs12->vm_exit_reason = EXIT_REASON_EXTERNAL_INTERRUPT;
++		vmcs12->vm_exit_intr_info = 0;
++		/* fall through to normal code, but now in L1, not L2 */
++	}
++
+ 	return (vmcs_readl(GUEST_RFLAGS) & X86_EFLAGS_IF) &&
+ 		!(vmcs_read32(GUEST_INTERRUPTIBILITY_INFO) &
+ 			(GUEST_INTR_STATE_STI | GUEST_INTR_STATE_MOV_SS));
+@@ -5537,6 +5565,14 @@ static int vmx_handle_exit(struct kvm_vcpu *vcpu)
+ 	if (vmx->emulation_required && emulate_invalid_guest_state)
+ 		return handle_invalid_guest_state(vcpu);
+ 
++	/*
++	 * the KVM_REQ_EVENT optimization bit is only on for one entry, and if
++	 * we did not inject a still-pending event to L1 now because of
++	 * nested_run_pending, we need to re-enable this bit.
++	 */
++	if (vmx->nested.nested_run_pending)
++		kvm_make_request(KVM_REQ_EVENT, vcpu);
++
+ 	if (exit_reason == EXIT_REASON_VMLAUNCH ||
+ 	    exit_reason == EXIT_REASON_VMRESUME)
+ 		vmx->nested.nested_run_pending = 1;

@@ -1,0 +1,61 @@
+commit e4453d8a1c56050df320ef54f339ffa4a9513d0a
+Author: Paul E. McKenney <paulmck@kernel.org>
+Date:   Sat Feb 15 14:18:09 2020 -0800
+
+    rcu: Make rcu_read_unlock_special() safe for rq/pi locks
+    
+    The scheduler is currently required to hold rq/pi locks across the entire
+    RCU read-side critical section or not at all.  This is inconvenient and
+    leaves traps for the unwary, including the author of this commit.
+    
+    But now that excessively long grace periods enable scheduling-clock
+    interrupts for holdout nohz_full CPUs, the nohz_full rescue logic in
+    rcu_read_unlock_special() can be dispensed with.  In other words, the
+    rcu_read_unlock_special() function can refrain from doing wakeups unless
+    such wakeups are guaranteed safe.
+    
+    This commit therefore avoids unsafe wakeups, freeing the scheduler to
+    hold rq/pi locks across rcu_read_unlock() even if the corresponding RCU
+    read-side critical section might have been preempted.  This commit also
+    updates RCU's requirements documentation.
+    
+    This commit is inspired by a patch from Lai Jiangshan:
+    https://lore.kernel.org/lkml/20191102124559.1135-2-laijs@linux.alibaba.com
+    This commit is further intended to be a step towards his goal of permitting
+    the inlining of RCU-preempt's rcu_read_lock() and rcu_read_unlock().
+    
+    Cc: Lai Jiangshan <laijs@linux.alibaba.com>
+    Signed-off-by: Paul E. McKenney <paulmck@kernel.org>
+
+diff --git a/kernel/rcu/tree_plugin.h b/kernel/rcu/tree_plugin.h
+index 097635c41135..ccad77639d80 100644
+--- a/kernel/rcu/tree_plugin.h
++++ b/kernel/rcu/tree_plugin.h
+@@ -615,19 +615,18 @@ static void rcu_read_unlock_special(struct task_struct *t)
+ 		struct rcu_data *rdp = this_cpu_ptr(&rcu_data);
+ 		struct rcu_node *rnp = rdp->mynode;
+ 
+-		exp = (t->rcu_blocked_node && t->rcu_blocked_node->exp_tasks) ||
+-		      (rdp->grpmask & READ_ONCE(rnp->expmask)) ||
+-		      tick_nohz_full_cpu(rdp->cpu);
++		exp = (t->rcu_blocked_node &&
++		       READ_ONCE(t->rcu_blocked_node->exp_tasks)) ||
++		      (rdp->grpmask & READ_ONCE(rnp->expmask));
+ 		// Need to defer quiescent state until everything is enabled.
+-		if (irqs_were_disabled && use_softirq &&
+-		    (in_interrupt() ||
+-		     (exp && !t->rcu_read_unlock_special.b.deferred_qs))) {
+-			// Using softirq, safe to awaken, and we get
+-			// no help from enabling irqs, unlike bh/preempt.
++		if (use_softirq && (in_irq() || (exp && !irqs_were_disabled))) {
++			// Using softirq, safe to awaken, and either the
++			// wakeup is free or there is an expedited GP.
+ 			raise_softirq_irqoff(RCU_SOFTIRQ);
+ 		} else {
+ 			// Enabling BH or preempt does reschedule, so...
+-			// Also if no expediting or NO_HZ_FULL, slow is OK.
++			// Also if no expediting, slow is OK.
++			// Plus nohz_full CPUs eventually get tick enabled.
+ 			set_tsk_need_resched(current);
+ 			set_preempt_need_resched();
+ 			if (IS_ENABLED(CONFIG_IRQ_WORK) && irqs_were_disabled &&

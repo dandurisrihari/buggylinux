@@ -1,0 +1,68 @@
+Commit Hash: 31464ab01fff910cb88376384e2b6824f7bf713f
+Subject: jbd2: skip reading super block if it has been verified
+
+
+Security Keywords:
+- injection
+
+Full commit message:
+jbd2: skip reading super block if it has been verified
+
+We got a NULL pointer dereference issue below while running generic/475
+I/O failure pressure test.
+
+ BUG: kernel NULL pointer dereference, address: 0000000000000000
+ #PF: supervisor write access in kernel mode
+ #PF: error_code(0x0002) - not-present page
+ PGD 0 P4D 0
+ Oops: 0002 [#1] PREEMPT SMP PTI
+ CPU: 1 PID: 15600 Comm: fsstress Not tainted 6.4.0-rc5-xfstests-00055-gd3ab1bca26b4 #190
+ RIP: 0010:jbd2_journal_set_features+0x13d/0x430
+ ...
+ Call Trace:
+  <TASK>
+  ? __die+0x23/0x60
+  ? page_fault_oops+0xa4/0x170
+  ? exc_page_fault+0x67/0x170
+  ? asm_exc_page_fault+0x26/0x30
+  ? jbd2_journal_set_features+0x13d/0x430
+  jbd2_journal_revoke+0x47/0x1e0
+  __ext4_forget+0xc3/0x1b0
+  ext4_free_blocks+0x214/0x2f0
+  ext4_free_branches+0xeb/0x270
+  ext4_ind_truncate+0x2bf/0x320
+  ext4_truncate+0x1e4/0x490
+  ext4_handle_inode_extension+0x1bd/0x2a0
+  ? iomap_dio_complete+0xaf/0x1d0
+
+The root cause is the journal super block had been failed to write out
+due to I/O fault injection, it's uptodate bit was cleared by
+end_buffer_write_sync() and didn't reset yet in jbd2_write_superblock().
+And it raced by journal_get_superblock()->bh_read(), unfortunately, the
+read IO is also failed, so the error handling in
+journal_fail_superblock() unexpectedly clear the journal->j_sb_buffer,
+finally lead to above NULL pointer dereference issue.
+
+If the journal super block had been read and verified, there is no need
+to call bh_read() read it again even if it has been failed to written
+out. So the fix could be simply move buffer_verified(bh) in front of
+bh_read(). Also remove a stale comment left in
+jbd2_journal_check_used_features().
+
+Fixes: 51bacdba23d8 ("jbd2: factor out journal initialization from journal_get_superblock()")
+Reported-by: Theodore Ts'o <tytso@mit.edu>
+Signed-off-by: Zhang Yi <yi.zhang@huawei.com>
+Reviewed-by: Jan Kara <jack@suse.cz>
+Link: https://lore.kernel.org/r/20230616015547.3155195-1-yi.zhang@huaweicloud.com
+Signed-off-by: Theodore Ts'o <tytso@mit.edu>
+
+Metadata:
+Author: Zhang Yi <yi.zhang@huawei.com>
+Author Date: Fri Jun 16 09:55:47 2023 +0800
+Committer: Theodore Ts'o <tytso@mit.edu>
+Commit Date: Mon Jun 26 19:36:45 2023 -0400
+
+Files Changed: 1
+Lines Added: 3
+Lines Removed: 4
+Total Changes: 7

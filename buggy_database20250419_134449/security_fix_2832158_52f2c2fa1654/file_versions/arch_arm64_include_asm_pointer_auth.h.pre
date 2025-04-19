@@ -1,0 +1,67 @@
+commit 33e45234987ea3ed4b05fc512f4441696478f12d
+Author: Kristina Martsenko <kristina.martsenko@arm.com>
+Date:   Fri Mar 13 14:34:56 2020 +0530
+
+    arm64: initialize and switch ptrauth kernel keys
+    
+    Set up keys to use pointer authentication within the kernel. The kernel
+    will be compiled with APIAKey instructions, the other keys are currently
+    unused. Each task is given its own APIAKey, which is initialized during
+    fork. The key is changed during context switch and on kernel entry from
+    EL0.
+    
+    The keys for idle threads need to be set before calling any C functions,
+    because it is not possible to enter and exit a function with different
+    keys.
+    
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Reviewed-by: Catalin Marinas <catalin.marinas@arm.com>
+    Reviewed-by: Vincenzo Frascino <Vincenzo.Frascino@arm.com>
+    Signed-off-by: Kristina Martsenko <kristina.martsenko@arm.com>
+    [Amit: Modified secondary cores key structure, comments]
+    Signed-off-by: Amit Daniel Kachhap <amit.kachhap@arm.com>
+    Signed-off-by: Catalin Marinas <catalin.marinas@arm.com>
+
+diff --git a/arch/arm64/include/asm/pointer_auth.h b/arch/arm64/include/asm/pointer_auth.h
+index dabe026ca8ca..aa956ca5f2c2 100644
+--- a/arch/arm64/include/asm/pointer_auth.h
++++ b/arch/arm64/include/asm/pointer_auth.h
+@@ -30,6 +30,10 @@ struct ptrauth_keys_user {
+ 	struct ptrauth_key apga;
+ };
+ 
++struct ptrauth_keys_kernel {
++	struct ptrauth_key apia;
++};
++
+ static inline void ptrauth_keys_init_user(struct ptrauth_keys_user *keys)
+ {
+ 	if (system_supports_address_auth()) {
+@@ -50,6 +54,12 @@ do {								\
+ 	write_sysreg_s(__pki_v.hi, SYS_ ## k ## KEYHI_EL1);	\
+ } while (0)
+ 
++static inline void ptrauth_keys_init_kernel(struct ptrauth_keys_kernel *keys)
++{
++	if (system_supports_address_auth())
++		get_random_bytes(&keys->apia, sizeof(keys->apia));
++}
++
+ extern int ptrauth_prctl_reset_keys(struct task_struct *tsk, unsigned long arg);
+ 
+ /*
+@@ -66,11 +76,14 @@ static inline unsigned long ptrauth_strip_insn_pac(unsigned long ptr)
+ 
+ #define ptrauth_thread_init_user(tsk)					\
+ 	ptrauth_keys_init_user(&(tsk)->thread.keys_user)
++#define ptrauth_thread_init_kernel(tsk)					\
++	ptrauth_keys_init_kernel(&(tsk)->thread.keys_kernel)
+ 
+ #else /* CONFIG_ARM64_PTR_AUTH */
+ #define ptrauth_prctl_reset_keys(tsk, arg)	(-EINVAL)
+ #define ptrauth_strip_insn_pac(lr)	(lr)
+ #define ptrauth_thread_init_user(tsk)
++#define ptrauth_thread_init_kernel(tsk)
+ #endif /* CONFIG_ARM64_PTR_AUTH */
+ 
+ #endif /* __ASM_POINTER_AUTH_H */

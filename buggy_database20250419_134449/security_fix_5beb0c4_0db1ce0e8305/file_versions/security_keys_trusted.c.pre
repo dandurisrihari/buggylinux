@@ -1,0 +1,95 @@
+commit 5ca4c20cfd37bac6486de040e9951b3b34755238
+Author: Jarkko Sakkinen <jarkko@kernel.org>
+Date:   Thu Nov 5 21:43:06 2015 +0200
+
+    keys, trusted: select hash algorithm for TPM2 chips
+    
+    Added 'hash=' option for selecting the hash algorithm for add_key()
+    syscall and documentation for it.
+    
+    Added entry for sm3-256 to the following tables in order to support
+    TPM_ALG_SM3_256:
+    
+    * hash_algo_name
+    * hash_digest_size
+    
+    Includes support for the following hash algorithms:
+    
+    * sha1
+    * sha256
+    * sha384
+    * sha512
+    * sm3-256
+    
+    Signed-off-by: Jarkko Sakkinen <jarkko.sakkinen@linux.intel.com>
+    Tested-by: Colin Ian King <colin.king@canonical.com>
+    Reviewed-by: James Morris <james.l.morris@oracle.com>
+    Reviewed-by: Mimi Zohar <zohar@linux.vnet.ibm.com>
+    Acked-by: Peter Huewe <peterhuewe@gmx.de>
+
+diff --git a/security/keys/trusted.c b/security/keys/trusted.c
+index 7c183c767a3a..8f1300cab38e 100644
+--- a/security/keys/trusted.c
++++ b/security/keys/trusted.c
+@@ -11,6 +11,7 @@
+  * See Documentation/security/keys-trusted-encrypted.txt
+  */
+ 
++#include <crypto/hash_info.h>
+ #include <linux/uaccess.h>
+ #include <linux/module.h>
+ #include <linux/init.h>
+@@ -710,7 +711,8 @@ enum {
+ 	Opt_err = -1,
+ 	Opt_new, Opt_load, Opt_update,
+ 	Opt_keyhandle, Opt_keyauth, Opt_blobauth,
+-	Opt_pcrinfo, Opt_pcrlock, Opt_migratable
++	Opt_pcrinfo, Opt_pcrlock, Opt_migratable,
++	Opt_hash,
+ };
+ 
+ static const match_table_t key_tokens = {
+@@ -723,6 +725,7 @@ static const match_table_t key_tokens = {
+ 	{Opt_pcrinfo, "pcrinfo=%s"},
+ 	{Opt_pcrlock, "pcrlock=%s"},
+ 	{Opt_migratable, "migratable=%s"},
++	{Opt_hash, "hash=%s"},
+ 	{Opt_err, NULL}
+ };
+ 
+@@ -737,6 +740,14 @@ static int getoptions(char *c, struct trusted_key_payload *pay,
+ 	unsigned long handle;
+ 	unsigned long lock;
+ 	unsigned long token_mask = 0;
++	int i;
++	int tpm2;
++
++	tpm2 = tpm_is_tpm2(TPM_ANY_NUM);
++	if (tpm2 < 0)
++		return tpm2;
++
++	opt->hash = tpm2 ? HASH_ALGO_SHA256 : HASH_ALGO_SHA1;
+ 
+ 	while ((p = strsep(&c, " \t"))) {
+ 		if (*p == '\0' || *p == ' ' || *p == '\t')
+@@ -790,6 +801,20 @@ static int getoptions(char *c, struct trusted_key_payload *pay,
+ 				return -EINVAL;
+ 			opt->pcrlock = lock;
+ 			break;
++		case Opt_hash:
++			for (i = 0; i < HASH_ALGO__LAST; i++) {
++				if (!strcmp(args[0].from, hash_algo_name[i])) {
++					opt->hash = i;
++					break;
++				}
++			}
++			if (i == HASH_ALGO__LAST)
++				return -EINVAL;
++			if  (!tpm2 && i != HASH_ALGO_SHA1) {
++				pr_info("trusted_key: TPM 1.x only supports SHA-1.\n");
++				return -EINVAL;
++			}
++			break;
+ 		default:
+ 			return -EINVAL;
+ 		}

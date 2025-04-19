@@ -1,0 +1,44 @@
+commit e11452eb071b2a8e6ba52892b2e270bbdaa6640d
+Author: Arjan van de Ven <arjan@linux.intel.com>
+Date:   Wed Apr 24 14:43:22 2024 +0000
+
+    dmaengine: idxd: add a new security check to deal with a hardware erratum
+    
+    On Sapphire Rapids and related platforms, the DSA and IAA devices have an
+    erratum that causes direct access (for example, by using the ENQCMD or
+    MOVDIR64 instructions) from untrusted applications to be a security problem.
+    
+    To solve this, add a flag to the PCI device enumeration and device structures
+    to indicate the presence/absence of this security exposure. In the mmap()
+    method of the device, this flag is then used to enforce that the user
+    has the CAP_SYS_RAWIO capability.
+    
+    In a future patch, a write() based method will be added that allows untrusted
+    applications submit work to the accelerator, where the kernel can do
+    sanity checking on the user input to ensure secure operation of the accelerator.
+    
+    Signed-off-by: Arjan van de Ven <arjan@linux.intel.com>
+
+diff --git a/drivers/dma/idxd/cdev.c b/drivers/dma/idxd/cdev.c
+index c095a2c8f659..9326a918b132 100644
+--- a/drivers/dma/idxd/cdev.c
++++ b/drivers/dma/idxd/cdev.c
+@@ -400,6 +400,18 @@ static int idxd_cdev_mmap(struct file *filp, struct vm_area_struct *vma)
+ 	int rc;
+ 
+ 	dev_dbg(&pdev->dev, "%s called\n", __func__);
++
++	/*
++	 * Due to an erratum in some of the devices supported by the driver,
++	 * direct user submission to the device can be unsafe.
++	 * (See the INTEL-SA-01084 security advisory)
++	 *
++	 * For the devices that exhibit this behavior, require that the user
++	 * has CAP_SYS_RAWIO capabilities.
++	 */
++	if (!idxd->user_submission_safe && !capable(CAP_SYS_RAWIO))
++		return -EPERM;
++
+ 	rc = check_vma(wq, vma, __func__);
+ 	if (rc < 0)
+ 		return rc;

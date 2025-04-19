@@ -1,0 +1,163 @@
+commit 09d56393c1d8d55fc8589a15cb7f4a5f1d40a0f2
+Author: Ramalingam C <ramalingam.c@intel.com>
+Date:   Sat Feb 16 23:06:52 2019 +0530
+
+    drm/i915: hdcp1.4 CP_IRQ handling and SW encryption tracking
+    
+    "hdcp_encrypted" flag is defined to denote the HDCP1.4 encryption status.
+    This SW tracking is used to determine the need for real hdcp1.4 disable
+    and hdcp_check_link upon CP_IRQ.
+    
+    On CP_IRQ we filter the CP_IRQ related to the states like Link failure
+    and reauthentication req etc and handle them in hdcp_check_link.
+    CP_IRQ corresponding to the authentication msg availability are ignored.
+    
+    WARN_ON is added for the abrupt stop of HDCP encryption of a port.
+    
+    v2:
+      bool is used in struct for the cleaner coding. [Daniel]
+      check_link work_fn is scheduled for cp_irq handling [Daniel]
+    v3:
+      rebased.
+    
+    Signed-off-by: Ramalingam C <ramalingam.c@intel.com>
+    Reviewed-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+    Reviewed-by: Uma Shankar <uma.shankar@intel.com>
+    Signed-off-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+    Link: https://patchwork.freedesktop.org/patch/msgid/1550338640-17470-6-git-send-email-ramalingam.c@intel.com
+
+diff --git a/drivers/gpu/drm/i915/intel_hdcp.c b/drivers/gpu/drm/i915/intel_hdcp.c
+index d06bef9d1ab2..66e3850a57a0 100644
+--- a/drivers/gpu/drm/i915/intel_hdcp.c
++++ b/drivers/gpu/drm/i915/intel_hdcp.c
+@@ -74,6 +74,16 @@ bool intel_hdcp_capable(struct intel_connector *connector)
+ 	return capable;
+ }
+ 
++static inline bool intel_hdcp_in_use(struct intel_connector *connector)
++{
++	struct drm_i915_private *dev_priv = to_i915(connector->base.dev);
++	enum port port = connector->encoder->port;
++	u32 reg;
++
++	reg = I915_READ(PORT_HDCP_STATUS(port));
++	return reg & HDCP_STATUS_ENC;
++}
++
+ static int intel_hdcp_poll_ksv_fifo(struct intel_digital_port *intel_dig_port,
+ 				    const struct intel_hdcp_shim *shim)
+ {
+@@ -668,6 +678,7 @@ static int _intel_hdcp_disable(struct intel_connector *connector)
+ 	DRM_DEBUG_KMS("[%s:%d] HDCP is being disabled...\n",
+ 		      connector->base.name, connector->base.base.id);
+ 
++	hdcp->hdcp_encrypted = false;
+ 	I915_WRITE(PORT_HDCP_CONF(port), 0);
+ 	if (intel_wait_for_register(dev_priv, PORT_HDCP_STATUS(port), ~0, 0,
+ 				    ENCRYPT_STATUS_CHANGE_TIMEOUT_MS)) {
+@@ -713,8 +724,10 @@ static int _intel_hdcp_enable(struct intel_connector *connector)
+ 	/* Incase of authentication failures, HDCP spec expects reauth. */
+ 	for (i = 0; i < tries; i++) {
+ 		ret = intel_hdcp_auth(conn_to_dig_port(connector), hdcp->shim);
+-		if (!ret)
++		if (!ret) {
++			hdcp->hdcp_encrypted = true;
+ 			return 0;
++		}
+ 
+ 		DRM_DEBUG_KMS("HDCP Auth failure (%d)\n", ret);
+ 
+@@ -741,16 +754,17 @@ int intel_hdcp_check_link(struct intel_connector *connector)
+ 	enum port port = intel_dig_port->base.port;
+ 	int ret = 0;
+ 
+-	if (!hdcp->shim)
+-		return -ENOENT;
+-
+ 	mutex_lock(&hdcp->mutex);
+ 
+-	if (hdcp->value == DRM_MODE_CONTENT_PROTECTION_UNDESIRED)
++	/* Check_link valid only when HDCP1.4 is enabled */
++	if (hdcp->value != DRM_MODE_CONTENT_PROTECTION_ENABLED ||
++	    !hdcp->hdcp_encrypted) {
++		ret = -EINVAL;
+ 		goto out;
++	}
+ 
+-	if (!(I915_READ(PORT_HDCP_STATUS(port)) & HDCP_STATUS_ENC)) {
+-		DRM_ERROR("%s:%d HDCP check failed: link is not encrypted,%x\n",
++	if (WARN_ON(!intel_hdcp_in_use(connector))) {
++		DRM_ERROR("%s:%d HDCP link stopped encryption,%x\n",
+ 			  connector->base.name, connector->base.base.id,
+ 			  I915_READ(PORT_HDCP_STATUS(port)));
+ 		ret = -ENXIO;
+@@ -791,18 +805,6 @@ int intel_hdcp_check_link(struct intel_connector *connector)
+ 	return ret;
+ }
+ 
+-static void intel_hdcp_check_work(struct work_struct *work)
+-{
+-	struct intel_hdcp *hdcp = container_of(to_delayed_work(work),
+-					       struct intel_hdcp,
+-					       check_work);
+-	struct intel_connector *connector = intel_hdcp_to_connector(hdcp);
+-
+-	if (!intel_hdcp_check_link(connector))
+-		schedule_delayed_work(&hdcp->check_work,
+-				      DRM_HDCP_CHECK_PERIOD_MS);
+-}
+-
+ static void intel_hdcp_prop_work(struct work_struct *work)
+ {
+ 	struct intel_hdcp *hdcp = container_of(work, struct intel_hdcp,
+@@ -1120,6 +1122,18 @@ int hdcp2_deauthenticate_port(struct intel_connector *connector)
+ 	return hdcp2_close_mei_session(connector);
+ }
+ 
++static void intel_hdcp_check_work(struct work_struct *work)
++{
++	struct intel_hdcp *hdcp = container_of(to_delayed_work(work),
++					       struct intel_hdcp,
++					       check_work);
++	struct intel_connector *connector = intel_hdcp_to_connector(hdcp);
++
++	if (!intel_hdcp_check_link(connector))
++		schedule_delayed_work(&hdcp->check_work,
++				      DRM_HDCP_CHECK_PERIOD_MS);
++}
++
+ static int i915_hdcp_component_bind(struct device *i915_kdev,
+ 				    struct device *mei_kdev, void *data)
+ {
+@@ -1281,7 +1295,8 @@ int intel_hdcp_disable(struct intel_connector *connector)
+ 
+ 	if (hdcp->value != DRM_MODE_CONTENT_PROTECTION_UNDESIRED) {
+ 		hdcp->value = DRM_MODE_CONTENT_PROTECTION_UNDESIRED;
+-		ret = _intel_hdcp_disable(connector);
++		if (hdcp->hdcp_encrypted)
++			ret = _intel_hdcp_disable(connector);
+ 	}
+ 
+ 	mutex_unlock(&hdcp->mutex);
+@@ -1345,3 +1360,21 @@ void intel_hdcp_atomic_check(struct drm_connector *connector,
+ 						   new_state->crtc);
+ 	crtc_state->mode_changed = true;
+ }
++
++/* Handles the CP_IRQ raised from the DP HDCP sink */
++void intel_hdcp_handle_cp_irq(struct intel_connector *connector)
++{
++	struct intel_hdcp *hdcp = &connector->hdcp;
++
++	if (!hdcp->shim)
++		return;
++
++	/*
++	 * CP_IRQ could be triggered due to 1. HDCP2.2 auth msgs availability,
++	 * 2. link failure and 3. repeater reauth request. At present we dont
++	 * handle the CP_IRQ for the HDCP2.2 auth msg availability for read.
++	 * To handle other two causes for CP_IRQ we have the work_fn which is
++	 * scheduled here.
++	 */
++	schedule_delayed_work(&hdcp->check_work, 0);
++}

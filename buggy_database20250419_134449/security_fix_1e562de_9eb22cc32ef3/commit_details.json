@@ -1,0 +1,174 @@
+{
+  "hash": "1e562deacecca1f1bec7d23da526904a1e87525e",
+  "hash_short": "1e562dea",
+  "subject": "crypto: rsassa-pkcs1 - Migrate to sig_alg backend",
+  "body": "A sig_alg backend has just been introduced with the intent of moving all\nasymmetric sign/verify algorithms to it one by one.\n\nMigrate the sign/verify operations from rsa-pkcs1pad.c to a separate\nrsassa-pkcs1.c which uses the new backend.\n\nConsequently there are now two templates which build on the \"rsa\"\nakcipher_alg:\n\n* The existing \"pkcs1pad\" template, which is instantiated as an\n  akcipher_instance and retains the encrypt/decrypt operations of\n  RSAES-PKCS1-v1_5 (RFC 8017 sec 7.2).\n\n* The new \"pkcs1\" template, which is instantiated as a sig_instance\n  and contains the sign/verify operations of RSASSA-PKCS1-v1_5\n  (RFC 8017 sec 8.2).\n\nIn a separate step, rsa-pkcs1pad.c could optionally be renamed to\nrsaes-pkcs1.c for clarity.  Additional \"oaep\" and \"pss\" templates\ncould be added for RSAES-OAEP and RSASSA-PSS.\n\nNote that it's currently allowed to allocate a \"pkcs1pad(rsa)\" transform\nwithout specifying a hash algorithm.  That makes sense if the transform\nis only used for encrypt/decrypt and continues to be supported.  But for\nsign/verify, such transforms previously did not insert the Full Hash\nPrefix into the padding.  The resulting message encoding was incompliant\nwith EMSA-PKCS1-v1_5 (RFC 8017 sec 9.2) and therefore nonsensical.\n\nFrom here on in, it is no longer allowed to allocate a transform without\nspecifying a hash algorithm if the transform is used for sign/verify\noperations.  This simplifies the code because the insertion of the Full\nHash Prefix is no longer optional, so various \"if (digest_info)\" clauses\ncan be removed.\n\nThere has been a previous attempt to forbid transform allocation without\nspecifying a hash algorithm, namely by commit c0d20d22e0ad (\"crypto:\nrsa-pkcs1pad - Require hash to be present\").  It had to be rolled back\nwith commit b3a8c8a5ebb5 (\"crypto: rsa-pkcs1pad: Allow hash to be\noptional [ver #2]\"), presumably because it broke allocation of a\ntransform which was solely used for encrypt/decrypt, not sign/verify.\nAvoid such breakage by allowing transform allocation for encrypt/decrypt\nwith and without specifying a hash algorithm (and simply ignoring the\nhash algorithm in the former case).\n\nSo again, specifying a hash algorithm is now mandatory for sign/verify,\nbut optional and ignored for encrypt/decrypt.\n\nThe new sig_alg API uses kernel buffers instead of sglists, which\navoids the overhead of copying signature and digest from sglists back\ninto kernel buffers.  rsassa-pkcs1.c is thus simplified quite a bit.\n\nsig_alg is always synchronous, whereas the underlying \"rsa\" akcipher_alg\nmay be asynchronous.  So await the result of the akcipher_alg, similar\nto crypto_akcipher_sync_{en,de}crypt().\n\nAs part of the migration, rename \"rsa_digest_info\" to \"hash_prefix\" to\nadhere to the spec language in RFC 9580.  Otherwise keep the code\nunmodified wherever possible to ease reviewing and bisecting.  Leave\nseveral simplification and hardening opportunities to separate commits.\n\nrsassa-pkcs1.c uses modern __free() syntax for allocation of buffers\nwhich need to be freed by kfree_sensitive(), hence a DEFINE_FREE()\nclause for kfree_sensitive() is introduced herein as a byproduct.\n\nSigned-off-by: Lukas Wunner <lukas@wunner.de>\nSigned-off-by: Herbert Xu <herbert@gondor.apana.org.au>",
+  "full_message": "crypto: rsassa-pkcs1 - Migrate to sig_alg backend\n\nA sig_alg backend has just been introduced with the intent of moving all\nasymmetric sign/verify algorithms to it one by one.\n\nMigrate the sign/verify operations from rsa-pkcs1pad.c to a separate\nrsassa-pkcs1.c which uses the new backend.\n\nConsequently there are now two templates which build on the \"rsa\"\nakcipher_alg:\n\n* The existing \"pkcs1pad\" template, which is instantiated as an\n  akcipher_instance and retains the encrypt/decrypt operations of\n  RSAES-PKCS1-v1_5 (RFC 8017 sec 7.2).\n\n* The new \"pkcs1\" template, which is instantiated as a sig_instance\n  and contains the sign/verify operations of RSASSA-PKCS1-v1_5\n  (RFC 8017 sec 8.2).\n\nIn a separate step, rsa-pkcs1pad.c could optionally be renamed to\nrsaes-pkcs1.c for clarity.  Additional \"oaep\" and \"pss\" templates\ncould be added for RSAES-OAEP and RSASSA-PSS.\n\nNote that it's currently allowed to allocate a \"pkcs1pad(rsa)\" transform\nwithout specifying a hash algorithm.  That makes sense if the transform\nis only used for encrypt/decrypt and continues to be supported.  But for\nsign/verify, such transforms previously did not insert the Full Hash\nPrefix into the padding.  The resulting message encoding was incompliant\nwith EMSA-PKCS1-v1_5 (RFC 8017 sec 9.2) and therefore nonsensical.\n\nFrom here on in, it is no longer allowed to allocate a transform without\nspecifying a hash algorithm if the transform is used for sign/verify\noperations.  This simplifies the code because the insertion of the Full\nHash Prefix is no longer optional, so various \"if (digest_info)\" clauses\ncan be removed.\n\nThere has been a previous attempt to forbid transform allocation without\nspecifying a hash algorithm, namely by commit c0d20d22e0ad (\"crypto:\nrsa-pkcs1pad - Require hash to be present\").  It had to be rolled back\nwith commit b3a8c8a5ebb5 (\"crypto: rsa-pkcs1pad: Allow hash to be\noptional [ver #2]\"), presumably because it broke allocation of a\ntransform which was solely used for encrypt/decrypt, not sign/verify.\nAvoid such breakage by allowing transform allocation for encrypt/decrypt\nwith and without specifying a hash algorithm (and simply ignoring the\nhash algorithm in the former case).\n\nSo again, specifying a hash algorithm is now mandatory for sign/verify,\nbut optional and ignored for encrypt/decrypt.\n\nThe new sig_alg API uses kernel buffers instead of sglists, which\navoids the overhead of copying signature and digest from sglists back\ninto kernel buffers.  rsassa-pkcs1.c is thus simplified quite a bit.\n\nsig_alg is always synchronous, whereas the underlying \"rsa\" akcipher_alg\nmay be asynchronous.  So await the result of the akcipher_alg, similar\nto crypto_akcipher_sync_{en,de}crypt().\n\nAs part of the migration, rename \"rsa_digest_info\" to \"hash_prefix\" to\nadhere to the spec language in RFC 9580.  Otherwise keep the code\nunmodified wherever possible to ease reviewing and bisecting.  Leave\nseveral simplification and hardening opportunities to separate commits.\n\nrsassa-pkcs1.c uses modern __free() syntax for allocation of buffers\nwhich need to be freed by kfree_sensitive(), hence a DEFINE_FREE()\nclause for kfree_sensitive() is introduced herein as a byproduct.\n\nSigned-off-by: Lukas Wunner <lukas@wunner.de>\nSigned-off-by: Herbert Xu <herbert@gondor.apana.org.au>",
+  "author_name": "Lukas Wunner",
+  "author_email": "lukas@wunner.de",
+  "author_date": "Tue Sep 10 16:30:16 2024 +0200",
+  "author_date_iso": "2024-09-10T16:30:16+02:00",
+  "committer_name": "Herbert Xu",
+  "committer_email": "herbert@gondor.apana.org.au",
+  "committer_date": "Sat Oct 5 13:22:04 2024 +0800",
+  "committer_date_iso": "2024-10-05T13:22:04+08:00",
+  "files_changed": [
+    "crypto/Kconfig",
+    "crypto/Makefile",
+    "crypto/asymmetric_keys/public_key.c",
+    "crypto/rsa-pkcs1pad.c",
+    "crypto/rsa.c",
+    "crypto/rsassa-pkcs1.c",
+    "crypto/testmgr.c",
+    "crypto/testmgr.h",
+    "include/crypto/internal/rsa.h",
+    "include/linux/slab.h",
+    "security/integrity/ima/ima_main.c"
+  ],
+  "files_changed_count": 11,
+  "stats": [
+    {
+      "file": "crypto/Kconfig",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "crypto/Makefile",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "crypto/asymmetric_keys/public_key.c",
+      "insertions": 8,
+      "deletions": 2
+    },
+    {
+      "file": "crypto/rsa-pkcs1pad.c",
+      "insertions": 16,
+      "deletions": 325
+    },
+    {
+      "file": "crypto/rsa.c",
+      "insertions": 13,
+      "deletions": 4
+    },
+    {
+      "file": "crypto/rsassa-pkcs1.c",
+      "insertions": 422,
+      "deletions": 0
+    },
+    {
+      "file": "crypto/testmgr.c",
+      "insertions": 13,
+      "deletions": 9
+    },
+    {
+      "file": "crypto/testmgr.h",
+      "insertions": 1,
+      "deletions": 2
+    },
+    {
+      "file": "include/crypto/internal/rsa.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/slab.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "security/integrity/ima/ima_main.c",
+      "insertions": 3,
+      "deletions": 3
+    }
+  ],
+  "total_insertions": 480,
+  "total_deletions": 345,
+  "total_changes": 825,
+  "parents": [
+    "7964b0d4bd1271f82d6b455366a200d320f7dbf8"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "hardening"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "crypto/asymmetric_keys/public_key.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "crypto/rsassa-pkcs1.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "crypto/Makefile",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "crypto/Kconfig",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "crypto/rsa-pkcs1pad.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "crypto/testmgr.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "crypto/rsa.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/crypto/internal/rsa.h",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/slab.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "security/integrity/ima/ima_main.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "crypto/testmgr.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

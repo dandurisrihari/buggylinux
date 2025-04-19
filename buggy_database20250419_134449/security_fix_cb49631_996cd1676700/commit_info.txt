@@ -1,0 +1,51 @@
+Commit Hash: cb49631ad111570f1bad37702c11c2ae07fa2e3c
+Subject: KVM: SVM: Don't inject #UD if KVM attempts to skip SEV guest insn
+
+
+Security Keywords:
+- inject
+
+Full commit message:
+KVM: SVM: Don't inject #UD if KVM attempts to skip SEV guest insn
+
+Don't inject a #UD if KVM attempts to "emulate" to skip an instruction
+for an SEV guest, and instead resume the guest and hope that it can make
+forward progress.  When commit 04c40f344def ("KVM: SVM: Inject #UD on
+attempted emulation for SEV guest w/o insn buffer") added the completely
+arbitrary #UD behavior, there were no known scenarios where a well-behaved
+guest would induce a VM-Exit that triggered emulation, i.e. it was thought
+that injecting #UD would be helpful.
+
+However, now that KVM (correctly) attempts to re-inject INT3/INTO, e.g. if
+a #NPF is encountered when attempting to deliver the INT3/INTO, an SEV
+guest can trigger emulation without a buffer, through no fault of its own.
+Resuming the guest and retrying the INT3/INTO is architecturally wrong,
+e.g. the vCPU will incorrectly re-hit code #DBs, but for SEV guests there
+is literally no other option that has a chance of making forward progress.
+
+Drop the #UD injection for all "skip" emulation, not just those related to
+INT3/INTO, even though that means that the guest will likely end up in an
+infinite loop instead of getting a #UD (the vCPU may also crash, e.g. if
+KVM emulated everything about an instruction except for advancing RIP).
+There's no evidence that suggests that an unexpected #UD is actually
+better than hanging the vCPU, e.g. a soft-hung vCPU can still respond to
+IRQs and NMIs to generate a backtrace.
+
+Reported-by: Wu Zongyo <wuzongyo@mail.ustc.edu.cn>
+Closes: https://lore.kernel.org/all/8eb933fd-2cf3-d7a9-32fe-2a1d82eac42a@mail.ustc.edu.cn
+Fixes: 6ef88d6e36c2 ("KVM: SVM: Re-inject INT3/INTO instead of retrying the instruction")
+Cc: stable@vger.kernel.org
+Cc: Tom Lendacky <thomas.lendacky@amd.com>
+Link: https://lore.kernel.org/r/20230825013621.2845700-2-seanjc@google.com
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+
+Metadata:
+Author: Sean Christopherson <seanjc@google.com>
+Author Date: Thu Aug 24 18:36:18 2023 -0700
+Committer: Sean Christopherson <seanjc@google.com>
+Commit Date: Fri Aug 25 09:00:40 2023 -0700
+
+Files Changed: 1
+Lines Added: 27
+Lines Removed: 8
+Total Changes: 35

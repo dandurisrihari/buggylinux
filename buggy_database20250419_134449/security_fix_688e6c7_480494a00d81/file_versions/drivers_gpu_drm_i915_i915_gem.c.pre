@@ -1,0 +1,55 @@
+commit 1f15b76f1ec973d1eb5d21b6d98b21aebb9025f1
+Author: Chris Wilson <chris@chris-wilson.co.uk>
+Date:   Fri Jul 1 17:23:14 2016 +0100
+
+    drm/i915: Separate GPU hang waitqueue from advance
+    
+    Currently __i915_wait_request uses a per-engine wait_queue_t for the dual
+    purpose of waking after the GPU advances or for waking after an error.
+    In the future, we may add even more wake sources and require greater
+    separation, but for now we can conceptually simplify wakeups by separating
+    the two sources. In particular, this allows us to use different wait-queues
+    (e.g. one on the engine advancement, a global one for errors and one on
+    each requests) without any hassle.
+    
+    Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+    Link: http://patchwork.freedesktop.org/patch/msgid/1467390209-3576-5-git-send-email-chris@chris-wilson.co.uk
+
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index e0b1e286bf87..b5278d117ea0 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -1455,6 +1455,7 @@ int __i915_wait_request(struct drm_i915_gem_request *req,
+ 	const bool irq_test_in_progress =
+ 		ACCESS_ONCE(dev_priv->gpu_error.test_irq_rings) & intel_engine_flag(engine);
+ 	int state = interruptible ? TASK_INTERRUPTIBLE : TASK_UNINTERRUPTIBLE;
++	DEFINE_WAIT(reset);
+ 	DEFINE_WAIT(wait);
+ 	unsigned long timeout_expire;
+ 	s64 before = 0; /* Only to silence a compiler warning. */
+@@ -1499,6 +1500,7 @@ int __i915_wait_request(struct drm_i915_gem_request *req,
+ 		goto out;
+ 	}
+ 
++	add_wait_queue(&dev_priv->gpu_error.wait_queue, &reset);
+ 	for (;;) {
+ 		struct timer_list timer;
+ 
+@@ -1557,6 +1559,8 @@ int __i915_wait_request(struct drm_i915_gem_request *req,
+ 			destroy_timer_on_stack(&timer);
+ 		}
+ 	}
++	remove_wait_queue(&dev_priv->gpu_error.wait_queue, &reset);
++
+ 	if (!irq_test_in_progress)
+ 		engine->irq_put(engine);
+ 
+@@ -5287,6 +5291,7 @@ i915_gem_load_init(struct drm_device *dev)
+ 			  i915_gem_retire_work_handler);
+ 	INIT_DELAYED_WORK(&dev_priv->mm.idle_work,
+ 			  i915_gem_idle_work_handler);
++	init_waitqueue_head(&dev_priv->gpu_error.wait_queue);
+ 	init_waitqueue_head(&dev_priv->gpu_error.reset_queue);
+ 
+ 	dev_priv->relative_constants_mode = I915_EXEC_CONSTANTS_REL_GENERAL;

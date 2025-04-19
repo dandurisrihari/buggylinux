@@ -1,0 +1,78 @@
+Commit Hash: f369b07c861435bd812a9d14493f71b34132ed6f
+Subject: mm/uffd: reset write protection when unregister with wp-mode
+
+
+Security Keywords:
+- exploit
+
+Full commit message:
+mm/uffd: reset write protection when unregister with wp-mode
+
+The motivation of this patch comes from a recent report and patchfix from
+David Hildenbrand on hugetlb shared handling of wr-protected page [1].
+
+With the reproducer provided in commit message of [1], one can leverage
+the uffd-wp lazy-reset of ptes to trigger a hugetlb issue which can affect
+not only the attacker process, but also the whole system.
+
+The lazy-reset mechanism of uffd-wp was used to make unregister faster,
+meanwhile it has an assumption that any leftover pgtable entries should
+only affect the process on its own, so not only the user should be aware
+of anything it does, but also it should not affect outside of the process.
+
+But it seems that this is not true, and it can also be utilized to make
+some exploit easier.
+
+So far there's no clue showing that the lazy-reset is important to any
+userfaultfd users because normally the unregister will only happen once
+for a specific range of memory of the lifecycle of the process.
+
+Considering all above, what this patch proposes is to do explicit pte
+resets when unregister an uffd region with wr-protect mode enabled.
+
+It should be the same as calling ioctl(UFFDIO_WRITEPROTECT, wp=false)
+right before ioctl(UFFDIO_UNREGISTER) for the user.  So potentially it'll
+make the unregister slower.  From that pov it's a very slight abi change,
+but hopefully nothing should break with this change either.
+
+Regarding to the change itself - core of uffd write [un]protect operation
+is moved into a separate function (uffd_wp_range()) and it is reused in
+the unregister code path.
+
+Note that the new function will not check for anything, e.g.  ranges or
+memory types, because they should have been checked during the previous
+UFFDIO_REGISTER or it should have failed already.  It also doesn't check
+mmap_changing because we're with mmap write lock held anyway.
+
+I added a Fixes upon introducing of uffd-wp shmem+hugetlbfs because that's
+the only issue reported so far and that's the commit David's reproducer
+will start working (v5.19+).  But the whole idea actually applies to not
+only file memories but also anonymous.  It's just that we don't need to
+fix anonymous prior to v5.19- because there's no known way to exploit.
+
+IOW, this patch can also fix the issue reported in [1] as the patch 2 does.
+
+[1] https://lore.kernel.org/all/20220811103435.188481-3-david@redhat.com/
+
+Link: https://lkml.kernel.org/r/20220811201340.39342-1-peterx@redhat.com
+Fixes: b1f9e876862d ("mm/uffd: enable write protection for shmem & hugetlbfs")
+Signed-off-by: Peter Xu <peterx@redhat.com>
+Cc: David Hildenbrand <david@redhat.com>
+Cc: Mike Rapoport <rppt@linux.vnet.ibm.com>
+Cc: Mike Kravetz <mike.kravetz@oracle.com>
+Cc: Andrea Arcangeli <aarcange@redhat.com>
+Cc: Nadav Amit <nadav.amit@gmail.com>
+Cc: Axel Rasmussen <axelrasmussen@google.com>
+Cc: <stable@vger.kernel.org>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+
+Metadata:
+Author: Peter Xu <peterx@redhat.com>
+Author Date: Thu Aug 11 16:13:40 2022 -0400
+Committer: Andrew Morton <akpm@linux-foundation.org>
+Commit Date: Sat Aug 20 15:17:45 2022 -0700
+
+Files Changed: 3
+Lines Added: 24
+Lines Removed: 11
+Total Changes: 35

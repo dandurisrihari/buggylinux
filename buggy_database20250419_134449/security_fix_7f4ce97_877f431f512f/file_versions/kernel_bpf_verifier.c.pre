@@ -1,0 +1,80 @@
+commit a73bf9f2d969cbb04d5ca778f2a224060cda1027
+Author: Andrii Nakryiko <andrii@kernel.org>
+Date:   Thu Dec 22 21:49:16 2022 -0800
+
+    bpf: reorganize struct bpf_reg_state fields
+    
+    Move id and ref_obj_id fields after scalar data section (var_off and
+    ranges). This is necessary to simplify next patch which will change
+    regsafe()'s logic to be safer, as it makes the contents that has to be
+    an exact match (type-specific parts, off, type, and var_off+ranges)
+    a single sequential block of memory, while id and ref_obj_id should
+    always be remapped and thus can't be memcp()'ed.
+    
+    There are few places that assume that var_off is after id/ref_obj_id to
+    clear out id/ref_obj_id with the single memset(0). These are changed to
+    explicitly zero-out id/ref_obj_id fields. Other places are adjusted to
+    preserve exact byte-by-byte comparison behavior.
+    
+    No functional changes.
+    
+    Signed-off-by: Andrii Nakryiko <andrii@kernel.org>
+    Link: https://lore.kernel.org/r/20221223054921.958283-3-andrii@kernel.org
+    Signed-off-by: Alexei Starovoitov <ast@kernel.org>
+
+diff --git a/kernel/bpf/verifier.c b/kernel/bpf/verifier.c
+index ab8337f6a576..e419e6024251 100644
+--- a/kernel/bpf/verifier.c
++++ b/kernel/bpf/verifier.c
+@@ -1402,9 +1402,11 @@ static void ___mark_reg_known(struct bpf_reg_state *reg, u64 imm)
+  */
+ static void __mark_reg_known(struct bpf_reg_state *reg, u64 imm)
+ {
+-	/* Clear id, off, and union(map_ptr, range) */
++	/* Clear off and union(map_ptr, range) */
+ 	memset(((u8 *)reg) + sizeof(reg->type), 0,
+ 	       offsetof(struct bpf_reg_state, var_off) - sizeof(reg->type));
++	reg->id = 0;
++	reg->ref_obj_id = 0;
+ 	___mark_reg_known(reg, imm);
+ }
+ 
+@@ -1750,11 +1752,13 @@ static void __mark_reg_unknown(const struct bpf_verifier_env *env,
+ 			       struct bpf_reg_state *reg)
+ {
+ 	/*
+-	 * Clear type, id, off, and union(map_ptr, range) and
++	 * Clear type, off, and union(map_ptr, range) and
+ 	 * padding between 'type' and union
+ 	 */
+ 	memset(reg, 0, offsetof(struct bpf_reg_state, var_off));
+ 	reg->type = SCALAR_VALUE;
++	reg->id = 0;
++	reg->ref_obj_id = 0;
+ 	reg->var_off = tnum_unknown;
+ 	reg->frameno = 0;
+ 	reg->precise = !env->bpf_capable;
+@@ -13104,7 +13108,7 @@ static bool regsafe(struct bpf_verifier_env *env, struct bpf_reg_state *rold,
+ 		if (type_may_be_null(rold->type)) {
+ 			if (!type_may_be_null(rcur->type))
+ 				return false;
+-			if (memcmp(rold, rcur, offsetof(struct bpf_reg_state, id)))
++			if (memcmp(rold, rcur, offsetof(struct bpf_reg_state, var_off)))
+ 				return false;
+ 			/* Check our ids match any regs they're supposed to */
+ 			return check_ids(rold->id, rcur->id, idmap);
+@@ -13112,13 +13116,8 @@ static bool regsafe(struct bpf_verifier_env *env, struct bpf_reg_state *rold,
+ 
+ 		/* If the new min/max/var_off satisfy the old ones and
+ 		 * everything else matches, we are OK.
+-		 * 'id' is not compared, since it's only used for maps with
+-		 * bpf_spin_lock inside map element and in such cases if
+-		 * the rest of the prog is valid for one map element then
+-		 * it's valid for all map elements regardless of the key
+-		 * used in bpf_map_lookup()
+ 		 */
+-		return memcmp(rold, rcur, offsetof(struct bpf_reg_state, id)) == 0 &&
++		return memcmp(rold, rcur, offsetof(struct bpf_reg_state, var_off)) == 0 &&
+ 		       range_within(rold, rcur) &&
+ 		       tnum_in(rold->var_off, rcur->var_off) &&
+ 		       check_ids(rold->id, rcur->id, idmap);

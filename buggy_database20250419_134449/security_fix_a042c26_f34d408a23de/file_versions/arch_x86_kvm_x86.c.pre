@@ -1,0 +1,90 @@
+commit 04140b4144cd888c080cddbb2be2ec603f00d081
+Author: Liran Alon <liran.alon@oracle.com>
+Date:   Fri Mar 23 03:01:31 2018 +0300
+
+    KVM: x86: Rename interrupt.pending to interrupt.injected
+    
+    For exceptions & NMIs events, KVM code use the following
+    coding convention:
+    *) "pending" represents an event that should be injected to guest at
+    some point but it's side-effects have not yet occurred.
+    *) "injected" represents an event that it's side-effects have already
+    occurred.
+    
+    However, interrupts don't conform to this coding convention.
+    All current code flows mark interrupt.pending when it's side-effects
+    have already taken place (For example, bit moved from LAPIC IRR to
+    ISR). Therefore, it makes sense to just rename
+    interrupt.pending to interrupt.injected.
+    
+    This change follows logic of previous commit 664f8e26b00c ("KVM: X86:
+    Fix loss of exception which has not yet been injected") which changed
+    exception to follow this coding convention as well.
+    
+    It is important to note that in case !lapic_in_kernel(vcpu),
+    interrupt.pending usage was and still incorrect.
+    In this case, interrrupt.pending can only be set using one of the
+    following ioctls: KVM_INTERRUPT, KVM_SET_VCPU_EVENTS and
+    KVM_SET_SREGS. Looking at how QEMU uses these ioctls, one can see that
+    QEMU uses them either to re-set an "interrupt.pending" state it has
+    received from KVM (via KVM_GET_VCPU_EVENTS interrupt.pending or
+    via KVM_GET_SREGS interrupt_bitmap) or by dispatching a new interrupt
+    from QEMU's emulated LAPIC which reset bit in IRR and set bit in ISR
+    before sending ioctl to KVM. So it seems that indeed "interrupt.pending"
+    in this case is also suppose to represent "interrupt.injected".
+    However, kvm_cpu_has_interrupt() & kvm_cpu_has_injectable_intr()
+    is misusing (now named) interrupt.injected in order to return if
+    there is a pending interrupt.
+    This leads to nVMX/nSVM not be able to distinguish if it should exit
+    from L2 to L1 on EXTERNAL_INTERRUPT on pending interrupt or should
+    re-inject an injected interrupt.
+    Therefore, add a FIXME at these functions for handling this issue.
+    
+    This patch introduce no semantics change.
+    
+    Signed-off-by: Liran Alon <liran.alon@oracle.com>
+    Reviewed-by: Nikita Leshenko <nikita.leshchenko@oracle.com>
+    Reviewed-by: Jim Mattson <jmattson@google.com>
+    Signed-off-by: Krish Sadhukhan <krish.sadhukhan@oracle.com>
+    Signed-off-by: Radim Krčmář <rkrcmar@redhat.com>
+
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index dfa135bb0e5a..d15dc8cd6b9d 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -3312,7 +3312,7 @@ static void kvm_vcpu_ioctl_x86_get_vcpu_events(struct kvm_vcpu *vcpu,
+ 	events->exception.error_code = vcpu->arch.exception.error_code;
+ 
+ 	events->interrupt.injected =
+-		vcpu->arch.interrupt.pending && !vcpu->arch.interrupt.soft;
++		vcpu->arch.interrupt.injected && !vcpu->arch.interrupt.soft;
+ 	events->interrupt.nr = vcpu->arch.interrupt.nr;
+ 	events->interrupt.soft = 0;
+ 	events->interrupt.shadow = kvm_x86_ops->get_interrupt_shadow(vcpu);
+@@ -3365,7 +3365,7 @@ static int kvm_vcpu_ioctl_x86_set_vcpu_events(struct kvm_vcpu *vcpu,
+ 	vcpu->arch.exception.has_error_code = events->exception.has_error_code;
+ 	vcpu->arch.exception.error_code = events->exception.error_code;
+ 
+-	vcpu->arch.interrupt.pending = events->interrupt.injected;
++	vcpu->arch.interrupt.injected = events->interrupt.injected;
+ 	vcpu->arch.interrupt.nr = events->interrupt.nr;
+ 	vcpu->arch.interrupt.soft = events->interrupt.soft;
+ 	if (events->flags & KVM_VCPUEVENT_VALID_SHADOW)
+@@ -6767,7 +6767,7 @@ static int inject_pending_event(struct kvm_vcpu *vcpu, bool req_int_win)
+ 			return 0;
+ 		}
+ 
+-		if (vcpu->arch.interrupt.pending) {
++		if (vcpu->arch.interrupt.injected) {
+ 			kvm_x86_ops->set_irq(vcpu);
+ 			return 0;
+ 		}
+@@ -7818,7 +7818,7 @@ static void __get_sregs(struct kvm_vcpu *vcpu, struct kvm_sregs *sregs)
+ 
+ 	memset(sregs->interrupt_bitmap, 0, sizeof sregs->interrupt_bitmap);
+ 
+-	if (vcpu->arch.interrupt.pending && !vcpu->arch.interrupt.soft)
++	if (vcpu->arch.interrupt.injected && !vcpu->arch.interrupt.soft)
+ 		set_bit(vcpu->arch.interrupt.nr,
+ 			(unsigned long *)sregs->interrupt_bitmap);
+ }

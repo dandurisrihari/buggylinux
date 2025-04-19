@@ -1,0 +1,54 @@
+{
+  "hash": "2a6e483ad047654a220c798080d0fc861ead2e07",
+  "hash_short": "2a6e483a",
+  "subject": "rpmsg: virtio: Replace deprecated strncpy with strscpy/_pad",
+  "body": "strncpy() is deprecated for use on NUL-terminated destination strings\n[1] and as such we should prefer more robust and less ambiguous string\ninterfaces.\n\nThis patch replaces 3 callsites of strncpy().\n\nThe first two populate the destination buffer `nsm.name` -- which we\nexpect to be NUL-terminated based on their use with format strings.\n\nFirstly, as I understand it, virtio_rpmsg_announce_create() creates an\nrpmsg_ns_msg and sends via:\n\nvirtio_rpmsg_bus.c:\n336: err = rpmsg_sendto(rpdev->ept, &nsm, sizeof(nsm), RPMSG_NS_ADDR);\n\n... which uses:\nvirtio_rpmsg_sendto() -> rpmsg_send_offchannel_raw()\n\n... which copies its data into an rpmsg_hdr `msg` in virtio_rpmsg_bus.c\n618: memcpy(msg->data, data, len);\n\nThis callback is invoked when a message is received from the remote\nprocessor:\n\nrpmsg_ns.c:\n30: /* invoked when a name service announcement arrives */\n31: static int rpmsg_ns_cb(struct rpmsg_device *rpdev, void *data, int len,\n32: \t\t       void *priv, u32 src)\n33: {\n34:         struct rpmsg_ns_msg *msg = data;\n...\n50:         /* don't trust the remote processor for null terminating the name */\n51:         msg->name[RPMSG_NAME_SIZE - 1] = '\\0';\n\n... which leads into the use of `name` within a format string:\nrpmsg_ns.c:\n57: dev_info(dev, \"%sing channel %s addr 0x%x\\n\",\n58:          rpmsg32_to_cpu(rpdev, msg->flags) & RPMSG_NS_DESTROY ?\n59:          \"destroy\" : \"creat\", msg->name, chinfo.dst);\n\nWe can also observe that `nsm` is not zero-initialized and as such we\nshould maintain the NUL-padding behavior that strncpy() provides:\n\nvirtio_rpmsg_bus.c:\n330: struct rpmsg_ns_msg nsm;\n\nConsidering the above, a suitable replacement is `strscpy_pad` due to\nthe fact that it guarantees both NUL-termination and NUL-padding on the\ndestination buffer.\n\nNow, for the third and final destination buffer rpdev->id.name we can\njust go for strscpy() (not _pad()) as rpdev points to &vch->rpdev:\n|       rpdev = &vch->rpdev;\n\n... and vch is zero-allocated:\n|       vch = kzalloc(sizeof(*vch), GFP_KERNEL);\n\n... this renders any additional NUL-byte assignments (like the ones\nstrncpy() or strscpy_pad() does) redundant.\n\nLink: https://www.kernel.org/doc/html/latest/process/deprecated.html#strncpy-on-nul-terminated-strings [1]\nLink: https://github.com/KSPP/linux/issues/90\nCc: linux-hardening@vger.kernel.org\nSigned-off-by: Justin Stitt <justinstitt@google.com>\nLink: https://lore.kernel.org/r/20231023-strncpy-drivers-rpmsg-virtio_rpmsg_bus-c-v2-1-dc591c36f5ed@google.com\nSigned-off-by: Mathieu Poirier <mathieu.poirier@linaro.org>",
+  "full_message": "rpmsg: virtio: Replace deprecated strncpy with strscpy/_pad\n\nstrncpy() is deprecated for use on NUL-terminated destination strings\n[1] and as such we should prefer more robust and less ambiguous string\ninterfaces.\n\nThis patch replaces 3 callsites of strncpy().\n\nThe first two populate the destination buffer `nsm.name` -- which we\nexpect to be NUL-terminated based on their use with format strings.\n\nFirstly, as I understand it, virtio_rpmsg_announce_create() creates an\nrpmsg_ns_msg and sends via:\n\nvirtio_rpmsg_bus.c:\n336: err = rpmsg_sendto(rpdev->ept, &nsm, sizeof(nsm), RPMSG_NS_ADDR);\n\n... which uses:\nvirtio_rpmsg_sendto() -> rpmsg_send_offchannel_raw()\n\n... which copies its data into an rpmsg_hdr `msg` in virtio_rpmsg_bus.c\n618: memcpy(msg->data, data, len);\n\nThis callback is invoked when a message is received from the remote\nprocessor:\n\nrpmsg_ns.c:\n30: /* invoked when a name service announcement arrives */\n31: static int rpmsg_ns_cb(struct rpmsg_device *rpdev, void *data, int len,\n32: \t\t       void *priv, u32 src)\n33: {\n34:         struct rpmsg_ns_msg *msg = data;\n...\n50:         /* don't trust the remote processor for null terminating the name */\n51:         msg->name[RPMSG_NAME_SIZE - 1] = '\\0';\n\n... which leads into the use of `name` within a format string:\nrpmsg_ns.c:\n57: dev_info(dev, \"%sing channel %s addr 0x%x\\n\",\n58:          rpmsg32_to_cpu(rpdev, msg->flags) & RPMSG_NS_DESTROY ?\n59:          \"destroy\" : \"creat\", msg->name, chinfo.dst);\n\nWe can also observe that `nsm` is not zero-initialized and as such we\nshould maintain the NUL-padding behavior that strncpy() provides:\n\nvirtio_rpmsg_bus.c:\n330: struct rpmsg_ns_msg nsm;\n\nConsidering the above, a suitable replacement is `strscpy_pad` due to\nthe fact that it guarantees both NUL-termination and NUL-padding on the\ndestination buffer.\n\nNow, for the third and final destination buffer rpdev->id.name we can\njust go for strscpy() (not _pad()) as rpdev points to &vch->rpdev:\n|       rpdev = &vch->rpdev;\n\n... and vch is zero-allocated:\n|       vch = kzalloc(sizeof(*vch), GFP_KERNEL);\n\n... this renders any additional NUL-byte assignments (like the ones\nstrncpy() or strscpy_pad() does) redundant.\n\nLink: https://www.kernel.org/doc/html/latest/process/deprecated.html#strncpy-on-nul-terminated-strings [1]\nLink: https://github.com/KSPP/linux/issues/90\nCc: linux-hardening@vger.kernel.org\nSigned-off-by: Justin Stitt <justinstitt@google.com>\nLink: https://lore.kernel.org/r/20231023-strncpy-drivers-rpmsg-virtio_rpmsg_bus-c-v2-1-dc591c36f5ed@google.com\nSigned-off-by: Mathieu Poirier <mathieu.poirier@linaro.org>",
+  "author_name": "Justin Stitt",
+  "author_email": "justinstitt@google.com",
+  "author_date": "Mon Oct 23 18:12:28 2023 +0000",
+  "author_date_iso": "2023-10-23T18:12:28+00:00",
+  "committer_name": "Mathieu Poirier",
+  "committer_email": "mathieu.poirier@linaro.org",
+  "committer_date": "Mon Oct 23 13:11:07 2023 -0600",
+  "committer_date_iso": "2023-10-23T13:11:07-06:00",
+  "files_changed": [
+    "drivers/rpmsg/virtio_rpmsg_bus.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "drivers/rpmsg/virtio_rpmsg_bus.c",
+      "insertions": 3,
+      "deletions": 3
+    }
+  ],
+  "total_insertions": 3,
+  "total_deletions": 3,
+  "total_changes": 6,
+  "parents": [
+    "ec189da923fb06acb0ee38e2d0ee55239995e9d6"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "hardening"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "drivers/rpmsg/virtio_rpmsg_bus.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

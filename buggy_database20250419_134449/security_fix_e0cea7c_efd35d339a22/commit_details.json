@@ -1,0 +1,114 @@
+{
+  "hash": "e0cea7ce988cf48cc4052235d2ad2550b3bc4fa0",
+  "hash_short": "e0cea7ce",
+  "subject": "bpf: implement ld_abs/ld_ind in native bpf",
+  "body": "The main part of this work is to finally allow removal of LD_ABS\nand LD_IND from the BPF core by reimplementing them through native\neBPF instead. Both LD_ABS/LD_IND were carried over from cBPF and\nkeeping them around in native eBPF caused way more trouble than\nactually worth it. To just list some of the security issues in\nthe past:\n\n  * fdfaf64e7539 (\"x86: bpf_jit: support negative offsets\")\n  * 35607b02dbef (\"sparc: bpf_jit: fix loads from negative offsets\")\n  * e0ee9c12157d (\"x86: bpf_jit: fix two bugs in eBPF JIT compiler\")\n  * 07aee9439454 (\"bpf, sparc: fix usage of wrong reg for load_skb_regs after call\")\n  * 6d59b7dbf72e (\"bpf, s390x: do not reload skb pointers in non-skb context\")\n  * 87338c8e2cbb (\"bpf, ppc64: do not reload skb pointers in non-skb context\")\n\nFor programs in native eBPF, LD_ABS/LD_IND are pretty much legacy\nthese days due to their limitations and more efficient/flexible\nalternatives that have been developed over time such as direct\npacket access. LD_ABS/LD_IND only cover 1/2/4 byte loads into a\nregister, the load happens in host endianness and its exception\nhandling can yield unexpected behavior. The latter is explained\nin depth in f6b1b3bf0d5f (\"bpf: fix subprog verifier bypass by\ndiv/mod by 0 exception\") with similar cases of exceptions we had.\nIn native eBPF more recent program types will disable LD_ABS/LD_IND\naltogether through may_access_skb() in verifier, and given the\nlimitations in terms of exception handling, it's also disabled\nin programs that use BPF to BPF calls.\n\nIn terms of cBPF, the LD_ABS/LD_IND is used in networking programs\nto access packet data. It is not used in seccomp-BPF but programs\nthat use it for socket filtering or reuseport for demuxing with\ncBPF. This is mostly relevant for applications that have not yet\nmigrated to native eBPF.\n\nThe main complexity and source of bugs in LD_ABS/LD_IND is coming\nfrom their implementation in the various JITs. Most of them keep\nthe model around from cBPF times by implementing a fastpath written\nin asm. They use typically two from the BPF program hidden CPU\nregisters for caching the skb's headlen (skb->len - skb->data_len)\nand skb->data. Throughout the JIT phase this requires to keep track\nwhether LD_ABS/LD_IND are used and if so, the two registers need\nto be recached each time a BPF helper would change the underlying\npacket data in native eBPF case. At least in eBPF case, available\nCPU registers are rare and the additional exit path out of the\nasm written JIT helper makes it also inflexible since not all\nparts of the JITer are in control from plain C. A LD_ABS/LD_IND\nimplementation in eBPF therefore allows to significantly reduce\nthe complexity in JITs with comparable performance results for\nthem, e.g.:\n\ntest_bpf             tcpdump port 22             tcpdump complex\nx64      - before    15 21 10                    14 19  18\n         - after      7 10 10                     7 10  15\narm64    - before    40 91 92                    40 91 151\n         - after     51 64 73                    51 62 113\n\nFor cBPF we now track any usage of LD_ABS/LD_IND in bpf_convert_filter()\nand cache the skb's headlen and data in the cBPF prologue. The\nBPF_REG_TMP gets remapped from R8 to R2 since it's mainly just\nused as a local temporary variable. This allows to shrink the\nimage on x86_64 also for seccomp programs slightly since mapping\nto %rsi is not an ereg. In callee-saved R8 and R9 we now track\nskb data and headlen, respectively. For normal prologue emission\nin the JITs this does not add any extra instructions since R8, R9\nare pushed to stack in any case from eBPF side. cBPF uses the\nconvert_bpf_ld_abs() emitter which probes the fast path inline\nalready and falls back to bpf_skb_load_helper_{8,16,32}() helper\nrelying on the cached skb data and headlen as well. R8 and R9\nnever need to be reloaded due to bpf_helper_changes_pkt_data()\nsince all skb access in cBPF is read-only. Then, for the case\nof native eBPF, we use the bpf_gen_ld_abs() emitter, which calls\nthe bpf_skb_load_helper_{8,16,32}_no_cache() helper unconditionally,\ndoes neither cache skb data and headlen nor has an inlined fast\npath. The reason for the latter is that native eBPF does not have\nany extra registers available anyway, but even if there were, it\navoids any reload of skb data and headlen in the first place.\nAdditionally, for the negative offsets, we provide an alternative\nbpf_skb_load_bytes_relative() helper in eBPF which operates\nsimilarly as bpf_skb_load_bytes() and allows for more flexibility.\nTested myself on x64, arm64, s390x, from Sandipan on ppc64.\n\nSigned-off-by: Daniel Borkmann <daniel@iogearbox.net>\nAcked-by: Alexei Starovoitov <ast@kernel.org>\nSigned-off-by: Alexei Starovoitov <ast@kernel.org>",
+  "full_message": "bpf: implement ld_abs/ld_ind in native bpf\n\nThe main part of this work is to finally allow removal of LD_ABS\nand LD_IND from the BPF core by reimplementing them through native\neBPF instead. Both LD_ABS/LD_IND were carried over from cBPF and\nkeeping them around in native eBPF caused way more trouble than\nactually worth it. To just list some of the security issues in\nthe past:\n\n  * fdfaf64e7539 (\"x86: bpf_jit: support negative offsets\")\n  * 35607b02dbef (\"sparc: bpf_jit: fix loads from negative offsets\")\n  * e0ee9c12157d (\"x86: bpf_jit: fix two bugs in eBPF JIT compiler\")\n  * 07aee9439454 (\"bpf, sparc: fix usage of wrong reg for load_skb_regs after call\")\n  * 6d59b7dbf72e (\"bpf, s390x: do not reload skb pointers in non-skb context\")\n  * 87338c8e2cbb (\"bpf, ppc64: do not reload skb pointers in non-skb context\")\n\nFor programs in native eBPF, LD_ABS/LD_IND are pretty much legacy\nthese days due to their limitations and more efficient/flexible\nalternatives that have been developed over time such as direct\npacket access. LD_ABS/LD_IND only cover 1/2/4 byte loads into a\nregister, the load happens in host endianness and its exception\nhandling can yield unexpected behavior. The latter is explained\nin depth in f6b1b3bf0d5f (\"bpf: fix subprog verifier bypass by\ndiv/mod by 0 exception\") with similar cases of exceptions we had.\nIn native eBPF more recent program types will disable LD_ABS/LD_IND\naltogether through may_access_skb() in verifier, and given the\nlimitations in terms of exception handling, it's also disabled\nin programs that use BPF to BPF calls.\n\nIn terms of cBPF, the LD_ABS/LD_IND is used in networking programs\nto access packet data. It is not used in seccomp-BPF but programs\nthat use it for socket filtering or reuseport for demuxing with\ncBPF. This is mostly relevant for applications that have not yet\nmigrated to native eBPF.\n\nThe main complexity and source of bugs in LD_ABS/LD_IND is coming\nfrom their implementation in the various JITs. Most of them keep\nthe model around from cBPF times by implementing a fastpath written\nin asm. They use typically two from the BPF program hidden CPU\nregisters for caching the skb's headlen (skb->len - skb->data_len)\nand skb->data. Throughout the JIT phase this requires to keep track\nwhether LD_ABS/LD_IND are used and if so, the two registers need\nto be recached each time a BPF helper would change the underlying\npacket data in native eBPF case. At least in eBPF case, available\nCPU registers are rare and the additional exit path out of the\nasm written JIT helper makes it also inflexible since not all\nparts of the JITer are in control from plain C. A LD_ABS/LD_IND\nimplementation in eBPF therefore allows to significantly reduce\nthe complexity in JITs with comparable performance results for\nthem, e.g.:\n\ntest_bpf             tcpdump port 22             tcpdump complex\nx64      - before    15 21 10                    14 19  18\n         - after      7 10 10                     7 10  15\narm64    - before    40 91 92                    40 91 151\n         - after     51 64 73                    51 62 113\n\nFor cBPF we now track any usage of LD_ABS/LD_IND in bpf_convert_filter()\nand cache the skb's headlen and data in the cBPF prologue. The\nBPF_REG_TMP gets remapped from R8 to R2 since it's mainly just\nused as a local temporary variable. This allows to shrink the\nimage on x86_64 also for seccomp programs slightly since mapping\nto %rsi is not an ereg. In callee-saved R8 and R9 we now track\nskb data and headlen, respectively. For normal prologue emission\nin the JITs this does not add any extra instructions since R8, R9\nare pushed to stack in any case from eBPF side. cBPF uses the\nconvert_bpf_ld_abs() emitter which probes the fast path inline\nalready and falls back to bpf_skb_load_helper_{8,16,32}() helper\nrelying on the cached skb data and headlen as well. R8 and R9\nnever need to be reloaded due to bpf_helper_changes_pkt_data()\nsince all skb access in cBPF is read-only. Then, for the case\nof native eBPF, we use the bpf_gen_ld_abs() emitter, which calls\nthe bpf_skb_load_helper_{8,16,32}_no_cache() helper unconditionally,\ndoes neither cache skb data and headlen nor has an inlined fast\npath. The reason for the latter is that native eBPF does not have\nany extra registers available anyway, but even if there were, it\navoids any reload of skb data and headlen in the first place.\nAdditionally, for the negative offsets, we provide an alternative\nbpf_skb_load_bytes_relative() helper in eBPF which operates\nsimilarly as bpf_skb_load_bytes() and allows for more flexibility.\nTested myself on x64, arm64, s390x, from Sandipan on ppc64.\n\nSigned-off-by: Daniel Borkmann <daniel@iogearbox.net>\nAcked-by: Alexei Starovoitov <ast@kernel.org>\nSigned-off-by: Alexei Starovoitov <ast@kernel.org>",
+  "author_name": "Daniel Borkmann",
+  "author_email": "daniel@iogearbox.net",
+  "author_date": "Fri May 4 01:08:14 2018 +0200",
+  "author_date_iso": "2018-05-04T01:08:14+02:00",
+  "committer_name": "Alexei Starovoitov",
+  "committer_email": "ast@kernel.org",
+  "committer_date": "Thu May 3 16:49:19 2018 -0700",
+  "committer_date_iso": "2018-05-03T16:49:19-07:00",
+  "files_changed": [
+    "include/linux/bpf.h",
+    "include/linux/filter.h",
+    "kernel/bpf/core.c",
+    "kernel/bpf/verifier.c",
+    "net/core/filter.c"
+  ],
+  "files_changed_count": 5,
+  "stats": [
+    {
+      "file": "include/linux/bpf.h",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/filter.h",
+      "insertions": 3,
+      "deletions": 1
+    },
+    {
+      "file": "kernel/bpf/core.c",
+      "insertions": 8,
+      "deletions": 88
+    },
+    {
+      "file": "kernel/bpf/verifier.c",
+      "insertions": 24,
+      "deletions": 0
+    },
+    {
+      "file": "net/core/filter.c",
+      "insertions": 225,
+      "deletions": 11
+    }
+  ],
+  "total_insertions": 262,
+  "total_deletions": 100,
+  "total_changes": 362,
+  "parents": [
+    "93731ef086cee90af594e62874bb98ae6d6eee91"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v4.18",
+    "v4.18-rc1",
+    "v4.18-rc2",
+    "v4.18-rc3",
+    "v4.18-rc4",
+    "v4.18-rc5",
+    "v4.18-rc6",
+    "v4.18-rc7",
+    "v4.18-rc8",
+    "v4.19"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "bypass"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "include/linux/bpf.h",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/filter.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "kernel/bpf/core.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "kernel/bpf/verifier.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "net/core/filter.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

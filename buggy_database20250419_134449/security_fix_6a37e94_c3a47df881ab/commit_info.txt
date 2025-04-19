@@ -1,0 +1,83 @@
+Commit Hash: 6a37e94009b1a76d415b2759755f5cc7854c4ff6
+Subject: Merge branch 'uaccess-work.iov_iter' of git://git.kernel.org/pub/scm/linux/kernel/git/viro/vfs
+
+
+Security Keywords:
+- hardening
+
+Full commit message:
+Merge branch 'uaccess-work.iov_iter' of git://git.kernel.org/pub/scm/linux/kernel/git/viro/vfs
+
+Pull iov_iter hardening from Al Viro:
+ "This is the iov_iter/uaccess/hardening pile.
+
+  For one thing, it trims the inline part of copy_to_user/copy_from_user
+  to the minimum that *does* need to be inlined - object size checks,
+  basically. For another, it sanitizes the checks for iov_iter
+  primitives. There are 4 groups of checks: access_ok(), might_fault(),
+  object size and KASAN.
+
+   - access_ok() had been verified by whoever had set the iov_iter up.
+     However, that has happened in a function far away, so proving that
+     there's no path to actual copying bypassing those checks is hard
+     and proving that iov_iter has not been buggered in the meanwhile is
+     also not pleasant. So we want those redone in actual
+     copyin/copyout.
+
+   - might_fault() is better off consolidated - we know whether it needs
+     to be checked as soon as we enter iov_iter primitive and observe
+     the iov_iter flavour. No need to wait until the copyin/copyout. The
+     call chains are short enough to make sure we won't miss anything -
+     in fact, it's more robust that way, since there are cases where we
+     do e.g. forced fault-in before getting to copyin/copyout. It's not
+     quite what we need to check (in particular, combination of
+     iovec-backed and set_fs(KERNEL_DS) is almost certainly a bug, not a
+     cause to skip checks), but that's for later series. For now let's
+     keep might_fault().
+
+   - KASAN checks belong in copyin/copyout - at the same level where
+     other iov_iter flavours would've hit them in memcpy().
+
+   - object size checks should apply to *all* iov_iter flavours, not
+     just iovec-backed ones.
+
+  There are two groups of primitives - one gets the kernel object
+  described as pointer + size (copy_to_iter(), etc.) while another gets
+  it as page + offset + size (copy_page_to_iter(), etc.)
+
+  For the first group the checks are best done where we actually have a
+  chance to find the object size. In other words, those belong in inline
+  wrappers in uio.h, before calling into iov_iter.c. Same kind as we
+  have for inlined part of copy_to_user().
+
+  For the second group there is no object to look at - offset in page is
+  just a number, it bears no type information. So we do them in the
+  common helper called by iov_iter.c primitives of that kind. All it
+  currently does is checking that we are not trying to access outside of
+  the compound page; eventually we might want to add some sanity checks
+  on the page involved.
+
+  So the things we need in copyin/copyout part of iov_iter.c do not
+  quite match anything in uaccess.h (we want no zeroing, we *do* want
+  access_ok() and KASAN and we want no might_fault() or object size
+  checks done on that level). OTOH, these needs are simple enough to
+  provide a couple of helpers (static in iov_iter.c) doing just what we
+  need..."
+
+* 'uaccess-work.iov_iter' of git://git.kernel.org/pub/scm/linux/kernel/git/viro/vfs:
+  iov_iter: saner checks on copyin/copyout
+  iov_iter: sanity checks for copy to/from page primitives
+  iov_iter/hardening: move object size checks to inlined part
+  copy_{to,from}_user(): consolidate object size checks
+  copy_{from,to}_user(): move kasan checks and might_fault() out-of-line
+
+Metadata:
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Author Date: Fri Jul 7 20:39:20 2017 -0700
+Committer: Linus Torvalds <torvalds@linux-foundation.org>
+Commit Date: Fri Jul 7 20:39:20 2017 -0700
+
+Files Changed: 2
+Lines Added: 178
+Lines Removed: 75
+Total Changes: 253

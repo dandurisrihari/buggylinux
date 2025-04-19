@@ -1,0 +1,83 @@
+commit a44ca8f5a30c008b54d07b00eed4eae7f169fcd0
+Author: Dave Hansen <dave.hansen@linux.intel.com>
+Date:   Fri Apr 20 15:20:23 2018 -0700
+
+    x86/pti: Reduce amount of kernel text allowed to be Global
+    
+    commit abb67605203687c8b7943d760638d0301787f8d9
+    
+    Kees reported to me that I made too much of the kernel image global.
+    It was far more than just text:
+    
+            I think this is too much set global: _end is after data,
+            bss, and brk, and all kinds of other stuff that could
+            hold secrets. I think this should match what
+            mark_rodata_ro() is doing.
+    
+    This does exactly that.  We use __end_rodata_hpage_align as our
+    marker both because it is huge-page-aligned and it does not contain
+    any sections we expect to hold secrets.
+    
+    Kees's logic was that r/o data is in the kernel image anyway and,
+    in the case of traditional distributions, can be freely downloaded
+    from the web, so there's no reason to hide it.
+    
+    Fixes: 8c06c7740 (x86/pti: Leave kernel text global for !PCID)
+    Reported-by: Kees Cook <keescook@google.com>
+    Signed-off-by: Dave Hansen <dave.hansen@linux.intel.com>
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Acked-by: Ingo Molnar <mingo@kernel.org>
+    Cc: Andrea Arcangeli <aarcange@redhat.com>
+    Cc: Juergen Gross <jgross@suse.com>
+    Cc: Josh Poimboeuf <jpoimboe@redhat.com>
+    Cc: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: David Woodhouse <dwmw2@infradead.org>
+    Cc: Hugh Dickins <hughd@google.com>
+    Cc: linux-mm@kvack.org
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Cc: Borislav Petkov <bp@alien8.de>
+    Cc: Andy Lutomirski <luto@kernel.org>
+    Cc: Nadav Amit <namit@vmware.com>
+    Cc: Dan Williams <dan.j.williams@intel.com>
+    Cc: Arjan van de Ven <arjan@linux.intel.com>
+    Link: https://lkml.kernel.org/r/20180420222023.1C8B2B20@viggo.jf.intel.com
+
+diff --git a/arch/x86/mm/pti.c b/arch/x86/mm/pti.c
+index f1fd52f449e0..ae3eb4f5d53b 100644
+--- a/arch/x86/mm/pti.c
++++ b/arch/x86/mm/pti.c
+@@ -430,12 +430,24 @@ static inline bool pti_kernel_image_global_ok(void)
+  */
+ void pti_clone_kernel_text(void)
+ {
++	/*
++	 * rodata is part of the kernel image and is normally
++	 * readable on the filesystem or on the web.  But, do not
++	 * clone the areas past rodata, they might contain secrets.
++	 */
+ 	unsigned long start = PFN_ALIGN(_text);
+-	unsigned long end = ALIGN((unsigned long)_end, PMD_PAGE_SIZE);
++	unsigned long end = (unsigned long)__end_rodata_hpage_align;
+ 
+ 	if (!pti_kernel_image_global_ok())
+ 		return;
+ 
++	pr_debug("mapping partial kernel image into user address space\n");
++
++	/*
++	 * Note that this will undo _some_ of the work that
++	 * pti_set_kernel_image_nonglobal() did to clear the
++	 * global bit.
++	 */
+ 	pti_clone_pmds(start, end, _PAGE_RW);
+ }
+ 
+@@ -458,8 +470,6 @@ void pti_set_kernel_image_nonglobal(void)
+ 	if (pti_kernel_image_global_ok())
+ 		return;
+ 
+-	pr_debug("set kernel image non-global\n");
+-
+ 	set_memory_nonglobal(start, (end - start) >> PAGE_SHIFT);
+ }

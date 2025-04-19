@@ -1,0 +1,54 @@
+{
+  "hash": "968219708108440b23bc292e0486e3cc1d9a1bed",
+  "hash_short": "96821970",
+  "subject": "fs: handle circular mappings correctly",
+  "body": "When calling setattr_prepare() to determine the validity of the attributes the\nia_{g,u}id fields contain the value that will be written to inode->i_{g,u}id.\nWhen the {g,u}id attribute of the file isn't altered and the caller's fs{g,u}id\nmatches the current {g,u}id attribute the attribute change is allowed.\n\nThe value in ia_{g,u}id does already account for idmapped mounts and will have\ntaken the relevant idmapping into account. So in order to verify that the\n{g,u}id attribute isn't changed we simple need to compare the ia_{g,u}id value\nagainst the inode's i_{g,u}id value.\n\nThis only has any meaning for idmapped mounts as idmapping helpers are\nidempotent without them. And for idmapped mounts this really only has a meaning\nwhen circular idmappings are used, i.e. mappings where e.g. id 1000 is mapped\nto id 1001 and id 1001 is mapped to id 1000. Such ciruclar mappings can e.g. be\nuseful when sharing the same home directory between multiple users at the same\ntime.\n\nAs an example consider a directory with two files: /source/file1 owned by\n{g,u}id 1000 and /source/file2 owned by {g,u}id 1001. Assume we create an\nidmapped mount at /target with an idmapping that maps files owned by {g,u}id\n1000 to being owned by {g,u}id 1001 and files owned by {g,u}id 1001 to being\nowned by {g,u}id 1000. In effect, the idmapped mount at /target switches the\nownership of /source/file1 and source/file2, i.e. /target/file1 will be owned\nby {g,u}id 1001 and /target/file2 will be owned by {g,u}id 1000.\n\nThis means that a user with fs{g,u}id 1000 must be allowed to setattr\n/target/file2 from {g,u}id 1000 to {g,u}id 1000. Similar, a user with fs{g,u}id\n1001 must be allowed to setattr /target/file1 from {g,u}id 1001 to {g,u}id\n1001. Conversely, a user with fs{g,u}id 1000 must fail to setattr /target/file1\nfrom {g,u}id 1001 to {g,u}id 1000. And a user with fs{g,u}id 1001 must fail to\nsetattr /target/file2 from {g,u}id 1000 to {g,u}id 1000. Both cases must fail\nwith EPERM for non-capable callers.\n\nBefore this patch we could end up denying legitimate attribute changes and\nallowing invalid attribute changes when circular mappings are used. To even get\ninto this situation the caller must've been privileged both to create that\nmapping and to create that idmapped mount.\n\nThis hasn't been seen in the wild anywhere but came up when expanding the\ntestsuite during work on a series of hardening patches. All idmapped fstests\npass without any regressions and we add new tests to verify the behavior of\ncircular mappings.\n\nLink: https://lore.kernel.org/r/20211109145713.1868404-1-brauner@kernel.org\nFixes: 2f221d6f7b88 (\"attr: handle idmapped mounts\")\nCc: Seth Forshee <seth.forshee@digitalocean.com>\nCc: Christoph Hellwig <hch@lst.de>\nCc: Al Viro <viro@zeniv.linux.org.uk>\nCc: stable@vger.kernel.org\nCC: linux-fsdevel@vger.kernel.org\nReviewed-by: Christoph Hellwig <hch@lst.de>\nAcked-by: Seth Forshee <sforshee@digitalocean.com>\nSigned-off-by: Christian Brauner <christian.brauner@ubuntu.com>",
+  "full_message": "fs: handle circular mappings correctly\n\nWhen calling setattr_prepare() to determine the validity of the attributes the\nia_{g,u}id fields contain the value that will be written to inode->i_{g,u}id.\nWhen the {g,u}id attribute of the file isn't altered and the caller's fs{g,u}id\nmatches the current {g,u}id attribute the attribute change is allowed.\n\nThe value in ia_{g,u}id does already account for idmapped mounts and will have\ntaken the relevant idmapping into account. So in order to verify that the\n{g,u}id attribute isn't changed we simple need to compare the ia_{g,u}id value\nagainst the inode's i_{g,u}id value.\n\nThis only has any meaning for idmapped mounts as idmapping helpers are\nidempotent without them. And for idmapped mounts this really only has a meaning\nwhen circular idmappings are used, i.e. mappings where e.g. id 1000 is mapped\nto id 1001 and id 1001 is mapped to id 1000. Such ciruclar mappings can e.g. be\nuseful when sharing the same home directory between multiple users at the same\ntime.\n\nAs an example consider a directory with two files: /source/file1 owned by\n{g,u}id 1000 and /source/file2 owned by {g,u}id 1001. Assume we create an\nidmapped mount at /target with an idmapping that maps files owned by {g,u}id\n1000 to being owned by {g,u}id 1001 and files owned by {g,u}id 1001 to being\nowned by {g,u}id 1000. In effect, the idmapped mount at /target switches the\nownership of /source/file1 and source/file2, i.e. /target/file1 will be owned\nby {g,u}id 1001 and /target/file2 will be owned by {g,u}id 1000.\n\nThis means that a user with fs{g,u}id 1000 must be allowed to setattr\n/target/file2 from {g,u}id 1000 to {g,u}id 1000. Similar, a user with fs{g,u}id\n1001 must be allowed to setattr /target/file1 from {g,u}id 1001 to {g,u}id\n1001. Conversely, a user with fs{g,u}id 1000 must fail to setattr /target/file1\nfrom {g,u}id 1001 to {g,u}id 1000. And a user with fs{g,u}id 1001 must fail to\nsetattr /target/file2 from {g,u}id 1000 to {g,u}id 1000. Both cases must fail\nwith EPERM for non-capable callers.\n\nBefore this patch we could end up denying legitimate attribute changes and\nallowing invalid attribute changes when circular mappings are used. To even get\ninto this situation the caller must've been privileged both to create that\nmapping and to create that idmapped mount.\n\nThis hasn't been seen in the wild anywhere but came up when expanding the\ntestsuite during work on a series of hardening patches. All idmapped fstests\npass without any regressions and we add new tests to verify the behavior of\ncircular mappings.\n\nLink: https://lore.kernel.org/r/20211109145713.1868404-1-brauner@kernel.org\nFixes: 2f221d6f7b88 (\"attr: handle idmapped mounts\")\nCc: Seth Forshee <seth.forshee@digitalocean.com>\nCc: Christoph Hellwig <hch@lst.de>\nCc: Al Viro <viro@zeniv.linux.org.uk>\nCc: stable@vger.kernel.org\nCC: linux-fsdevel@vger.kernel.org\nReviewed-by: Christoph Hellwig <hch@lst.de>\nAcked-by: Seth Forshee <sforshee@digitalocean.com>\nSigned-off-by: Christian Brauner <christian.brauner@ubuntu.com>",
+  "author_name": "Christian Brauner",
+  "author_email": "christian.brauner@ubuntu.com",
+  "author_date": "Tue Nov 9 15:57:12 2021 +0100",
+  "author_date_iso": "2021-11-09T15:57:12+01:00",
+  "committer_name": "Christian Brauner",
+  "committer_email": "christian.brauner@ubuntu.com",
+  "committer_date": "Wed Nov 17 09:26:09 2021 +0100",
+  "committer_date_iso": "2021-11-17T09:26:09+01:00",
+  "files_changed": [
+    "fs/attr.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "fs/attr.c",
+      "insertions": 2,
+      "deletions": 2
+    }
+  ],
+  "total_insertions": 2,
+  "total_deletions": 2,
+  "total_changes": 4,
+  "parents": [
+    "fa55b7dcdc43c1aa1ba12bca9d2dd4318c2a0dbf"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "hardening"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "fs/attr.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

@@ -1,0 +1,123 @@
+commit 45479b67becd29492b5d53e73cba21d32ad5c391
+Author: Ramalingam C <ramalingam.c@intel.com>
+Date:   Thu Feb 21 23:42:03 2019 +0530
+
+    misc/mei/hdcp: Verify L_prime
+    
+    Request to ME to verify the LPrime received from HDCP sink.
+    
+    On Success, ME FW will verify the received Lprime by calculating and
+    comparing with L.
+    
+    This represents the completion of Locality Check.
+    
+    v2: Rebased.
+    v3:
+      cldev is passed as first parameter [Tomas]
+      Redundant comments and cast are removed [Tomas]
+    v4:
+      %zd for ssize_t [Alexander]
+      %s/return -1/return -EIO [Alexander]
+      Style fixed [Uma]
+    v5: Rebased.
+    v6:
+      Collected the Rb-ed by.
+      Rebasing.
+    v7:
+      Adjust to the new mei interface.
+      Fix for Kdoc.
+    v8:
+      K-Doc addition. [Tomas]
+      memcpy for const length.
+    v9:
+      renamed func as mei_hdcp_* [Tomas]
+      Inline function is defined for DDI index [Tomas]
+    v10:
+      K-Doc fix. [Tomas]
+    v11:
+      Rebased.
+    
+    Signed-off-by: Ramalingam C <ramalingam.c@intel.com>
+    Reviewed-by: Uma Shankar <uma.shankar@intel.com>
+    Acked-by: Tomas Winkler <tomas.winkler@intel.com>
+    Signed-off-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+    Link: https://patchwork.freedesktop.org/patch/msgid/1550772730-23280-10-git-send-email-ramalingam.c@intel.com
+
+diff --git a/drivers/misc/mei/hdcp/mei_hdcp.c b/drivers/misc/mei/hdcp/mei_hdcp.c
+index 7c880efe9134..03f8af257ecc 100644
+--- a/drivers/misc/mei/hdcp/mei_hdcp.c
++++ b/drivers/misc/mei/hdcp/mei_hdcp.c
+@@ -351,6 +351,64 @@ mei_hdcp_initiate_locality_check(struct device *dev,
+ 	return 0;
+ }
+ 
++/**
++ * mei_hdcp_verify_lprime() - Verify lprime.
++ * @dev: device corresponding to the mei_cl_device
++ * @data: Intel HW specific hdcp data
++ * @rx_lprime: LC_Send_L_prime msg for ME FW verification
++ *
++ * Return: 0 on Success, <0 on Failure
++ */
++static int
++mei_hdcp_verify_lprime(struct device *dev, struct hdcp_port_data *data,
++		       struct hdcp2_lc_send_lprime *rx_lprime)
++{
++	struct wired_cmd_validate_locality_in verify_lprime_in = { { 0 } };
++	struct wired_cmd_validate_locality_out verify_lprime_out = { { 0 } };
++	struct mei_cl_device *cldev;
++	ssize_t byte;
++
++	if (!dev || !data || !rx_lprime)
++		return -EINVAL;
++
++	cldev = to_mei_cl_device(dev);
++
++	verify_lprime_in.header.api_version = HDCP_API_VERSION;
++	verify_lprime_in.header.command_id = WIRED_VALIDATE_LOCALITY;
++	verify_lprime_in.header.status = ME_HDCP_STATUS_SUCCESS;
++	verify_lprime_in.header.buffer_len =
++					WIRED_CMD_BUF_LEN_VALIDATE_LOCALITY_IN;
++
++	verify_lprime_in.port.integrated_port_type = data->port_type;
++	verify_lprime_in.port.physical_port = mei_get_ddi_index(data->port);
++
++	memcpy(verify_lprime_in.l_prime, rx_lprime->l_prime,
++	       HDCP_2_2_L_PRIME_LEN);
++
++	byte = mei_cldev_send(cldev, (u8 *)&verify_lprime_in,
++			      sizeof(verify_lprime_in));
++	if (byte < 0) {
++		dev_dbg(dev, "mei_cldev_send failed. %zd\n", byte);
++		return byte;
++	}
++
++	byte = mei_cldev_recv(cldev, (u8 *)&verify_lprime_out,
++			      sizeof(verify_lprime_out));
++	if (byte < 0) {
++		dev_dbg(dev, "mei_cldev_recv failed. %zd\n", byte);
++		return byte;
++	}
++
++	if (verify_lprime_out.header.status != ME_HDCP_STATUS_SUCCESS) {
++		dev_dbg(dev, "ME cmd 0x%08X failed. status: 0x%X\n",
++			WIRED_VALIDATE_LOCALITY,
++			verify_lprime_out.header.status);
++		return -EIO;
++	}
++
++	return 0;
++}
++
+ static const __attribute__((unused))
+ struct i915_hdcp_component_ops mei_hdcp_ops = {
+ 	.owner = THIS_MODULE,
+@@ -360,7 +418,7 @@ struct i915_hdcp_component_ops mei_hdcp_ops = {
+ 	.verify_hprime = mei_hdcp_verify_hprime,
+ 	.store_pairing_info = mei_hdcp_store_pairing_info,
+ 	.initiate_locality_check = mei_hdcp_initiate_locality_check,
+-	.verify_lprime = NULL,
++	.verify_lprime = mei_hdcp_verify_lprime,
+ 	.get_session_key = NULL,
+ 	.repeater_check_flow_prepare_ack = NULL,
+ 	.verify_mprime = NULL,

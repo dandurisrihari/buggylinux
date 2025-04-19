@@ -1,0 +1,95 @@
+commit 3730f5300b450bc89306c3ab79c254e6039d9197
+Author: Harald Freudenberger <freude@linux.ibm.com>
+Date:   Sat Sep 26 22:51:38 2020 +0200
+
+    s390/zcrypt: move ap_msg param one level up the call chain
+    
+    Move the creating and disposal of the struct ap_message one
+    level up the call chain. The ap message was constructed in the
+    calling functions in msgtype50 and msgtype6 but only for the
+    ica rsa messages. For CCA and EP11 CPRBs the ap message struct
+    is created in the zcrypt api functions.
+    
+    This patch moves the construction of the ap message struct into
+    the functions zcrypt_rsa_modexpo and zcrypt_rsa_crt. So now all
+    the 4 zcrypt api functions zcrypt_rsa_modexpo, zcrypt_rsa_crt,
+    zcrypt_send_cprb and zcrypt_send_ep11_cprb appear and act
+    similar.
+    
+    There are no functional changes coming with this patch.
+    However, the availability of the ap_message struct has
+    advantages which will be needed by a follow up patch.
+    
+    Signed-off-by: Harald Freudenberger <freude@linux.ibm.com>
+    Signed-off-by: Vasily Gorbik <gor@linux.ibm.com>
+
+diff --git a/drivers/s390/crypto/zcrypt_api.c b/drivers/s390/crypto/zcrypt_api.c
+index ab18e847cee7..d642be65a3a0 100644
+--- a/drivers/s390/crypto/zcrypt_api.c
++++ b/drivers/s390/crypto/zcrypt_api.c
+@@ -635,6 +635,7 @@ static long zcrypt_rsa_modexpo(struct ap_perms *perms,
+ {
+ 	struct zcrypt_card *zc, *pref_zc;
+ 	struct zcrypt_queue *zq, *pref_zq;
++	struct ap_message ap_msg;
+ 	unsigned int wgt = 0, pref_wgt = 0;
+ 	unsigned int func_code;
+ 	int cpen, qpen, qid = 0, rc = -ENODEV;
+@@ -642,6 +643,8 @@ static long zcrypt_rsa_modexpo(struct ap_perms *perms,
+ 
+ 	trace_s390_zcrypt_req(mex, TP_ICARSAMODEXPO);
+ 
++	ap_init_message(&ap_msg);
++
+ 	if (mex->outputdatalength < mex->inputdatalength) {
+ 		func_code = 0;
+ 		rc = -EINVAL;
+@@ -712,13 +715,14 @@ static long zcrypt_rsa_modexpo(struct ap_perms *perms,
+ 	}
+ 
+ 	qid = pref_zq->queue->qid;
+-	rc = pref_zq->ops->rsa_modexpo(pref_zq, mex);
++	rc = pref_zq->ops->rsa_modexpo(pref_zq, mex, &ap_msg);
+ 
+ 	spin_lock(&zcrypt_list_lock);
+ 	zcrypt_drop_queue(pref_zc, pref_zq, mod, wgt);
+ 	spin_unlock(&zcrypt_list_lock);
+ 
+ out:
++	ap_release_message(&ap_msg);
+ 	if (tr) {
+ 		tr->last_rc = rc;
+ 		tr->last_qid = qid;
+@@ -734,6 +738,7 @@ static long zcrypt_rsa_crt(struct ap_perms *perms,
+ {
+ 	struct zcrypt_card *zc, *pref_zc;
+ 	struct zcrypt_queue *zq, *pref_zq;
++	struct ap_message ap_msg;
+ 	unsigned int wgt = 0, pref_wgt = 0;
+ 	unsigned int func_code;
+ 	int cpen, qpen, qid = 0, rc = -ENODEV;
+@@ -741,6 +746,8 @@ static long zcrypt_rsa_crt(struct ap_perms *perms,
+ 
+ 	trace_s390_zcrypt_req(crt, TP_ICARSACRT);
+ 
++	ap_init_message(&ap_msg);
++
+ 	if (crt->outputdatalength < crt->inputdatalength) {
+ 		func_code = 0;
+ 		rc = -EINVAL;
+@@ -811,13 +818,14 @@ static long zcrypt_rsa_crt(struct ap_perms *perms,
+ 	}
+ 
+ 	qid = pref_zq->queue->qid;
+-	rc = pref_zq->ops->rsa_modexpo_crt(pref_zq, crt);
++	rc = pref_zq->ops->rsa_modexpo_crt(pref_zq, crt, &ap_msg);
+ 
+ 	spin_lock(&zcrypt_list_lock);
+ 	zcrypt_drop_queue(pref_zc, pref_zq, mod, wgt);
+ 	spin_unlock(&zcrypt_list_lock);
+ 
+ out:
++	ap_release_message(&ap_msg);
+ 	if (tr) {
+ 		tr->last_rc = rc;
+ 		tr->last_qid = qid;

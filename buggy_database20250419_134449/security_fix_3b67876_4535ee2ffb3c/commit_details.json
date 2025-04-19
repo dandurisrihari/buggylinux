@@ -1,0 +1,54 @@
+{
+  "hash": "3b678768c0458e6d8d45fadf61423e44effed4cb",
+  "hash_short": "3b678768",
+  "subject": "powerpc/pseries: Fix STK_PARAM access in the hcall tracing code",
+  "body": "In powerpc pseries system, below behaviour is observed while\nenabling tracing on hcall:\n  # cd /sys/kernel/debug/tracing/\n  # cat events/powerpc/hcall_exit/enable\n  0\n  # echo 1 > events/powerpc/hcall_exit/enable\n\n  # ls\n  -bash: fork: Bad address\n\nAbove is from power9 lpar with latest kernel. Past this, softlockup\nis observed. Initially while attempting via perf_event_open to\nuse \"PERF_TYPE_TRACEPOINT\", kernel panic was observed.\n\nperf config used:\n================\n  memset(&pe[1],0,sizeof(struct perf_event_attr));\n  pe[1].type=PERF_TYPE_TRACEPOINT;\n  pe[1].size=96;\n  pe[1].config=0x26ULL; /* 38 raw_syscalls/sys_exit */\n  pe[1].sample_type=0; /* 0 */\n  pe[1].read_format=PERF_FORMAT_TOTAL_TIME_ENABLED|PERF_FORMAT_TOTAL_TIME_RUNNING|PERF_FORMAT_ID|PERF_FORMAT_GROUP|0x10ULL; /* 1f */\n  pe[1].inherit=1;\n  pe[1].precise_ip=0; /* arbitrary skid */\n  pe[1].wakeup_events=0;\n  pe[1].bp_type=HW_BREAKPOINT_EMPTY;\n  pe[1].config1=0x1ULL;\n\nKernel panic logs:\n==================\n\n  Kernel attempted to read user page (8) - exploit attempt? (uid: 0)\n  BUG: Kernel NULL pointer dereference on read at 0x00000008\n  Faulting instruction address: 0xc0000000004c2814\n  Oops: Kernel access of bad area, sig: 11 [#1]\n  LE PAGE_SIZE=64K MMU=Hash SMP NR_CPUS=2048 NUMA pSeries\n  Modules linked in: nfnetlink bonding tls rfkill sunrpc dm_service_time dm_multipath pseries_rng xts vmx_crypto xfs libcrc32c sd_mod t10_pi crc64_rocksoft crc64 sg ibmvfc scsi_transport_fc ibmveth dm_mirror dm_region_hash dm_log dm_mod fuse\n  CPU: 0 PID: 1431 Comm: login Not tainted 6.4.0+ #1\n  Hardware name: IBM,8375-42A POWER9 (raw) 0x4e0202 0xf000005 of:IBM,FW950.30 (VL950_892) hv:phyp pSeries\n  NIP page_remove_rmap+0x44/0x320\n  LR  wp_page_copy+0x384/0xec0\n  Call Trace:\n    0xc00000001416e400 (unreliable)\n    wp_page_copy+0x384/0xec0\n    __handle_mm_fault+0x9d4/0xfb0\n    handle_mm_fault+0xf0/0x350\n    ___do_page_fault+0x48c/0xc90\n    hash__do_page_fault+0x30/0x70\n    do_hash_fault+0x1a4/0x330\n    data_access_common_virt+0x198/0x1f0\n   --- interrupt: 300 at 0x7fffae971abc\n\ngit bisect tracked this down to below commit:\n'commit baa49d81a94b (\"powerpc/pseries: hvcall stack frame overhead\")'\n\nThis commit changed STACK_FRAME_OVERHEAD (112 ) to\nSTACK_FRAME_MIN_SIZE (32 ) since 32 bytes is the minimum size\nfor ELFv2 stack. With the latest kernel, when running on ELFv2,\nSTACK_FRAME_MIN_SIZE is used to allocate stack size.\n\nDuring plpar_hcall_trace, first call is made to HCALL_INST_PRECALL\nwhich saves the registers and allocates new stack frame. In the\nplpar_hcall_trace code, STK_PARAM is accessed at two places.\n  1. To save r4: std     r4,STK_PARAM(R4)(r1)\n  2. To access r4 back: ld      r12,STK_PARAM(R4)(r1)\n\nHCALL_INST_PRECALL precall allocates a new stack frame. So all\nthe stack parameter access after the precall, needs to be accessed\nwith +STACK_FRAME_MIN_SIZE. So the store instruction should be:\n  std     r4,STACK_FRAME_MIN_SIZE+STK_PARAM(R4)(r1)\n\nIf the \"std\" is not updated with STACK_FRAME_MIN_SIZE, we will\nend up with overwriting stack contents and cause corruption.\nBut instead of updating 'std', we can instead remove it since\nHCALL_INST_PRECALL already saves it to the correct location.\n\nsimilarly load instruction should be:\n  ld      r12,STACK_FRAME_MIN_SIZE+STK_PARAM(R4)(r1)\n\nFix the load instruction to correctly access the stack parameter\nwith +STACK_FRAME_MIN_SIZE and remove the store of r4 since the\nprecall saves it correctly.\n\nCc: stable@vger.kernel.org # v6.2+\nFixes: baa49d81a94b (\"powerpc/pseries: hvcall stack frame overhead\")\nCo-developed-by: Naveen N Rao <naveen@kernel.org>\nSigned-off-by: Naveen N Rao <naveen@kernel.org>\nSigned-off-by: Athira Rajeev <atrajeev@linux.vnet.ibm.com>\nSigned-off-by: Michael Ellerman <mpe@ellerman.id.au>\nLink: https://msgid.link/20230929172337.7906-1-atrajeev@linux.vnet.ibm.com",
+  "full_message": "powerpc/pseries: Fix STK_PARAM access in the hcall tracing code\n\nIn powerpc pseries system, below behaviour is observed while\nenabling tracing on hcall:\n  # cd /sys/kernel/debug/tracing/\n  # cat events/powerpc/hcall_exit/enable\n  0\n  # echo 1 > events/powerpc/hcall_exit/enable\n\n  # ls\n  -bash: fork: Bad address\n\nAbove is from power9 lpar with latest kernel. Past this, softlockup\nis observed. Initially while attempting via perf_event_open to\nuse \"PERF_TYPE_TRACEPOINT\", kernel panic was observed.\n\nperf config used:\n================\n  memset(&pe[1],0,sizeof(struct perf_event_attr));\n  pe[1].type=PERF_TYPE_TRACEPOINT;\n  pe[1].size=96;\n  pe[1].config=0x26ULL; /* 38 raw_syscalls/sys_exit */\n  pe[1].sample_type=0; /* 0 */\n  pe[1].read_format=PERF_FORMAT_TOTAL_TIME_ENABLED|PERF_FORMAT_TOTAL_TIME_RUNNING|PERF_FORMAT_ID|PERF_FORMAT_GROUP|0x10ULL; /* 1f */\n  pe[1].inherit=1;\n  pe[1].precise_ip=0; /* arbitrary skid */\n  pe[1].wakeup_events=0;\n  pe[1].bp_type=HW_BREAKPOINT_EMPTY;\n  pe[1].config1=0x1ULL;\n\nKernel panic logs:\n==================\n\n  Kernel attempted to read user page (8) - exploit attempt? (uid: 0)\n  BUG: Kernel NULL pointer dereference on read at 0x00000008\n  Faulting instruction address: 0xc0000000004c2814\n  Oops: Kernel access of bad area, sig: 11 [#1]\n  LE PAGE_SIZE=64K MMU=Hash SMP NR_CPUS=2048 NUMA pSeries\n  Modules linked in: nfnetlink bonding tls rfkill sunrpc dm_service_time dm_multipath pseries_rng xts vmx_crypto xfs libcrc32c sd_mod t10_pi crc64_rocksoft crc64 sg ibmvfc scsi_transport_fc ibmveth dm_mirror dm_region_hash dm_log dm_mod fuse\n  CPU: 0 PID: 1431 Comm: login Not tainted 6.4.0+ #1\n  Hardware name: IBM,8375-42A POWER9 (raw) 0x4e0202 0xf000005 of:IBM,FW950.30 (VL950_892) hv:phyp pSeries\n  NIP page_remove_rmap+0x44/0x320\n  LR  wp_page_copy+0x384/0xec0\n  Call Trace:\n    0xc00000001416e400 (unreliable)\n    wp_page_copy+0x384/0xec0\n    __handle_mm_fault+0x9d4/0xfb0\n    handle_mm_fault+0xf0/0x350\n    ___do_page_fault+0x48c/0xc90\n    hash__do_page_fault+0x30/0x70\n    do_hash_fault+0x1a4/0x330\n    data_access_common_virt+0x198/0x1f0\n   --- interrupt: 300 at 0x7fffae971abc\n\ngit bisect tracked this down to below commit:\n'commit baa49d81a94b (\"powerpc/pseries: hvcall stack frame overhead\")'\n\nThis commit changed STACK_FRAME_OVERHEAD (112 ) to\nSTACK_FRAME_MIN_SIZE (32 ) since 32 bytes is the minimum size\nfor ELFv2 stack. With the latest kernel, when running on ELFv2,\nSTACK_FRAME_MIN_SIZE is used to allocate stack size.\n\nDuring plpar_hcall_trace, first call is made to HCALL_INST_PRECALL\nwhich saves the registers and allocates new stack frame. In the\nplpar_hcall_trace code, STK_PARAM is accessed at two places.\n  1. To save r4: std     r4,STK_PARAM(R4)(r1)\n  2. To access r4 back: ld      r12,STK_PARAM(R4)(r1)\n\nHCALL_INST_PRECALL precall allocates a new stack frame. So all\nthe stack parameter access after the precall, needs to be accessed\nwith +STACK_FRAME_MIN_SIZE. So the store instruction should be:\n  std     r4,STACK_FRAME_MIN_SIZE+STK_PARAM(R4)(r1)\n\nIf the \"std\" is not updated with STACK_FRAME_MIN_SIZE, we will\nend up with overwriting stack contents and cause corruption.\nBut instead of updating 'std', we can instead remove it since\nHCALL_INST_PRECALL already saves it to the correct location.\n\nsimilarly load instruction should be:\n  ld      r12,STACK_FRAME_MIN_SIZE+STK_PARAM(R4)(r1)\n\nFix the load instruction to correctly access the stack parameter\nwith +STACK_FRAME_MIN_SIZE and remove the store of r4 since the\nprecall saves it correctly.\n\nCc: stable@vger.kernel.org # v6.2+\nFixes: baa49d81a94b (\"powerpc/pseries: hvcall stack frame overhead\")\nCo-developed-by: Naveen N Rao <naveen@kernel.org>\nSigned-off-by: Naveen N Rao <naveen@kernel.org>\nSigned-off-by: Athira Rajeev <atrajeev@linux.vnet.ibm.com>\nSigned-off-by: Michael Ellerman <mpe@ellerman.id.au>\nLink: https://msgid.link/20230929172337.7906-1-atrajeev@linux.vnet.ibm.com",
+  "author_name": "Athira Rajeev",
+  "author_email": "atrajeev@linux.vnet.ibm.com",
+  "author_date": "Fri Sep 29 22:53:36 2023 +0530",
+  "author_date_iso": "2023-09-29T22:53:36+05:30",
+  "committer_name": "Michael Ellerman",
+  "committer_email": "mpe@ellerman.id.au",
+  "committer_date": "Sat Sep 30 22:48:36 2023 +1000",
+  "committer_date_iso": "2023-09-30T22:48:36+10:00",
+  "files_changed": [
+    "arch/powerpc/platforms/pseries/hvCall.S"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "arch/powerpc/platforms/pseries/hvCall.S",
+      "insertions": 1,
+      "deletions": 3
+    }
+  ],
+  "total_insertions": 1,
+  "total_deletions": 3,
+  "total_changes": 4,
+  "parents": [
+    "58b33e78a31782ffe25d404d5eba9a45fe636e27"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "exploit"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/powerpc/platforms/pseries/hvCall.S",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

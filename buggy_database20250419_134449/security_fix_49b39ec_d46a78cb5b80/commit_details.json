@@ -1,0 +1,54 @@
+{
+  "hash": "49b39ec248af863781a13aa6d81c5f69a2928094",
+  "hash_short": "49b39ec2",
+  "subject": "powerpc/64s: Fix entry flush patching w/strict RWX & hash",
+  "body": "The entry flush mitigation can be enabled/disabled at runtime. When this\nhappens it results in the kernel patching its own instructions to\nenable/disable the mitigation sequence.\n\nWith strict kernel RWX enabled instruction patching happens via a\nsecondary mapping of the kernel text, so that we don't have to make the\nprimary mapping writable. With the hash MMU this leads to a hash fault,\nwhich causes us to execute the exception entry which contains the entry\nflush mitigation.\n\nThis means we end up executing the entry flush in a semi-patched state,\nie. after we have patched the first instruction but before we patch the\nsecond or third instruction of the sequence.\n\nOn machines with updated firmware the entry flush is a series of special\nnops, and it's safe to to execute in a semi-patched state.\n\nHowever when using the fallback flush the sequence is mflr/branch/mtlr,\nand so it's not safe to execute if we have patched out the mflr but not\nthe other two instructions. Doing so leads to us corrputing LR, leading\nto an oops, for example:\n\n  # echo 0 > /sys/kernel/debug/powerpc/entry_flush\n  kernel tried to execute exec-protected page (c000000002971000) - exploit attempt? (uid: 0)\n  BUG: Unable to handle kernel instruction fetch\n  Faulting instruction address: 0xc000000002971000\n  Oops: Kernel access of bad area, sig: 11 [#1]\n  LE PAGE_SIZE=64K MMU=Hash SMP NR_CPUS=2048 NUMA pSeries\n  CPU: 0 PID: 2215 Comm: bash Not tainted 5.13.0-rc1-00010-gda3bb206c9ce #1\n  NIP:  c000000002971000 LR: c000000002971000 CTR: c000000000120c40\n  REGS: c000000013243840 TRAP: 0400   Not tainted  (5.13.0-rc1-00010-gda3bb206c9ce)\n  MSR:  8000000010009033 <SF,EE,ME,IR,DR,RI,LE>  CR: 48428482  XER: 00000000\n  ...\n  NIP  0xc000000002971000\n  LR   0xc000000002971000\n  Call Trace:\n    do_patch_instruction+0xc4/0x340 (unreliable)\n    do_entry_flush_fixups+0x100/0x3b0\n    entry_flush_set+0x50/0xe0\n    simple_attr_write+0x160/0x1a0\n    full_proxy_write+0x8c/0x110\n    vfs_write+0xf0/0x340\n    ksys_write+0x84/0x140\n    system_call_exception+0x164/0x2d0\n    system_call_common+0xec/0x278\n\nThe simplest fix is to change the order in which we patch the\ninstructions, so that the sequence is always safe to execute. For the\nnon-fallback flushes it doesn't matter what order we patch in.\n\nFixes: bd573a81312f (\"powerpc/mm/64s: Allow STRICT_KERNEL_RWX again\")\nSigned-off-by: Michael Ellerman <mpe@ellerman.id.au>\nLink: https://lore.kernel.org/r/20210513140800.1391706-1-mpe@ellerman.id.au",
+  "full_message": "powerpc/64s: Fix entry flush patching w/strict RWX & hash\n\nThe entry flush mitigation can be enabled/disabled at runtime. When this\nhappens it results in the kernel patching its own instructions to\nenable/disable the mitigation sequence.\n\nWith strict kernel RWX enabled instruction patching happens via a\nsecondary mapping of the kernel text, so that we don't have to make the\nprimary mapping writable. With the hash MMU this leads to a hash fault,\nwhich causes us to execute the exception entry which contains the entry\nflush mitigation.\n\nThis means we end up executing the entry flush in a semi-patched state,\nie. after we have patched the first instruction but before we patch the\nsecond or third instruction of the sequence.\n\nOn machines with updated firmware the entry flush is a series of special\nnops, and it's safe to to execute in a semi-patched state.\n\nHowever when using the fallback flush the sequence is mflr/branch/mtlr,\nand so it's not safe to execute if we have patched out the mflr but not\nthe other two instructions. Doing so leads to us corrputing LR, leading\nto an oops, for example:\n\n  # echo 0 > /sys/kernel/debug/powerpc/entry_flush\n  kernel tried to execute exec-protected page (c000000002971000) - exploit attempt? (uid: 0)\n  BUG: Unable to handle kernel instruction fetch\n  Faulting instruction address: 0xc000000002971000\n  Oops: Kernel access of bad area, sig: 11 [#1]\n  LE PAGE_SIZE=64K MMU=Hash SMP NR_CPUS=2048 NUMA pSeries\n  CPU: 0 PID: 2215 Comm: bash Not tainted 5.13.0-rc1-00010-gda3bb206c9ce #1\n  NIP:  c000000002971000 LR: c000000002971000 CTR: c000000000120c40\n  REGS: c000000013243840 TRAP: 0400   Not tainted  (5.13.0-rc1-00010-gda3bb206c9ce)\n  MSR:  8000000010009033 <SF,EE,ME,IR,DR,RI,LE>  CR: 48428482  XER: 00000000\n  ...\n  NIP  0xc000000002971000\n  LR   0xc000000002971000\n  Call Trace:\n    do_patch_instruction+0xc4/0x340 (unreliable)\n    do_entry_flush_fixups+0x100/0x3b0\n    entry_flush_set+0x50/0xe0\n    simple_attr_write+0x160/0x1a0\n    full_proxy_write+0x8c/0x110\n    vfs_write+0xf0/0x340\n    ksys_write+0x84/0x140\n    system_call_exception+0x164/0x2d0\n    system_call_common+0xec/0x278\n\nThe simplest fix is to change the order in which we patch the\ninstructions, so that the sequence is always safe to execute. For the\nnon-fallback flushes it doesn't matter what order we patch in.\n\nFixes: bd573a81312f (\"powerpc/mm/64s: Allow STRICT_KERNEL_RWX again\")\nSigned-off-by: Michael Ellerman <mpe@ellerman.id.au>\nLink: https://lore.kernel.org/r/20210513140800.1391706-1-mpe@ellerman.id.au",
+  "author_name": "Michael Ellerman",
+  "author_email": "mpe@ellerman.id.au",
+  "author_date": "Fri May 14 00:07:59 2021 +1000",
+  "author_date_iso": "2021-05-14T00:07:59+10:00",
+  "committer_name": "Michael Ellerman",
+  "committer_email": "mpe@ellerman.id.au",
+  "committer_date": "Fri May 14 17:27:36 2021 +1000",
+  "committer_date_iso": "2021-05-14T17:27:36+10:00",
+  "files_changed": [
+    "arch/powerpc/lib/feature-fixups.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "arch/powerpc/lib/feature-fixups.c",
+      "insertions": 43,
+      "deletions": 16
+    }
+  ],
+  "total_insertions": 43,
+  "total_deletions": 16,
+  "total_changes": 59,
+  "parents": [
+    "aec86b052df6541cc97c5fca44e5934cbea4963b"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "exploit"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/powerpc/lib/feature-fixups.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+commit 6fe7b9901400152238e1b76198747f6716c78aad
+Author: Matthew Bobrowski <mbobrowski@mbobrowski.org>
+Date:   Thu Sep 19 15:32:44 2019 -0700
+
+    iomap: split size and error for iomap_dio_rw ->end_io
+    
+    Modify the calling convention for the iomap_dio_rw ->end_io() callback.
+    Rather than passing either dio->error or dio->size as the 'size' argument,
+    instead pass both the dio->error and the dio->size value separately.
+    
+    In the instance that an error occurred during a write, we currently cannot
+    determine whether any blocks have been allocated beyond the current EOF and
+    data has subsequently been written to these blocks within the ->end_io()
+    callback. As a result, we cannot judge whether we should take the truncate
+    failed write path. Having both dio->error and dio->size will allow us to
+    perform such checks within this callback.
+    
+    Signed-off-by: Matthew Bobrowski <mbobrowski@mbobrowski.org>
+    [hch: minor cleanups]
+    Signed-off-by: Christoph Hellwig <hch@lst.de>
+    Reviewed-by: Darrick J. Wong <darrick.wong@oracle.com>
+    Signed-off-by: Darrick J. Wong <darrick.wong@oracle.com>
+    Reviewed-by: Matthew Wilcox (Oracle) <willy@infradead.org>
+
+diff --git a/fs/iomap/direct-io.c b/fs/iomap/direct-io.c
+index 10517cea9682..2ccf1c6460d4 100644
+--- a/fs/iomap/direct-io.c
++++ b/fs/iomap/direct-io.c
+@@ -77,13 +77,10 @@ static ssize_t iomap_dio_complete(struct iomap_dio *dio)
+ 	loff_t offset = iocb->ki_pos;
+ 	ssize_t ret;
+ 
+-	if (dio->end_io) {
+-		ret = dio->end_io(iocb,
+-				dio->error ? dio->error : dio->size,
+-				dio->flags);
+-	} else {
++	if (dio->end_io)
++		ret = dio->end_io(iocb, dio->size, dio->error, dio->flags);
++	else
+ 		ret = dio->error;
+-	}
+ 
+ 	if (likely(!ret)) {
+ 		ret = dio->size;

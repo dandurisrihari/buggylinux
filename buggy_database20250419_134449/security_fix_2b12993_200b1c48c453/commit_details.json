@@ -1,0 +1,151 @@
+{
+  "hash": "2b1299322016731d56807aa49254a5ea3080b6b3",
+  "hash_short": "2b129932",
+  "subject": "x86/speculation: Add RSB VM Exit protections",
+  "body": "tl;dr: The Enhanced IBRS mitigation for Spectre v2 does not work as\ndocumented for RET instructions after VM exits. Mitigate it with a new\none-entry RSB stuffing mechanism and a new LFENCE.\n\n== Background ==\n\nIndirect Branch Restricted Speculation (IBRS) was designed to help\nmitigate Branch Target Injection and Speculative Store Bypass, i.e.\nSpectre, attacks. IBRS prevents software run in less privileged modes\nfrom affecting branch prediction in more privileged modes. IBRS requires\nthe MSR to be written on every privilege level change.\n\nTo overcome some of the performance issues of IBRS, Enhanced IBRS was\nintroduced.  eIBRS is an \"always on\" IBRS, in other words, just turn\nit on once instead of writing the MSR on every privilege level change.\nWhen eIBRS is enabled, more privileged modes should be protected from\nless privileged modes, including protecting VMMs from guests.\n\n== Problem ==\n\nHere's a simplification of how guests are run on Linux' KVM:\n\nvoid run_kvm_guest(void)\n{\n\t// Prepare to run guest\n\tVMRESUME();\n\t// Clean up after guest runs\n}\n\nThe execution flow for that would look something like this to the\nprocessor:\n\n1. Host-side: call run_kvm_guest()\n2. Host-side: VMRESUME\n3. Guest runs, does \"CALL guest_function\"\n4. VM exit, host runs again\n5. Host might make some \"cleanup\" function calls\n6. Host-side: RET from run_kvm_guest()\n\nNow, when back on the host, there are a couple of possible scenarios of\npost-guest activity the host needs to do before executing host code:\n\n* on pre-eIBRS hardware (legacy IBRS, or nothing at all), the RSB is not\ntouched and Linux has to do a 32-entry stuffing.\n\n* on eIBRS hardware, VM exit with IBRS enabled, or restoring the host\nIBRS=1 shortly after VM exit, has a documented side effect of flushing\nthe RSB except in this PBRSB situation where the software needs to stuff\nthe last RSB entry \"by hand\".\n\nIOW, with eIBRS supported, host RET instructions should no longer be\ninfluenced by guest behavior after the host retires a single CALL\ninstruction.\n\nHowever, if the RET instructions are \"unbalanced\" with CALLs after a VM\nexit as is the RET in #6, it might speculatively use the address for the\ninstruction after the CALL in #3 as an RSB prediction. This is a problem\nsince the (untrusted) guest controls this address.\n\nBalanced CALL/RET instruction pairs such as in step #5 are not affected.\n\n== Solution ==\n\nThe PBRSB issue affects a wide variety of Intel processors which\nsupport eIBRS. But not all of them need mitigation. Today,\nX86_FEATURE_RSB_VMEXIT triggers an RSB filling sequence that mitigates\nPBRSB. Systems setting RSB_VMEXIT need no further mitigation - i.e.,\neIBRS systems which enable legacy IBRS explicitly.\n\nHowever, such systems (X86_FEATURE_IBRS_ENHANCED) do not set RSB_VMEXIT\nand most of them need a new mitigation.\n\nTherefore, introduce a new feature flag X86_FEATURE_RSB_VMEXIT_LITE\nwhich triggers a lighter-weight PBRSB mitigation versus RSB_VMEXIT.\n\nThe lighter-weight mitigation performs a CALL instruction which is\nimmediately followed by a speculative execution barrier (INT3). This\nsteers speculative execution to the barrier -- just like a retpoline\n-- which ensures that speculation can never reach an unbalanced RET.\nThen, ensure this CALL is retired before continuing execution with an\nLFENCE.\n\nIn other words, the window of exposure is opened at VM exit where RET\nbehavior is troublesome. While the window is open, force RSB predictions\nsampling for RET targets to a dead end at the INT3. Close the window\nwith the LFENCE.\n\nThere is a subset of eIBRS systems which are not vulnerable to PBRSB.\nAdd these systems to the cpu_vuln_whitelist[] as NO_EIBRS_PBRSB.\nFuture systems that aren't vulnerable will set ARCH_CAP_PBRSB_NO.\n\n  [ bp: Massage, incorporate review comments from Andy Cooper. ]\n\nSigned-off-by: Daniel Sneddon <daniel.sneddon@linux.intel.com>\nCo-developed-by: Pawan Gupta <pawan.kumar.gupta@linux.intel.com>\nSigned-off-by: Pawan Gupta <pawan.kumar.gupta@linux.intel.com>\nSigned-off-by: Borislav Petkov <bp@suse.de>",
+  "full_message": "x86/speculation: Add RSB VM Exit protections\n\ntl;dr: The Enhanced IBRS mitigation for Spectre v2 does not work as\ndocumented for RET instructions after VM exits. Mitigate it with a new\none-entry RSB stuffing mechanism and a new LFENCE.\n\n== Background ==\n\nIndirect Branch Restricted Speculation (IBRS) was designed to help\nmitigate Branch Target Injection and Speculative Store Bypass, i.e.\nSpectre, attacks. IBRS prevents software run in less privileged modes\nfrom affecting branch prediction in more privileged modes. IBRS requires\nthe MSR to be written on every privilege level change.\n\nTo overcome some of the performance issues of IBRS, Enhanced IBRS was\nintroduced.  eIBRS is an \"always on\" IBRS, in other words, just turn\nit on once instead of writing the MSR on every privilege level change.\nWhen eIBRS is enabled, more privileged modes should be protected from\nless privileged modes, including protecting VMMs from guests.\n\n== Problem ==\n\nHere's a simplification of how guests are run on Linux' KVM:\n\nvoid run_kvm_guest(void)\n{\n\t// Prepare to run guest\n\tVMRESUME();\n\t// Clean up after guest runs\n}\n\nThe execution flow for that would look something like this to the\nprocessor:\n\n1. Host-side: call run_kvm_guest()\n2. Host-side: VMRESUME\n3. Guest runs, does \"CALL guest_function\"\n4. VM exit, host runs again\n5. Host might make some \"cleanup\" function calls\n6. Host-side: RET from run_kvm_guest()\n\nNow, when back on the host, there are a couple of possible scenarios of\npost-guest activity the host needs to do before executing host code:\n\n* on pre-eIBRS hardware (legacy IBRS, or nothing at all), the RSB is not\ntouched and Linux has to do a 32-entry stuffing.\n\n* on eIBRS hardware, VM exit with IBRS enabled, or restoring the host\nIBRS=1 shortly after VM exit, has a documented side effect of flushing\nthe RSB except in this PBRSB situation where the software needs to stuff\nthe last RSB entry \"by hand\".\n\nIOW, with eIBRS supported, host RET instructions should no longer be\ninfluenced by guest behavior after the host retires a single CALL\ninstruction.\n\nHowever, if the RET instructions are \"unbalanced\" with CALLs after a VM\nexit as is the RET in #6, it might speculatively use the address for the\ninstruction after the CALL in #3 as an RSB prediction. This is a problem\nsince the (untrusted) guest controls this address.\n\nBalanced CALL/RET instruction pairs such as in step #5 are not affected.\n\n== Solution ==\n\nThe PBRSB issue affects a wide variety of Intel processors which\nsupport eIBRS. But not all of them need mitigation. Today,\nX86_FEATURE_RSB_VMEXIT triggers an RSB filling sequence that mitigates\nPBRSB. Systems setting RSB_VMEXIT need no further mitigation - i.e.,\neIBRS systems which enable legacy IBRS explicitly.\n\nHowever, such systems (X86_FEATURE_IBRS_ENHANCED) do not set RSB_VMEXIT\nand most of them need a new mitigation.\n\nTherefore, introduce a new feature flag X86_FEATURE_RSB_VMEXIT_LITE\nwhich triggers a lighter-weight PBRSB mitigation versus RSB_VMEXIT.\n\nThe lighter-weight mitigation performs a CALL instruction which is\nimmediately followed by a speculative execution barrier (INT3). This\nsteers speculative execution to the barrier -- just like a retpoline\n-- which ensures that speculation can never reach an unbalanced RET.\nThen, ensure this CALL is retired before continuing execution with an\nLFENCE.\n\nIn other words, the window of exposure is opened at VM exit where RET\nbehavior is troublesome. While the window is open, force RSB predictions\nsampling for RET targets to a dead end at the INT3. Close the window\nwith the LFENCE.\n\nThere is a subset of eIBRS systems which are not vulnerable to PBRSB.\nAdd these systems to the cpu_vuln_whitelist[] as NO_EIBRS_PBRSB.\nFuture systems that aren't vulnerable will set ARCH_CAP_PBRSB_NO.\n\n  [ bp: Massage, incorporate review comments from Andy Cooper. ]\n\nSigned-off-by: Daniel Sneddon <daniel.sneddon@linux.intel.com>\nCo-developed-by: Pawan Gupta <pawan.kumar.gupta@linux.intel.com>\nSigned-off-by: Pawan Gupta <pawan.kumar.gupta@linux.intel.com>\nSigned-off-by: Borislav Petkov <bp@suse.de>",
+  "author_name": "Daniel Sneddon",
+  "author_email": "daniel.sneddon@linux.intel.com",
+  "author_date": "Tue Aug 2 15:47:01 2022 -0700",
+  "author_date_iso": "2022-08-02T15:47:01-07:00",
+  "committer_name": "Borislav Petkov",
+  "committer_email": "bp@suse.de",
+  "committer_date": "Wed Aug 3 11:23:52 2022 +0200",
+  "committer_date_iso": "2022-08-03T11:23:52+02:00",
+  "files_changed": [
+    "Documentation/admin-guide/hw-vuln/spectre.rst",
+    "arch/x86/include/asm/cpufeatures.h",
+    "arch/x86/include/asm/msr-index.h",
+    "arch/x86/include/asm/nospec-branch.h",
+    "arch/x86/kernel/cpu/bugs.c",
+    "arch/x86/kernel/cpu/common.c",
+    "arch/x86/kvm/vmx/vmenter.S",
+    "tools/arch/x86/include/asm/cpufeatures.h",
+    "tools/arch/x86/include/asm/msr-index.h"
+  ],
+  "files_changed_count": 9,
+  "stats": [
+    {
+      "file": "Documentation/admin-guide/hw-vuln/spectre.rst",
+      "insertions": 8,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/include/asm/cpufeatures.h",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/include/asm/msr-index.h",
+      "insertions": 4,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/include/asm/nospec-branch.h",
+      "insertions": 16,
+      "deletions": 1
+    },
+    {
+      "file": "arch/x86/kernel/cpu/bugs.c",
+      "insertions": 63,
+      "deletions": 23
+    },
+    {
+      "file": "arch/x86/kernel/cpu/common.c",
+      "insertions": 10,
+      "deletions": 2
+    },
+    {
+      "file": "arch/x86/kvm/vmx/vmenter.S",
+      "insertions": 5,
+      "deletions": 3
+    },
+    {
+      "file": "tools/arch/x86/include/asm/cpufeatures.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "tools/arch/x86/include/asm/msr-index.h",
+      "insertions": 4,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 113,
+  "total_deletions": 29,
+  "total_changes": 142,
+  "parents": [
+    "3d7cb6b04c3f3115719235cc6866b10326de34cd"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "Injection",
+      "Bypass"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/x86/include/asm/msr-index.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "tools/arch/x86/include/asm/cpufeatures.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/include/asm/cpufeatures.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "Documentation/admin-guide/hw-vuln/spectre.rst",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kvm/vmx/vmenter.S",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kernel/cpu/common.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/include/asm/nospec-branch.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kernel/cpu/bugs.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "tools/arch/x86/include/asm/msr-index.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

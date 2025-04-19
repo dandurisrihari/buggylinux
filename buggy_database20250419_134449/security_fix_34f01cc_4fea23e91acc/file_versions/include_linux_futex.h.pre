@@ -1,0 +1,60 @@
+commit d0aa7a70bf03b9de9e995ab272293be1f7937822
+Author: Pierre Peiffer <pierre.peiffer@bull.net>
+Date:   Wed May 9 02:35:02 2007 -0700
+
+    futex_requeue_pi optimization
+    
+    This patch provides the futex_requeue_pi functionality, which allows some
+    threads waiting on a normal futex to be requeued on the wait-queue of a
+    PI-futex.
+    
+    This provides an optimization, already used for (normal) futexes, to be used
+    with the PI-futexes.
+    
+    This optimization is currently used by the glibc in pthread_broadcast, when
+    using "normal" mutexes.  With futex_requeue_pi, it can be used with
+    PRIO_INHERIT mutexes too.
+    
+    Signed-off-by: Pierre Peiffer <pierre.peiffer@bull.net>
+    Cc: Ingo Molnar <mingo@elte.hu>
+    Cc: Ulrich Drepper <drepper@redhat.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/include/linux/futex.h b/include/linux/futex.h
+index 34e54f2b8997..1bd8dfcb037b 100644
+--- a/include/linux/futex.h
++++ b/include/linux/futex.h
+@@ -17,6 +17,7 @@ union ktime;
+ #define FUTEX_LOCK_PI		6
+ #define FUTEX_UNLOCK_PI		7
+ #define FUTEX_TRYLOCK_PI	8
++#define FUTEX_CMP_REQUEUE_PI	9
+ 
+ /*
+  * Support for robust futexes: the kernel cleans up held futexes at
+@@ -84,10 +85,15 @@ struct robust_list_head {
+  */
+ #define FUTEX_OWNER_DIED	0x40000000
+ 
++/*
++ * Some processes have been requeued on this PI-futex
++ */
++#define FUTEX_WAITER_REQUEUED	0x20000000
++
+ /*
+  * The rest of the robust-futex field is for the TID:
+  */
+-#define FUTEX_TID_MASK		0x3fffffff
++#define FUTEX_TID_MASK		0x0fffffff
+ 
+ /*
+  * This limit protects against a deliberately circular list.
+@@ -111,6 +117,7 @@ handle_futex_death(u32 __user *uaddr, struct task_struct *curr, int pi);
+  * We set bit 0 to indicate if it's an inode-based key.
+  */
+ union futex_key {
++	u32 __user *uaddr;
+ 	struct {
+ 		unsigned long pgoff;
+ 		struct inode *inode;

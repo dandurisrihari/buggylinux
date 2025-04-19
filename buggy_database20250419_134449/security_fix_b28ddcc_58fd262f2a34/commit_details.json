@@ -1,0 +1,126 @@
+{
+  "hash": "b28ddcc32d8fa3e20745b3a47dff863fe0376d79",
+  "hash_short": "b28ddcc3",
+  "subject": "pidfs: convert to path_from_stashed() helper",
+  "body": "Moving pidfds from the anonymous inode infrastructure to a separate tiny\nin-kernel filesystem similar to sockfs, pipefs, and anon_inodefs causes\nselinux denials and thus various userspace components that make heavy\nuse of pidfds to fail as pidfds used anon_inode_getfile() which aren't\nsubject to any LSM hooks. But dentry_open() is and that would cause\nregressions.\n\nThe failures that are seen are selinux denials. But the core failure is\ndbus-broker. That cascades into other services failing that depend on\ndbus-broker. For example, when dbus-broker fails to start polkit and all\nthe others won't be able to work because they depend on dbus-broker.\n\nThe reason for dbus-broker failing is because it doesn't handle failures\nfor SO_PEERPIDFD correctly. Last kernel release we introduced\nSO_PEERPIDFD (and SCM_PIDFD). SO_PEERPIDFD allows dbus-broker and polkit\nand others to receive a pidfd for the peer of an AF_UNIX socket. This is\nthe first time in the history of Linux that we can safely authenticate\nclients in a race-free manner.\n\ndbus-broker immediately made use of this but messed up the error\nchecking. It only allowed EINVAL as a valid failure for SO_PEERPIDFD.\nThat's obviously problematic not just because of LSM denials but because\nof seccomp denials that would prevent SO_PEERPIDFD from working; or any\nother new error code from there.\n\nSo this is catching a flawed implementation in dbus-broker as well. It\nhas to fallback to the old pid-based authentication when SO_PEERPIDFD\ndoesn't work no matter the reasons otherwise it'll always risk such\nfailures. So overall that LSM denial should not have caused dbus-broker\nto fail. It can never assume that a feature released one kernel ago like\nSO_PEERPIDFD can be assumed to be available.\n\nSo, the next fix separate from the selinux policy update is to try and\nfix dbus-broker at [3]. That should make it into Fedora as well. In\naddition the selinux reference policy should also be updated. See [4]\nfor that. If Selinux is in enforcing mode in userspace and it encounters\nanything that it doesn't know about it will deny it by default. And the\npolicy is entirely in userspace including declaring new types for stuff\nlike nsfs or pidfs to allow it.\n\nFor now we continue to raise S_PRIVATE on the inode if it's a pidfs\ninode which means things behave exactly like before.\n\nLink: https://bugzilla.redhat.com/show_bug.cgi?id=2265630\nLink: https://github.com/fedora-selinux/selinux-policy/pull/2050\nLink: https://github.com/bus1/dbus-broker/pull/343 [3]\nLink: https://github.com/SELinuxProject/refpolicy/pull/762 [4]\nReported-by: Nathan Chancellor <nathan@kernel.org>\nLink: https://lore.kernel.org/r/20240222190334.GA412503@dev-arch.thelio-3990X\nLink: https://lore.kernel.org/r/20240218-neufahrzeuge-brauhaus-fb0eb6459771@brauner\nSigned-off-by: Christian Brauner <brauner@kernel.org>",
+  "full_message": "pidfs: convert to path_from_stashed() helper\n\nMoving pidfds from the anonymous inode infrastructure to a separate tiny\nin-kernel filesystem similar to sockfs, pipefs, and anon_inodefs causes\nselinux denials and thus various userspace components that make heavy\nuse of pidfds to fail as pidfds used anon_inode_getfile() which aren't\nsubject to any LSM hooks. But dentry_open() is and that would cause\nregressions.\n\nThe failures that are seen are selinux denials. But the core failure is\ndbus-broker. That cascades into other services failing that depend on\ndbus-broker. For example, when dbus-broker fails to start polkit and all\nthe others won't be able to work because they depend on dbus-broker.\n\nThe reason for dbus-broker failing is because it doesn't handle failures\nfor SO_PEERPIDFD correctly. Last kernel release we introduced\nSO_PEERPIDFD (and SCM_PIDFD). SO_PEERPIDFD allows dbus-broker and polkit\nand others to receive a pidfd for the peer of an AF_UNIX socket. This is\nthe first time in the history of Linux that we can safely authenticate\nclients in a race-free manner.\n\ndbus-broker immediately made use of this but messed up the error\nchecking. It only allowed EINVAL as a valid failure for SO_PEERPIDFD.\nThat's obviously problematic not just because of LSM denials but because\nof seccomp denials that would prevent SO_PEERPIDFD from working; or any\nother new error code from there.\n\nSo this is catching a flawed implementation in dbus-broker as well. It\nhas to fallback to the old pid-based authentication when SO_PEERPIDFD\ndoesn't work no matter the reasons otherwise it'll always risk such\nfailures. So overall that LSM denial should not have caused dbus-broker\nto fail. It can never assume that a feature released one kernel ago like\nSO_PEERPIDFD can be assumed to be available.\n\nSo, the next fix separate from the selinux policy update is to try and\nfix dbus-broker at [3]. That should make it into Fedora as well. In\naddition the selinux reference policy should also be updated. See [4]\nfor that. If Selinux is in enforcing mode in userspace and it encounters\nanything that it doesn't know about it will deny it by default. And the\npolicy is entirely in userspace including declaring new types for stuff\nlike nsfs or pidfs to allow it.\n\nFor now we continue to raise S_PRIVATE on the inode if it's a pidfs\ninode which means things behave exactly like before.\n\nLink: https://bugzilla.redhat.com/show_bug.cgi?id=2265630\nLink: https://github.com/fedora-selinux/selinux-policy/pull/2050\nLink: https://github.com/bus1/dbus-broker/pull/343 [3]\nLink: https://github.com/SELinuxProject/refpolicy/pull/762 [4]\nReported-by: Nathan Chancellor <nathan@kernel.org>\nLink: https://lore.kernel.org/r/20240222190334.GA412503@dev-arch.thelio-3990X\nLink: https://lore.kernel.org/r/20240218-neufahrzeuge-brauhaus-fb0eb6459771@brauner\nSigned-off-by: Christian Brauner <brauner@kernel.org>",
+  "author_name": "Christian Brauner",
+  "author_email": "brauner@kernel.org",
+  "author_date": "Mon Feb 19 16:30:57 2024 +0100",
+  "author_date_iso": "2024-02-19T16:30:57+01:00",
+  "committer_name": "Christian Brauner",
+  "committer_email": "brauner@kernel.org",
+  "committer_date": "Fri Mar 1 12:24:53 2024 +0100",
+  "committer_date_iso": "2024-03-01T12:24:53+01:00",
+  "files_changed": [
+    "fs/internal.h",
+    "fs/libfs.c",
+    "fs/nsfs.c",
+    "fs/pidfs.c",
+    "include/linux/pid.h",
+    "include/linux/pidfs.h",
+    "kernel/pid.c"
+  ],
+  "files_changed_count": 7,
+  "stats": [
+    {
+      "file": "fs/internal.h",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "fs/libfs.c",
+      "insertions": 12,
+      "deletions": 3
+    },
+    {
+      "file": "fs/nsfs.c",
+      "insertions": 4,
+      "deletions": 3
+    },
+    {
+      "file": "fs/pidfs.c",
+      "insertions": 38,
+      "deletions": 21
+    },
+    {
+      "file": "include/linux/pid.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/pidfs.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "kernel/pid.c",
+      "insertions": 1,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 59,
+  "total_deletions": 28,
+  "total_changes": 87,
+  "parents": [
+    "1fa08aece42512be072351f482096d5796edf7ca"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "authentication"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "fs/nsfs.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/internal.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "kernel/pid.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/pidfs.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/libfs.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/pid.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/pidfs.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

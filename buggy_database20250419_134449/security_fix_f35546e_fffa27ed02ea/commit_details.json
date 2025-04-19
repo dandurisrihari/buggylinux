@@ -1,0 +1,102 @@
+{
+  "hash": "f35546e072a7a86ccb950d4d1508879b0d49e374",
+  "hash_short": "f35546e0",
+  "subject": "Merge branch 'stable/for-jens-3.10' of git://git.kernel.org/pub/scm/linux/kernel/git/konrad/xen into for-3.11/drivers",
+  "body": "Konrad writes:\n\nIt has the 'feature-max-indirect-segments' implemented in both backend\nand frontend. The current problem with the backend and frontend is that the\nsegment size is limited to 11 pages. It means we can at most squeeze in 44kB per\nrequest. The ring can hold 32 (next power of two below 36) requests, meaning we\ncan do 1.4M of outstanding requests. Nowadays that is not enough.\n\nThe problem in the past was addressed in two ways - but neither one went upstream.\nThe first solution to this proposed by Justin from Spectralogic was to negotiate\nthe segment size.  This means that the \u2018struct blkif_sring_entry\u2019 is now a variable size.\nIt can expand from 112 bytes (cover 11 pages of data - 44kB) to 1580 bytes\n(256 pages of data - so 1MB). It is a simple extension by just making the array in the\nrequest expand from 11 to a variable size negotiated. But it had limits: this extension\nstill limits the number of segments per request to 255 (as the total number must be\nspecified in the request, which only has an 8-bit field for that purpose).\n\nThe other solution (from Intel - Ronghui) was to create one extra ring that only has the\n\u2018struct blkif_request_segment\u2019 in them. The \u2018struct blkif_request\u2019 would be changed to have\nan index in said \u2018segment ring\u2019. There is only one segment ring. This means that the size of\nthe initial ring is still the same. The requests would point to the segment and enumerate out\nhow many of the indexes it wants to use. The limit is of course the size of the segment.\nIf one assumes a one-page segment this means we can in one request cover ~4MB.\n\nThose patches were posted as RFC and the author never followed up on the ideas on changing\nit to be a bit more flexible.\n\nThere is yet another mechanism that could be employed \u00a0(which these patches implement) - and it\nborrows from VirtIO protocol. And that is the \u2018indirect descriptors\u2019. This very similar to\nwhat Intel suggests, but with a twist. The twist is to negotiate how many of these\n'segment' pages (aka indirect descriptor pages) we want to support (in reality we negotiate\nhow many entries in the segment we want to cover, and we module the number if it is\nbigger than the segment size).\n\nThis means that with the existing 36 slots in the ring (single page) we can cover:\n32 slots * each blkif_request_indirect covers: 512 * 4096 ~= 64M. Since we ample space\nin the blkif_request_indirect to span more than one indirect page, that number (64M)\ncan be also multiplied by eight = 512MB.\n\nRoger Pau Monne took the idea and implemented them in these patches. They work\ngreat and the corner cases (migration between backends with and without this extension)\nwork nicely. The backend has a limit right now off how many indirect entries\nit can handle: one indirect page, and at maximum 256 entries (out of 512 - so  50% of the page\nis used). That comes out to 32 slots * 256 entries in a indirect page * 1 indirect page\nper request * 4096 = 32MB.\n\nThis is a conservative number that can change in the future. Right now it strikes\na good balance between giving excellent performance, memory usage in the backend, and\nbalancing the needs of many guests.\n\nIn the patchset there is also the split of the blkback structure to be per-VBD.\nThis means that the spinlock contention we had with many guests trying to do I/O and\nall the blkback threads hitting the same lock has been eliminated.\n\nAlso there are bug-fixes to deal with oddly sized sectors, insane amounts on\nth ring, and also a security fix (posted earlier).",
+  "full_message": "Merge branch 'stable/for-jens-3.10' of git://git.kernel.org/pub/scm/linux/kernel/git/konrad/xen into for-3.11/drivers\n\nKonrad writes:\n\nIt has the 'feature-max-indirect-segments' implemented in both backend\nand frontend. The current problem with the backend and frontend is that the\nsegment size is limited to 11 pages. It means we can at most squeeze in 44kB per\nrequest. The ring can hold 32 (next power of two below 36) requests, meaning we\ncan do 1.4M of outstanding requests. Nowadays that is not enough.\n\nThe problem in the past was addressed in two ways - but neither one went upstream.\nThe first solution to this proposed by Justin from Spectralogic was to negotiate\nthe segment size.  This means that the \u2018struct blkif_sring_entry\u2019 is now a variable size.\nIt can expand from 112 bytes (cover 11 pages of data - 44kB) to 1580 bytes\n(256 pages of data - so 1MB). It is a simple extension by just making the array in the\nrequest expand from 11 to a variable size negotiated. But it had limits: this extension\nstill limits the number of segments per request to 255 (as the total number must be\nspecified in the request, which only has an 8-bit field for that purpose).\n\nThe other solution (from Intel - Ronghui) was to create one extra ring that only has the\n\u2018struct blkif_request_segment\u2019 in them. The \u2018struct blkif_request\u2019 would be changed to have\nan index in said \u2018segment ring\u2019. There is only one segment ring. This means that the size of\nthe initial ring is still the same. The requests would point to the segment and enumerate out\nhow many of the indexes it wants to use. The limit is of course the size of the segment.\nIf one assumes a one-page segment this means we can in one request cover ~4MB.\n\nThose patches were posted as RFC and the author never followed up on the ideas on changing\nit to be a bit more flexible.\n\nThere is yet another mechanism that could be employed \u00a0(which these patches implement) - and it\nborrows from VirtIO protocol. And that is the \u2018indirect descriptors\u2019. This very similar to\nwhat Intel suggests, but with a twist. The twist is to negotiate how many of these\n'segment' pages (aka indirect descriptor pages) we want to support (in reality we negotiate\nhow many entries in the segment we want to cover, and we module the number if it is\nbigger than the segment size).\n\nThis means that with the existing 36 slots in the ring (single page) we can cover:\n32 slots * each blkif_request_indirect covers: 512 * 4096 ~= 64M. Since we ample space\nin the blkif_request_indirect to span more than one indirect page, that number (64M)\ncan be also multiplied by eight = 512MB.\n\nRoger Pau Monne took the idea and implemented them in these patches. They work\ngreat and the corner cases (migration between backends with and without this extension)\nwork nicely. The backend has a limit right now off how many indirect entries\nit can handle: one indirect page, and at maximum 256 entries (out of 512 - so  50% of the page\nis used). That comes out to 32 slots * 256 entries in a indirect page * 1 indirect page\nper request * 4096 = 32MB.\n\nThis is a conservative number that can change in the future. Right now it strikes\na good balance between giving excellent performance, memory usage in the backend, and\nbalancing the needs of many guests.\n\nIn the patchset there is also the split of the blkback structure to be per-VBD.\nThis means that the spinlock contention we had with many guests trying to do I/O and\nall the blkback threads hitting the same lock has been eliminated.\n\nAlso there are bug-fixes to deal with oddly sized sectors, insane amounts on\nth ring, and also a security fix (posted earlier).",
+  "author_name": "Jens Axboe",
+  "author_email": "axboe@kernel.dk",
+  "author_date": "Fri Jun 28 16:01:14 2013 +0200",
+  "author_date_iso": "2013-06-28T16:01:14+02:00",
+  "committer_name": "Jens Axboe",
+  "committer_email": "axboe@kernel.dk",
+  "committer_date": "Fri Jun 28 16:01:14 2013 +0200",
+  "committer_date_iso": "2013-06-28T16:01:14+02:00",
+  "files_changed": [
+    "drivers/block/xen-blkfront.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "Documentation/ABI/testing/sysfs-driver-xen-blkback",
+      "insertions": 17,
+      "deletions": 0
+    },
+    {
+      "file": "Documentation/ABI/testing/sysfs-driver-xen-blkfront",
+      "insertions": 10,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/block/xen-blkback/blkback.c",
+      "insertions": 552,
+      "deletions": 320
+    },
+    {
+      "file": "drivers/block/xen-blkback/common.h",
+      "insertions": 145,
+      "deletions": 2
+    },
+    {
+      "file": "drivers/block/xen-blkback/xenbus.c",
+      "insertions": 85,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/block/xen-blkfront.c",
+      "insertions": 432,
+      "deletions": 100
+    },
+    {
+      "file": "include/xen/interface/io/blkif.h",
+      "insertions": 53,
+      "deletions": 0
+    },
+    {
+      "file": "include/xen/interface/io/ring.h",
+      "insertions": 5,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 1299,
+  "total_deletions": 422,
+  "total_changes": 1721,
+  "parents": [
+    "36f988e978f81ffa415df4d77bbcd8887917f25c",
+    "1e0f7a21b2fffc70f27cc4a454c60321501045b1"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v3.11",
+    "v3.11-rc3",
+    "v3.11-rc4",
+    "v3.11-rc5",
+    "v3.11-rc6",
+    "v3.11-rc7",
+    "v3.12",
+    "v3.12-rc1",
+    "v3.12-rc2",
+    "v3.12-rc3"
+  ],
+  "is_merge": true,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "security fix"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "drivers/block/xen-blkfront.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

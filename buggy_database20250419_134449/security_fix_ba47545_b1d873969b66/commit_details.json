@@ -1,0 +1,121 @@
+{
+  "hash": "ba47545c756b55f4b114c45fea7d52dd1577e181",
+  "hash_short": "ba47545c",
+  "subject": "Merge branch 'SCM_PIDFD-SCM_PEERPIDFD'",
+  "body": "Alexander Mikhalitsyn says:\n\n====================\nAdd SCM_PIDFD and SO_PEERPIDFD\n\n1. Implement SCM_PIDFD, a new type of CMSG type analogical to SCM_CREDENTIALS,\nbut it contains pidfd instead of plain pid, which allows programmers not\nto care about PID reuse problem.\n\n2. Add SO_PEERPIDFD which allows to get pidfd of peer socket holder pidfd.\nThis thing is direct analog of SO_PEERCRED which allows to get plain PID.\n\n3. Add SCM_PIDFD / SO_PEERPIDFD kselftest\n\nIdea comes from UAPI kernel group:\nhttps://uapi-group.org/kernel-features/\n\nBig thanks to Christian Brauner and Lennart Poettering for productive\ndiscussions about this and Luca Boccassi for testing and reviewing this.\n\n=== Motivation behind this patchset\n\nEric Dumazet raised a question:\n> It seems that we already can use pidfd_open() (since linux-5.3), and\n> pass the resulting fd in af_unix SCM_RIGHTS message ?\n\nYes, it's possible, but it means that from the receiver side we need\nto trust the sent pidfd (in SCM_RIGHTS),\nor always use combination of SCM_RIGHTS+SCM_CREDENTIALS, then we can\nextract pidfd from SCM_RIGHTS,\nthen acquire plain pid from pidfd and after compare it with the pid\nfrom SCM_CREDENTIALS.\n\nA few comments from other folks regarding this.\n\nChristian Brauner wrote:\n\n>Let me try and provide some of the missing background.\n\n>There are a range of use-cases where we would like to authenticate a\n>client through sockets without being susceptible to PID recycling\n>attacks. Currently, we can't do this as the race isn't fully fixable.\n>We can only apply mitigations.\n\n>What this patchset will allows us to do is to get a pidfd without the\n>client having to send us an fd explicitly via SCM_RIGHTS. As that's\n>already possibly as you correctly point out.\n\n>But for protocols like polkit this is quite important. Every message is\n>standalone and we would need to force a complete protocol change where\n>we would need to require that every client allocate and send a pidfd via\n>SCM_RIGHTS. That would also mean patching through all polkit users.\n\n>For something like systemd-journald where we provide logging facilities\n>and want to add metadata to the log we would also immensely benefit from\n>being able to get a receiver-side controlled pidfd.\n\n>With the message type we envisioned we don't need to change the sender\n>at all and can be safe against pid recycling.\n\n>Link: https://gitlab.freedesktop.org/polkit/polkit/-/merge_requests/154\n>Link: https://uapi-group.org/kernel-features\n\nLennart Poettering wrote:\n\n>So yes, this is of course possible, but it would mean the pidfd would\n>have to be transported as part of the user protocol, explicitly sent\n>by the sender. (Moreover, the receiver after receiving the pidfd would\n>then still have to somehow be able to prove that the pidfd it just\n>received actually refers to the peer's process and not some random\n>process. \u2013 this part is actually solvable in userspace, but ugly)\n\n>The big thing is simply that we want that the pidfd is associated\n>*implicity* with each AF_UNIX connection, not explicitly. A lot of\n>userspace already relies on this, both in the authentication area\n>(polkit) as well as in the logging area (systemd-journald). Right now\n>using the PID field from SO_PEERCREDS/SCM_CREDENTIALS is racy though\n>and very hard to get right. Making this available as pidfd too, would\n>solve this raciness, without otherwise changing semantics of it all:\n>receivers can still enable the creds stuff as they wish, and the data\n>is then implicitly appended to the connections/datagrams the sender\n>initiates.\n\n>Or to turn this around: things like polkit are typically used to\n>authenticate arbitrary dbus methods calls: some service implements a\n>dbus method call, and when an unprivileged client then issues that\n>call, it will take the client's info, go to polkit and ask it if this\n>is ok. If we wanted to send the pidfd as part of the protocol we\n>basically would have to extend every single method call to contain the\n>client's pidfd along with it as an additional argument, which would be\n>a massive undertaking: it would change the prototypes of basically\n>*all* methods a service defines\u2026 And that's just ugly.\n\n>Note that Alex' patch set doesn't expose anything that wasn't exposed\n>before, or attach, propagate what wasn't before. All it does, is make\n>the field already available anyway (the struct ucred .pid field)\n>available also in a better way (as a pidfd), to solve a variety of\n>races, with no effect on the protocol actually spoken within the\n>AF_UNIX transport. It's a seamless improvement of the status quo.\n====================\n\nSigned-off-by: David S. Miller <davem@davemloft.net>",
+  "full_message": "Merge branch 'SCM_PIDFD-SCM_PEERPIDFD'\n\nAlexander Mikhalitsyn says:\n\n====================\nAdd SCM_PIDFD and SO_PEERPIDFD\n\n1. Implement SCM_PIDFD, a new type of CMSG type analogical to SCM_CREDENTIALS,\nbut it contains pidfd instead of plain pid, which allows programmers not\nto care about PID reuse problem.\n\n2. Add SO_PEERPIDFD which allows to get pidfd of peer socket holder pidfd.\nThis thing is direct analog of SO_PEERCRED which allows to get plain PID.\n\n3. Add SCM_PIDFD / SO_PEERPIDFD kselftest\n\nIdea comes from UAPI kernel group:\nhttps://uapi-group.org/kernel-features/\n\nBig thanks to Christian Brauner and Lennart Poettering for productive\ndiscussions about this and Luca Boccassi for testing and reviewing this.\n\n=== Motivation behind this patchset\n\nEric Dumazet raised a question:\n> It seems that we already can use pidfd_open() (since linux-5.3), and\n> pass the resulting fd in af_unix SCM_RIGHTS message ?\n\nYes, it's possible, but it means that from the receiver side we need\nto trust the sent pidfd (in SCM_RIGHTS),\nor always use combination of SCM_RIGHTS+SCM_CREDENTIALS, then we can\nextract pidfd from SCM_RIGHTS,\nthen acquire plain pid from pidfd and after compare it with the pid\nfrom SCM_CREDENTIALS.\n\nA few comments from other folks regarding this.\n\nChristian Brauner wrote:\n\n>Let me try and provide some of the missing background.\n\n>There are a range of use-cases where we would like to authenticate a\n>client through sockets without being susceptible to PID recycling\n>attacks. Currently, we can't do this as the race isn't fully fixable.\n>We can only apply mitigations.\n\n>What this patchset will allows us to do is to get a pidfd without the\n>client having to send us an fd explicitly via SCM_RIGHTS. As that's\n>already possibly as you correctly point out.\n\n>But for protocols like polkit this is quite important. Every message is\n>standalone and we would need to force a complete protocol change where\n>we would need to require that every client allocate and send a pidfd via\n>SCM_RIGHTS. That would also mean patching through all polkit users.\n\n>For something like systemd-journald where we provide logging facilities\n>and want to add metadata to the log we would also immensely benefit from\n>being able to get a receiver-side controlled pidfd.\n\n>With the message type we envisioned we don't need to change the sender\n>at all and can be safe against pid recycling.\n\n>Link: https://gitlab.freedesktop.org/polkit/polkit/-/merge_requests/154\n>Link: https://uapi-group.org/kernel-features\n\nLennart Poettering wrote:\n\n>So yes, this is of course possible, but it would mean the pidfd would\n>have to be transported as part of the user protocol, explicitly sent\n>by the sender. (Moreover, the receiver after receiving the pidfd would\n>then still have to somehow be able to prove that the pidfd it just\n>received actually refers to the peer's process and not some random\n>process. \u2013 this part is actually solvable in userspace, but ugly)\n\n>The big thing is simply that we want that the pidfd is associated\n>*implicity* with each AF_UNIX connection, not explicitly. A lot of\n>userspace already relies on this, both in the authentication area\n>(polkit) as well as in the logging area (systemd-journald). Right now\n>using the PID field from SO_PEERCREDS/SCM_CREDENTIALS is racy though\n>and very hard to get right. Making this available as pidfd too, would\n>solve this raciness, without otherwise changing semantics of it all:\n>receivers can still enable the creds stuff as they wish, and the data\n>is then implicitly appended to the connections/datagrams the sender\n>initiates.\n\n>Or to turn this around: things like polkit are typically used to\n>authenticate arbitrary dbus methods calls: some service implements a\n>dbus method call, and when an unprivileged client then issues that\n>call, it will take the client's info, go to polkit and ask it if this\n>is ok. If we wanted to send the pidfd as part of the protocol we\n>basically would have to extend every single method call to contain the\n>client's pidfd along with it as an additional argument, which would be\n>a massive undertaking: it would change the prototypes of basically\n>*all* methods a service defines\u2026 And that's just ugly.\n\n>Note that Alex' patch set doesn't expose anything that wasn't exposed\n>before, or attach, propagate what wasn't before. All it does, is make\n>the field already available anyway (the struct ucred .pid field)\n>available also in a better way (as a pidfd), to solve a variety of\n>races, with no effect on the protocol actually spoken within the\n>AF_UNIX transport. It's a seamless improvement of the status quo.\n====================\n\nSigned-off-by: David S. Miller <davem@davemloft.net>",
+  "author_name": "David S. Miller",
+  "author_email": "davem@davemloft.net",
+  "author_date": "Mon Jun 12 10:45:50 2023 +0100",
+  "author_date_iso": "2023-06-12T10:45:50+01:00",
+  "committer_name": "David S. Miller",
+  "committer_email": "davem@davemloft.net",
+  "committer_date": "Mon Jun 12 10:45:50 2023 +0100",
+  "committer_date_iso": "2023-06-12T10:45:50+01:00",
+  "files_changed": [],
+  "files_changed_count": 0,
+  "stats": [
+    {
+      "file": "arch/alpha/include/uapi/asm/socket.h",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "arch/mips/include/uapi/asm/socket.h",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "arch/parisc/include/uapi/asm/socket.h",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "arch/sparc/include/uapi/asm/socket.h",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/net.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/socket.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "include/net/scm.h",
+      "insertions": 37,
+      "deletions": 2
+    },
+    {
+      "file": "include/uapi/asm-generic/socket.h",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "net/core/sock.c",
+      "insertions": 44,
+      "deletions": 0
+    },
+    {
+      "file": "net/mptcp/sockopt.c",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "net/unix/Kconfig",
+      "insertions": 1,
+      "deletions": 5
+    },
+    {
+      "file": "net/unix/af_unix.c",
+      "insertions": 29,
+      "deletions": 5
+    },
+    {
+      "file": "tools/include/uapi/asm-generic/socket.h",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/net/.gitignore",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/net/af_unix/Makefile",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "tools/testing/selftests/net/af_unix/scm_pidfd.c",
+      "insertions": 430,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 565,
+  "total_deletions": 13,
+  "total_changes": 578,
+  "parents": [
+    "55d7c91406b4b486ea8c50e2fb31f1e1a0ef5143",
+    "97154bcf4d1b7cabefec8a72cff5fbb91d5afb7b"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": true,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "authentication"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": []
+}

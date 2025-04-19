@@ -1,0 +1,79 @@
+{
+  "hash": "d5c8028b4788f62b31fb79a331b3ad3e041fa366",
+  "hash_short": "d5c8028b",
+  "subject": "x86/fpu: Reinitialize FPU registers if restoring FPU state fails",
+  "body": "Userspace can change the FPU state of a task using the ptrace() or\nrt_sigreturn() system calls.  Because reserved bits in the FPU state can\ncause the XRSTOR instruction to fail, the kernel has to carefully\nvalidate that no reserved bits or other invalid values are being set.\n\nUnfortunately, there have been bugs in this validation code.  For\nexample, we were not checking that the 'xcomp_bv' field in the\nxstate_header was 0.  As-is, such bugs are exploitable to read the FPU\nregisters of other processes on the system.  To do so, an attacker can\ncreate a task, assign to it an invalid FPU state, then spin in a loop\nand monitor the values of the FPU registers.  Because the task's FPU\nregisters are not being restored, sometimes the FPU registers will have\nthe values from another process.\n\nThis is likely to continue to be a problem in the future because the\nvalidation done by the CPU instructions like XRSTOR is not immediately\nvisible to kernel developers.  Nor will invalid FPU states ever be\nencountered during ordinary use --- they will only be seen during\nfuzzing or exploits.  There can even be reserved bits outside the\nxstate_header which are easy to forget about.  For example, the MXCSR\nregister contains reserved bits, which were not validated by the\nKVM_SET_XSAVE ioctl until commit a575813bfe4b (\"KVM: x86: Fix load\ndamaged SSEx MXCSR register\").\n\nTherefore, mitigate this class of vulnerability by restoring the FPU\nregisters from init_fpstate if restoring from the task's state fails.\n\nWe actually used to do this, but it was (perhaps unwisely) removed by\ncommit 9ccc27a5d297 (\"x86/fpu: Remove error return values from\ncopy_kernel_to_*regs() functions\").  This new patch is also a bit\ndifferent.  First, it only clears the registers, not also the bad\nin-memory state; this is simpler and makes it easier to make the\nmitigation cover all callers of __copy_kernel_to_fpregs().  Second, it\ndoes the register clearing in an exception handler so that no extra\ninstructions are added to context switches.  In fact, we *remove*\ninstructions, since previously we were always zeroing the register\ncontaining 'err' even if CONFIG_X86_DEBUG_FPU was disabled.\n\nSigned-off-by: Eric Biggers <ebiggers@google.com>\nReviewed-by: Rik van Riel <riel@redhat.com>\nCc: Andrew Morton <akpm@linux-foundation.org>\nCc: Andy Lutomirski <luto@amacapital.net>\nCc: Andy Lutomirski <luto@kernel.org>\nCc: Borislav Petkov <bp@alien8.de>\nCc: Dave Hansen <dave.hansen@linux.intel.com>\nCc: Dmitry Vyukov <dvyukov@google.com>\nCc: Eric Biggers <ebiggers3@gmail.com>\nCc: Fenghua Yu <fenghua.yu@intel.com>\nCc: Kevin Hao <haokexin@gmail.com>\nCc: Linus Torvalds <torvalds@linux-foundation.org>\nCc: Michael Halcrow <mhalcrow@google.com>\nCc: Oleg Nesterov <oleg@redhat.com>\nCc: Peter Zijlstra <peterz@infradead.org>\nCc: Thomas Gleixner <tglx@linutronix.de>\nCc: Wanpeng Li <wanpeng.li@hotmail.com>\nCc: Yu-cheng Yu <yu-cheng.yu@intel.com>\nCc: kernel-hardening@lists.openwall.com\nLink: http://lkml.kernel.org/r/20170922174156.16780-4-ebiggers3@gmail.com\nLink: http://lkml.kernel.org/r/20170923130016.21448-27-mingo@kernel.org\nSigned-off-by: Ingo Molnar <mingo@kernel.org>",
+  "full_message": "x86/fpu: Reinitialize FPU registers if restoring FPU state fails\n\nUserspace can change the FPU state of a task using the ptrace() or\nrt_sigreturn() system calls.  Because reserved bits in the FPU state can\ncause the XRSTOR instruction to fail, the kernel has to carefully\nvalidate that no reserved bits or other invalid values are being set.\n\nUnfortunately, there have been bugs in this validation code.  For\nexample, we were not checking that the 'xcomp_bv' field in the\nxstate_header was 0.  As-is, such bugs are exploitable to read the FPU\nregisters of other processes on the system.  To do so, an attacker can\ncreate a task, assign to it an invalid FPU state, then spin in a loop\nand monitor the values of the FPU registers.  Because the task's FPU\nregisters are not being restored, sometimes the FPU registers will have\nthe values from another process.\n\nThis is likely to continue to be a problem in the future because the\nvalidation done by the CPU instructions like XRSTOR is not immediately\nvisible to kernel developers.  Nor will invalid FPU states ever be\nencountered during ordinary use --- they will only be seen during\nfuzzing or exploits.  There can even be reserved bits outside the\nxstate_header which are easy to forget about.  For example, the MXCSR\nregister contains reserved bits, which were not validated by the\nKVM_SET_XSAVE ioctl until commit a575813bfe4b (\"KVM: x86: Fix load\ndamaged SSEx MXCSR register\").\n\nTherefore, mitigate this class of vulnerability by restoring the FPU\nregisters from init_fpstate if restoring from the task's state fails.\n\nWe actually used to do this, but it was (perhaps unwisely) removed by\ncommit 9ccc27a5d297 (\"x86/fpu: Remove error return values from\ncopy_kernel_to_*regs() functions\").  This new patch is also a bit\ndifferent.  First, it only clears the registers, not also the bad\nin-memory state; this is simpler and makes it easier to make the\nmitigation cover all callers of __copy_kernel_to_fpregs().  Second, it\ndoes the register clearing in an exception handler so that no extra\ninstructions are added to context switches.  In fact, we *remove*\ninstructions, since previously we were always zeroing the register\ncontaining 'err' even if CONFIG_X86_DEBUG_FPU was disabled.\n\nSigned-off-by: Eric Biggers <ebiggers@google.com>\nReviewed-by: Rik van Riel <riel@redhat.com>\nCc: Andrew Morton <akpm@linux-foundation.org>\nCc: Andy Lutomirski <luto@amacapital.net>\nCc: Andy Lutomirski <luto@kernel.org>\nCc: Borislav Petkov <bp@alien8.de>\nCc: Dave Hansen <dave.hansen@linux.intel.com>\nCc: Dmitry Vyukov <dvyukov@google.com>\nCc: Eric Biggers <ebiggers3@gmail.com>\nCc: Fenghua Yu <fenghua.yu@intel.com>\nCc: Kevin Hao <haokexin@gmail.com>\nCc: Linus Torvalds <torvalds@linux-foundation.org>\nCc: Michael Halcrow <mhalcrow@google.com>\nCc: Oleg Nesterov <oleg@redhat.com>\nCc: Peter Zijlstra <peterz@infradead.org>\nCc: Thomas Gleixner <tglx@linutronix.de>\nCc: Wanpeng Li <wanpeng.li@hotmail.com>\nCc: Yu-cheng Yu <yu-cheng.yu@intel.com>\nCc: kernel-hardening@lists.openwall.com\nLink: http://lkml.kernel.org/r/20170922174156.16780-4-ebiggers3@gmail.com\nLink: http://lkml.kernel.org/r/20170923130016.21448-27-mingo@kernel.org\nSigned-off-by: Ingo Molnar <mingo@kernel.org>",
+  "author_name": "Eric Biggers",
+  "author_email": "ebiggers@google.com",
+  "author_date": "Sat Sep 23 15:00:09 2017 +0200",
+  "author_date_iso": "2017-09-23T15:00:09+02:00",
+  "committer_name": "Ingo Molnar",
+  "committer_email": "mingo@kernel.org",
+  "committer_date": "Mon Sep 25 09:26:38 2017 +0200",
+  "committer_date_iso": "2017-09-25T09:26:38+02:00",
+  "files_changed": [
+    "arch/x86/include/asm/fpu/internal.h",
+    "arch/x86/mm/extable.c"
+  ],
+  "files_changed_count": 2,
+  "stats": [
+    {
+      "file": "arch/x86/include/asm/fpu/internal.h",
+      "insertions": 15,
+      "deletions": 36
+    },
+    {
+      "file": "arch/x86/mm/extable.c",
+      "insertions": 24,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 39,
+  "total_deletions": 36,
+  "total_changes": 75,
+  "parents": [
+    "814fb7bb7db5433757d76f4c4502c96fc53b0b5e"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v4.14",
+    "v4.14-rc3",
+    "v4.14-rc4",
+    "v4.14-rc5",
+    "v4.14-rc6",
+    "v4.14-rc7",
+    "v4.14-rc8",
+    "v4.15",
+    "v4.15-rc1",
+    "v4.15-rc2"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "hardening",
+      "vulnerability"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/x86/include/asm/fpu/internal.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/mm/extable.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

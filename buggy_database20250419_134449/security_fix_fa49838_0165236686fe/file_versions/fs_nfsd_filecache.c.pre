@@ -1,0 +1,72 @@
+commit a61e147e6be6e763d9c6dec8061d2893c0bb3423
+Author: Mike Snitzer <snitzer@kernel.org>
+Date:   Thu Sep 5 15:09:49 2024 -0400
+
+    nfs_common: prepare for the NFS client to use nfsd_file for LOCALIO
+    
+    The next commit will introduce nfsd_open_local_fh() which returns an
+    nfsd_file structure.  This commit exposes LOCALIO's required NFSD
+    symbols to the NFS client:
+    
+    - Make nfsd_open_local_fh() symbol and other required NFSD symbols
+      available to NFS in a global 'nfs_to' nfsd_localio_operations
+      struct (global access suggested by Trond, nfsd_localio_operations
+      suggested by NeilBrown).  The next commit will also introduce
+      nfsd_localio_ops_init() that init_nfsd() will call to initialize
+      'nfs_to'.
+    
+    - Introduce nfsd_file_file() that provides access to nfsd_file's
+      backing file.  Keeps nfsd_file structure opaque to NFS client (as
+      suggested by Jeff Layton).
+    
+    - Introduce nfsd_file_put_local() that will put the reference to the
+      nfsd_file's associated nn->nfsd_serv and then put the reference to
+      the nfsd_file (as suggested by NeilBrown).
+    
+    Suggested-by: Trond Myklebust <trond.myklebust@hammerspace.com> # nfs_to
+    Suggested-by: NeilBrown <neilb@suse.de> # nfsd_localio_operations
+    Suggested-by: Jeff Layton <jlayton@kernel.org> # nfsd_file_file
+    Signed-off-by: Mike Snitzer <snitzer@kernel.org>
+    Reviewed-by: NeilBrown <neilb@suse.de>
+    Reviewed-by: Jeff Layton <jlayton@kernel.org>
+    Signed-off-by: Anna Schumaker <anna.schumaker@oracle.com>
+
+diff --git a/fs/nfsd/filecache.c b/fs/nfsd/filecache.c
+index caeffc43ca4b..414b5bf738df 100644
+--- a/fs/nfsd/filecache.c
++++ b/fs/nfsd/filecache.c
+@@ -390,6 +390,34 @@ nfsd_file_put(struct nfsd_file *nf)
+ 		nfsd_file_free(nf);
+ }
+ 
++/**
++ * nfsd_file_put_local - put the reference to nfsd_file and local nfsd_serv
++ * @nf: nfsd_file of which to put the references
++ *
++ * First put the reference of the nfsd_file and then put the
++ * reference to the associated nn->nfsd_serv.
++ */
++void
++nfsd_file_put_local(struct nfsd_file *nf)
++{
++	struct net *net = nf->nf_net;
++
++	nfsd_file_put(nf);
++	nfsd_serv_put(net);
++}
++
++/**
++ * nfsd_file_file - get the backing file of an nfsd_file
++ * @nf: nfsd_file of which to access the backing file.
++ *
++ * Return backing file for @nf.
++ */
++struct file *
++nfsd_file_file(struct nfsd_file *nf)
++{
++	return nf->nf_file;
++}
++
+ static void
+ nfsd_file_dispose_list(struct list_head *dispose)
+ {

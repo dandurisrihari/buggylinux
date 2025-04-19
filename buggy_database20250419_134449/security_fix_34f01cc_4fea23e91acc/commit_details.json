@@ -1,0 +1,78 @@
+{
+  "hash": "34f01cc1f512fa783302982776895c73714ebbc2",
+  "hash_short": "34f01cc1",
+  "subject": "FUTEX: new PRIVATE futexes",
+  "body": "Analysis of current linux futex code :\n  --------------------------------------\n\nA central hash table futex_queues[] holds all contexts (futex_q) of waiting\nthreads.\n\nEach futex_wait()/futex_wait() has to obtain a spinlock on a hash slot to\nperform lookups or insert/deletion of a futex_q.\n\nWhen a futex_wait() is done, calling thread has to :\n\n1) - Obtain a read lock on mmap_sem to be able to validate the user pointer\n     (calling find_vma()). This validation tells us if the futex uses\n     an inode based store (mapped file), or mm based store (anonymous mem)\n\n2) - compute a hash key\n\n3) - Atomic increment of reference counter on an inode or a mm_struct\n\n4) - lock part of futex_queues[] hash table\n\n5) - perform the test on value of futex.\n\t(rollback is value != expected_value, returns EWOULDBLOCK)\n\t(various loops if test triggers mm faults)\n\n6) queue the context into hash table, release the lock got in 4)\n\n7) - release the read_lock on mmap_sem\n\n   <block>\n\n8) Eventually unqueue the context (but rarely, as this part \u00a0may be done\n   by the futex_wake())\n\nFutexes were designed to improve scalability but current implementation has\nvarious problems :\n\n- Central hashtable :\n\n  This means scalability problems if many processes/threads want to use\n  futexes at the same time.\n  This means NUMA unbalance because this hashtable is located on one node.\n\n- Using mmap_sem on every futex() syscall :\n\n  Even if mmap_sem is a rw_semaphore, up_read()/down_read() are doing atomic\n  ops on mmap_sem, dirtying cache line :\n    - lot of cache line ping pongs on SMP configurations.\n\n  mmap_sem is also extensively used by mm code (page faults, mmap()/munmap())\n  Highly threaded processes might suffer from mmap_sem contention.\n\n  mmap_sem is also used by oprofile code. Enabling oprofile hurts threaded\n  programs because of contention on the mmap_sem cache line.\n\n- Using an atomic_inc()/atomic_dec() on inode ref counter or mm ref counter:\n  It's also a cache line ping pong on SMP. It also increases mmap_sem hold time\n  because of cache misses.\n\nMost of these scalability problems come from the fact that futexes are in\none global namespace.  As we use a central hash table, we must make sure\nthey are all using the same reference (given by the mm subsystem).  We\nchose to force all futexes be 'shared'.  This has a cost.\n\nBut fact is POSIX defined PRIVATE and SHARED, allowing clear separation,\nand optimal performance if carefuly implemented.  Time has come for linux\nto have better threading performance.\n\nThe goal is to permit new futex commands to avoid :\n - Taking the mmap_sem semaphore, conflicting with other subsystems.\n - Modifying a ref_count on mm or an inode, still conflicting with mm or fs.\n\nThis is possible because, for one process using PTHREAD_PROCESS_PRIVATE\nfutexes, we only need to distinguish futexes by their virtual address, no\nmatter the underlying mm storage is.\n\nIf glibc wants to exploit this new infrastructure, it should use new\n_PRIVATE futex subcommands for PTHREAD_PROCESS_PRIVATE futexes.  And be\nprepared to fallback on old subcommands for old kernels.  Using one global\nvariable with the FUTEX_PRIVATE_FLAG or 0 value should be OK.\n\nPTHREAD_PROCESS_SHARED futexes should still use the old subcommands.\n\nCompatibility with old applications is preserved, they still hit the\nscalability problems, but new applications can fly :)\n\nNote : the same SHARED futex (mapped on a file) can be used by old binaries\n*and* new binaries, because both binaries will use the old subcommands.\n\nNote : Vast majority of futexes should be using PROCESS_PRIVATE semantic,\nas this is the default semantic. Almost all applications should benefit\nof this changes (new kernel and updated libc)\n\nSome bench results on a Pentium M 1.6 GHz (SMP kernel on a UP machine)\n\n/* calling futex_wait(addr, value) with value != *addr */\n433 cycles per futex(FUTEX_WAIT) call (mixing 2 futexes)\n424 cycles per futex(FUTEX_WAIT) call (using one futex)\n334 cycles per futex(FUTEX_WAIT_PRIVATE) call (mixing 2 futexes)\n334 cycles per futex(FUTEX_WAIT_PRIVATE) call (using one futex)\nFor reference :\n187 cycles per getppid() call\n188 cycles per umask() call\n181 cycles per ni_syscall() call\n\nSigned-off-by: Eric Dumazet <dada1@cosmosbay.com>\nPierre Peiffer <pierre.peiffer@bull.net>\nCc: \"Ulrich Drepper\" <drepper@gmail.com>\nCc: \"Nick Piggin\" <nickpiggin@yahoo.com.au>\nCc: \"Ingo Molnar\" <mingo@elte.hu>\nCc: Rusty Russell <rusty@rustcorp.com.au>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>\nSigned-off-by: Linus Torvalds <torvalds@linux-foundation.org>",
+  "full_message": "FUTEX: new PRIVATE futexes\n\n  Analysis of current linux futex code :\n  --------------------------------------\n\nA central hash table futex_queues[] holds all contexts (futex_q) of waiting\nthreads.\n\nEach futex_wait()/futex_wait() has to obtain a spinlock on a hash slot to\nperform lookups or insert/deletion of a futex_q.\n\nWhen a futex_wait() is done, calling thread has to :\n\n1) - Obtain a read lock on mmap_sem to be able to validate the user pointer\n     (calling find_vma()). This validation tells us if the futex uses\n     an inode based store (mapped file), or mm based store (anonymous mem)\n\n2) - compute a hash key\n\n3) - Atomic increment of reference counter on an inode or a mm_struct\n\n4) - lock part of futex_queues[] hash table\n\n5) - perform the test on value of futex.\n\t(rollback is value != expected_value, returns EWOULDBLOCK)\n\t(various loops if test triggers mm faults)\n\n6) queue the context into hash table, release the lock got in 4)\n\n7) - release the read_lock on mmap_sem\n\n   <block>\n\n8) Eventually unqueue the context (but rarely, as this part \u00a0may be done\n   by the futex_wake())\n\nFutexes were designed to improve scalability but current implementation has\nvarious problems :\n\n- Central hashtable :\n\n  This means scalability problems if many processes/threads want to use\n  futexes at the same time.\n  This means NUMA unbalance because this hashtable is located on one node.\n\n- Using mmap_sem on every futex() syscall :\n\n  Even if mmap_sem is a rw_semaphore, up_read()/down_read() are doing atomic\n  ops on mmap_sem, dirtying cache line :\n    - lot of cache line ping pongs on SMP configurations.\n\n  mmap_sem is also extensively used by mm code (page faults, mmap()/munmap())\n  Highly threaded processes might suffer from mmap_sem contention.\n\n  mmap_sem is also used by oprofile code. Enabling oprofile hurts threaded\n  programs because of contention on the mmap_sem cache line.\n\n- Using an atomic_inc()/atomic_dec() on inode ref counter or mm ref counter:\n  It's also a cache line ping pong on SMP. It also increases mmap_sem hold time\n  because of cache misses.\n\nMost of these scalability problems come from the fact that futexes are in\none global namespace.  As we use a central hash table, we must make sure\nthey are all using the same reference (given by the mm subsystem).  We\nchose to force all futexes be 'shared'.  This has a cost.\n\nBut fact is POSIX defined PRIVATE and SHARED, allowing clear separation,\nand optimal performance if carefuly implemented.  Time has come for linux\nto have better threading performance.\n\nThe goal is to permit new futex commands to avoid :\n - Taking the mmap_sem semaphore, conflicting with other subsystems.\n - Modifying a ref_count on mm or an inode, still conflicting with mm or fs.\n\nThis is possible because, for one process using PTHREAD_PROCESS_PRIVATE\nfutexes, we only need to distinguish futexes by their virtual address, no\nmatter the underlying mm storage is.\n\nIf glibc wants to exploit this new infrastructure, it should use new\n_PRIVATE futex subcommands for PTHREAD_PROCESS_PRIVATE futexes.  And be\nprepared to fallback on old subcommands for old kernels.  Using one global\nvariable with the FUTEX_PRIVATE_FLAG or 0 value should be OK.\n\nPTHREAD_PROCESS_SHARED futexes should still use the old subcommands.\n\nCompatibility with old applications is preserved, they still hit the\nscalability problems, but new applications can fly :)\n\nNote : the same SHARED futex (mapped on a file) can be used by old binaries\n*and* new binaries, because both binaries will use the old subcommands.\n\nNote : Vast majority of futexes should be using PROCESS_PRIVATE semantic,\nas this is the default semantic. Almost all applications should benefit\nof this changes (new kernel and updated libc)\n\nSome bench results on a Pentium M 1.6 GHz (SMP kernel on a UP machine)\n\n/* calling futex_wait(addr, value) with value != *addr */\n433 cycles per futex(FUTEX_WAIT) call (mixing 2 futexes)\n424 cycles per futex(FUTEX_WAIT) call (using one futex)\n334 cycles per futex(FUTEX_WAIT_PRIVATE) call (mixing 2 futexes)\n334 cycles per futex(FUTEX_WAIT_PRIVATE) call (using one futex)\nFor reference :\n187 cycles per getppid() call\n188 cycles per umask() call\n181 cycles per ni_syscall() call\n\nSigned-off-by: Eric Dumazet <dada1@cosmosbay.com>\nPierre Peiffer <pierre.peiffer@bull.net>\nCc: \"Ulrich Drepper\" <drepper@gmail.com>\nCc: \"Nick Piggin\" <nickpiggin@yahoo.com.au>\nCc: \"Ingo Molnar\" <mingo@elte.hu>\nCc: Rusty Russell <rusty@rustcorp.com.au>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>\nSigned-off-by: Linus Torvalds <torvalds@linux-foundation.org>",
+  "author_name": "Eric Dumazet",
+  "author_email": "dada1@cosmosbay.com",
+  "author_date": "Wed May 9 02:35:04 2007 -0700",
+  "author_date_iso": "2007-05-09T02:35:04-07:00",
+  "committer_name": "Linus Torvalds",
+  "committer_email": "torvalds@woody.linux-foundation.org",
+  "committer_date": "Wed May 9 12:30:55 2007 -0700",
+  "committer_date_iso": "2007-05-09T12:30:55-07:00",
+  "files_changed": [
+    "include/linux/futex.h",
+    "kernel/futex.c"
+  ],
+  "files_changed_count": 2,
+  "stats": [
+    {
+      "file": "include/linux/futex.h",
+      "insertions": 26,
+      "deletions": 3
+    },
+    {
+      "file": "kernel/futex.c",
+      "insertions": 210,
+      "deletions": 114
+    }
+  ],
+  "total_insertions": 236,
+  "total_deletions": 117,
+  "total_changes": 353,
+  "parents": [
+    "d0aa7a70bf03b9de9e995ab272293be1f7937822"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v2.6.22",
+    "v2.6.22-rc1",
+    "v2.6.22-rc2",
+    "v2.6.22-rc3",
+    "v2.6.22-rc4",
+    "v2.6.22-rc5",
+    "v2.6.22-rc6",
+    "v2.6.22-rc7",
+    "v2.6.23",
+    "v2.6.23-rc1"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "exploit"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "include/linux/futex.h",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "kernel/futex.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

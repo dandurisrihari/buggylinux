@@ -1,0 +1,57 @@
+commit 2dcfe9e2d370f6643486e327c6ae17af8887756c
+Author: Kees Cook <kees@kernel.org>
+Date:   Mon May 9 15:11:54 2022 -0700
+
+    niu: Silence randstruct warnings
+    
+    Clang randstruct gets upset when it sees struct addresspace (which is
+    randomized) being assigned to a struct page (which is not randomized):
+    
+    drivers/net/ethernet/sun/niu.c:3385:12: error: casting from randomized structure pointer type 'struct address_space *' to 'struct page *'
+                            *link = (struct page *) page->mapping;
+                                    ^
+    
+    It looks like niu.c is looking for an in-line place to chain its allocated
+    pages together and is overloading the "mapping" member, as it is unused.
+    This is very non-standard, and is expected to be cleaned up in the
+    future[1], but there is no "correct" way to handle it today.
+    
+    No meaningful machine code changes result after this change, and source
+    readability is improved.
+    
+    Drop the randstruct exception now that there is no "confusing" cross-type
+    assignment.
+    
+    [1] https://lore.kernel.org/lkml/YnqgjVoMDu5v9PNG@casper.infradead.org/
+    
+    Cc: "Matthew Wilcox (Oracle)" <willy@infradead.org>
+    Cc: Christoph Hellwig <hch@infradead.org>
+    Cc: "David S. Miller" <davem@davemloft.net>
+    Cc: Jakub Kicinski <kuba@kernel.org>
+    Cc: Paolo Abeni <pabeni@redhat.com>
+    Cc: Du Cheng <ducheng2@gmail.com>
+    Cc: Christophe JAILLET <christophe.jaillet@wanadoo.fr>
+    Cc: Vlastimil Babka <vbabka@suse.cz>
+    Cc: William Kucharski <william.kucharski@oracle.com>
+    Cc: Arnd Bergmann <arnd@arndb.de>
+    Cc: Nathan Chancellor <nathan@kernel.org>
+    Cc: netdev@vger.kernel.org
+    Cc: linux-mm@kvack.org
+    Cc: linux-hardening@vger.kernel.org
+    Acked-by: Jakub Kicinski <kuba@kernel.org>
+    Link: https://lore.kernel.org/lkml/20220511151647.7290adbe@kernel.org
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+
+diff --git a/scripts/gcc-plugins/randomize_layout_plugin.c b/scripts/gcc-plugins/randomize_layout_plugin.c
+index 5836a7fc7532..c9d345a91c41 100644
+--- a/scripts/gcc-plugins/randomize_layout_plugin.c
++++ b/scripts/gcc-plugins/randomize_layout_plugin.c
+@@ -46,8 +46,6 @@ struct whitelist_entry {
+ };
+ 
+ static const struct whitelist_entry whitelist[] = {
+-	/* NIU overloads mapping with page struct */
+-	{ "drivers/net/ethernet/sun/niu.c", "page", "address_space" },
+ 	/* unix_skb_parms via UNIXCB() buffer */
+ 	{ "net/unix/af_unix.c", "unix_skb_parms", "char" },
+ 	{ }

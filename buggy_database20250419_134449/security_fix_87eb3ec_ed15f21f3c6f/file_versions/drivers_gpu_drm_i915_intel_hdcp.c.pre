@@ -1,0 +1,72 @@
+commit fdddd08c4875db0799defd8cad318a68f564e7e5
+Author: Ramalingam C <ramalingam.c@intel.com>
+Date:   Thu Jan 18 11:18:05 2018 +0530
+
+    drm/i915: Extending HDCP for HSW, BDW and BXT+
+    
+    This patch extends the Key load process and hdcp initialization for
+    few more capable intel platforms i.e. HSW, BDW and BXT+.
+    
+    Signed-off-by: Ramalingam C <ramalingam.c@intel.com>
+    [seanpaul fixed checkpatch issues]
+    Signed-off-by: Sean Paul <seanpaul@chromium.org>
+    Link: https://patchwork.freedesktop.org/patch/msgid/1516254488-4971-2-git-send-email-ramalingam.c@intel.com
+
+diff --git a/drivers/gpu/drm/i915/intel_hdcp.c b/drivers/gpu/drm/i915/intel_hdcp.c
+index 827cab22f191..e49ca7fe893f 100644
+--- a/drivers/gpu/drm/i915/intel_hdcp.c
++++ b/drivers/gpu/drm/i915/intel_hdcp.c
+@@ -49,13 +49,32 @@ static int intel_hdcp_load_keys(struct drm_i915_private *dev_priv)
+ 	int ret;
+ 	u32 val;
+ 
+-	/* Initiate loading the HDCP key from fuses */
+-	mutex_lock(&dev_priv->pcu_lock);
+-	ret = sandybridge_pcode_write(dev_priv, SKL_PCODE_LOAD_HDCP_KEYS, 1);
+-	mutex_unlock(&dev_priv->pcu_lock);
+-	if (ret) {
+-		DRM_ERROR("Failed to initiate HDCP key load (%d)\n", ret);
+-		return ret;
++	/*
++	 * On HSW and BDW HW loads the HDCP1.4 Key when Display comes
++	 * out of reset. So if Key is not already loaded, its an error state.
++	 */
++	if (IS_HASWELL(dev_priv) || IS_BROADWELL(dev_priv))
++		if (!(I915_READ(HDCP_KEY_STATUS) & HDCP_KEY_LOAD_DONE))
++			return -ENXIO;
++
++	/*
++	 * Initiate loading the HDCP key from fuses.
++	 *
++	 * BXT+ platforms, HDCP key needs to be loaded by SW. Only SKL and KBL
++	 * differ in the key load trigger process from other platforms.
++	 */
++	if (IS_SKYLAKE(dev_priv) || IS_KABYLAKE(dev_priv)) {
++		mutex_lock(&dev_priv->pcu_lock);
++		ret = sandybridge_pcode_write(dev_priv,
++					      SKL_PCODE_LOAD_HDCP_KEYS, 1);
++		mutex_unlock(&dev_priv->pcu_lock);
++		if (ret) {
++			DRM_ERROR("Failed to initiate HDCP key load (%d)\n",
++			          ret);
++			return ret;
++		}
++	} else {
++		I915_WRITE(HDCP_KEY_CONF, HDCP_KEY_LOAD_TRIGGER);
+ 	}
+ 
+ 	/* Wait for the keys to load (500us) */
+@@ -575,6 +594,13 @@ static void intel_hdcp_prop_work(struct work_struct *work)
+ 	drm_modeset_unlock(&dev->mode_config.connection_mutex);
+ }
+ 
++bool is_hdcp_supported(struct drm_i915_private *dev_priv, enum port port)
++{
++	/* PORT E doesn't have HDCP, and PORT F is disabled */
++	return ((INTEL_GEN(dev_priv) >= 8 || IS_HASWELL(dev_priv)) &&
++		!IS_CHERRYVIEW(dev_priv) && port < PORT_E);
++}
++
+ int intel_hdcp_init(struct intel_connector *connector,
+ 		    const struct intel_hdcp_shim *hdcp_shim)
+ {

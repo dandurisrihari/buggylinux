@@ -1,0 +1,49 @@
+commit d583fbd7066a2dea43050521a95d9770f7d7593e
+Author: Dmytro Maluka <dmy@semihalf.com>
+Date:   Wed Mar 22 21:43:43 2023 +0100
+
+    KVM: irqfd: Make resampler_list an RCU list
+    
+    It is useful to be able to do read-only traversal of the list of all the
+    registered irqfd resamplers without locking the resampler_lock mutex.
+    In particular, we are going to traverse it to search for a resampler
+    registered for the given irq of an irqchip, and that will be done with
+    an irqchip spinlock (ioapic->lock) held, so it is undesirable to lock a
+    mutex in this context. So turn this list into an RCU list.
+    
+    For protecting the read side, reuse kvm->irq_srcu which is already used
+    for protecting a number of irq related things (kvm->irq_routing,
+    irqfd->resampler->list, kvm->irq_ack_notifier_list,
+    kvm->arch.mask_notifier_list).
+    
+    Signed-off-by: Dmytro Maluka <dmy@semihalf.com>
+    Message-Id: <20230322204344.50138-2-dmy@semihalf.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/virt/kvm/eventfd.c b/virt/kvm/eventfd.c
+index 2a3ed401ce46..61aea70dd888 100644
+--- a/virt/kvm/eventfd.c
++++ b/virt/kvm/eventfd.c
+@@ -96,8 +96,12 @@ irqfd_resampler_shutdown(struct kvm_kernel_irqfd *irqfd)
+ 	synchronize_srcu(&kvm->irq_srcu);
+ 
+ 	if (list_empty(&resampler->list)) {
+-		list_del(&resampler->link);
++		list_del_rcu(&resampler->link);
+ 		kvm_unregister_irq_ack_notifier(kvm, &resampler->notifier);
++		/*
++		 * synchronize_srcu(&kvm->irq_srcu) already called
++		 * in kvm_unregister_irq_ack_notifier().
++		 */
+ 		kvm_set_irq(kvm, KVM_IRQFD_RESAMPLE_IRQ_SOURCE_ID,
+ 			    resampler->notifier.gsi, 0, false);
+ 		kfree(resampler);
+@@ -369,7 +373,7 @@ kvm_irqfd_assign(struct kvm *kvm, struct kvm_irqfd *args)
+ 			resampler->notifier.irq_acked = irqfd_resampler_ack;
+ 			INIT_LIST_HEAD(&resampler->link);
+ 
+-			list_add(&resampler->link, &kvm->irqfds.resampler_list);
++			list_add_rcu(&resampler->link, &kvm->irqfds.resampler_list);
+ 			kvm_register_irq_ack_notifier(kvm,
+ 						      &resampler->notifier);
+ 			irqfd->resampler = resampler;

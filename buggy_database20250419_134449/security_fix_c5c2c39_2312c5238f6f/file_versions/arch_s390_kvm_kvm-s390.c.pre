@@ -1,0 +1,38 @@
+commit 60417fcc2b0235dfe3dcd589c56dbe3ea1a64c54
+Author: David Hildenbrand <dahi@linux.vnet.ibm.com>
+Date:   Tue Sep 29 16:20:36 2015 +0200
+
+    KVM: s390: factor out reading of the guest TOD clock
+    
+    Let's factor this out and always use get_tod_clock_fast() when
+    reading the guest TOD.
+    
+    STORE CLOCK FAST does not do serialization and, therefore, might
+    result in some fuzziness between different processors in a way
+    that subsequent calls on different CPUs might have time stamps that
+    are earlier. This semantics is fine though for all KVM use cases.
+    To make it obvious that the new function has STORE CLOCK FAST
+    semantics we name it kvm_s390_get_tod_clock_fast.
+    
+    With this patch, we only have a handful of places were we
+    have to care about STP sync (using preempt_disable() logic).
+    
+    Reviewed-by: Christian Borntraeger <borntraeger@de.ibm.com>
+    Signed-off-by: David Hildenbrand <dahi@linux.vnet.ibm.com>
+    Signed-off-by: Christian Borntraeger <borntraeger@de.ibm.com>
+
+diff --git a/arch/s390/kvm/kvm-s390.c b/arch/s390/kvm/kvm-s390.c
+index 87bd602f326c..618c85411a51 100644
+--- a/arch/s390/kvm/kvm-s390.c
++++ b/arch/s390/kvm/kvm-s390.c
+@@ -568,9 +568,7 @@ static int kvm_s390_get_tod_low(struct kvm *kvm, struct kvm_device_attr *attr)
+ {
+ 	u64 gtod;
+ 
+-	preempt_disable();
+-	gtod = get_tod_clock() + kvm->arch.epoch;
+-	preempt_enable();
++	gtod = kvm_s390_get_tod_clock_fast(kvm);
+ 	if (copy_to_user((void __user *)attr->addr, &gtod, sizeof(gtod)))
+ 		return -EFAULT;
+ 	VM_EVENT(kvm, 3, "QUERY: TOD base: 0x%llx\n", gtod);

@@ -1,0 +1,102 @@
+commit f845172531fb7410c7fb7780b1a6e51ee6df7d52
+Author: Herbert Xu <herbert@gondor.apana.org.au>
+Date:   Mon May 24 00:12:34 2010 -0700
+
+    cls_cgroup: Store classid in struct sock
+    
+    Up until now cls_cgroup has relied on fetching the classid out of
+    the current executing thread.  This runs into trouble when a packet
+    processing is delayed in which case it may execute out of another
+    thread's context.
+    
+    Furthermore, even when a packet is not delayed we may fail to
+    classify it if soft IRQs have been disabled, because this scenario
+    is indistinguishable from one where a packet unrelated to the
+    current thread is processed by a real soft IRQ.
+    
+    In fact, the current semantics is inherently broken, as a single
+    skb may be constructed out of the writes of two different tasks.
+    A different manifestation of this problem is when the TCP stack
+    transmits in response of an incoming ACK.  This is currently
+    unclassified.
+    
+    As we already have a concept of packet ownership for accounting
+    purposes in the skb->sk pointer, this is a natural place to store
+    the classid in a persistent manner.
+    
+    This patch adds the cls_cgroup classid in struct sock, filling up
+    an existing hole on 64-bit :)
+    
+    The value is set at socket creation time.  So all sockets created
+    via socket(2) automatically gains the ID of the thread creating it.
+    Whenever another process touches the socket by either reading or
+    writing to it, we will change the socket classid to that of the
+    process if it has a valid (non-zero) classid.
+    
+    For sockets created on inbound connections through accept(2), we
+    inherit the classid of the original listening socket through
+    sk_clone, possibly preceding the actual accept(2) call.
+    
+    In order to minimise risks, I have not made this the authoritative
+    classid.  For now it is only used as a backup when we execute
+    with soft IRQs disabled.  Once we're completely happy with its
+    semantics we can use it as the sole classid.
+    
+    Footnote: I have rearranged the error path on cls_group module
+    creation.  If we didn't do this, then there is a window where
+    someone could create a tc rule using cls_group before the cgroup
+    subsystem has been registered.
+    
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/core/sock.c b/net/core/sock.c
+index bf88a167c8f2..a05ae7f9771e 100644
+--- a/net/core/sock.c
++++ b/net/core/sock.c
+@@ -123,6 +123,7 @@
+ #include <linux/net_tstamp.h>
+ #include <net/xfrm.h>
+ #include <linux/ipsec.h>
++#include <net/cls_cgroup.h>
+ 
+ #include <linux/filter.h>
+ 
+@@ -217,6 +218,11 @@ __u32 sysctl_rmem_default __read_mostly = SK_RMEM_MAX;
+ int sysctl_optmem_max __read_mostly = sizeof(unsigned long)*(2*UIO_MAXIOV+512);
+ EXPORT_SYMBOL(sysctl_optmem_max);
+ 
++#if defined(CONFIG_CGROUPS) && !defined(CONFIG_NET_CLS_CGROUP)
++int net_cls_subsys_id = -1;
++EXPORT_SYMBOL_GPL(net_cls_subsys_id);
++#endif
++
+ static int sock_set_timeout(long *timeo_p, char __user *optval, int optlen)
+ {
+ 	struct timeval tv;
+@@ -1050,6 +1056,16 @@ static void sk_prot_free(struct proto *prot, struct sock *sk)
+ 	module_put(owner);
+ }
+ 
++#ifdef CONFIG_CGROUPS
++void sock_update_classid(struct sock *sk)
++{
++	u32 classid = task_cls_classid(current);
++
++	if (classid && classid != sk->sk_classid)
++		sk->sk_classid = classid;
++}
++#endif
++
+ /**
+  *	sk_alloc - All socket objects are allocated here
+  *	@net: the applicable net namespace
+@@ -1073,6 +1089,8 @@ struct sock *sk_alloc(struct net *net, int family, gfp_t priority,
+ 		sock_lock_init(sk);
+ 		sock_net_set(sk, get_net(net));
+ 		atomic_set(&sk->sk_wmem_alloc, 1);
++
++		sock_update_classid(sk);
+ 	}
+ 
+ 	return sk;

@@ -1,0 +1,64 @@
+commit c2beff99eb03866df6fdbd3a93b08fd27eb8bf5c
+Author: Darrick J. Wong <djwong@kernel.org>
+Date:   Mon Nov 28 17:24:35 2022 -0800
+
+    xfs: add debug knob to slow down writeback for fun
+    
+    Add a new error injection knob so that we can arbitrarily slow down
+    writeback to test for race conditions and aberrant reclaim behavior if
+    the writeback mechanisms are slow to issue writeback.  This will enable
+    functional testing for the ifork sequence counters introduced in commit
+    745b3f76d1c8 ("xfs: maintain a sequence count for inode fork
+    manipulations").
+    
+    Signed-off-by: Darrick J. Wong <djwong@kernel.org>
+    Reviewed-by: Dave Chinner <dchinner@redhat.com>
+
+diff --git a/fs/xfs/xfs_error.c b/fs/xfs/xfs_error.c
+index dea3c0649d2f..2d6e3c718e03 100644
+--- a/fs/xfs/xfs_error.c
++++ b/fs/xfs/xfs_error.c
+@@ -60,6 +60,7 @@ static unsigned int xfs_errortag_random_default[] = {
+ 	XFS_RANDOM_LARP,
+ 	XFS_RANDOM_DA_LEAF_SPLIT,
+ 	XFS_RANDOM_ATTR_LEAF_TO_NODE,
++	XFS_RANDOM_WB_DELAY_MS,
+ };
+ 
+ struct xfs_errortag_attr {
+@@ -175,6 +176,7 @@ XFS_ERRORTAG_ATTR_RW(ag_resv_fail, XFS_ERRTAG_AG_RESV_FAIL);
+ XFS_ERRORTAG_ATTR_RW(larp,		XFS_ERRTAG_LARP);
+ XFS_ERRORTAG_ATTR_RW(da_leaf_split,	XFS_ERRTAG_DA_LEAF_SPLIT);
+ XFS_ERRORTAG_ATTR_RW(attr_leaf_to_node,	XFS_ERRTAG_ATTR_LEAF_TO_NODE);
++XFS_ERRORTAG_ATTR_RW(wb_delay_ms,	XFS_ERRTAG_WB_DELAY_MS);
+ 
+ static struct attribute *xfs_errortag_attrs[] = {
+ 	XFS_ERRORTAG_ATTR_LIST(noerror),
+@@ -218,6 +220,7 @@ static struct attribute *xfs_errortag_attrs[] = {
+ 	XFS_ERRORTAG_ATTR_LIST(larp),
+ 	XFS_ERRORTAG_ATTR_LIST(da_leaf_split),
+ 	XFS_ERRORTAG_ATTR_LIST(attr_leaf_to_node),
++	XFS_ERRORTAG_ATTR_LIST(wb_delay_ms),
+ 	NULL,
+ };
+ ATTRIBUTE_GROUPS(xfs_errortag);
+@@ -267,6 +270,19 @@ xfs_errortag_valid(
+ 	return true;
+ }
+ 
++bool
++xfs_errortag_enabled(
++	struct xfs_mount	*mp,
++	unsigned int		tag)
++{
++	if (!mp->m_errortag)
++		return false;
++	if (!xfs_errortag_valid(tag))
++		return false;
++
++	return mp->m_errortag[tag] != 0;
++}
++
+ bool
+ xfs_errortag_test(
+ 	struct xfs_mount	*mp,

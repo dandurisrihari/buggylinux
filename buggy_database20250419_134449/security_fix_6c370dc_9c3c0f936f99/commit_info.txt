@@ -1,0 +1,100 @@
+Commit Hash: 6c370dc65374db5afbc5c6c64c662f922a2555ad
+Subject: Merge branch 'kvm-guestmemfd' into HEAD
+
+
+Security Keywords:
+- hardening
+
+Full commit message:
+Merge branch 'kvm-guestmemfd' into HEAD
+
+Introduce several new KVM uAPIs to ultimately create a guest-first memory
+subsystem within KVM, a.k.a. guest_memfd.  Guest-first memory allows KVM
+to provide features, enhancements, and optimizations that are kludgly
+or outright impossible to implement in a generic memory subsystem.
+
+The core KVM ioctl() for guest_memfd is KVM_CREATE_GUEST_MEMFD, which
+similar to the generic memfd_create(), creates an anonymous file and
+returns a file descriptor that refers to it.  Again like "regular"
+memfd files, guest_memfd files live in RAM, have volatile storage,
+and are automatically released when the last reference is dropped.
+The key differences between memfd files (and every other memory subystem)
+is that guest_memfd files are bound to their owning virtual machine,
+cannot be mapped, read, or written by userspace, and cannot be resized.
+guest_memfd files do however support PUNCH_HOLE, which can be used to
+convert a guest memory area between the shared and guest-private states.
+
+A second KVM ioctl(), KVM_SET_MEMORY_ATTRIBUTES, allows userspace to
+specify attributes for a given page of guest memory.  In the long term,
+it will likely be extended to allow userspace to specify per-gfn RWX
+protections, including allowing memory to be writable in the guest
+without it also being writable in host userspace.
+
+The immediate and driving use case for guest_memfd are Confidential
+(CoCo) VMs, specifically AMD's SEV-SNP, Intel's TDX, and KVM's own pKVM.
+For such use cases, being able to map memory into KVM guests without
+requiring said memory to be mapped into the host is a hard requirement.
+While SEV+ and TDX prevent untrusted software from reading guest private
+data by encrypting guest memory, pKVM provides confidentiality and
+integrity *without* relying on memory encryption.  In addition, with
+SEV-SNP and especially TDX, accessing guest private memory can be fatal
+to the host, i.e. KVM must be prevent host userspace from accessing
+guest memory irrespective of hardware behavior.
+
+Long term, guest_memfd may be useful for use cases beyond CoCo VMs,
+for example hardening userspace against unintentional accesses to guest
+memory.  As mentioned earlier, KVM's ABI uses userspace VMA protections to
+define the allow guest protection (with an exception granted to mapping
+guest memory executable), and similarly KVM currently requires the guest
+mapping size to be a strict subset of the host userspace mapping size.
+Decoupling the mappings sizes would allow userspace to precisely map
+only what is needed and with the required permissions, without impacting
+guest performance.
+
+A guest-first memory subsystem also provides clearer line of sight to
+things like a dedicated memory pool (for slice-of-hardware VMs) and
+elimination of "struct page" (for offload setups where userspace _never_
+needs to DMA from or into guest memory).
+
+guest_memfd is the result of 3+ years of development and exploration;
+taking on memory management responsibilities in KVM was not the first,
+second, or even third choice for supporting CoCo VMs.  But after many
+failed attempts to avoid KVM-specific backing memory, and looking at
+where things ended up, it is quite clear that of all approaches tried,
+guest_memfd is the simplest, most robust, and most extensible, and the
+right thing to do for KVM and the kernel at-large.
+
+The "development cycle" for this version is going to be very short;
+ideally, next week I will merge it as is in kvm/next, taking this through
+the KVM tree for 6.8 immediately after the end of the merge window.
+The series is still based on 6.6 (plus KVM changes for 6.7) so it
+will require a small fixup for changes to get_file_rcu() introduced in
+6.7 by commit 0ede61d8589c ("file: convert to SLAB_TYPESAFE_BY_RCU").
+The fixup will be done as part of the merge commit, and most of the text
+above will become the commit message for the merge.
+
+Pending post-merge work includes:
+- hugepage support
+- looking into using the restrictedmem framework for guest memory
+- introducing a testing mechanism to poison memory, possibly using
+  the same memory attributes introduced here
+- SNP and TDX support
+
+There are two non-KVM patches buried in the middle of this series:
+
+  fs: Rename anon_inode_getfile_secure() and anon_inode_getfd_secure()
+  mm: Add AS_UNMOVABLE to mark mapping as completely unmovable
+
+The first is small and mostly suggested-by Christian Brauner; the second
+a bit less so but it was written by an mm person (Vlastimil Babka).
+
+Metadata:
+Author: Paolo Bonzini <pbonzini@redhat.com>
+Author Date: Mon Nov 13 05:58:30 2023 -0500
+Committer: Paolo Bonzini <pbonzini@redhat.com>
+Commit Date: Tue Nov 14 08:31:31 2023 -0500
+
+Files Changed: 14
+Lines Added: 3065
+Lines Removed: 307
+Total Changes: 3372

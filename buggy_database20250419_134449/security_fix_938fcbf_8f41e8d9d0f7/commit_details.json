@@ -1,0 +1,54 @@
+{
+  "hash": "938fcbfb0cbcf532a1869efab58e6009446b1ced",
+  "hash_short": "938fcbfb",
+  "subject": "btrfs: splice remaining dirty_bg's onto the transaction dirty bg list",
+  "body": "While doing error injection testing with my relocation patches I hit the\nfollowing assert:\n\n  assertion failed: list_empty(&block_group->dirty_list), in fs/btrfs/block-group.c:3356\n  ------------[ cut here ]------------\n  kernel BUG at fs/btrfs/ctree.h:3357!\n  invalid opcode: 0000 [#1] SMP NOPTI\n  CPU: 0 PID: 24351 Comm: umount Tainted: G        W         5.10.0-rc3+ #193\n  Hardware name: QEMU Standard PC (Q35 + ICH9, 2009), BIOS 1.13.0-2.fc32 04/01/2014\n  RIP: 0010:assertfail.constprop.0+0x18/0x1a\n  RSP: 0018:ffffa09b019c7e00 EFLAGS: 00010282\n  RAX: 0000000000000056 RBX: ffff8f6492c18000 RCX: 0000000000000000\n  RDX: ffff8f64fbc27c60 RSI: ffff8f64fbc19050 RDI: ffff8f64fbc19050\n  RBP: ffff8f6483bbdc00 R08: 0000000000000000 R09: 0000000000000000\n  R10: ffffa09b019c7c38 R11: ffffffff85d70928 R12: ffff8f6492c18100\n  R13: ffff8f6492c18148 R14: ffff8f6483bbdd70 R15: dead000000000100\n  FS:  00007fbfda4cdc40(0000) GS:ffff8f64fbc00000(0000) knlGS:0000000000000000\n  CS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033\n  CR2: 00007fbfda666fd0 CR3: 000000013cf66002 CR4: 0000000000370ef0\n  Call Trace:\n   btrfs_free_block_groups.cold+0x55/0x55\n   close_ctree+0x2c5/0x306\n   ? fsnotify_destroy_marks+0x14/0x100\n   generic_shutdown_super+0x6c/0x100\n   kill_anon_super+0x14/0x30\n   btrfs_kill_super+0x12/0x20\n   deactivate_locked_super+0x36/0xa0\n   cleanup_mnt+0x12d/0x190\n   task_work_run+0x5c/0xa0\n   exit_to_user_mode_prepare+0x1b1/0x1d0\n   syscall_exit_to_user_mode+0x54/0x280\n   entry_SYSCALL_64_after_hwframe+0x44/0xa9\n\nThis happened because I injected an error in btrfs_cow_block() while\nrunning the dirty block groups.  When we run the dirty block groups, we\nsplice the list onto a local list to process.  However if an error\noccurs, we only cleanup the transactions dirty block group list, not any\npending block groups we have on our locally spliced list.\n\nIn fact if we fail to allocate a path in this function we'll also fail\nto clean up the splice list.\n\nFix this by splicing the list back onto the transaction dirty block\ngroup list so that the block groups are cleaned up.  Then add a 'out'\nlabel and have the error conditions jump to out so that the errors are\nhandled properly.  This also has the side-effect of fixing a problem\nwhere we would clear 'ret' on error because we unconditionally ran\nbtrfs_run_delayed_refs().\n\nCC: stable@vger.kernel.org # 4.4+\nSigned-off-by: Josef Bacik <josef@toxicpanda.com>\nReviewed-by: David Sterba <dsterba@suse.com>\nSigned-off-by: David Sterba <dsterba@suse.com>",
+  "full_message": "btrfs: splice remaining dirty_bg's onto the transaction dirty bg list\n\nWhile doing error injection testing with my relocation patches I hit the\nfollowing assert:\n\n  assertion failed: list_empty(&block_group->dirty_list), in fs/btrfs/block-group.c:3356\n  ------------[ cut here ]------------\n  kernel BUG at fs/btrfs/ctree.h:3357!\n  invalid opcode: 0000 [#1] SMP NOPTI\n  CPU: 0 PID: 24351 Comm: umount Tainted: G        W         5.10.0-rc3+ #193\n  Hardware name: QEMU Standard PC (Q35 + ICH9, 2009), BIOS 1.13.0-2.fc32 04/01/2014\n  RIP: 0010:assertfail.constprop.0+0x18/0x1a\n  RSP: 0018:ffffa09b019c7e00 EFLAGS: 00010282\n  RAX: 0000000000000056 RBX: ffff8f6492c18000 RCX: 0000000000000000\n  RDX: ffff8f64fbc27c60 RSI: ffff8f64fbc19050 RDI: ffff8f64fbc19050\n  RBP: ffff8f6483bbdc00 R08: 0000000000000000 R09: 0000000000000000\n  R10: ffffa09b019c7c38 R11: ffffffff85d70928 R12: ffff8f6492c18100\n  R13: ffff8f6492c18148 R14: ffff8f6483bbdd70 R15: dead000000000100\n  FS:  00007fbfda4cdc40(0000) GS:ffff8f64fbc00000(0000) knlGS:0000000000000000\n  CS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033\n  CR2: 00007fbfda666fd0 CR3: 000000013cf66002 CR4: 0000000000370ef0\n  Call Trace:\n   btrfs_free_block_groups.cold+0x55/0x55\n   close_ctree+0x2c5/0x306\n   ? fsnotify_destroy_marks+0x14/0x100\n   generic_shutdown_super+0x6c/0x100\n   kill_anon_super+0x14/0x30\n   btrfs_kill_super+0x12/0x20\n   deactivate_locked_super+0x36/0xa0\n   cleanup_mnt+0x12d/0x190\n   task_work_run+0x5c/0xa0\n   exit_to_user_mode_prepare+0x1b1/0x1d0\n   syscall_exit_to_user_mode+0x54/0x280\n   entry_SYSCALL_64_after_hwframe+0x44/0xa9\n\nThis happened because I injected an error in btrfs_cow_block() while\nrunning the dirty block groups.  When we run the dirty block groups, we\nsplice the list onto a local list to process.  However if an error\noccurs, we only cleanup the transactions dirty block group list, not any\npending block groups we have on our locally spliced list.\n\nIn fact if we fail to allocate a path in this function we'll also fail\nto clean up the splice list.\n\nFix this by splicing the list back onto the transaction dirty block\ngroup list so that the block groups are cleaned up.  Then add a 'out'\nlabel and have the error conditions jump to out so that the errors are\nhandled properly.  This also has the side-effect of fixing a problem\nwhere we would clear 'ret' on error because we unconditionally ran\nbtrfs_run_delayed_refs().\n\nCC: stable@vger.kernel.org # 4.4+\nSigned-off-by: Josef Bacik <josef@toxicpanda.com>\nReviewed-by: David Sterba <dsterba@suse.com>\nSigned-off-by: David Sterba <dsterba@suse.com>",
+  "author_name": "Josef Bacik",
+  "author_email": "josef@toxicpanda.com",
+  "author_date": "Thu Jan 14 14:02:43 2021 -0500",
+  "author_date_iso": "2021-01-14T14:02:43-05:00",
+  "committer_name": "David Sterba",
+  "committer_email": "dsterba@suse.com",
+  "committer_date": "Mon Feb 8 22:58:55 2021 +0100",
+  "committer_date_iso": "2021-02-08T22:58:55+01:00",
+  "files_changed": [
+    "fs/btrfs/block-group.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "fs/btrfs/block-group.c",
+      "insertions": 12,
+      "deletions": 7
+    }
+  ],
+  "total_insertions": 12,
+  "total_deletions": 7,
+  "total_changes": 19,
+  "parents": [
+    "c78a10aebb275c38d0cfccae129a803fe622e305"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "injection"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "fs/btrfs/block-group.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

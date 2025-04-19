@@ -1,0 +1,91 @@
+commit c7262e711ae6e466baeb9ddc21d678c878469b1f
+Author: Johan Hedberg <johan.hedberg@intel.com>
+Date:   Tue Jun 17 13:07:37 2014 +0300
+
+    Bluetooth: Fix overriding higher security level in SMP
+    
+    When we receive a pairing request or an internal request to start
+    pairing we shouldn't blindly overwrite the existing pending_sec_level
+    value as that may actually be higher than the new one. This patch fixes
+    the SMP code to only overwrite the value in case the new one is higher
+    than the old.
+    
+    Signed-off-by: Johan Hedberg <johan.hedberg@intel.com>
+    Signed-off-by: Marcel Holtmann <marcel@holtmann.org>
+
+diff --git a/net/bluetooth/smp.c b/net/bluetooth/smp.c
+index f2829a7932e2..0189ec8b68d1 100644
+--- a/net/bluetooth/smp.c
++++ b/net/bluetooth/smp.c
+@@ -669,7 +669,7 @@ static u8 smp_cmd_pairing_req(struct l2cap_conn *conn, struct sk_buff *skb)
+ {
+ 	struct smp_cmd_pairing rsp, *req = (void *) skb->data;
+ 	struct smp_chan *smp;
+-	u8 key_size, auth;
++	u8 key_size, auth, sec_level;
+ 	int ret;
+ 
+ 	BT_DBG("conn %p", conn);
+@@ -695,7 +695,9 @@ static u8 smp_cmd_pairing_req(struct l2cap_conn *conn, struct sk_buff *skb)
+ 	/* We didn't start the pairing, so match remote */
+ 	auth = req->auth_req;
+ 
+-	conn->hcon->pending_sec_level = authreq_to_seclevel(auth);
++	sec_level = authreq_to_seclevel(auth);
++	if (sec_level > conn->hcon->pending_sec_level)
++		conn->hcon->pending_sec_level = sec_level;
+ 
+ 	build_pairing_cmd(conn, req, &rsp, auth);
+ 
+@@ -838,6 +840,7 @@ static u8 smp_cmd_security_req(struct l2cap_conn *conn, struct sk_buff *skb)
+ 	struct smp_cmd_pairing cp;
+ 	struct hci_conn *hcon = conn->hcon;
+ 	struct smp_chan *smp;
++	u8 sec_level;
+ 
+ 	BT_DBG("conn %p", conn);
+ 
+@@ -847,7 +850,9 @@ static u8 smp_cmd_security_req(struct l2cap_conn *conn, struct sk_buff *skb)
+ 	if (!(conn->hcon->link_mode & HCI_LM_MASTER))
+ 		return SMP_CMD_NOTSUPP;
+ 
+-	hcon->pending_sec_level = authreq_to_seclevel(rp->auth_req);
++	sec_level = authreq_to_seclevel(rp->auth_req);
++	if (sec_level > hcon->pending_sec_level)
++		hcon->pending_sec_level = sec_level;
+ 
+ 	if (smp_ltk_encrypt(conn, hcon->pending_sec_level))
+ 		return 0;
+@@ -901,9 +906,12 @@ int smp_conn_security(struct hci_conn *hcon, __u8 sec_level)
+ 	if (smp_sufficient_security(hcon, sec_level))
+ 		return 1;
+ 
++	if (sec_level > hcon->pending_sec_level)
++		hcon->pending_sec_level = sec_level;
++
+ 	if (hcon->link_mode & HCI_LM_MASTER)
+-		if (smp_ltk_encrypt(conn, sec_level))
+-			goto done;
++		if (smp_ltk_encrypt(conn, hcon->pending_sec_level))
++			return 0;
+ 
+ 	if (test_and_set_bit(HCI_CONN_LE_SMP_PEND, &hcon->flags))
+ 		return 0;
+@@ -918,7 +926,7 @@ int smp_conn_security(struct hci_conn *hcon, __u8 sec_level)
+ 	 * requires it.
+ 	 */
+ 	if (hcon->io_capability != HCI_IO_NO_INPUT_OUTPUT ||
+-	    sec_level > BT_SECURITY_MEDIUM)
++	    hcon->pending_sec_level > BT_SECURITY_MEDIUM)
+ 		authreq |= SMP_AUTH_MITM;
+ 
+ 	if (hcon->link_mode & HCI_LM_MASTER) {
+@@ -937,9 +945,6 @@ int smp_conn_security(struct hci_conn *hcon, __u8 sec_level)
+ 
+ 	set_bit(SMP_FLAG_INITIATOR, &smp->flags);
+ 
+-done:
+-	hcon->pending_sec_level = sec_level;
+-
+ 	return 0;
+ }

@@ -1,0 +1,42 @@
+commit a6c6ed1e81060e110258dbc7118fda07e9971e48
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Tue Aug 27 14:40:30 2019 -0700
+
+    KVM: x86: Don't attempt VMWare emulation on #GP with non-zero error code
+    
+    The VMware backdoor hooks #GP faults on IN{S}, OUT{S}, and RDPMC, none
+    of which generate a non-zero error code for their #GP.  Re-injecting #GP
+    instead of attempting emulation on a non-zero error code will allow a
+    future patch to move #GP injection (for emulation failure) into
+    kvm_emulate_instruction() without having to plumb in the error code.
+    
+    Reviewed-and-tested-by: Vitaly Kuznetsov <vkuznets@redhat.com>
+    Reviewed-by: Liran Alon <liran.alon@oracle.com>
+    Signed-off-by: Sean Christopherson <sean.j.christopherson@intel.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/svm.c b/arch/x86/kvm/svm.c
+index 7e352e81df31..00ec27bc2946 100644
+--- a/arch/x86/kvm/svm.c
++++ b/arch/x86/kvm/svm.c
+@@ -2772,12 +2772,20 @@ static int gp_interception(struct vcpu_svm *svm)
+ 
+ 	WARN_ON_ONCE(!enable_vmware_backdoor);
+ 
++	/*
++	 * VMware backdoor emulation on #GP interception only handles IN{S},
++	 * OUT{S}, and RDPMC, none of which generate a non-zero error code.
++	 */
++	if (error_code) {
++		kvm_queue_exception_e(vcpu, GP_VECTOR, error_code);
++		return 1;
++	}
+ 	er = kvm_emulate_instruction(vcpu,
+ 		EMULTYPE_VMWARE | EMULTYPE_NO_UD_ON_FAIL);
+ 	if (er == EMULATE_USER_EXIT)
+ 		return 0;
+ 	else if (er != EMULATE_DONE)
+-		kvm_queue_exception_e(vcpu, GP_VECTOR, error_code);
++		kvm_queue_exception_e(vcpu, GP_VECTOR, 0);
+ 	return 1;
+ }

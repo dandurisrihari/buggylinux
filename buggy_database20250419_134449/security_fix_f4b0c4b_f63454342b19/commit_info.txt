@@ -1,0 +1,216 @@
+Commit Hash: f4b0c4b508364fde023e4f7b9f23f7e38c663dfe
+Subject: Merge tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm
+
+
+Security Keywords:
+- authentication
+
+Full commit message:
+Merge tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm
+
+Pull KVM updates from Paolo Bonzini:
+ "ARM:
+
+   - Move a lot of state that was previously stored on a per vcpu basis
+     into a per-CPU area, because it is only pertinent to the host while
+     the vcpu is loaded. This results in better state tracking, and a
+     smaller vcpu structure.
+
+   - Add full handling of the ERET/ERETAA/ERETAB instructions in nested
+     virtualisation. The last two instructions also require emulating
+     part of the pointer authentication extension. As a result, the trap
+     handling of pointer authentication has been greatly simplified.
+
+   - Turn the global (and not very scalable) LPI translation cache into
+     a per-ITS, scalable cache, making non directly injected LPIs much
+     cheaper to make visible to the vcpu.
+
+   - A batch of pKVM patches, mostly fixes and cleanups, as the
+     upstreaming process seems to be resuming. Fingers crossed!
+
+   - Allocate PPIs and SGIs outside of the vcpu structure, allowing for
+     smaller EL2 mapping and some flexibility in implementing more or
+     less than 32 private IRQs.
+
+   - Purge stale mpidr_data if a vcpu is created after the MPIDR map has
+     been created.
+
+   - Preserve vcpu-specific ID registers across a vcpu reset.
+
+   - Various minor cleanups and improvements.
+
+  LoongArch:
+
+   - Add ParaVirt IPI support
+
+   - Add software breakpoint support
+
+   - Add mmio trace events support
+
+  RISC-V:
+
+   - Support guest breakpoints using ebreak
+
+   - Introduce per-VCPU mp_state_lock and reset_cntx_lock
+
+   - Virtualize SBI PMU snapshot and counter overflow interrupts
+
+   - New selftests for SBI PMU and Guest ebreak
+
+   - Some preparatory work for both TDX and SNP page fault handling.
+
+     This also cleans up the page fault path, so that the priorities of
+     various kinds of fauls (private page, no memory, write to read-only
+     slot, etc.) are easier to follow.
+
+  x86:
+
+   - Minimize amount of time that shadow PTEs remain in the special
+     REMOVED_SPTE state.
+
+     This is a state where the mmu_lock is held for reading but
+     concurrent accesses to the PTE have to spin; shortening its use
+     allows other vCPUs to repopulate the zapped region while the zapper
+     finishes tearing down the old, defunct page tables.
+
+   - Advertise the max mappable GPA in the "guest MAXPHYADDR" CPUID
+     field, which is defined by hardware but left for software use.
+
+     This lets KVM communicate its inability to map GPAs that set bits
+     51:48 on hosts without 5-level nested page tables. Guest firmware
+     is expected to use the information when mapping BARs; this avoids
+     that they end up at a legal, but unmappable, GPA.
+
+   - Fixed a bug where KVM would not reject accesses to MSR that aren't
+     supposed to exist given the vCPU model and/or KVM configuration.
+
+   - As usual, a bunch of code cleanups.
+
+  x86 (AMD):
+
+   - Implement a new and improved API to initialize SEV and SEV-ES VMs,
+     which will also be extendable to SEV-SNP.
+
+     The new API specifies the desired encryption in KVM_CREATE_VM and
+     then separately initializes the VM. The new API also allows
+     customizing the desired set of VMSA features; the features affect
+     the measurement of the VM's initial state, and therefore enabling
+     them cannot be done tout court by the hypervisor.
+
+     While at it, the new API includes two bugfixes that couldn't be
+     applied to the old one without a flag day in userspace or without
+     affecting the initial measurement. When a SEV-ES VM is created with
+     the new VM type, KVM_GET_REGS/KVM_SET_REGS and friends are rejected
+     once the VMSA has been encrypted. Also, the FPU and AVX state will
+     be synchronized and encrypted too.
+
+   - Support for GHCB version 2 as applicable to SEV-ES guests.
+
+     This, once more, is only accessible when using the new
+     KVM_SEV_INIT2 flow for initialization of SEV-ES VMs.
+
+  x86 (Intel):
+
+   - An initial bunch of prerequisite patches for Intel TDX were merged.
+
+     They generally don't do anything interesting. The only somewhat
+     user visible change is a new debugging mode that checks that KVM's
+     MMU never triggers a #VE virtualization exception in the guest.
+
+   - Clear vmcs.EXIT_QUALIFICATION when synthesizing an EPT Misconfig
+     VM-Exit to L1, as per the SDM.
+
+  Generic:
+
+   - Use vfree() instead of kvfree() for allocations that always use
+     vcalloc() or __vcalloc().
+
+   - Remove .change_pte() MMU notifier - the changes to non-KVM code are
+     small and Andrew Morton asked that I also take those through the
+     KVM tree.
+
+     The callback was only ever implemented by KVM (which was also the
+     original user of MMU notifiers) but it had been nonfunctional ever
+     since calls to set_pte_at_notify were wrapped with
+     invalidate_range_start and invalidate_range_end... in 2012.
+
+  Selftests:
+
+   - Enhance the demand paging test to allow for better reporting and
+     stressing of UFFD performance.
+
+   - Convert the steal time test to generate TAP-friendly output.
+
+   - Fix a flaky false positive in the xen_shinfo_test due to comparing
+     elapsed time across two different clock domains.
+
+   - Skip the MONITOR/MWAIT test if the host doesn't actually support
+     MWAIT.
+
+   - Avoid unnecessary use of "sudo" in the NX hugepage test wrapper
+     shell script, to play nice with running in a minimal userspace
+     environment.
+
+   - Allow skipping the RSEQ test's sanity check that the vCPU was able
+     to complete a reasonable number of KVM_RUNs, as the assert can fail
+     on a completely valid setup.
+
+     If the test is run on a large-ish system that is otherwise idle,
+     and the test isn't affined to a low-ish number of CPUs, the vCPU
+     task can be repeatedly migrated to CPUs that are in deep sleep
+     states, which results in the vCPU having very little net runtime
+     before the next migration due to high wakeup latencies.
+
+   - Define _GNU_SOURCE for all selftests to fix a warning that was
+     introduced by a change to kselftest_harness.h late in the 6.9
+     cycle, and because forcing every test to #define _GNU_SOURCE is
+     painful.
+
+   - Provide a global pseudo-RNG instance for all tests, so that library
+     code can generate random, but determinstic numbers.
+
+   - Use the global pRNG to randomly force emulation of select writes
+     from guest code on x86, e.g. to help validate KVM's emulation of
+     locked accesses.
+
+   - Allocate and initialize x86's GDT, IDT, TSS, segments, and default
+     exception handlers at VM creation, instead of forcing tests to
+     manually trigger the related setup.
+
+  Documentation:
+
+   - Fix a goof in the KVM_CREATE_GUEST_MEMFD documentation"
+
+* tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm: (225 commits)
+  selftests/kvm: remove dead file
+  KVM: selftests: arm64: Test vCPU-scoped feature ID registers
+  KVM: selftests: arm64: Test that feature ID regs survive a reset
+  KVM: selftests: arm64: Store expected register value in set_id_regs
+  KVM: selftests: arm64: Rename helper in set_id_regs to imply VM scope
+  KVM: arm64: Only reset vCPU-scoped feature ID regs once
+  KVM: arm64: Reset VM feature ID regs from kvm_reset_sys_regs()
+  KVM: arm64: Rename is_id_reg() to imply VM scope
+  KVM: arm64: Destroy mpidr_data for 'late' vCPU creation
+  KVM: arm64: Use hVHE in pKVM by default on CPUs with VHE support
+  KVM: arm64: Fix hvhe/nvhe early alias parsing
+  KVM: SEV: Allow per-guest configuration of GHCB protocol version
+  KVM: SEV: Add GHCB handling for termination requests
+  KVM: SEV: Add GHCB handling for Hypervisor Feature Support requests
+  KVM: SEV: Add support to handle AP reset MSR protocol
+  KVM: x86: Explicitly zero kvm_caps during vendor module load
+  KVM: x86: Fully re-initialize supported_mce_cap on vendor module load
+  KVM: x86: Fully re-initialize supported_vm_types on vendor module load
+  KVM: x86/mmu: Sanity check that __kvm_faultin_pfn() doesn't create noslot pfns
+  KVM: x86/mmu: Initialize kvm_page_fault's pfn and hva to error values
+  ...
+
+Metadata:
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Author Date: Wed May 15 14:46:43 2024 -0700
+Committer: Linus Torvalds <torvalds@linux-foundation.org>
+Commit Date: Wed May 15 14:46:43 2024 -0700
+
+Files Changed: 6
+Lines Added: 8891
+Lines Removed: 4204
+Total Changes: 13095

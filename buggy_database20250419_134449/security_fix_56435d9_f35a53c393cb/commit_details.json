@@ -1,0 +1,181 @@
+{
+  "hash": "56435d9145f5b97decca66244d2049e2d5e4616d",
+  "hash_short": "56435d91",
+  "subject": "Merge branch 'tag_8021q-for-ocelot-switches'",
+  "body": "Vladimir Oltean says:\n\n====================\ntag_8021q for Ocelot switches\n\nThe Felix switch inside LS1028A has an issue. It has a 2.5G CPU port,\nand the external ports, in the majority of use cases, run at 1G. This\nmeans that, when the CPU injects traffic into the switch, it is very\neasy to run into congestion. This is not to say that it is impossible to\nenter congestion even with all ports running at the same speed, just\nthat the default configuration is already very prone to that by design.\n\nNormally, the way to deal with that is using Ethernet flow control\n(PAUSE frames).\n\nHowever, this functionality is not working today with the ENETC - Felix\nswitch pair. The hardware issue is undergoing documentation right now as\nan erratum within NXP, but several customers have been requesting a\nreasonable workaround for it.\n\nIn truth, the LS1028A has 2 internal port pairs. The lack of flow control\nis an issue only when NPI mode (Node Processor Interface, aka the mode\nwhere the \"CPU port module\", which carries DSA-style tagged packets, is\nconnected to a regular Ethernet port) is used, and NPI mode is supported\nby Felix on a single port.\n\nIn past BSPs, we have had setups where both internal port pairs were\nenabled. We were advertising the following setup:\n\n\"data port\"     \"control port\"\n  (2.5G)            (1G)\n\n   eno2             eno3\n    ^                ^\n    |                |\n    | regular        | DSA-tagged\n    | frames         | frames\n    |                |\n    v                v\n   swp4             swp5\n\nThis works but is highly unpractical, due to NXP shifting the task of\ndesigning a functional system (choosing which port to use, depending on\ntype of traffic required) up to the end user. The swpN interfaces would\nhave to be bridged with swp4, in order for the eno2 \"data port\" to have\naccess to the outside network. And the swpN interfaces would still be\ncapable of IP networking. So running a DHCP client would give us two IP\ninterfaces from the same subnet, one assigned to eno2, and the other to\nswpN (0, 1, 2, 3).\n\nAlso, the dual port design doesn't scale. When attaching another DSA\nswitch to a Felix port, the end result is that the \"data port\" cannot\ncarry any meaningful data to the external world, since it lacks the DSA\ntags required to traverse the sja1105 switches below. All that traffic\nneeds to go through the \"control port\".\n\nSo in newer BSPs there was a desire to simplify that setup, and only\nhave one internal port pair:\n\n   eno2            eno3\n    ^\n    |\n    | DSA-tagged    x disabled\n    | frames\n    |\n    v\n   swp4            swp5\n\nHowever, this setup only exacerbates the issue of not having flow\ncontrol on the NPI port, since that is the only port now. Also, there\nare use cases that still require the \"data port\", such as IEEE 802.1CB\n(TSN stream identification doesn't work over an NPI port), source\nMAC address learning over NPI, etc.\n\nAgain, there is a desire to keep the simplicity of the single internal\nport setup, while regaining the benefits of having a dedicated data port\nas well. And this series attempts to deliver just that.\n\nSo the NPI functionality is disabled conditionally. Its purpose was:\n- To ensure individually addressable ports on TX. This can be replaced\n  by using some designated VLAN tags which are pushed by the DSA tagger\n  code, then removed by the switch (so they are invisible to the outside\n  world and to the user).\n- To ensure source port identification on RX. Again, this can be\n  replaced by using some designated VLAN tags to encapsulate all RX\n  traffic (each VLAN uniquely identifies a source port). The DSA tagger\n  determines which port it was based on the VLAN number, then removes\n  that header.\n- To deliver PTP timestamps. This cannot be obtained through VLAN\n  headers, so we need to take a step back and see how else we can do\n  that. The Microchip Ocelot-1 (VSC7514 MIPS) driver performs manual\n  injection/extraction from the CPU port module using register-based\n  MMIO, and not over Ethernet. We will need to do the same from DSA,\n  which makes this tagger a sort of hybrid between DSA and pure\n  switchdev.\n====================\n\nLink: https://lore.kernel.org/r/20210129010009.3959398-1-olteanv@gmail.com\nSigned-off-by: Jakub Kicinski <kuba@kernel.org>",
+  "full_message": "Merge branch 'tag_8021q-for-ocelot-switches'\n\nVladimir Oltean says:\n\n====================\ntag_8021q for Ocelot switches\n\nThe Felix switch inside LS1028A has an issue. It has a 2.5G CPU port,\nand the external ports, in the majority of use cases, run at 1G. This\nmeans that, when the CPU injects traffic into the switch, it is very\neasy to run into congestion. This is not to say that it is impossible to\nenter congestion even with all ports running at the same speed, just\nthat the default configuration is already very prone to that by design.\n\nNormally, the way to deal with that is using Ethernet flow control\n(PAUSE frames).\n\nHowever, this functionality is not working today with the ENETC - Felix\nswitch pair. The hardware issue is undergoing documentation right now as\nan erratum within NXP, but several customers have been requesting a\nreasonable workaround for it.\n\nIn truth, the LS1028A has 2 internal port pairs. The lack of flow control\nis an issue only when NPI mode (Node Processor Interface, aka the mode\nwhere the \"CPU port module\", which carries DSA-style tagged packets, is\nconnected to a regular Ethernet port) is used, and NPI mode is supported\nby Felix on a single port.\n\nIn past BSPs, we have had setups where both internal port pairs were\nenabled. We were advertising the following setup:\n\n\"data port\"     \"control port\"\n  (2.5G)            (1G)\n\n   eno2             eno3\n    ^                ^\n    |                |\n    | regular        | DSA-tagged\n    | frames         | frames\n    |                |\n    v                v\n   swp4             swp5\n\nThis works but is highly unpractical, due to NXP shifting the task of\ndesigning a functional system (choosing which port to use, depending on\ntype of traffic required) up to the end user. The swpN interfaces would\nhave to be bridged with swp4, in order for the eno2 \"data port\" to have\naccess to the outside network. And the swpN interfaces would still be\ncapable of IP networking. So running a DHCP client would give us two IP\ninterfaces from the same subnet, one assigned to eno2, and the other to\nswpN (0, 1, 2, 3).\n\nAlso, the dual port design doesn't scale. When attaching another DSA\nswitch to a Felix port, the end result is that the \"data port\" cannot\ncarry any meaningful data to the external world, since it lacks the DSA\ntags required to traverse the sja1105 switches below. All that traffic\nneeds to go through the \"control port\".\n\nSo in newer BSPs there was a desire to simplify that setup, and only\nhave one internal port pair:\n\n   eno2            eno3\n    ^\n    |\n    | DSA-tagged    x disabled\n    | frames\n    |\n    v\n   swp4            swp5\n\nHowever, this setup only exacerbates the issue of not having flow\ncontrol on the NPI port, since that is the only port now. Also, there\nare use cases that still require the \"data port\", such as IEEE 802.1CB\n(TSN stream identification doesn't work over an NPI port), source\nMAC address learning over NPI, etc.\n\nAgain, there is a desire to keep the simplicity of the single internal\nport setup, while regaining the benefits of having a dedicated data port\nas well. And this series attempts to deliver just that.\n\nSo the NPI functionality is disabled conditionally. Its purpose was:\n- To ensure individually addressable ports on TX. This can be replaced\n  by using some designated VLAN tags which are pushed by the DSA tagger\n  code, then removed by the switch (so they are invisible to the outside\n  world and to the user).\n- To ensure source port identification on RX. Again, this can be\n  replaced by using some designated VLAN tags to encapsulate all RX\n  traffic (each VLAN uniquely identifies a source port). The DSA tagger\n  determines which port it was based on the VLAN number, then removes\n  that header.\n- To deliver PTP timestamps. This cannot be obtained through VLAN\n  headers, so we need to take a step back and see how else we can do\n  that. The Microchip Ocelot-1 (VSC7514 MIPS) driver performs manual\n  injection/extraction from the CPU port module using register-based\n  MMIO, and not over Ethernet. We will need to do the same from DSA,\n  which makes this tagger a sort of hybrid between DSA and pure\n  switchdev.\n====================\n\nLink: https://lore.kernel.org/r/20210129010009.3959398-1-olteanv@gmail.com\nSigned-off-by: Jakub Kicinski <kuba@kernel.org>",
+  "author_name": "Jakub Kicinski",
+  "author_email": "kuba@kernel.org",
+  "author_date": "Fri Jan 29 21:25:27 2021 -0800",
+  "author_date_iso": "2021-01-29T21:25:27-08:00",
+  "committer_name": "Jakub Kicinski",
+  "committer_email": "kuba@kernel.org",
+  "committer_date": "Fri Jan 29 21:29:32 2021 -0800",
+  "committer_date_iso": "2021-01-29T21:29:32-08:00",
+  "files_changed": [],
+  "files_changed_count": 0,
+  "stats": [
+    {
+      "file": "Documentation/ABI/testing/sysfs-class-net-dsa",
+      "insertions": 9,
+      "deletions": 2
+    },
+    {
+      "file": "MAINTAINERS",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/dsa/ocelot/Kconfig",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/dsa/ocelot/felix.c",
+      "insertions": 488,
+      "deletions": 37
+    },
+    {
+      "file": "drivers/net/dsa/ocelot/felix.h",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/dsa/ocelot/felix_vsc9959.c",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/dsa/ocelot/seville_vsc9953.c",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mscc/ocelot.c",
+      "insertions": 87,
+      "deletions": 33
+    },
+    {
+      "file": "drivers/net/ethernet/mscc/ocelot_flower.c",
+      "insertions": 4,
+      "deletions": 3
+    },
+    {
+      "file": "drivers/net/ethernet/mscc/ocelot_net.c",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mscc/ocelot_vcap.c",
+      "insertions": 15,
+      "deletions": 4
+    },
+    {
+      "file": "drivers/net/ethernet/mscc/ocelot_vcap.h",
+      "insertions": 2,
+      "deletions": 293
+    },
+    {
+      "file": "drivers/net/ethernet/mscc/ocelot_vsc7514.c",
+      "insertions": 0,
+      "deletions": 2
+    },
+    {
+      "file": "include/linux/dsa/8021q.h",
+      "insertions": 14,
+      "deletions": 0
+    },
+    {
+      "file": "include/net/dsa.h",
+      "insertions": 17,
+      "deletions": 1
+    },
+    {
+      "file": "include/soc/mscc/ocelot.h",
+      "insertions": 4,
+      "deletions": 2
+    },
+    {
+      "file": "include/soc/mscc/ocelot_vcap.h",
+      "insertions": 297,
+      "deletions": 0
+    },
+    {
+      "file": "net/dsa/Kconfig",
+      "insertions": 18,
+      "deletions": 3
+    },
+    {
+      "file": "net/dsa/Makefile",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "net/dsa/dsa.c",
+      "insertions": 26,
+      "deletions": 0
+    },
+    {
+      "file": "net/dsa/dsa2.c",
+      "insertions": 116,
+      "deletions": 12
+    },
+    {
+      "file": "net/dsa/dsa_priv.h",
+      "insertions": 17,
+      "deletions": 0
+    },
+    {
+      "file": "net/dsa/master.c",
+      "insertions": 38,
+      "deletions": 1
+    },
+    {
+      "file": "net/dsa/port.c",
+      "insertions": 21,
+      "deletions": 23
+    },
+    {
+      "file": "net/dsa/slave.c",
+      "insertions": 23,
+      "deletions": 12
+    },
+    {
+      "file": "net/dsa/switch.c",
+      "insertions": 55,
+      "deletions": 0
+    },
+    {
+      "file": "net/dsa/tag_8021q.c",
+      "insertions": 13,
+      "deletions": 2
+    },
+    {
+      "file": "net/dsa/tag_ocelot_8021q.c",
+      "insertions": 68,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 1341,
+  "total_deletions": 430,
+  "total_changes": 1771,
+  "parents": [
+    "de1da8bcf40564a2adada2d5d5426e05355f66e8",
+    "e21268efbe26d9ab3f7468577d691b992d76e06a"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": true,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "injection"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": []
+}

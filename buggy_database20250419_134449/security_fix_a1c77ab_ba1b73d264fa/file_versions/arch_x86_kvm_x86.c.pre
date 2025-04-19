@@ -1,0 +1,35 @@
+commit b34de572a863b5a453dece431eac0da59b5aec0a
+Author: Wanpeng Li <wanpengli@tencent.com>
+Date:   Fri Feb 28 11:18:41 2020 +0800
+
+    KVM: X86: trigger kvmclock sync request just once on VM creation
+    
+    In the progress of vCPUs creation, it queues a kvmclock sync worker to the global
+    workqueue before each vCPU creation completes. The workqueue subsystem guarantees
+    not to queue the already queued work; however, we can make the logic more clear by
+    making just one leader to trigger this kvmclock sync request, and also save on
+    cacheline bouncing caused by test_and_set_bit.
+    
+    Signed-off-by: Wanpeng Li <wanpengli@tencent.com>
+    Reviewed-by: Vitaly Kuznetsov <vkuznets@redhat.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index c5762c031b0c..78e34c968ab5 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -9335,11 +9335,9 @@ void kvm_arch_vcpu_postcreate(struct kvm_vcpu *vcpu)
+ 
+ 	mutex_unlock(&vcpu->mutex);
+ 
+-	if (!kvmclock_periodic_sync)
+-		return;
+-
+-	schedule_delayed_work(&kvm->arch.kvmclock_sync_work,
+-					KVMCLOCK_SYNC_PERIOD);
++	if (kvmclock_periodic_sync && vcpu->vcpu_idx == 0)
++		schedule_delayed_work(&kvm->arch.kvmclock_sync_work,
++						KVMCLOCK_SYNC_PERIOD);
+ }
+ 
+ void kvm_arch_vcpu_destroy(struct kvm_vcpu *vcpu)

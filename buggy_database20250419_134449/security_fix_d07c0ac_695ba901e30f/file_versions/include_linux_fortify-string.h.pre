@@ -1,0 +1,94 @@
+commit dfbafa70bde26c40615f8c538ce68dac82a64fb4
+Author: Kees Cook <kees@kernel.org>
+Date:   Fri Aug 26 11:04:43 2022 -0700
+
+    string: Introduce strtomem() and strtomem_pad()
+    
+    One of the "legitimate" uses of strncpy() is copying a NUL-terminated
+    string into a fixed-size non-NUL-terminated character array. To avoid
+    the weaknesses and ambiguity of intent when using strncpy(), provide
+    replacement functions that explicitly distinguish between trailing
+    padding and not, and require the destination buffer size be discoverable
+    by the compiler.
+    
+    For example:
+    
+    struct obj {
+            int foo;
+            char small[4] __nonstring;
+            char big[8] __nonstring;
+            int bar;
+    };
+    
+    struct obj p;
+    
+    /* This will truncate to 4 chars with no trailing NUL */
+    strncpy(p.small, "hello", sizeof(p.small));
+    /* p.small contains 'h', 'e', 'l', 'l' */
+    
+    /* This will NUL pad to 8 chars. */
+    strncpy(p.big, "hello", sizeof(p.big));
+    /* p.big contains 'h', 'e', 'l', 'l', 'o', '\0', '\0', '\0' */
+    
+    When the "__nonstring" attributes are missing, the intent of the
+    programmer becomes ambiguous for whether the lack of a trailing NUL
+    in the p.small copy is a bug. Additionally, it's not clear whether
+    the trailing padding in the p.big copy is _needed_. Both cases
+    become unambiguous with:
+    
+    strtomem(p.small, "hello");
+    strtomem_pad(p.big, "hello", 0);
+    
+    See also https://github.com/KSPP/linux/issues/90
+    
+    Expand the memcpy KUnit tests to include these functions.
+    
+    Cc: Wolfram Sang <wsa+renesas@sang-engineering.com>
+    Cc: Nick Desaulniers <ndesaulniers@google.com>
+    Cc: Geert Uytterhoeven <geert@linux-m68k.org>
+    Cc: Guenter Roeck <linux@roeck-us.net>
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+
+diff --git a/include/linux/fortify-string.h b/include/linux/fortify-string.h
+index 3b401fa0f374..8e8c2c87b1d5 100644
+--- a/include/linux/fortify-string.h
++++ b/include/linux/fortify-string.h
+@@ -77,6 +77,38 @@ extern char *__underlying_strncpy(char *p, const char *q, __kernel_size_t size)
+ #define POS	__pass_object_size(1)
+ #define POS0	__pass_object_size(0)
+ 
++/**
++ * strncpy - Copy a string to memory with non-guaranteed NUL padding
++ *
++ * @p: pointer to destination of copy
++ * @q: pointer to NUL-terminated source string to copy
++ * @size: bytes to write at @p
++ *
++ * If strlen(@q) >= @size, the copy of @q will stop after @size bytes,
++ * and @p will NOT be NUL-terminated
++ *
++ * If strlen(@q) < @size, following the copy of @q, trailing NUL bytes
++ * will be written to @p until @size total bytes have been written.
++ *
++ * Do not use this function. While FORTIFY_SOURCE tries to avoid
++ * over-reads of @q, it cannot defend against writing unterminated
++ * results to @p. Using strncpy() remains ambiguous and fragile.
++ * Instead, please choose an alternative, so that the expectation
++ * of @p's contents is unambiguous:
++ *
++ * +--------------------+-----------------+------------+
++ * | @p needs to be:    | padded to @size | not padded |
++ * +====================+=================+============+
++ * |     NUL-terminated | strscpy_pad()   | strscpy()  |
++ * +--------------------+-----------------+------------+
++ * | not NUL-terminated | strtomem_pad()  | strtomem() |
++ * +--------------------+-----------------+------------+
++ *
++ * Note strscpy*()'s differing return values for detecting truncation,
++ * and strtomem*()'s expectation that the destination is marked with
++ * __nonstring when it is a character array.
++ *
++ */
+ __FORTIFY_INLINE __diagnose_as(__builtin_strncpy, 1, 2, 3)
+ char *strncpy(char * const POS p, const char *q, __kernel_size_t size)
+ {

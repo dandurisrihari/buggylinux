@@ -1,0 +1,156 @@
+Commit Hash: 5185ad616bb4d17e4874b29043d4b4069d8b2fb7
+Subject: Merge tag 'mlx5-updates-2017-06-27' of git://git.kernel.org/pub/scm/linux/kernel/git/saeed/linux
+
+
+Security Keywords:
+- authentication
+
+Full commit message:
+Merge tag 'mlx5-updates-2017-06-27' of git://git.kernel.org/pub/scm/linux/kernel/git/saeed/linux
+
+Saeed Mahameed says:
+
+====================
+mlx5-updates-2017-06-27 (Innova IPsec offload support)
+
+This patchset adds support for Innova IPSec network interface card.
+
+About Innova device:
+--------------------
+Innova is a network card with a ConnectX chip and an FPGA chip as a
+ bump-on-the-wire.
+
+               Internal
++----------+   Link       +-----------------+
+|          +--------------+      FPGA       |  +------+
+| ConnectX |              |  Shell          +--+ QSFP |
+|          +--------------+    +-------+    |  | Port |
++----------+      I2C     |    |  SBU  |    |  +------+
+                          |    +-------+    |
+                          +--+----------+---+
+                             |          |
+                          +--+--+   +---+---+
+                          | DDR |   | Flash |
+                          +-----+   +-------+
+
+The FPGA synthesized logic is loaded from dedicated flash storage and has
+ access to its own dedicated DDR RAM.
+The ConnectX chip firmware programs the FPGA by accessing its configuration
+space over either the slow internal I2C link or the high-speed internal link.
+
+The FPGA logic is divided into a "Shell" and a "Sandbox Unit" (SBU).
+mlx5_core driver (with CONFIG_MLX5_FPGA) handles all shell functionality,
+while other components may handle the various SBU functionalities.
+
+The driver opens high-speed reliable communication channels with the shell and
+the SBU over the internal link.
+These channels may be used for high-bandwidth configuration or for SBU-specific
+out-of-band data paths.
+
+About Innova IPSec device:
+--------------------------
+Innova IPSec is a network card that allows offloading IPSec cryptography operations
+from the host CPU to the NIC. It is an Innova card with an IPSec SBU.
+The hardware keeps the database of IPSec Security Associations (SADB) in the FPGA's
+DDR memory.
+
+               Internal
++----------+   Link       +-----------------+
+|          +--------------+      FPGA       |  +------+
+| ConnectX |              |  Shell          +--+ QSFP |
+|          +--------------+    +-------+    |  | Port |
++----------+ Internal I2C |    | IPSec |    |  +------+
+                          |    |  SBU  |    |
+                          |    +-------+    |
+                          +--+----------+---+
+                             |          |
+                          +--+--+   +---+---+
+                          | DDR |   |       |
+                          |     |   | Flash |
+                          |SADB |   |       |
+                          +-----+   +-------+
+
+Modes and ciphers:
+Currently the following modes and ciphers are supported:
+IPv4 and IPv6
+ESP tunnel and transport modes
+AES 128 and 256 bit encryption, with GCM authentication (RFC4106)
+
+IV is generated using seqiv, in sync with Linux's geniv.
+
+More modes and ciphers may be added later.
+
+Notes:
+In the future similar functionality will be included in a single-chip NIC.
+
+About the driver:
+-----------------
+Patches 1-4 prepare some existing driver code for the new feature:
+  * Add support for reserved GIDs in the hardware GID table
+  * Allow multiple modules to enable hardware RoCE support independently
+Patches 5-6 define structs and helper functions for QP work-queues.
+Patches 7-11 add various FPGA-related features required for Innova.
+IPSec.
+Patch 12 adds abstraction layer for Mellanox IPSec-offload capable devices.
+atches 13-16 add IPSec offload support to the mlx5 netdevice.
+
+This driver services the new IPSec offload API introduced in commit
+d77e38e612a0 ("xfrm: Add an IPsec hardware offloading API")
+
+Configuration Path:
+If Innova IPSec device is detected, the mlx5e netdevice gets the new
+NETIF_F_HW_ESP feature and the xdo callbacks, indicating ESP offload
+capabilities, and also the matching TX checksum and GSO features.
+
+The driver configures offloaded Security Associations (SAs) by sending
+an ADD_SA or DEL_SA message to the IPSec SBU, which updates the SADB in DDR.
+These messages and their responses are sent over a high-speed channel.
+Counters for ethtool are retrieved by the driver from the SBU.
+
+Data path:
+On receive path, the SBU decrypts ESP packets which match the offloaded SADB,
+but keeps them encapsulated.
+The SBU injects metadata (Mellanox owned ethertype) indicating that crypto-offload
+has taken place, the SA with which it was done, and the authentication result.
+
+The ConnectX chip performs RX checksum offload on the packet, and RSS using the
+ESP SPI value.  The driver detects the special ethertype, and attaches a struct
+secpath to the RX SKB, including flags to indicate that crypto offload took place,
+the authentication result, and which xfrm_state was used for decryption, in the
+olen and ovec members. The RX SKB may have useful CHECKSUM_COMPLETE. A separate
+patchset will add support for that in the xfrm stack.
+
+On transmit path, the stack encapsulates the packet but does not encrypt it, and
+indicates in the SKB's secpath that crypto offload is to be performed and the SA
+to use to do so.
+The driver avoids performing crypto-offload for ESP fragments, and packets with
+IP options, as the SBU cannot currently do that.  For eligible packets, the driver
+prepends a special ethertype with metadata instructing the hardware to perform crypto offload.
+The stack builds regular (non-GSO) SKBs so that they contain a placeholder for the ESP trailer.
+The driver trims it off, because the SBU automatically appends the trailer for offloaded packets.
+The ConnectX chip performs TX checksum offload on inner UDP or TCP packets,
+and GSO for TCP packets (duplicating the prepended metadata).
+The segmented packets then undergo encryption in the SBU before going on the wire.
+
+Performance:
+We measure single stream of TCP on Intel(R) Xeon(R) CPU E5-2643 v2 @3.50GHz
+Using AES-NI with ESP GSO we get constant 4.1 Gbps.
+Using crypto offload we get constant 18 Gbps.
+
+Note that these numbers require CHECKSUM_COMPLETE support in XFRM, which we submit separately.
+
+-  Ilan Tayari
+====================
+
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+Metadata:
+Author: David S. Miller <davem@davemloft.net>
+Author Date: Thu Jun 29 12:30:16 2017 -0400
+Committer: David S. Miller <davem@davemloft.net>
+Commit Date: Thu Jun 29 12:30:16 2017 -0400
+
+Files Changed: 0
+Lines Added: 4518
+Lines Removed: 127
+Total Changes: 4645

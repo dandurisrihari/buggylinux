@@ -1,0 +1,165 @@
+Commit Hash: 4334496e831d0d1cb2a8f79d08f6efe3d2ee7e7d
+Subject: Merge branch 'fix-isolation-of-broadcast-traffic-and-unmatched-unicast-traffic-with-macsec-offload'
+
+
+Security Keywords:
+- security bug
+- security issue
+
+Full commit message:
+Merge branch 'fix-isolation-of-broadcast-traffic-and-unmatched-unicast-traffic-with-macsec-offload'
+
+Rahul Rameshbabu says:
+
+====================
+Fix isolation of broadcast traffic and unmatched unicast traffic with MACsec offload
+
+Some device drivers support devices that enable them to annotate whether a
+Rx skb refers to a packet that was processed by the MACsec offloading
+functionality of the device. Logic in the Rx handling for MACsec offload
+does not utilize this information to preemptively avoid forwarding to the
+macsec netdev currently. Because of this, things like multicast messages or
+unicast messages with an unmatched destination address such as ARP requests
+are forwarded to the macsec netdev whether the message received was MACsec
+encrypted or not. The goal of this patch series is to improve the Rx
+handling for MACsec offload for devices capable of annotating skbs received
+that were decrypted by the NIC offload for MACsec.
+
+Here is a summary of the issue that occurs with the existing logic today.
+
+    * The current design of the MACsec offload handling path tries to use
+      "best guess" mechanisms for determining whether a packet associated
+      with the currently handled skb in the datapath was processed via HW
+      offload
+    * The best guess mechanism uses the following heuristic logic (in order of
+      precedence)
+      - Check if header destination MAC address matches MACsec netdev MAC
+        address -> forward to MACsec port
+      - Check if packet is multicast traffic -> forward to MACsec port
+      - MACsec security channel was able to be looked up from skb offload
+        context (mlx5 only) -> forward to MACsec port
+    * Problem: plaintext traffic can potentially solicit a MACsec encrypted
+      response from the offload device
+      - Core aspect of MACsec is that it identifies unauthorized LAN connections
+        and excludes them from communication
+        + This behavior can be seen when not enabling offload for MACsec
+      - The offload behavior violates this principle in MACsec
+
+I believe this behavior is a security bug since applications utilizing
+MACsec could be exploited using this behavior, and the correct way to
+resolve this is by having the hardware correctly indicate whether MACsec
+offload occurred for the packet or not. In the patches in this series, I
+leave a warning for when the problematic path occurs because I cannot
+figure out a secure way to fix the security issue that applies to the core
+MACsec offload handling in the Rx path without breaking MACsec offload for
+other vendors.
+
+Shown at the bottom is an example use case where plaintext traffic sent to
+a physical port of a NIC configured for MACsec offload is unable to be
+handled correctly by the software stack when the NIC provides awareness to
+the kernel about whether the received packet is MACsec traffic or not. In
+this specific example, plaintext ARP requests are being responded with
+MACsec encrypted ARP replies (which leads to routing information being
+unable to be built for the requester).
+
+    Side 1
+
+      ip link del macsec0
+      ip address flush mlx5_1
+      ip address add 1.1.1.1/24 dev mlx5_1
+      ip link set dev mlx5_1 up
+      ip link add link mlx5_1 macsec0 type macsec sci 1 encrypt on
+      ip link set dev macsec0 address 00:11:22:33:44:66
+      ip macsec offload macsec0 mac
+      ip macsec add macsec0 tx sa 0 pn 1 on key 00 dffafc8d7b9a43d5b9a3dfbbf6a30c16
+      ip macsec add macsec0 rx sci 2 on
+      ip macsec add macsec0 rx sci 2 sa 0 pn 1 on key 00 ead3664f508eb06c40ac7104cdae4ce5
+      ip address flush macsec0
+      ip address add 2.2.2.1/24 dev macsec0
+      ip link set dev macsec0 up
+
+      # macsec0 enters promiscuous mode.
+      # This enables all traffic received on macsec_vlan to be processed by
+      # the macsec offload rx datapath. This however means that traffic
+      # meant to be received by mlx5_1 will be incorrectly steered to
+      # macsec0 as well.
+
+      ip link add link macsec0 name macsec_vlan type vlan id 1
+      ip link set dev macsec_vlan address 00:11:22:33:44:88
+      ip address flush macsec_vlan
+      ip address add 3.3.3.1/24 dev macsec_vlan
+      ip link set dev macsec_vlan up
+
+    Side 2
+
+      ip link del macsec0
+      ip address flush mlx5_1
+      ip address add 1.1.1.2/24 dev mlx5_1
+      ip link set dev mlx5_1 up
+      ip link add link mlx5_1 macsec0 type macsec sci 2 encrypt on
+      ip link set dev macsec0 address 00:11:22:33:44:77
+      ip macsec offload macsec0 mac
+      ip macsec add macsec0 tx sa 0 pn 1 on key 00 ead3664f508eb06c40ac7104cdae4ce5
+      ip macsec add macsec0 rx sci 1 on
+      ip macsec add macsec0 rx sci 1 sa 0 pn 1 on key 00 dffafc8d7b9a43d5b9a3dfbbf6a30c16
+      ip address flush macsec0
+      ip address add 2.2.2.2/24 dev macsec0
+      ip link set dev macsec0 up
+
+      # macsec0 enters promiscuous mode.
+      # This enables all traffic received on macsec_vlan to be processed by
+      # the macsec offload rx datapath. This however means that traffic
+      # meant to be received by mlx5_1 will be incorrectly steered to
+      # macsec0 as well.
+
+      ip link add link macsec0 name macsec_vlan type vlan id 1
+      ip link set dev macsec_vlan address 00:11:22:33:44:99
+      ip address flush macsec_vlan
+      ip address add 3.3.3.2/24 dev macsec_vlan
+      ip link set dev macsec_vlan up
+
+    Side 1
+
+      ping -I mlx5_1 1.1.1.2
+      PING 1.1.1.2 (1.1.1.2) from 1.1.1.1 mlx5_1: 56(84) bytes of data.
+      From 1.1.1.1 icmp_seq=1 Destination Host Unreachable
+      ping: sendmsg: No route to host
+      From 1.1.1.1 icmp_seq=2 Destination Host Unreachable
+      From 1.1.1.1 icmp_seq=3 Destination Host Unreachable
+
+Changes:
+
+  v2->v3:
+    * Made dev paramater const for eth_skb_pkt_type helper as suggested by Sabrina
+      Dubroca <sd@queasysnail.net>
+  v1->v2:
+    * Fixed series subject to detail the issue being fixed
+    * Removed strange characters from cover letter
+    * Added comment in example that illustrates the impact involving
+      promiscuous mode
+    * Added patch for generalizing packet type detection
+    * Added Fixes: tags and targeting net
+    * Removed pointless warning in the heuristic Rx path for macsec offload
+    * Applied small refactor in Rx path offload to minimize scope of rx_sc
+      local variable
+
+Link: https://github.com/Binary-Eater/macsec-rx-offload/blob/trunk/MACsec_violation_in_core_stack_offload_rx_handling.pdf
+Link: https://lore.kernel.org/netdev/20240419213033.400467-5-rrameshbabu@nvidia.com/
+Link: https://lore.kernel.org/netdev/20240419011740.333714-1-rrameshbabu@nvidia.com/
+Link: https://lore.kernel.org/netdev/87r0l25y1c.fsf@nvidia.com/
+Link: https://lore.kernel.org/netdev/20231116182900.46052-1-rrameshbabu@nvidia.com/
+====================
+
+Link: https://lore.kernel.org/r/20240423181319.115860-1-rrameshbabu@nvidia.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+Metadata:
+Author: Jakub Kicinski <kuba@kernel.org>
+Author Date: Thu Apr 25 07:59:04 2024 -0700
+Committer: Jakub Kicinski <kuba@kernel.org>
+Commit Date: Thu Apr 25 08:20:55 2024 -0700
+
+Files Changed: 0
+Lines Added: 65
+Lines Removed: 21
+Total Changes: 86

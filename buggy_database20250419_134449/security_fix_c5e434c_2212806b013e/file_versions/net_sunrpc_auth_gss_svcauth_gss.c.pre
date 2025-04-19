@@ -1,0 +1,54 @@
+commit 54f9247b3f6e51b24a4b7e873b3ab34d8e59dc45
+Author: Frank Filz <ffilzlnx@us.ibm.com>
+Date:   Wed May 9 02:34:53 2007 -0700
+
+    knfsd: fix resource leak resulting in module refcount leak for rpcsec_gss_krb5.ko
+    
+    I have been investigating a module reference count leak on the server for
+    rpcsec_gss_krb5.ko.  It turns out the problem is a reference count leak for
+    the security context in net/sunrpc/auth_gss/svcauth_gss.c.
+    
+    The problem is that gss_write_init_verf() calls gss_svc_searchbyctx() which
+    does a rsc_lookup() but never releases the reference to the context.  There is
+    another issue that rpc.svcgssd sets an "end of time" expiration for the
+    context
+    
+    By adding a cache_put() call in gss_svc_searchbyctx(), and setting an
+    expiration timeout in the downcall, cache_clean() does clean up the context
+    and the module reference count now goes to zero after unmount.
+    
+    I also verified that if the context expires and then the client makes a new
+    request, a new context is established.
+    
+    Here is the patch to fix the kernel, I will start a separate thread to discuss
+    what expiration time should be set by rpc.svcgssd.
+    
+    Acked-by: "J. Bruce Fields" <bfields@citi.umich.edu>
+    Signed-off-by: Frank Filz <ffilzlnx@us.ibm.com>
+    Signed-off-by: Neil Brown <neilb@suse.de>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/net/sunrpc/auth_gss/svcauth_gss.c b/net/sunrpc/auth_gss/svcauth_gss.c
+index c678f5f461c6..9c0508e5493d 100644
+--- a/net/sunrpc/auth_gss/svcauth_gss.c
++++ b/net/sunrpc/auth_gss/svcauth_gss.c
+@@ -924,6 +924,7 @@ static inline int
+ gss_write_init_verf(struct svc_rqst *rqstp, struct rsi *rsip)
+ {
+ 	struct rsc *rsci;
++	int        rc;
+ 
+ 	if (rsip->major_status != GSS_S_COMPLETE)
+ 		return gss_write_null_verf(rqstp);
+@@ -932,7 +933,9 @@ gss_write_init_verf(struct svc_rqst *rqstp, struct rsi *rsip)
+ 		rsip->major_status = GSS_S_NO_CONTEXT;
+ 		return gss_write_null_verf(rqstp);
+ 	}
+-	return gss_write_verf(rqstp, rsci->mechctx, GSS_SEQ_WIN);
++	rc = gss_write_verf(rqstp, rsci->mechctx, GSS_SEQ_WIN);
++	cache_put(&rsci->h, &rsc_cache);
++	return rc;
+ }
+ 
+ /*

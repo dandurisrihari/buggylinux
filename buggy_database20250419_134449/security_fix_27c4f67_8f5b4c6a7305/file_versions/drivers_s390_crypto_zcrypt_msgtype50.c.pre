@@ -1,0 +1,150 @@
+commit 3730f5300b450bc89306c3ab79c254e6039d9197
+Author: Harald Freudenberger <freude@linux.ibm.com>
+Date:   Sat Sep 26 22:51:38 2020 +0200
+
+    s390/zcrypt: move ap_msg param one level up the call chain
+    
+    Move the creating and disposal of the struct ap_message one
+    level up the call chain. The ap message was constructed in the
+    calling functions in msgtype50 and msgtype6 but only for the
+    ica rsa messages. For CCA and EP11 CPRBs the ap message struct
+    is created in the zcrypt api functions.
+    
+    This patch moves the construction of the ap message struct into
+    the functions zcrypt_rsa_modexpo and zcrypt_rsa_crt. So now all
+    the 4 zcrypt api functions zcrypt_rsa_modexpo, zcrypt_rsa_crt,
+    zcrypt_send_cprb and zcrypt_send_ep11_cprb appear and act
+    similar.
+    
+    There are no functional changes coming with this patch.
+    However, the availability of the ap_message struct has
+    advantages which will be needed by a follow up patch.
+    
+    Signed-off-by: Harald Freudenberger <freude@linux.ibm.com>
+    Signed-off-by: Vasily Gorbik <gor@linux.ibm.com>
+
+diff --git a/drivers/s390/crypto/zcrypt_msgtype50.c b/drivers/s390/crypto/zcrypt_msgtype50.c
+index 0f7f404ed858..c543b5959509 100644
+--- a/drivers/s390/crypto/zcrypt_msgtype50.c
++++ b/drivers/s390/crypto/zcrypt_msgtype50.c
+@@ -450,42 +450,41 @@ static atomic_t zcrypt_step = ATOMIC_INIT(0);
+  * @mex: pointer to the modexpo request buffer
+  */
+ static long zcrypt_cex2a_modexpo(struct zcrypt_queue *zq,
+-				 struct ica_rsa_modexpo *mex)
++				 struct ica_rsa_modexpo *mex,
++				 struct ap_message *ap_msg)
+ {
+-	struct ap_message ap_msg;
+ 	struct completion work;
+ 	int rc;
+ 
+-	ap_init_message(&ap_msg);
+ 	if (zq->zcard->user_space_type == ZCRYPT_CEX2A)
+-		ap_msg.msg = kmalloc(MSGTYPE50_CRB2_MAX_MSG_SIZE, GFP_KERNEL);
++		ap_msg->msg = kmalloc(MSGTYPE50_CRB2_MAX_MSG_SIZE, GFP_KERNEL);
+ 	else
+-		ap_msg.msg = kmalloc(MSGTYPE50_CRB3_MAX_MSG_SIZE, GFP_KERNEL);
+-	if (!ap_msg.msg)
++		ap_msg->msg = kmalloc(MSGTYPE50_CRB3_MAX_MSG_SIZE, GFP_KERNEL);
++	if (!ap_msg->msg)
+ 		return -ENOMEM;
+-	ap_msg.receive = zcrypt_cex2a_receive;
+-	ap_msg.psmid = (((unsigned long long) current->pid) << 32) +
+-				atomic_inc_return(&zcrypt_step);
+-	ap_msg.private = &work;
+-	rc = ICAMEX_msg_to_type50MEX_msg(zq, &ap_msg, mex);
++	ap_msg->receive = zcrypt_cex2a_receive;
++	ap_msg->psmid = (((unsigned long long) current->pid) << 32) +
++		atomic_inc_return(&zcrypt_step);
++	ap_msg->private = &work;
++	rc = ICAMEX_msg_to_type50MEX_msg(zq, ap_msg, mex);
+ 	if (rc)
+-		goto out_free;
++		goto out;
+ 	init_completion(&work);
+-	rc = ap_queue_message(zq->queue, &ap_msg);
++	rc = ap_queue_message(zq->queue, ap_msg);
+ 	if (rc)
+-		goto out_free;
++		goto out;
+ 	rc = wait_for_completion_interruptible(&work);
+ 	if (rc == 0) {
+-		rc = ap_msg.rc;
++		rc = ap_msg->rc;
+ 		if (rc == 0)
+-			rc = convert_response_cex2a(zq, &ap_msg,
++			rc = convert_response_cex2a(zq, ap_msg,
+ 						    mex->outputdata,
+ 						    mex->outputdatalength);
+ 	} else
+ 		/* Signal pending. */
+-		ap_cancel_message(zq->queue, &ap_msg);
+-out_free:
+-	kfree(ap_msg.msg);
++		ap_cancel_message(zq->queue, ap_msg);
++out:
++	ap_msg->private = NULL;
+ 	return rc;
+ }
+ 
+@@ -497,42 +496,41 @@ static long zcrypt_cex2a_modexpo(struct zcrypt_queue *zq,
+  * @crt: pointer to the modexpoc_crt request buffer
+  */
+ static long zcrypt_cex2a_modexpo_crt(struct zcrypt_queue *zq,
+-				     struct ica_rsa_modexpo_crt *crt)
++				     struct ica_rsa_modexpo_crt *crt,
++				     struct ap_message *ap_msg)
+ {
+-	struct ap_message ap_msg;
+ 	struct completion work;
+ 	int rc;
+ 
+-	ap_init_message(&ap_msg);
+ 	if (zq->zcard->user_space_type == ZCRYPT_CEX2A)
+-		ap_msg.msg = kmalloc(MSGTYPE50_CRB2_MAX_MSG_SIZE, GFP_KERNEL);
++		ap_msg->msg = kmalloc(MSGTYPE50_CRB2_MAX_MSG_SIZE, GFP_KERNEL);
+ 	else
+-		ap_msg.msg = kmalloc(MSGTYPE50_CRB3_MAX_MSG_SIZE, GFP_KERNEL);
+-	if (!ap_msg.msg)
++		ap_msg->msg = kmalloc(MSGTYPE50_CRB3_MAX_MSG_SIZE, GFP_KERNEL);
++	if (!ap_msg->msg)
+ 		return -ENOMEM;
+-	ap_msg.receive = zcrypt_cex2a_receive;
+-	ap_msg.psmid = (((unsigned long long) current->pid) << 32) +
+-				atomic_inc_return(&zcrypt_step);
+-	ap_msg.private = &work;
+-	rc = ICACRT_msg_to_type50CRT_msg(zq, &ap_msg, crt);
++	ap_msg->receive = zcrypt_cex2a_receive;
++	ap_msg->psmid = (((unsigned long long) current->pid) << 32) +
++		atomic_inc_return(&zcrypt_step);
++	ap_msg->private = &work;
++	rc = ICACRT_msg_to_type50CRT_msg(zq, ap_msg, crt);
+ 	if (rc)
+-		goto out_free;
++		goto out;
+ 	init_completion(&work);
+-	rc = ap_queue_message(zq->queue, &ap_msg);
++	rc = ap_queue_message(zq->queue, ap_msg);
+ 	if (rc)
+-		goto out_free;
++		goto out;
+ 	rc = wait_for_completion_interruptible(&work);
+ 	if (rc == 0) {
+-		rc = ap_msg.rc;
++		rc = ap_msg->rc;
+ 		if (rc == 0)
+-			rc = convert_response_cex2a(zq, &ap_msg,
++			rc = convert_response_cex2a(zq, ap_msg,
+ 						    crt->outputdata,
+ 						    crt->outputdatalength);
+ 	} else
+ 		/* Signal pending. */
+-		ap_cancel_message(zq->queue, &ap_msg);
+-out_free:
+-	kfree(ap_msg.msg);
++		ap_cancel_message(zq->queue, ap_msg);
++out:
++	ap_msg->private = NULL;
+ 	return rc;
+ }

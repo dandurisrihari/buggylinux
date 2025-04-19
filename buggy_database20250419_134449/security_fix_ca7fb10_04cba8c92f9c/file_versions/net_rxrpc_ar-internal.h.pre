@@ -1,0 +1,61 @@
+commit ec832bd06d6fdf08b0455ab7c2a7a9104e029638
+Author: David Howells <dhowells@redhat.com>
+Date:   Wed Sep 16 08:00:44 2020 +0100
+
+    rxrpc: Don't retain the server key in the connection
+    
+    Don't retain a pointer to the server key in the connection, but rather get
+    it on demand when the server has to deal with a response packet.
+    
+    This is necessary to implement RxGK (GSSAPI-mediated transport class),
+    where we can't know which key we'll need until we've challenged the client
+    and got back the response.
+    
+    This also means that we don't need to do a key search in the accept path in
+    softirq mode.
+    
+    Also, whilst we're at it, allow the security class to ask for a kvno and
+    encoding-type variant of a server key as RxGK needs different keys for
+    different encoding types.  Keys of this type have an extra bit in the
+    description:
+    
+            "<service-id>:<security-index>:<kvno>:<enctype>"
+    
+    Signed-off-by: David Howells <dhowells@redhat.com>
+
+diff --git a/net/rxrpc/ar-internal.h b/net/rxrpc/ar-internal.h
+index 3c417ec94e4c..db6e754743fb 100644
+--- a/net/rxrpc/ar-internal.h
++++ b/net/rxrpc/ar-internal.h
+@@ -441,7 +441,6 @@ struct rxrpc_connection {
+ 	struct list_head	link;		/* link in master connection list */
+ 	struct sk_buff_head	rx_queue;	/* received conn-level packets */
+ 	const struct rxrpc_security *security;	/* applied security module */
+-	struct key		*server_key;	/* security for this service */
+ 	struct crypto_sync_skcipher *cipher;	/* encryption handle */
+ 	struct rxrpc_crypt	csum_iv;	/* packet checksum base */
+ 	unsigned long		flags;
+@@ -890,8 +889,7 @@ struct rxrpc_connection *rxrpc_find_service_conn_rcu(struct rxrpc_peer *,
+ 						     struct sk_buff *);
+ struct rxrpc_connection *rxrpc_prealloc_service_connection(struct rxrpc_net *, gfp_t);
+ void rxrpc_new_incoming_connection(struct rxrpc_sock *, struct rxrpc_connection *,
+-				   const struct rxrpc_security *, struct key *,
+-				   struct sk_buff *);
++				   const struct rxrpc_security *, struct sk_buff *);
+ void rxrpc_unpublish_service_conn(struct rxrpc_connection *);
+ 
+ /*
+@@ -1056,9 +1054,10 @@ extern const struct rxrpc_security rxkad;
+ int __init rxrpc_init_security(void);
+ void rxrpc_exit_security(void);
+ int rxrpc_init_client_conn_security(struct rxrpc_connection *);
+-bool rxrpc_look_up_server_security(struct rxrpc_local *, struct rxrpc_sock *,
+-				   const struct rxrpc_security **, struct key **,
+-				   struct sk_buff *);
++const struct rxrpc_security *rxrpc_get_incoming_security(struct rxrpc_sock *,
++							 struct sk_buff *);
++struct key *rxrpc_look_up_server_security(struct rxrpc_connection *,
++					  struct sk_buff *, u32, u32);
+ 
+ /*
+  * sendmsg.c

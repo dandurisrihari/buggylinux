@@ -1,0 +1,66 @@
+{
+  "hash": "a873dfe1032a132bf89f9e19a6ac44f5a0b78754",
+  "hash_short": "a873dfe1",
+  "subject": "mm, hwpoison: try to recover from copy-on write faults",
+  "body": "Patch series \"Copy-on-write poison recovery\", v3.\n\nPart 1 deals with the process that triggered the copy on write fault with\na store to a shared read-only page.  That process is send a SIGBUS with\nthe usual machine check decoration to specify the virtual address of the\nlost page, together with the scope.\n\nPart 2 sets up to asynchronously take the page with the uncorrected error\noffline to prevent additional machine check faults.  H/t to Miaohe Lin\n<linmiaohe@huawei.com> and Shuai Xue <xueshuai@linux.alibaba.com> for\npointing me to the existing function to queue a call to memory_failure().\n\nOn x86 there is some duplicate reporting (because the error is also\nsignalled by the memory controller as well as by the core that triggered\nthe machine check).  Console logs look like this:\n\n\nThis patch (of 2):\n\nIf the kernel is copying a page as the result of a copy-on-write\nfault and runs into an uncorrectable error, Linux will crash because\nit does not have recovery code for this case where poison is consumed\nby the kernel.\n\nIt is easy to set up a test case. Just inject an error into a private\npage, fork(2), and have the child process write to the page.\n\nI wrapped that neatly into a test at:\n\n  git://git.kernel.org/pub/scm/linux/kernel/git/aegl/ras-tools.git\n\njust enable ACPI error injection and run:\n\n  # ./einj_mem-uc -f copy-on-write\n\nAdd a new copy_user_highpage_mc() function that uses copy_mc_to_kernel()\non architectures where that is available (currently x86 and powerpc).\nWhen an error is detected during the page copy, return VM_FAULT_HWPOISON\nto caller of wp_page_copy(). This propagates up the call stack. Both x86\nand powerpc have code in their fault handler to deal with this code by\nsending a SIGBUS to the application.\n\nNote that this patch avoids a system crash and signals the process that\ntriggered the copy-on-write action. It does not take any action for the\nmemory error that is still in the shared page. To handle that a call to\nmemory_failure() is needed. But this cannot be done from wp_page_copy()\nbecause it holds mmap_lock(). Perhaps the architecture fault handlers\ncan deal with this loose end in a subsequent patch?\n\nOn Intel/x86 this loose end will often be handled automatically because\nthe memory controller provides an additional notification of the h/w\npoison in memory, the handler for this will call memory_failure(). This\nisn't a 100% solution. If there are multiple errors, not all may be\nlogged in this way.\n\n[tony.luck@intel.com: add call to kmsan_unpoison_memory(), per Miaohe Lin]\n  Link: https://lkml.kernel.org/r/20221031201029.102123-2-tony.luck@intel.com\nLink: https://lkml.kernel.org/r/20221021200120.175753-1-tony.luck@intel.com\nLink: https://lkml.kernel.org/r/20221021200120.175753-2-tony.luck@intel.com\nSigned-off-by: Tony Luck <tony.luck@intel.com>\nReviewed-by: Dan Williams <dan.j.williams@intel.com>\nReviewed-by: Naoya Horiguchi <naoya.horiguchi@nec.com>\nReviewed-by: Miaohe Lin <linmiaohe@huawei.com>\nReviewed-by: Alexander Potapenko <glider@google.com>\nTested-by: Shuai Xue <xueshuai@linux.alibaba.com>\nCc: Christophe Leroy <christophe.leroy@csgroup.eu>\nCc: Matthew Wilcox (Oracle) <willy@infradead.org>\nCc: Michael Ellerman <mpe@ellerman.id.au>\nCc: Nicholas Piggin <npiggin@gmail.com>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>",
+  "full_message": "mm, hwpoison: try to recover from copy-on write faults\n\nPatch series \"Copy-on-write poison recovery\", v3.\n\nPart 1 deals with the process that triggered the copy on write fault with\na store to a shared read-only page.  That process is send a SIGBUS with\nthe usual machine check decoration to specify the virtual address of the\nlost page, together with the scope.\n\nPart 2 sets up to asynchronously take the page with the uncorrected error\noffline to prevent additional machine check faults.  H/t to Miaohe Lin\n<linmiaohe@huawei.com> and Shuai Xue <xueshuai@linux.alibaba.com> for\npointing me to the existing function to queue a call to memory_failure().\n\nOn x86 there is some duplicate reporting (because the error is also\nsignalled by the memory controller as well as by the core that triggered\nthe machine check).  Console logs look like this:\n\n\nThis patch (of 2):\n\nIf the kernel is copying a page as the result of a copy-on-write\nfault and runs into an uncorrectable error, Linux will crash because\nit does not have recovery code for this case where poison is consumed\nby the kernel.\n\nIt is easy to set up a test case. Just inject an error into a private\npage, fork(2), and have the child process write to the page.\n\nI wrapped that neatly into a test at:\n\n  git://git.kernel.org/pub/scm/linux/kernel/git/aegl/ras-tools.git\n\njust enable ACPI error injection and run:\n\n  # ./einj_mem-uc -f copy-on-write\n\nAdd a new copy_user_highpage_mc() function that uses copy_mc_to_kernel()\non architectures where that is available (currently x86 and powerpc).\nWhen an error is detected during the page copy, return VM_FAULT_HWPOISON\nto caller of wp_page_copy(). This propagates up the call stack. Both x86\nand powerpc have code in their fault handler to deal with this code by\nsending a SIGBUS to the application.\n\nNote that this patch avoids a system crash and signals the process that\ntriggered the copy-on-write action. It does not take any action for the\nmemory error that is still in the shared page. To handle that a call to\nmemory_failure() is needed. But this cannot be done from wp_page_copy()\nbecause it holds mmap_lock(). Perhaps the architecture fault handlers\ncan deal with this loose end in a subsequent patch?\n\nOn Intel/x86 this loose end will often be handled automatically because\nthe memory controller provides an additional notification of the h/w\npoison in memory, the handler for this will call memory_failure(). This\nisn't a 100% solution. If there are multiple errors, not all may be\nlogged in this way.\n\n[tony.luck@intel.com: add call to kmsan_unpoison_memory(), per Miaohe Lin]\n  Link: https://lkml.kernel.org/r/20221031201029.102123-2-tony.luck@intel.com\nLink: https://lkml.kernel.org/r/20221021200120.175753-1-tony.luck@intel.com\nLink: https://lkml.kernel.org/r/20221021200120.175753-2-tony.luck@intel.com\nSigned-off-by: Tony Luck <tony.luck@intel.com>\nReviewed-by: Dan Williams <dan.j.williams@intel.com>\nReviewed-by: Naoya Horiguchi <naoya.horiguchi@nec.com>\nReviewed-by: Miaohe Lin <linmiaohe@huawei.com>\nReviewed-by: Alexander Potapenko <glider@google.com>\nTested-by: Shuai Xue <xueshuai@linux.alibaba.com>\nCc: Christophe Leroy <christophe.leroy@csgroup.eu>\nCc: Matthew Wilcox (Oracle) <willy@infradead.org>\nCc: Michael Ellerman <mpe@ellerman.id.au>\nCc: Nicholas Piggin <npiggin@gmail.com>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>",
+  "author_name": "Tony Luck",
+  "author_email": "tony.luck@intel.com",
+  "author_date": "Fri Oct 21 13:01:19 2022 -0700",
+  "author_date_iso": "2022-10-21T13:01:19-07:00",
+  "committer_name": "Andrew Morton",
+  "committer_email": "akpm@linux-foundation.org",
+  "committer_date": "Wed Nov 30 15:58:40 2022 -0800",
+  "committer_date_iso": "2022-11-30T15:58:40-08:00",
+  "files_changed": [
+    "include/linux/highmem.h",
+    "mm/memory.c"
+  ],
+  "files_changed_count": 2,
+  "stats": [
+    {
+      "file": "include/linux/highmem.h",
+      "insertions": 26,
+      "deletions": 0
+    },
+    {
+      "file": "mm/memory.c",
+      "insertions": 20,
+      "deletions": 10
+    }
+  ],
+  "total_insertions": 46,
+  "total_deletions": 10,
+  "total_changes": 56,
+  "parents": [
+    "f689054aace2ff13af2e9a44a74fbba650ca31ba"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "inject"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "include/linux/highmem.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/memory.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

@@ -1,0 +1,126 @@
+{
+  "hash": "58319057b7847667f0c9585b9de0e8932b0fdb08",
+  "hash_short": "58319057",
+  "subject": "capabilities: ambient capabilities",
+  "body": "Credit where credit is due: this idea comes from Christoph Lameter with\na lot of valuable input from Serge Hallyn.  This patch is heavily based\non Christoph's patch.\n\n===== The status quo =====\n\nOn Linux, there are a number of capabilities defined by the kernel.  To\nperform various privileged tasks, processes can wield capabilities that\nthey hold.\n\nEach task has four capability masks: effective (pE), permitted (pP),\ninheritable (pI), and a bounding set (X).  When the kernel checks for a\ncapability, it checks pE.  The other capability masks serve to modify\nwhat capabilities can be in pE.\n\nAny task can remove capabilities from pE, pP, or pI at any time.  If a\ntask has a capability in pP, it can add that capability to pE and/or pI.\nIf a task has CAP_SETPCAP, then it can add any capability to pI, and it\ncan remove capabilities from X.\n\nTasks are not the only things that can have capabilities; files can also\nhave capabilities.  A file can have no capabilty information at all [1].\nIf a file has capability information, then it has a permitted mask (fP)\nand an inheritable mask (fI) as well as a single effective bit (fE) [2].\nFile capabilities modify the capabilities of tasks that execve(2) them.\n\nA task that successfully calls execve has its capabilities modified for\nthe file ultimately being excecuted (i.e.  the binary itself if that\nbinary is ELF or for the interpreter if the binary is a script.) [3] In\nthe capability evolution rules, for each mask Z, pZ represents the old\nvalue and pZ' represents the new value.  The rules are:\n\n  pP' = (X & fP) | (pI & fI)\n  pI' = pI\n  pE' = (fE ? pP' : 0)\n  X is unchanged\n\nFor setuid binaries, fP, fI, and fE are modified by a moderately\ncomplicated set of rules that emulate POSIX behavior.  Similarly, if\neuid == 0 or ruid == 0, then fP, fI, and fE are modified differently\n(primary, fP and fI usually end up being the full set).  For nonroot\nusers executing binaries with neither setuid nor file caps, fI and fP\nare empty and fE is false.\n\nAs an extra complication, if you execute a process as nonroot and fE is\nset, then the \"secure exec\" rules are in effect: AT_SECURE gets set,\nLD_PRELOAD doesn't work, etc.\n\nThis is rather messy.  We've learned that making any changes is\ndangerous, though: if a new kernel version allows an unprivileged\nprogram to change its security state in a way that persists cross\nexecution of a setuid program or a program with file caps, this\npersistent state is surprisingly likely to allow setuid or file-capped\nprograms to be exploited for privilege escalation.\n\n===== The problem =====\n\nCapability inheritance is basically useless.\n\nIf you aren't root and you execute an ordinary binary, fI is zero, so\nyour capabilities have no effect whatsoever on pP'.  This means that you\ncan't usefully execute a helper process or a shell command with elevated\ncapabilities if you aren't root.\n\nOn current kernels, you can sort of work around this by setting fI to\nthe full set for most or all non-setuid executable files.  This causes\npP' = pI for nonroot, and inheritance works.  No one does this because\nit's a PITA and it isn't even supported on most filesystems.\n\nIf you try this, you'll discover that every nonroot program ends up with\nsecure exec rules, breaking many things.\n\nThis is a problem that has bitten many people who have tried to use\ncapabilities for anything useful.\n\n===== The proposed change =====\n\nThis patch adds a fifth capability mask called the ambient mask (pA).\npA does what most people expect pI to do.\n\npA obeys the invariant that no bit can ever be set in pA if it is not\nset in both pP and pI.  Dropping a bit from pP or pI drops that bit from\npA.  This ensures that existing programs that try to drop capabilities\nstill do so, with a complication.  Because capability inheritance is so\nbroken, setting KEEPCAPS, using setresuid to switch to nonroot uids, and\nthen calling execve effectively drops capabilities.  Therefore,\nsetresuid from root to nonroot conditionally clears pA unless\nSECBIT_NO_SETUID_FIXUP is set.  Processes that don't like this can\nre-add bits to pA afterwards.\n\nThe capability evolution rules are changed:\n\n  pA' = (file caps or setuid or setgid ? 0 : pA)\n  pP' = (X & fP) | (pI & fI) | pA'\n  pI' = pI\n  pE' = (fE ? pP' : pA')\n  X is unchanged\n\nIf you are nonroot but you have a capability, you can add it to pA.  If\nyou do so, your children get that capability in pA, pP, and pE.  For\nexample, you can set pA = CAP_NET_BIND_SERVICE, and your children can\nautomatically bind low-numbered ports.  Hallelujah!\n\nUnprivileged users can create user namespaces, map themselves to a\nnonzero uid, and create both privileged (relative to their namespace)\nand unprivileged process trees.  This is currently more or less\nimpossible.  Hallelujah!\n\nYou cannot use pA to try to subvert a setuid, setgid, or file-capped\nprogram: if you execute any such program, pA gets cleared and the\nresulting evolution rules are unchanged by this patch.\n\nUsers with nonzero pA are unlikely to unintentionally leak that\ncapability.  If they run programs that try to drop privileges, dropping\nprivileges will still work.\n\nIt's worth noting that the degree of paranoia in this patch could\npossibly be reduced without causing serious problems.  Specifically, if\nwe allowed pA to persist across executing non-pA-aware setuid binaries\nand across setresuid, then, naively, the only capabilities that could\nleak as a result would be the capabilities in pA, and any attacker\n*already* has those capabilities.  This would make me nervous, though --\nsetuid binaries that tried to privilege-separate might fail to do so,\nand putting CAP_DAC_READ_SEARCH or CAP_DAC_OVERRIDE into pA could have\nunexpected side effects.  (Whether these unexpected side effects would\nbe exploitable is an open question.) I've therefore taken the more\nparanoid route.  We can revisit this later.\n\nAn alternative would be to require PR_SET_NO_NEW_PRIVS before setting\nambient capabilities.  I think that this would be annoying and would\nmake granting otherwise unprivileged users minor ambient capabilities\n(CAP_NET_BIND_SERVICE or CAP_NET_RAW for example) much less useful than\nit is with this patch.\n\n===== Footnotes =====\n\n[1] Files that are missing the \"security.capability\" xattr or that have\nunrecognized values for that xattr end up with has_cap set to false.\nThe code that does that appears to be complicated for no good reason.\n\n[2] The libcap capability mask parsers and formatters are dangerously\nmisleading and the documentation is flat-out wrong.  fE is *not* a mask;\nit's a single bit.  This has probably confused every single person who\nhas tried to use file capabilities.\n\n[3] Linux very confusingly processes both the script and the interpreter\nif applicable, for reasons that elude me.  The results from thinking\nabout a script's file capabilities and/or setuid bits are mostly\ndiscarded.\n\nPreliminary userspace code is here, but it needs updating:\nhttps://git.kernel.org/cgit/linux/kernel/git/luto/util-linux-playground.git/commit/?h=cap_ambient&id=7f5afbd175d2\n\nHere is a test program that can be used to verify the functionality\n(from Christoph):\n\n/*\n * Test program for the ambient capabilities. This program spawns a shell\n * that allows running processes with a defined set of capabilities.\n *\n * (C) 2015 Christoph Lameter <cl@linux.com>\n * Released under: GPL v3 or later.\n *\n *\n * Compile using:\n *\n *\tgcc -o ambient_test ambient_test.o -lcap-ng\n *\n * This program must have the following capabilities to run properly:\n * Permissions for CAP_NET_RAW, CAP_NET_ADMIN, CAP_SYS_NICE\n *\n * A command to equip the binary with the right caps is:\n *\n *\tsetcap cap_net_raw,cap_net_admin,cap_sys_nice+p ambient_test\n *\n *\n * To get a shell with additional caps that can be inherited by other processes:\n *\n *\t./ambient_test /bin/bash\n *\n *\n * Verifying that it works:\n *\n * From the bash spawed by ambient_test run\n *\n *\tcat /proc/$$/status\n *\n * and have a look at the capabilities.\n */\n\n#include <stdlib.h>\n#include <stdio.h>\n#include <errno.h>\n#include <cap-ng.h>\n#include <sys/prctl.h>\n#include <linux/capability.h>\n\n/*\n * Definitions from the kernel header files. These are going to be removed\n * when the /usr/include files have these defined.\n */\n#define PR_CAP_AMBIENT 47\n#define PR_CAP_AMBIENT_IS_SET 1\n#define PR_CAP_AMBIENT_RAISE 2\n#define PR_CAP_AMBIENT_LOWER 3\n#define PR_CAP_AMBIENT_CLEAR_ALL 4\n\nstatic void set_ambient_cap(int cap)\n{\n\tint rc;\n\n\tcapng_get_caps_process();\n\trc = capng_update(CAPNG_ADD, CAPNG_INHERITABLE, cap);\n\tif (rc) {\n\t\tprintf(\"Cannot add inheritable cap\\n\");\n\t\texit(2);\n\t}\n\tcapng_apply(CAPNG_SELECT_CAPS);\n\n\t/* Note the two 0s at the end. Kernel checks for these */\n\tif (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, cap, 0, 0)) {\n\t\tperror(\"Cannot set cap\");\n\t\texit(1);\n\t}\n}\n\nint main(int argc, char **argv)\n{\n\tint rc;\n\n\tset_ambient_cap(CAP_NET_RAW);\n\tset_ambient_cap(CAP_NET_ADMIN);\n\tset_ambient_cap(CAP_SYS_NICE);\n\n\tprintf(\"Ambient_test forking shell\\n\");\n\tif (execv(argv[1], argv + 1))\n\t\tperror(\"Cannot exec\");\n\n\treturn 0;\n}\n\nSigned-off-by: Christoph Lameter <cl@linux.com> # Original author\nSigned-off-by: Andy Lutomirski <luto@kernel.org>\nAcked-by: Serge E. Hallyn <serge.hallyn@ubuntu.com>\nAcked-by: Kees Cook <keescook@chromium.org>\nCc: Jonathan Corbet <corbet@lwn.net>\nCc: Aaron Jones <aaronmdjones@gmail.com>\nCc: Ted Ts'o <tytso@mit.edu>\nCc: Andrew G. Morgan <morgan@kernel.org>\nCc: Mimi Zohar <zohar@linux.vnet.ibm.com>\nCc: Austin S Hemmelgarn <ahferroin7@gmail.com>\nCc: Markku Savela <msa@moth.iki.fi>\nCc: Jarkko Sakkinen <jarkko.sakkinen@linux.intel.com>\nCc: Michael Kerrisk <mtk.manpages@gmail.com>\nCc: James Morris <james.l.morris@oracle.com>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>\nSigned-off-by: Linus Torvalds <torvalds@linux-foundation.org>",
+  "full_message": "capabilities: ambient capabilities\n\nCredit where credit is due: this idea comes from Christoph Lameter with\na lot of valuable input from Serge Hallyn.  This patch is heavily based\non Christoph's patch.\n\n===== The status quo =====\n\nOn Linux, there are a number of capabilities defined by the kernel.  To\nperform various privileged tasks, processes can wield capabilities that\nthey hold.\n\nEach task has four capability masks: effective (pE), permitted (pP),\ninheritable (pI), and a bounding set (X).  When the kernel checks for a\ncapability, it checks pE.  The other capability masks serve to modify\nwhat capabilities can be in pE.\n\nAny task can remove capabilities from pE, pP, or pI at any time.  If a\ntask has a capability in pP, it can add that capability to pE and/or pI.\nIf a task has CAP_SETPCAP, then it can add any capability to pI, and it\ncan remove capabilities from X.\n\nTasks are not the only things that can have capabilities; files can also\nhave capabilities.  A file can have no capabilty information at all [1].\nIf a file has capability information, then it has a permitted mask (fP)\nand an inheritable mask (fI) as well as a single effective bit (fE) [2].\nFile capabilities modify the capabilities of tasks that execve(2) them.\n\nA task that successfully calls execve has its capabilities modified for\nthe file ultimately being excecuted (i.e.  the binary itself if that\nbinary is ELF or for the interpreter if the binary is a script.) [3] In\nthe capability evolution rules, for each mask Z, pZ represents the old\nvalue and pZ' represents the new value.  The rules are:\n\n  pP' = (X & fP) | (pI & fI)\n  pI' = pI\n  pE' = (fE ? pP' : 0)\n  X is unchanged\n\nFor setuid binaries, fP, fI, and fE are modified by a moderately\ncomplicated set of rules that emulate POSIX behavior.  Similarly, if\neuid == 0 or ruid == 0, then fP, fI, and fE are modified differently\n(primary, fP and fI usually end up being the full set).  For nonroot\nusers executing binaries with neither setuid nor file caps, fI and fP\nare empty and fE is false.\n\nAs an extra complication, if you execute a process as nonroot and fE is\nset, then the \"secure exec\" rules are in effect: AT_SECURE gets set,\nLD_PRELOAD doesn't work, etc.\n\nThis is rather messy.  We've learned that making any changes is\ndangerous, though: if a new kernel version allows an unprivileged\nprogram to change its security state in a way that persists cross\nexecution of a setuid program or a program with file caps, this\npersistent state is surprisingly likely to allow setuid or file-capped\nprograms to be exploited for privilege escalation.\n\n===== The problem =====\n\nCapability inheritance is basically useless.\n\nIf you aren't root and you execute an ordinary binary, fI is zero, so\nyour capabilities have no effect whatsoever on pP'.  This means that you\ncan't usefully execute a helper process or a shell command with elevated\ncapabilities if you aren't root.\n\nOn current kernels, you can sort of work around this by setting fI to\nthe full set for most or all non-setuid executable files.  This causes\npP' = pI for nonroot, and inheritance works.  No one does this because\nit's a PITA and it isn't even supported on most filesystems.\n\nIf you try this, you'll discover that every nonroot program ends up with\nsecure exec rules, breaking many things.\n\nThis is a problem that has bitten many people who have tried to use\ncapabilities for anything useful.\n\n===== The proposed change =====\n\nThis patch adds a fifth capability mask called the ambient mask (pA).\npA does what most people expect pI to do.\n\npA obeys the invariant that no bit can ever be set in pA if it is not\nset in both pP and pI.  Dropping a bit from pP or pI drops that bit from\npA.  This ensures that existing programs that try to drop capabilities\nstill do so, with a complication.  Because capability inheritance is so\nbroken, setting KEEPCAPS, using setresuid to switch to nonroot uids, and\nthen calling execve effectively drops capabilities.  Therefore,\nsetresuid from root to nonroot conditionally clears pA unless\nSECBIT_NO_SETUID_FIXUP is set.  Processes that don't like this can\nre-add bits to pA afterwards.\n\nThe capability evolution rules are changed:\n\n  pA' = (file caps or setuid or setgid ? 0 : pA)\n  pP' = (X & fP) | (pI & fI) | pA'\n  pI' = pI\n  pE' = (fE ? pP' : pA')\n  X is unchanged\n\nIf you are nonroot but you have a capability, you can add it to pA.  If\nyou do so, your children get that capability in pA, pP, and pE.  For\nexample, you can set pA = CAP_NET_BIND_SERVICE, and your children can\nautomatically bind low-numbered ports.  Hallelujah!\n\nUnprivileged users can create user namespaces, map themselves to a\nnonzero uid, and create both privileged (relative to their namespace)\nand unprivileged process trees.  This is currently more or less\nimpossible.  Hallelujah!\n\nYou cannot use pA to try to subvert a setuid, setgid, or file-capped\nprogram: if you execute any such program, pA gets cleared and the\nresulting evolution rules are unchanged by this patch.\n\nUsers with nonzero pA are unlikely to unintentionally leak that\ncapability.  If they run programs that try to drop privileges, dropping\nprivileges will still work.\n\nIt's worth noting that the degree of paranoia in this patch could\npossibly be reduced without causing serious problems.  Specifically, if\nwe allowed pA to persist across executing non-pA-aware setuid binaries\nand across setresuid, then, naively, the only capabilities that could\nleak as a result would be the capabilities in pA, and any attacker\n*already* has those capabilities.  This would make me nervous, though --\nsetuid binaries that tried to privilege-separate might fail to do so,\nand putting CAP_DAC_READ_SEARCH or CAP_DAC_OVERRIDE into pA could have\nunexpected side effects.  (Whether these unexpected side effects would\nbe exploitable is an open question.) I've therefore taken the more\nparanoid route.  We can revisit this later.\n\nAn alternative would be to require PR_SET_NO_NEW_PRIVS before setting\nambient capabilities.  I think that this would be annoying and would\nmake granting otherwise unprivileged users minor ambient capabilities\n(CAP_NET_BIND_SERVICE or CAP_NET_RAW for example) much less useful than\nit is with this patch.\n\n===== Footnotes =====\n\n[1] Files that are missing the \"security.capability\" xattr or that have\nunrecognized values for that xattr end up with has_cap set to false.\nThe code that does that appears to be complicated for no good reason.\n\n[2] The libcap capability mask parsers and formatters are dangerously\nmisleading and the documentation is flat-out wrong.  fE is *not* a mask;\nit's a single bit.  This has probably confused every single person who\nhas tried to use file capabilities.\n\n[3] Linux very confusingly processes both the script and the interpreter\nif applicable, for reasons that elude me.  The results from thinking\nabout a script's file capabilities and/or setuid bits are mostly\ndiscarded.\n\nPreliminary userspace code is here, but it needs updating:\nhttps://git.kernel.org/cgit/linux/kernel/git/luto/util-linux-playground.git/commit/?h=cap_ambient&id=7f5afbd175d2\n\nHere is a test program that can be used to verify the functionality\n(from Christoph):\n\n/*\n * Test program for the ambient capabilities. This program spawns a shell\n * that allows running processes with a defined set of capabilities.\n *\n * (C) 2015 Christoph Lameter <cl@linux.com>\n * Released under: GPL v3 or later.\n *\n *\n * Compile using:\n *\n *\tgcc -o ambient_test ambient_test.o -lcap-ng\n *\n * This program must have the following capabilities to run properly:\n * Permissions for CAP_NET_RAW, CAP_NET_ADMIN, CAP_SYS_NICE\n *\n * A command to equip the binary with the right caps is:\n *\n *\tsetcap cap_net_raw,cap_net_admin,cap_sys_nice+p ambient_test\n *\n *\n * To get a shell with additional caps that can be inherited by other processes:\n *\n *\t./ambient_test /bin/bash\n *\n *\n * Verifying that it works:\n *\n * From the bash spawed by ambient_test run\n *\n *\tcat /proc/$$/status\n *\n * and have a look at the capabilities.\n */\n\n#include <stdlib.h>\n#include <stdio.h>\n#include <errno.h>\n#include <cap-ng.h>\n#include <sys/prctl.h>\n#include <linux/capability.h>\n\n/*\n * Definitions from the kernel header files. These are going to be removed\n * when the /usr/include files have these defined.\n */\n#define PR_CAP_AMBIENT 47\n#define PR_CAP_AMBIENT_IS_SET 1\n#define PR_CAP_AMBIENT_RAISE 2\n#define PR_CAP_AMBIENT_LOWER 3\n#define PR_CAP_AMBIENT_CLEAR_ALL 4\n\nstatic void set_ambient_cap(int cap)\n{\n\tint rc;\n\n\tcapng_get_caps_process();\n\trc = capng_update(CAPNG_ADD, CAPNG_INHERITABLE, cap);\n\tif (rc) {\n\t\tprintf(\"Cannot add inheritable cap\\n\");\n\t\texit(2);\n\t}\n\tcapng_apply(CAPNG_SELECT_CAPS);\n\n\t/* Note the two 0s at the end. Kernel checks for these */\n\tif (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, cap, 0, 0)) {\n\t\tperror(\"Cannot set cap\");\n\t\texit(1);\n\t}\n}\n\nint main(int argc, char **argv)\n{\n\tint rc;\n\n\tset_ambient_cap(CAP_NET_RAW);\n\tset_ambient_cap(CAP_NET_ADMIN);\n\tset_ambient_cap(CAP_SYS_NICE);\n\n\tprintf(\"Ambient_test forking shell\\n\");\n\tif (execv(argv[1], argv + 1))\n\t\tperror(\"Cannot exec\");\n\n\treturn 0;\n}\n\nSigned-off-by: Christoph Lameter <cl@linux.com> # Original author\nSigned-off-by: Andy Lutomirski <luto@kernel.org>\nAcked-by: Serge E. Hallyn <serge.hallyn@ubuntu.com>\nAcked-by: Kees Cook <keescook@chromium.org>\nCc: Jonathan Corbet <corbet@lwn.net>\nCc: Aaron Jones <aaronmdjones@gmail.com>\nCc: Ted Ts'o <tytso@mit.edu>\nCc: Andrew G. Morgan <morgan@kernel.org>\nCc: Mimi Zohar <zohar@linux.vnet.ibm.com>\nCc: Austin S Hemmelgarn <ahferroin7@gmail.com>\nCc: Markku Savela <msa@moth.iki.fi>\nCc: Jarkko Sakkinen <jarkko.sakkinen@linux.intel.com>\nCc: Michael Kerrisk <mtk.manpages@gmail.com>\nCc: James Morris <james.l.morris@oracle.com>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>\nSigned-off-by: Linus Torvalds <torvalds@linux-foundation.org>",
+  "author_name": "Andy Lutomirski",
+  "author_email": "luto@kernel.org",
+  "author_date": "Fri Sep 4 15:42:45 2015 -0700",
+  "author_date_iso": "2015-09-04T15:42:45-07:00",
+  "committer_name": "Linus Torvalds",
+  "committer_email": "torvalds@linux-foundation.org",
+  "committer_date": "Fri Sep 4 16:54:41 2015 -0700",
+  "committer_date_iso": "2015-09-04T16:54:41-07:00",
+  "files_changed": [
+    "fs/proc/array.c",
+    "include/linux/cred.h",
+    "include/uapi/linux/prctl.h",
+    "kernel/user_namespace.c",
+    "security/commoncap.c",
+    "security/keys/process_keys.c"
+  ],
+  "files_changed_count": 6,
+  "stats": [
+    {
+      "file": "fs/proc/array.c",
+      "insertions": 4,
+      "deletions": 1
+    },
+    {
+      "file": "include/linux/cred.h",
+      "insertions": 8,
+      "deletions": 0
+    },
+    {
+      "file": "include/uapi/linux/prctl.h",
+      "insertions": 7,
+      "deletions": 0
+    },
+    {
+      "file": "kernel/user_namespace.c",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "security/commoncap.c",
+      "insertions": 92,
+      "deletions": 10
+    },
+    {
+      "file": "security/keys/process_keys.c",
+      "insertions": 1,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 113,
+  "total_deletions": 11,
+  "total_changes": 124,
+  "parents": [
+    "e9f069868d60550c4b46f084ac9276a57c1b4711"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v4.10",
+    "v4.10-rc1",
+    "v4.10-rc2",
+    "v4.10-rc3",
+    "v4.10-rc4",
+    "v4.10-rc5",
+    "v4.10-rc6",
+    "v4.10-rc7",
+    "v4.10-rc8",
+    "v4.11"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "privilege escalation"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "fs/proc/array.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "kernel/user_namespace.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/uapi/linux/prctl.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "security/commoncap.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "security/keys/process_keys.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/cred.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

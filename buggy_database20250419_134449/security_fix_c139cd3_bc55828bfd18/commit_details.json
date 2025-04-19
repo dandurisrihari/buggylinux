@@ -1,0 +1,124 @@
+{
+  "hash": "c139cd3b43eac8708849755ed14286d0e9d2e589",
+  "hash_short": "c139cd3b",
+  "subject": "Merge branch 'ip_forward_pmtu'",
+  "body": "Hannes Frederic Sowa says:\n\n====================\npath mtu hardening patches\n\nAfter a lot of back and forth I want to propose these changes regarding\npath mtu hardening and give an outline why I think this is the best way\nhow to proceed:\n\nThis set contains the following patches:\n* ipv4: introduce ip_dst_mtu_maybe_forward and protect forwarding path against pmtu spoofing\n* ipv6: introduce ip6_dst_mtu_forward and protect forwarding path with it\n* ipv4: introduce hardened ip_no_pmtu_disc mode\n\nThe first one switches the forwarding path of IPv4 to use the interface\nmtu by default and ignore a possible discovered path mtu. It provides\na sysctl to switch back to the original behavior (see discussion below).\n\nThe second patch does the same thing unconditionally for IPv6. I don't\nprovide a knob for IPv6 to switch to original behavior (please see\nbelow).\n\nThe third patch introduces a hardened pmtu mode, where only pmtu\ninformation are accepted where the protocol is able to do more stringent\nchecks on the icmp piggyback payload (please see the patch commit msg\nfor further details).\n\nWhy is this change necessary?\n\nFirst of all, RFC 1191 4. Router specification says:\n\"When a router is unable to forward a datagram because it exceeds the\n MTU of the next-hop network and its Don't Fragment bit is set, the\n router is required to return an ICMP Destination Unreachable message\n to the source of the datagram, with the Code indicating\n \"fragmentation needed and DF set\". ...\"\n\nFor some time now fragmentation has been considered problematic, e.g.:\n* http://www.hpl.hp.com/techreports/Compaq-DEC/WRL-87-3.pdf\n* http://tools.ietf.org/search/rfc4963\n\nMost of them seem to agree that fragmentation should be avoided because\nof efficiency, data corruption or security concerns.\n\nRecently it was shown possible that correctly guessing IP ids could lead\nto data injection on DNS packets:\n<https://sites.google.com/site/hayashulman/files/fragmentation-poisoning.pdf>\n\nWhile we can try to completly stop fragmentation on the end host\n(this is e.g. implemented via IP_PMTUDISC_INTERFACE), we cannot stop\nfragmentation completly on the forwarding path. On the end host the\napplication has to deal with MTUs and has to choose fallback methods\nif fragmentation could be an attack vector. This is already the case for\nmost DNS software, where a maximum UDP packet size can be configured. But\nuntil recently they had no control over local fragmentation and could\nthus emit fragmented packets.\n\nOn the forwarding path we can just try to delay the fragmentation to\nthe last hop where this is really necessary. Current kernel already does\nthat but only because routers don't receive feedback of path mtus, these are\nonly send back to the end host system. But it is possible to maliciously\ninsert path mtu inforamtion via ICMP packets which have an icmp echo_reply\npayload, because we cannot validate those notifications against local\nsockets. DHCP clients which establish an any-bound RAW-socket could also\nstart processing unwanted fragmentation-needed packets.\n\nWhy does IPv4 has a knob to revert to old behavior while IPv6 doesn't?\n\nIPv4 does fragmentation on the path while IPv6 does always respond with\npacket-too-big errors. The interface MTU will always be greater than\nthe path MTU information. So we would discard packets we could actually\nforward because of malicious information. After this change we would\nlet the hop, which really could not forward the packet, notify the host\nof this problem.\n\nIPv4 allowes fragmentation mid-path. In case someone does use a software\nwhich tries to discover such paths and assumes that the kernel is handling\nthe discovered pmtu information automatically. This should be an extremly\nrare case, but because I could not exclude the possibility this knob is\nprovided. Also this software could insert non-locked mtu information\ninto the kernel. We cannot distinguish that from path mtu information\ncurrently. Premature fragmentation could solve some problems in wrongly\nconfigured networks, thus this switch is provided.\n\nOne frag-needed packet could reduce the path mtu down to 522 bytes\n(route/min_pmtu).\n\nMisc:\n\nIPv6 neighbor discovery could advertise mtu information for an\ninterface. These information update the ipv6-specific interface mtu and\nthus get used by the forwarding path.\n\nTunnel and xfrm output path will still honour path mtu and also respond\nwith Packet-too-Big or fragmentation-needed errors if needed.\n\nChangelog for all patches:\nv2)\n* enabled ip_forward_use_pmtu by default\n* reworded\nv3)\n* disabled ip_forward_use_pmtu by default\n* reworded\nv4)\n* renamed ip_dst_mtu_secure to ip_dst_mtu_maybe_forward\n* updated changelog accordingly\n* removed unneeded !!(... & ...) double negations\n\nv2)\n* by default we honour pmtu information\n3)\n* only honor interface mtu\n* rewritten and simplified\n* no knob to fall back to old mode any more\n\nv2)\n* reworded Documentation\n====================\n\nSigned-off-by: David S. Miller <davem@davemloft.net>",
+  "full_message": "Merge branch 'ip_forward_pmtu'\n\nHannes Frederic Sowa says:\n\n====================\npath mtu hardening patches\n\nAfter a lot of back and forth I want to propose these changes regarding\npath mtu hardening and give an outline why I think this is the best way\nhow to proceed:\n\nThis set contains the following patches:\n* ipv4: introduce ip_dst_mtu_maybe_forward and protect forwarding path against pmtu spoofing\n* ipv6: introduce ip6_dst_mtu_forward and protect forwarding path with it\n* ipv4: introduce hardened ip_no_pmtu_disc mode\n\nThe first one switches the forwarding path of IPv4 to use the interface\nmtu by default and ignore a possible discovered path mtu. It provides\na sysctl to switch back to the original behavior (see discussion below).\n\nThe second patch does the same thing unconditionally for IPv6. I don't\nprovide a knob for IPv6 to switch to original behavior (please see\nbelow).\n\nThe third patch introduces a hardened pmtu mode, where only pmtu\ninformation are accepted where the protocol is able to do more stringent\nchecks on the icmp piggyback payload (please see the patch commit msg\nfor further details).\n\nWhy is this change necessary?\n\nFirst of all, RFC 1191 4. Router specification says:\n\"When a router is unable to forward a datagram because it exceeds the\n MTU of the next-hop network and its Don't Fragment bit is set, the\n router is required to return an ICMP Destination Unreachable message\n to the source of the datagram, with the Code indicating\n \"fragmentation needed and DF set\". ...\"\n\nFor some time now fragmentation has been considered problematic, e.g.:\n* http://www.hpl.hp.com/techreports/Compaq-DEC/WRL-87-3.pdf\n* http://tools.ietf.org/search/rfc4963\n\nMost of them seem to agree that fragmentation should be avoided because\nof efficiency, data corruption or security concerns.\n\nRecently it was shown possible that correctly guessing IP ids could lead\nto data injection on DNS packets:\n<https://sites.google.com/site/hayashulman/files/fragmentation-poisoning.pdf>\n\nWhile we can try to completly stop fragmentation on the end host\n(this is e.g. implemented via IP_PMTUDISC_INTERFACE), we cannot stop\nfragmentation completly on the forwarding path. On the end host the\napplication has to deal with MTUs and has to choose fallback methods\nif fragmentation could be an attack vector. This is already the case for\nmost DNS software, where a maximum UDP packet size can be configured. But\nuntil recently they had no control over local fragmentation and could\nthus emit fragmented packets.\n\nOn the forwarding path we can just try to delay the fragmentation to\nthe last hop where this is really necessary. Current kernel already does\nthat but only because routers don't receive feedback of path mtus, these are\nonly send back to the end host system. But it is possible to maliciously\ninsert path mtu inforamtion via ICMP packets which have an icmp echo_reply\npayload, because we cannot validate those notifications against local\nsockets. DHCP clients which establish an any-bound RAW-socket could also\nstart processing unwanted fragmentation-needed packets.\n\nWhy does IPv4 has a knob to revert to old behavior while IPv6 doesn't?\n\nIPv4 does fragmentation on the path while IPv6 does always respond with\npacket-too-big errors. The interface MTU will always be greater than\nthe path MTU information. So we would discard packets we could actually\nforward because of malicious information. After this change we would\nlet the hop, which really could not forward the packet, notify the host\nof this problem.\n\nIPv4 allowes fragmentation mid-path. In case someone does use a software\nwhich tries to discover such paths and assumes that the kernel is handling\nthe discovered pmtu information automatically. This should be an extremly\nrare case, but because I could not exclude the possibility this knob is\nprovided. Also this software could insert non-locked mtu information\ninto the kernel. We cannot distinguish that from path mtu information\ncurrently. Premature fragmentation could solve some problems in wrongly\nconfigured networks, thus this switch is provided.\n\nOne frag-needed packet could reduce the path mtu down to 522 bytes\n(route/min_pmtu).\n\nMisc:\n\nIPv6 neighbor discovery could advertise mtu information for an\ninterface. These information update the ipv6-specific interface mtu and\nthus get used by the forwarding path.\n\nTunnel and xfrm output path will still honour path mtu and also respond\nwith Packet-too-Big or fragmentation-needed errors if needed.\n\nChangelog for all patches:\nv2)\n* enabled ip_forward_use_pmtu by default\n* reworded\nv3)\n* disabled ip_forward_use_pmtu by default\n* reworded\nv4)\n* renamed ip_dst_mtu_secure to ip_dst_mtu_maybe_forward\n* updated changelog accordingly\n* removed unneeded !!(... & ...) double negations\n\nv2)\n* by default we honour pmtu information\n3)\n* only honor interface mtu\n* rewritten and simplified\n* no knob to fall back to old mode any more\n\nv2)\n* reworded Documentation\n====================\n\nSigned-off-by: David S. Miller <davem@davemloft.net>",
+  "author_name": "David S. Miller",
+  "author_email": "davem@davemloft.net",
+  "author_date": "Mon Jan 13 11:23:02 2014 -0800",
+  "author_date_iso": "2014-01-13T11:23:02-08:00",
+  "committer_name": "David S. Miller",
+  "committer_email": "davem@davemloft.net",
+  "committer_date": "Mon Jan 13 11:23:02 2014 -0800",
+  "committer_date_iso": "2014-01-13T11:23:02-08:00",
+  "files_changed": [],
+  "files_changed_count": 0,
+  "stats": [
+    {
+      "file": "Documentation/networking/ip-sysctl.txt",
+      "insertions": 25,
+      "deletions": 1
+    },
+    {
+      "file": "include/net/ip.h",
+      "insertions": 33,
+      "deletions": 0
+    },
+    {
+      "file": "include/net/netns/ipv4.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "include/net/protocol.h",
+      "insertions": 6,
+      "deletions": 1
+    },
+    {
+      "file": "include/net/route.h",
+      "insertions": 3,
+      "deletions": 16
+    },
+    {
+      "file": "net/dccp/ipv4.c",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "net/ipv4/af_inet.c",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "net/ipv4/icmp.c",
+      "insertions": 24,
+      "deletions": 4
+    },
+    {
+      "file": "net/ipv4/ip_forward.c",
+      "insertions": 5,
+      "deletions": 2
+    },
+    {
+      "file": "net/ipv4/ip_output.c",
+      "insertions": 5,
+      "deletions": 3
+    },
+    {
+      "file": "net/ipv4/route.c",
+      "insertions": 0,
+      "deletions": 3
+    },
+    {
+      "file": "net/ipv4/sysctl_net_ipv4.c",
+      "insertions": 7,
+      "deletions": 0
+    },
+    {
+      "file": "net/ipv6/ip6_output.c",
+      "insertions": 22,
+      "deletions": 1
+    },
+    {
+      "file": "net/sctp/protocol.c",
+      "insertions": 1,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 134,
+  "total_deletions": 31,
+  "total_changes": 165,
+  "parents": [
+    "6c76a07a711165a31332aa619215f961b115071d",
+    "8ed1dc44d3e9e8387a104b1ae8f92e9a3fbf1b1e"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v3.14",
+    "v3.14-rc1",
+    "v3.14-rc2",
+    "v3.14-rc3",
+    "v3.14-rc4",
+    "v3.14-rc5",
+    "v3.14-rc6",
+    "v3.14-rc7",
+    "v3.14-rc8",
+    "v3.15"
+  ],
+  "is_merge": true,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "hardening",
+      "injection"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": []
+}

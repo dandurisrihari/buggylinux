@@ -1,0 +1,54 @@
+{
+  "hash": "9f7853d7609d59172eecfc5e7ccf503bc1b690bd",
+  "hash_short": "9f7853d7",
+  "subject": "powerpc/mm: Fix set_memory_*() against concurrent accesses",
+  "body": "Laurent reported that STRICT_MODULE_RWX was causing intermittent crashes\non one of his systems:\n\n  kernel tried to execute exec-protected page (c008000004073278) - exploit attempt? (uid: 0)\n  BUG: Unable to handle kernel instruction fetch\n  Faulting instruction address: 0xc008000004073278\n  Oops: Kernel access of bad area, sig: 11 [#1]\n  LE PAGE_SIZE=64K MMU=Radix SMP NR_CPUS=2048 NUMA pSeries\n  Modules linked in: drm virtio_console fuse drm_panel_orientation_quirks ...\n  CPU: 3 PID: 44 Comm: kworker/3:1 Not tainted 5.14.0-rc4+ #12\n  Workqueue: events control_work_handler [virtio_console]\n  NIP:  c008000004073278 LR: c008000004073278 CTR: c0000000001e9de0\n  REGS: c00000002e4ef7e0 TRAP: 0400   Not tainted  (5.14.0-rc4+)\n  MSR:  800000004280b033 <SF,VEC,VSX,EE,FP,ME,IR,DR,RI,LE>  CR: 24002822 XER: 200400cf\n  ...\n  NIP fill_queue+0xf0/0x210 [virtio_console]\n  LR  fill_queue+0xf0/0x210 [virtio_console]\n  Call Trace:\n    fill_queue+0xb4/0x210 [virtio_console] (unreliable)\n    add_port+0x1a8/0x470 [virtio_console]\n    control_work_handler+0xbc/0x1e8 [virtio_console]\n    process_one_work+0x290/0x590\n    worker_thread+0x88/0x620\n    kthread+0x194/0x1a0\n    ret_from_kernel_thread+0x5c/0x64\n\nJordan, Fabiano & Murilo were able to reproduce and identify that the\nproblem is caused by the call to module_enable_ro() in do_init_module(),\nwhich happens after the module's init function has already been called.\n\nOur current implementation of change_page_attr() is not safe against\nconcurrent accesses, because it invalidates the PTE before flushing the\nTLB and then installing the new PTE. That leaves a window in time where\nthere is no valid PTE for the page, if another CPU tries to access the\npage at that time we see something like the fault above.\n\nWe can't simply switch to set_pte_at()/flush TLB, because our hash MMU\ncode doesn't handle a set_pte_at() of a valid PTE. See [1].\n\nBut we do have pte_update(), which replaces the old PTE with the new,\nmeaning there's no window where the PTE is invalid. And the hash MMU\nversion hash__pte_update() deals with synchronising the hash page table\ncorrectly.\n\n[1]: https://lore.kernel.org/linuxppc-dev/87y318wp9r.fsf@linux.ibm.com/\n\nFixes: 1f9ad21c3b38 (\"powerpc/mm: Implement set_memory() routines\")\nReported-by: Laurent Vivier <lvivier@redhat.com>\nReviewed-by: Christophe Leroy <christophe.leroy@csgroup.eu>\nReviewed-by: Murilo Opsfelder Ara\u00fajo <muriloo@linux.ibm.com>\nTested-by: Laurent Vivier <lvivier@redhat.com>\nSigned-off-by: Fabiano Rosas <farosas@linux.ibm.com>\nSigned-off-by: Michael Ellerman <mpe@ellerman.id.au>\nLink: https://lore.kernel.org/r/20210818120518.3603172-1-mpe@ellerman.id.au",
+  "full_message": "powerpc/mm: Fix set_memory_*() against concurrent accesses\n\nLaurent reported that STRICT_MODULE_RWX was causing intermittent crashes\non one of his systems:\n\n  kernel tried to execute exec-protected page (c008000004073278) - exploit attempt? (uid: 0)\n  BUG: Unable to handle kernel instruction fetch\n  Faulting instruction address: 0xc008000004073278\n  Oops: Kernel access of bad area, sig: 11 [#1]\n  LE PAGE_SIZE=64K MMU=Radix SMP NR_CPUS=2048 NUMA pSeries\n  Modules linked in: drm virtio_console fuse drm_panel_orientation_quirks ...\n  CPU: 3 PID: 44 Comm: kworker/3:1 Not tainted 5.14.0-rc4+ #12\n  Workqueue: events control_work_handler [virtio_console]\n  NIP:  c008000004073278 LR: c008000004073278 CTR: c0000000001e9de0\n  REGS: c00000002e4ef7e0 TRAP: 0400   Not tainted  (5.14.0-rc4+)\n  MSR:  800000004280b033 <SF,VEC,VSX,EE,FP,ME,IR,DR,RI,LE>  CR: 24002822 XER: 200400cf\n  ...\n  NIP fill_queue+0xf0/0x210 [virtio_console]\n  LR  fill_queue+0xf0/0x210 [virtio_console]\n  Call Trace:\n    fill_queue+0xb4/0x210 [virtio_console] (unreliable)\n    add_port+0x1a8/0x470 [virtio_console]\n    control_work_handler+0xbc/0x1e8 [virtio_console]\n    process_one_work+0x290/0x590\n    worker_thread+0x88/0x620\n    kthread+0x194/0x1a0\n    ret_from_kernel_thread+0x5c/0x64\n\nJordan, Fabiano & Murilo were able to reproduce and identify that the\nproblem is caused by the call to module_enable_ro() in do_init_module(),\nwhich happens after the module's init function has already been called.\n\nOur current implementation of change_page_attr() is not safe against\nconcurrent accesses, because it invalidates the PTE before flushing the\nTLB and then installing the new PTE. That leaves a window in time where\nthere is no valid PTE for the page, if another CPU tries to access the\npage at that time we see something like the fault above.\n\nWe can't simply switch to set_pte_at()/flush TLB, because our hash MMU\ncode doesn't handle a set_pte_at() of a valid PTE. See [1].\n\nBut we do have pte_update(), which replaces the old PTE with the new,\nmeaning there's no window where the PTE is invalid. And the hash MMU\nversion hash__pte_update() deals with synchronising the hash page table\ncorrectly.\n\n[1]: https://lore.kernel.org/linuxppc-dev/87y318wp9r.fsf@linux.ibm.com/\n\nFixes: 1f9ad21c3b38 (\"powerpc/mm: Implement set_memory() routines\")\nReported-by: Laurent Vivier <lvivier@redhat.com>\nReviewed-by: Christophe Leroy <christophe.leroy@csgroup.eu>\nReviewed-by: Murilo Opsfelder Ara\u00fajo <muriloo@linux.ibm.com>\nTested-by: Laurent Vivier <lvivier@redhat.com>\nSigned-off-by: Fabiano Rosas <farosas@linux.ibm.com>\nSigned-off-by: Michael Ellerman <mpe@ellerman.id.au>\nLink: https://lore.kernel.org/r/20210818120518.3603172-1-mpe@ellerman.id.au",
+  "author_name": "Michael Ellerman",
+  "author_email": "mpe@ellerman.id.au",
+  "author_date": "Sun Aug 15 14:10:24 2021 +1000",
+  "author_date_iso": "2021-08-15T14:10:24+10:00",
+  "committer_name": "Michael Ellerman",
+  "committer_email": "mpe@ellerman.id.au",
+  "committer_date": "Thu Aug 19 09:41:54 2021 +1000",
+  "committer_date_iso": "2021-08-19T09:41:54+10:00",
+  "files_changed": [
+    "arch/powerpc/mm/pageattr.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "arch/powerpc/mm/pageattr.c",
+      "insertions": 10,
+      "deletions": 13
+    }
+  ],
+  "total_insertions": 10,
+  "total_deletions": 13,
+  "total_changes": 23,
+  "parents": [
+    "ef486bf448a057a6e2d50e40ae879f7add6585da"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "exploit"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/powerpc/mm/pageattr.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

@@ -1,0 +1,100 @@
+commit 71419b30cab099f7ca37e61bf41028d8b7d4984d
+Author: Thomas Gleixner <tglx@linutronix.de>
+Date:   Fri Aug 14 12:19:34 2020 +0200
+
+    timekeeping: Utilize local_clock() for NMI safe timekeeper during early boot
+    
+    During early boot the NMI safe timekeeper returns 0 until the first
+    clocksource becomes available.
+    
+    This prevents it from being used for printk or other facilities which today
+    use sched clock. sched clock can be available way before timekeeping is
+    initialized.
+    
+    The obvious workaround for this is to utilize the early sched clock in the
+    default dummy clock read function until a clocksource becomes available.
+    
+    After switching to the clocksource clock MONOTONIC and BOOTTIME will not
+    jump because the timekeeping_init() bases clock MONOTONIC on sched clock
+    and the offset between clock MONOTONIC and BOOTTIME is zero during boot.
+    
+    Clock REALTIME cannot provide useful timestamps during early boot up to
+    the point where a persistent clock becomes available, which is either in
+    timekeeping_init() or later when the RTC driver which might depend on I2C
+    or other subsystems is initialized.
+    
+    There is a minor difference to sched_clock() vs. suspend/resume. As the
+    timekeeper clock source might not be accessible during suspend, after
+    timekeeping_suspend() timestamps freeze up to the point where
+    timekeeping_resume() is invoked. OTOH this is true for some sched clock
+    implementations as well.
+    
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Tested-by: Petr Mladek <pmladek@suse.com>
+    Link: https://lore.kernel.org/r/20200814115512.041422402@linutronix.de
+
+diff --git a/kernel/time/timekeeping.c b/kernel/time/timekeeping.c
+index 4c47f388a83f..57d064d94cc2 100644
+--- a/kernel/time/timekeeping.c
++++ b/kernel/time/timekeeping.c
+@@ -54,6 +54,9 @@ static struct {
+ 
+ static struct timekeeper shadow_timekeeper;
+ 
++/* flag for if timekeeping is suspended */
++int __read_mostly timekeeping_suspended;
++
+ /**
+  * struct tk_fast - NMI safe timekeeper
+  * @seq:	Sequence counter for protecting updates. The lowest bit
+@@ -73,28 +76,42 @@ static u64 cycles_at_suspend;
+ 
+ static u64 dummy_clock_read(struct clocksource *cs)
+ {
+-	return cycles_at_suspend;
++	if (timekeeping_suspended)
++		return cycles_at_suspend;
++	return local_clock();
+ }
+ 
+ static struct clocksource dummy_clock = {
+ 	.read = dummy_clock_read,
+ };
+ 
++/*
++ * Boot time initialization which allows local_clock() to be utilized
++ * during early boot when clocksources are not available. local_clock()
++ * returns nanoseconds already so no conversion is required, hence mult=1
++ * and shift=0. When the first proper clocksource is installed then
++ * the fast time keepers are updated with the correct values.
++ */
++#define FAST_TK_INIT						\
++	{							\
++		.clock		= &dummy_clock,			\
++		.mask		= CLOCKSOURCE_MASK(64),		\
++		.mult		= 1,				\
++		.shift		= 0,				\
++	}
++
+ static struct tk_fast tk_fast_mono ____cacheline_aligned = {
+ 	.seq     = SEQCNT_RAW_SPINLOCK_ZERO(tk_fast_mono.seq, &timekeeper_lock),
+-	.base[0] = { .clock = &dummy_clock, },
+-	.base[1] = { .clock = &dummy_clock, },
++	.base[0] = FAST_TK_INIT,
++	.base[1] = FAST_TK_INIT,
+ };
+ 
+ static struct tk_fast tk_fast_raw  ____cacheline_aligned = {
+ 	.seq     = SEQCNT_RAW_SPINLOCK_ZERO(tk_fast_raw.seq, &timekeeper_lock),
+-	.base[0] = { .clock = &dummy_clock, },
+-	.base[1] = { .clock = &dummy_clock, },
++	.base[0] = FAST_TK_INIT,
++	.base[1] = FAST_TK_INIT,
+ };
+ 
+-/* flag for if timekeeping is suspended */
+-int __read_mostly timekeeping_suspended;
+-
+ static inline void tk_normalize_xtime(struct timekeeper *tk)
+ {
+ 	while (tk->tkr_mono.xtime_nsec >= ((u64)NSEC_PER_SEC << tk->tkr_mono.shift)) {

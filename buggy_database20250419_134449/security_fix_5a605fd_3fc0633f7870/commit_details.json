@@ -1,0 +1,78 @@
+{
+  "hash": "5a605fd6cb1da0ec9cb6e54c06bcf58f706d2f83",
+  "hash_short": "5a605fd6",
+  "subject": "xfs: recalculate free rt extents after log recovery",
+  "body": "I've been observing periodic corruption reports from xfs_scrub involving\nthe free rt extent counter (frextents) while running xfs/141.  That test\nuses an error injection knob to induce a torn write to the log, and an\narbitrary number of recovery mounts, frextents will count fewer free rt\nextents than can be found the rtbitmap.\n\nThe root cause of the problem is a combination of the misuse of\nsb_frextents in the incore mount to reflect both incore reservations\nmade by running transactions as well as the actual count of free rt\nextents on disk.  The following sequence can reproduce the undercount:\n\nThread 1\t\t\tThread 2\nxfs_trans_alloc(rtextents=3)\nxfs_mod_frextents(-3)\n<blocks>\n\t\t\t\txfs_attr_set()\n\t\t\t\txfs_bmap_attr_addfork()\n\t\t\t\txfs_add_attr2()\n\t\t\t\txfs_log_sb()\n\t\t\t\txfs_sb_to_disk()\n\t\t\t\txfs_trans_commit()\n<log flushed to disk>\n<log goes down>\n\nNote that thread 1 subtracts 3 from sb_frextents even though it never\ncommits to using that space.  Thread 2 writes the undercounted value to\nthe ondisk superblock and logs it to the xattr transaction, which is\nthen flushed to disk.  At next mount, log recovery will find the logged\nsuperblock and write that back into the filesystem.  At the end of log\nrecovery, we reread the superblock and install the recovered\nundercounted frextents value into the incore superblock.  From that\npoint on, we've effectively leaked thread 1's transaction reservation.\n\nThe correct fix for this is to separate the incore reservation from the\nondisk usage, but that's a matter for the next patch.  Because the\nkernel has been logging superblocks with undercounted frextents for a\nvery long time and we don't demand that sysadmins run xfs_repair after a\ncrash, fix the undercount by recomputing frextents after log recovery.\n\nGating this on log recovery is a reasonable balance (I think) between\ncorrecting the problem and slowing down every mount attempt.  Note that\nxfs_repair will fix undercounted frextents.\n\nSigned-off-by: Darrick J. Wong <djwong@kernel.org>\nReviewed-by: Dave Chinner <dchinner@redhat.com>\nSigned-off-by: Dave Chinner <david@fromorbit.com>",
+  "full_message": "xfs: recalculate free rt extents after log recovery\n\nI've been observing periodic corruption reports from xfs_scrub involving\nthe free rt extent counter (frextents) while running xfs/141.  That test\nuses an error injection knob to induce a torn write to the log, and an\narbitrary number of recovery mounts, frextents will count fewer free rt\nextents than can be found the rtbitmap.\n\nThe root cause of the problem is a combination of the misuse of\nsb_frextents in the incore mount to reflect both incore reservations\nmade by running transactions as well as the actual count of free rt\nextents on disk.  The following sequence can reproduce the undercount:\n\nThread 1\t\t\tThread 2\nxfs_trans_alloc(rtextents=3)\nxfs_mod_frextents(-3)\n<blocks>\n\t\t\t\txfs_attr_set()\n\t\t\t\txfs_bmap_attr_addfork()\n\t\t\t\txfs_add_attr2()\n\t\t\t\txfs_log_sb()\n\t\t\t\txfs_sb_to_disk()\n\t\t\t\txfs_trans_commit()\n<log flushed to disk>\n<log goes down>\n\nNote that thread 1 subtracts 3 from sb_frextents even though it never\ncommits to using that space.  Thread 2 writes the undercounted value to\nthe ondisk superblock and logs it to the xattr transaction, which is\nthen flushed to disk.  At next mount, log recovery will find the logged\nsuperblock and write that back into the filesystem.  At the end of log\nrecovery, we reread the superblock and install the recovered\nundercounted frextents value into the incore superblock.  From that\npoint on, we've effectively leaked thread 1's transaction reservation.\n\nThe correct fix for this is to separate the incore reservation from the\nondisk usage, but that's a matter for the next patch.  Because the\nkernel has been logging superblocks with undercounted frextents for a\nvery long time and we don't demand that sysadmins run xfs_repair after a\ncrash, fix the undercount by recomputing frextents after log recovery.\n\nGating this on log recovery is a reasonable balance (I think) between\ncorrecting the problem and slowing down every mount attempt.  Note that\nxfs_repair will fix undercounted frextents.\n\nSigned-off-by: Darrick J. Wong <djwong@kernel.org>\nReviewed-by: Dave Chinner <dchinner@redhat.com>\nSigned-off-by: Dave Chinner <david@fromorbit.com>",
+  "author_name": "Darrick J. Wong",
+  "author_email": "djwong@kernel.org",
+  "author_date": "Tue Apr 12 06:49:42 2022 +1000",
+  "author_date_iso": "2022-04-12T06:49:42+10:00",
+  "committer_name": "Dave Chinner",
+  "committer_email": "david@fromorbit.com",
+  "committer_date": "Tue Apr 12 06:49:42 2022 +1000",
+  "committer_date_iso": "2022-04-12T06:49:42+10:00",
+  "files_changed": [
+    "fs/xfs/xfs_mount.c",
+    "fs/xfs/xfs_rtalloc.c",
+    "fs/xfs/xfs_rtalloc.h"
+  ],
+  "files_changed_count": 3,
+  "stats": [
+    {
+      "file": "fs/xfs/xfs_mount.c",
+      "insertions": 32,
+      "deletions": 9
+    },
+    {
+      "file": "fs/xfs/xfs_rtalloc.c",
+      "insertions": 37,
+      "deletions": 0
+    },
+    {
+      "file": "fs/xfs/xfs_rtalloc.h",
+      "insertions": 2,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 71,
+  "total_deletions": 9,
+  "total_changes": 80,
+  "parents": [
+    "f34061f554feba68e12b7a73008c350d2a9afd0c"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "injection"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "fs/xfs/xfs_mount.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/xfs/xfs_rtalloc.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/xfs/xfs_rtalloc.h",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

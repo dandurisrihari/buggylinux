@@ -1,0 +1,57 @@
+commit 376c6d285017419e35c7177bc60abe7915fb7497
+Author: Tom Lendacky <thomas.lendacky@amd.com>
+Date:   Thu Dec 10 11:10:06 2020 -0600
+
+    KVM: SVM: Provide support for SEV-ES vCPU creation/loading
+    
+    An SEV-ES vCPU requires additional VMCB initialization requirements for
+    vCPU creation and vCPU load/put requirements. This includes:
+    
+    General VMCB initialization changes:
+      - Set a VMCB control bit to enable SEV-ES support on the vCPU.
+      - Set the VMCB encrypted VM save area address.
+      - CRx registers are part of the encrypted register state and cannot be
+        updated. Remove the CRx register read and write intercepts and replace
+        them with CRx register write traps to track the CRx register values.
+      - Certain MSR values are part of the encrypted register state and cannot
+        be updated. Remove certain MSR intercepts (EFER, CR_PAT, etc.).
+      - Remove the #GP intercept (no support for "enable_vmware_backdoor").
+      - Remove the XSETBV intercept since the hypervisor cannot modify XCR0.
+    
+    General vCPU creation changes:
+      - Set the initial GHCB gpa value as per the GHCB specification.
+    
+    Signed-off-by: Tom Lendacky <thomas.lendacky@amd.com>
+    Message-Id: <3a8aef366416eddd5556dfa3fdc212aafa1ad0a2.1607620209.git.thomas.lendacky@amd.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/svm/svm.h b/arch/x86/kvm/svm/svm.h
+index b85c162a8a1e..03359185331c 100644
+--- a/arch/x86/kvm/svm/svm.h
++++ b/arch/x86/kvm/svm/svm.h
+@@ -34,7 +34,7 @@ static const u32 host_save_user_msrs[] = {
+ 
+ #define NR_HOST_SAVE_USER_MSRS ARRAY_SIZE(host_save_user_msrs)
+ 
+-#define MAX_DIRECT_ACCESS_MSRS	15
++#define MAX_DIRECT_ACCESS_MSRS	18
+ #define MSRPM_OFFSETS	16
+ extern u32 msrpm_offsets[MSRPM_OFFSETS] __read_mostly;
+ extern bool npt_enabled;
+@@ -417,6 +417,8 @@ bool svm_nmi_blocked(struct kvm_vcpu *vcpu);
+ bool svm_interrupt_blocked(struct kvm_vcpu *vcpu);
+ void svm_set_gif(struct vcpu_svm *svm, bool value);
+ int svm_invoke_exit_handler(struct vcpu_svm *svm, u64 exit_code);
++void set_msr_interception(struct kvm_vcpu *vcpu, u32 *msrpm, u32 msr,
++			  int read, int write);
+ 
+ /* nested.c */
+ 
+@@ -576,5 +578,7 @@ void sev_hardware_teardown(void);
+ void sev_free_vcpu(struct kvm_vcpu *vcpu);
+ int sev_handle_vmgexit(struct vcpu_svm *svm);
+ int sev_es_string_io(struct vcpu_svm *svm, int size, unsigned int port, int in);
++void sev_es_init_vmcb(struct vcpu_svm *svm);
++void sev_es_create_vcpu(struct vcpu_svm *svm);
+ 
+ #endif

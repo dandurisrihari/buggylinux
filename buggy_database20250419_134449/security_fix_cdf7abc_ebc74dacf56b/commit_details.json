@@ -1,0 +1,78 @@
+{
+  "hash": "cdf7abc4610a7f1c43d06cda246c5f748a4fd267",
+  "hash_short": "cdf7abc4",
+  "subject": "srcu: Allow use of Tiny/Tree SRCU from both process and interrupt context",
+  "body": "Linu Cherian reported a WARN in cleanup_srcu_struct() when shutting\ndown a guest running iperf on a VFIO assigned device.  This happens\nbecause irqfd_wakeup() calls srcu_read_lock(&kvm->irq_srcu) in interrupt\ncontext, while a worker thread does the same inside kvm_set_irq().  If the\ninterrupt happens while the worker thread is executing __srcu_read_lock(),\nupdates to the Classic SRCU ->lock_count[] field or the Tree SRCU\n->srcu_lock_count[] field can be lost.\n\nThe docs say you are not supposed to call srcu_read_lock() and\nsrcu_read_unlock() from irq context, but KVM interrupt injection happens\nfrom (host) interrupt context and it would be nice if SRCU supported the\nuse case.  KVM is using SRCU here not really for the \"sleepable\" part,\nbut rather due to its IPI-free fast detection of grace periods.  It is\ntherefore not desirable to switch back to RCU, which would effectively\nrevert commit 719d93cd5f5c (\"kvm/irqchip: Speed up KVM_SET_GSI_ROUTING\",\n2014-01-16).\n\nHowever, the docs are overly conservative.  You can have an SRCU instance\nonly has users in irq context, and you can mix process and irq context\nas long as process context users disable interrupts.  In addition,\n__srcu_read_unlock() actually uses this_cpu_dec() on both Tree SRCU and\nClassic SRCU.  For those two implementations, only srcu_read_lock()\nis unsafe.\n\nWhen Classic SRCU's __srcu_read_unlock() was changed to use this_cpu_dec(),\nin commit 5a41344a3d83 (\"srcu: Simplify __srcu_read_unlock() via\nthis_cpu_dec()\", 2012-11-29), __srcu_read_lock() did two increments.\nTherefore it kept __this_cpu_inc(), with preempt_disable/enable in\nthe caller.  Tree SRCU however only does one increment, so on most\narchitectures it is more efficient for __srcu_read_lock() to use\nthis_cpu_inc(), and any performance differences appear to be down in\nthe noise.\n\nUnlike Classic and Tree SRCU, Tiny SRCU does increments and decrements on\na single variable.  Therefore, as Peter Zijlstra pointed out, Tiny SRCU's\nimplementation already supports mixed-context use of srcu_read_lock()\nand srcu_read_unlock(), at least as long as uses of srcu_read_lock()\nand srcu_read_unlock() in each handler are nested and paired properly.\nIn other words, it is still illegal to (say) invoke srcu_read_lock()\nin an interrupt handler and to invoke the matching srcu_read_unlock()\nin a softirq handler.  Therefore, the only change required for Tiny SRCU\nis to its comments.\n\nFixes: 719d93cd5f5c (\"kvm/irqchip: Speed up KVM_SET_GSI_ROUTING\")\nReported-by: Linu Cherian <linuc.decode@gmail.com>\nSuggested-by: Linu Cherian <linuc.decode@gmail.com>\nCc: kvm@vger.kernel.org\nSigned-off-by: Paolo Bonzini <pbonzini@redhat.com>\nCc: Linus Torvalds <torvalds@linux-foundation.org>\nSigned-off-by: Paul E. McKenney <paulmck@linux.vnet.ibm.com>\nTested-by: Paolo Bonzini <pbonzini@redhat.com>",
+  "full_message": "srcu: Allow use of Tiny/Tree SRCU from both process and interrupt context\n\nLinu Cherian reported a WARN in cleanup_srcu_struct() when shutting\ndown a guest running iperf on a VFIO assigned device.  This happens\nbecause irqfd_wakeup() calls srcu_read_lock(&kvm->irq_srcu) in interrupt\ncontext, while a worker thread does the same inside kvm_set_irq().  If the\ninterrupt happens while the worker thread is executing __srcu_read_lock(),\nupdates to the Classic SRCU ->lock_count[] field or the Tree SRCU\n->srcu_lock_count[] field can be lost.\n\nThe docs say you are not supposed to call srcu_read_lock() and\nsrcu_read_unlock() from irq context, but KVM interrupt injection happens\nfrom (host) interrupt context and it would be nice if SRCU supported the\nuse case.  KVM is using SRCU here not really for the \"sleepable\" part,\nbut rather due to its IPI-free fast detection of grace periods.  It is\ntherefore not desirable to switch back to RCU, which would effectively\nrevert commit 719d93cd5f5c (\"kvm/irqchip: Speed up KVM_SET_GSI_ROUTING\",\n2014-01-16).\n\nHowever, the docs are overly conservative.  You can have an SRCU instance\nonly has users in irq context, and you can mix process and irq context\nas long as process context users disable interrupts.  In addition,\n__srcu_read_unlock() actually uses this_cpu_dec() on both Tree SRCU and\nClassic SRCU.  For those two implementations, only srcu_read_lock()\nis unsafe.\n\nWhen Classic SRCU's __srcu_read_unlock() was changed to use this_cpu_dec(),\nin commit 5a41344a3d83 (\"srcu: Simplify __srcu_read_unlock() via\nthis_cpu_dec()\", 2012-11-29), __srcu_read_lock() did two increments.\nTherefore it kept __this_cpu_inc(), with preempt_disable/enable in\nthe caller.  Tree SRCU however only does one increment, so on most\narchitectures it is more efficient for __srcu_read_lock() to use\nthis_cpu_inc(), and any performance differences appear to be down in\nthe noise.\n\nUnlike Classic and Tree SRCU, Tiny SRCU does increments and decrements on\na single variable.  Therefore, as Peter Zijlstra pointed out, Tiny SRCU's\nimplementation already supports mixed-context use of srcu_read_lock()\nand srcu_read_unlock(), at least as long as uses of srcu_read_lock()\nand srcu_read_unlock() in each handler are nested and paired properly.\nIn other words, it is still illegal to (say) invoke srcu_read_lock()\nin an interrupt handler and to invoke the matching srcu_read_unlock()\nin a softirq handler.  Therefore, the only change required for Tiny SRCU\nis to its comments.\n\nFixes: 719d93cd5f5c (\"kvm/irqchip: Speed up KVM_SET_GSI_ROUTING\")\nReported-by: Linu Cherian <linuc.decode@gmail.com>\nSuggested-by: Linu Cherian <linuc.decode@gmail.com>\nCc: kvm@vger.kernel.org\nSigned-off-by: Paolo Bonzini <pbonzini@redhat.com>\nCc: Linus Torvalds <torvalds@linux-foundation.org>\nSigned-off-by: Paul E. McKenney <paulmck@linux.vnet.ibm.com>\nTested-by: Paolo Bonzini <pbonzini@redhat.com>",
+  "author_name": "Paolo Bonzini",
+  "author_email": "pbonzini@redhat.com",
+  "author_date": "Wed May 31 14:03:10 2017 +0200",
+  "author_date_iso": "2017-05-31T14:03:10+02:00",
+  "committer_name": "Paul E. McKenney",
+  "committer_email": "paulmck@linux.vnet.ibm.com",
+  "committer_date": "Thu Jun 8 08:24:26 2017 -0700",
+  "committer_date_iso": "2017-06-08T08:24:26-07:00",
+  "files_changed": [
+    "kernel/rcu/srcutiny.c",
+    "kernel/rcu/srcutree.c"
+  ],
+  "files_changed_count": 2,
+  "stats": [
+    {
+      "file": "kernel/rcu/srcutiny.c",
+      "insertions": 4,
+      "deletions": 3
+    },
+    {
+      "file": "kernel/rcu/srcutree.c",
+      "insertions": 2,
+      "deletions": 3
+    }
+  ],
+  "total_insertions": 6,
+  "total_deletions": 6,
+  "total_changes": 12,
+  "parents": [
+    "3c2993b8c6143d8a5793746a54eba8f86f95240f"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v4.12",
+    "v4.12-rc5",
+    "v4.12-rc6",
+    "v4.12-rc7",
+    "v4.13",
+    "v4.13-rc1",
+    "v4.13-rc2",
+    "v4.13-rc3",
+    "v4.13-rc4",
+    "v4.13-rc5"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "injection"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "kernel/rcu/srcutiny.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "kernel/rcu/srcutree.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

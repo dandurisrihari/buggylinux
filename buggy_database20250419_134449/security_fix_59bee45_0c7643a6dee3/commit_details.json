@@ -1,0 +1,61 @@
+{
+  "hash": "59bee45b9712c759ea4d3dcc4eff1752f3a66558",
+  "hash_short": "59bee45b",
+  "subject": "powerpc/mm: Fix missing KUAP disable in flush_coherent_icache()",
+  "body": "Stefan reported a strange kernel fault which turned out to be due to a\nmissing KUAP disable in flush_coherent_icache() called from\nflush_icache_range().\n\nThe fault looks like:\n\n  Kernel attempted to access user page (7fffc30d9c00) - exploit attempt? (uid: 1009)\n  BUG: Unable to handle kernel data access on read at 0x7fffc30d9c00\n  Faulting instruction address: 0xc00000000007232c\n  Oops: Kernel access of bad area, sig: 11 [#1]\n  LE PAGE_SIZE=64K MMU=Radix SMP NR_CPUS=2048 NUMA PowerNV\n  CPU: 35 PID: 5886 Comm: sigtramp Not tainted 5.6.0-rc2-gcc-8.2.0-00003-gfc37a1632d40 #79\n  NIP:  c00000000007232c LR: c00000000003b7fc CTR: 0000000000000000\n  REGS: c000001e11093940 TRAP: 0300   Not tainted  (5.6.0-rc2-gcc-8.2.0-00003-gfc37a1632d40)\n  MSR:  900000000280b033 <SF,HV,VEC,VSX,EE,FP,ME,IR,DR,RI,LE>  CR: 28000884  XER: 00000000\n  CFAR: c0000000000722fc DAR: 00007fffc30d9c00 DSISR: 08000000 IRQMASK: 0\n  GPR00: c00000000003b7fc c000001e11093bd0 c0000000023ac200 00007fffc30d9c00\n  GPR04: 00007fffc30d9c18 0000000000000000 c000001e11093bd4 0000000000000000\n  GPR08: 0000000000000000 0000000000000001 0000000000000000 c000001e1104ed80\n  GPR12: 0000000000000000 c000001fff6ab380 c0000000016be2d0 4000000000000000\n  GPR16: c000000000000000 bfffffffffffffff 0000000000000000 0000000000000000\n  GPR20: 00007fffc30d9c00 00007fffc30d8f58 00007fffc30d9c18 00007fffc30d9c20\n  GPR24: 00007fffc30d9c18 0000000000000000 c000001e11093d90 c000001e1104ed80\n  GPR28: c000001e11093e90 0000000000000000 c0000000023d9d18 00007fffc30d9c00\n  NIP flush_icache_range+0x5c/0x80\n  LR  handle_rt_signal64+0x95c/0xc2c\n  Call Trace:\n    0xc000001e11093d90 (unreliable)\n    handle_rt_signal64+0x93c/0xc2c\n    do_notify_resume+0x310/0x430\n    ret_from_except_lite+0x70/0x74\n  Instruction dump:\n  409e002c 7c0802a6 3c62ff31 3863f6a0 f8010080 48195fed 60000000 48fe4c8d\n  60000000 e8010080 7c0803a6 7c0004ac <7c00ffac> 7c0004ac 4c00012c 38210070\n\nThis path through handle_rt_signal64() to setup_trampoline() and\nflush_icache_range() is only triggered by 64-bit processes that have\nunmapped their VDSO, which is rare.\n\nflush_icache_range() takes a range of addresses to flush. In\nflush_coherent_icache() we implement an optimisation for CPUs where we\nknow we don't actually have to flush the whole range, we just need to\ndo a single icbi.\n\nHowever we still execute the icbi on the user address of the start of\nthe range we're flushing. On CPUs that also implement KUAP (Power9)\nthat leads to the spurious fault above.\n\nWe should be able to pass any address, including a kernel address, to\nthe icbi on these CPUs, which would avoid any interaction with KUAP.\nBut I don't want to make that change in a bug fix, just in case it\nsurfaces some strange behaviour on some CPU.\n\nSo for now just disable KUAP around the icbi. Note the icbi is treated\nas a load, so we allow read access, not write as you'd expect.\n\nFixes: 890274c2dc4c (\"powerpc/64s: Implement KUAP for Radix MMU\")\nCc: stable@vger.kernel.org # v5.2+\nReported-by: Stefan Berger <stefanb@linux.ibm.com>\nSigned-off-by: Michael Ellerman <mpe@ellerman.id.au>\nLink: https://lore.kernel.org/r/20200303235708.26004-1-mpe@ellerman.id.au",
+  "full_message": "powerpc/mm: Fix missing KUAP disable in flush_coherent_icache()\n\nStefan reported a strange kernel fault which turned out to be due to a\nmissing KUAP disable in flush_coherent_icache() called from\nflush_icache_range().\n\nThe fault looks like:\n\n  Kernel attempted to access user page (7fffc30d9c00) - exploit attempt? (uid: 1009)\n  BUG: Unable to handle kernel data access on read at 0x7fffc30d9c00\n  Faulting instruction address: 0xc00000000007232c\n  Oops: Kernel access of bad area, sig: 11 [#1]\n  LE PAGE_SIZE=64K MMU=Radix SMP NR_CPUS=2048 NUMA PowerNV\n  CPU: 35 PID: 5886 Comm: sigtramp Not tainted 5.6.0-rc2-gcc-8.2.0-00003-gfc37a1632d40 #79\n  NIP:  c00000000007232c LR: c00000000003b7fc CTR: 0000000000000000\n  REGS: c000001e11093940 TRAP: 0300   Not tainted  (5.6.0-rc2-gcc-8.2.0-00003-gfc37a1632d40)\n  MSR:  900000000280b033 <SF,HV,VEC,VSX,EE,FP,ME,IR,DR,RI,LE>  CR: 28000884  XER: 00000000\n  CFAR: c0000000000722fc DAR: 00007fffc30d9c00 DSISR: 08000000 IRQMASK: 0\n  GPR00: c00000000003b7fc c000001e11093bd0 c0000000023ac200 00007fffc30d9c00\n  GPR04: 00007fffc30d9c18 0000000000000000 c000001e11093bd4 0000000000000000\n  GPR08: 0000000000000000 0000000000000001 0000000000000000 c000001e1104ed80\n  GPR12: 0000000000000000 c000001fff6ab380 c0000000016be2d0 4000000000000000\n  GPR16: c000000000000000 bfffffffffffffff 0000000000000000 0000000000000000\n  GPR20: 00007fffc30d9c00 00007fffc30d8f58 00007fffc30d9c18 00007fffc30d9c20\n  GPR24: 00007fffc30d9c18 0000000000000000 c000001e11093d90 c000001e1104ed80\n  GPR28: c000001e11093e90 0000000000000000 c0000000023d9d18 00007fffc30d9c00\n  NIP flush_icache_range+0x5c/0x80\n  LR  handle_rt_signal64+0x95c/0xc2c\n  Call Trace:\n    0xc000001e11093d90 (unreliable)\n    handle_rt_signal64+0x93c/0xc2c\n    do_notify_resume+0x310/0x430\n    ret_from_except_lite+0x70/0x74\n  Instruction dump:\n  409e002c 7c0802a6 3c62ff31 3863f6a0 f8010080 48195fed 60000000 48fe4c8d\n  60000000 e8010080 7c0803a6 7c0004ac <7c00ffac> 7c0004ac 4c00012c 38210070\n\nThis path through handle_rt_signal64() to setup_trampoline() and\nflush_icache_range() is only triggered by 64-bit processes that have\nunmapped their VDSO, which is rare.\n\nflush_icache_range() takes a range of addresses to flush. In\nflush_coherent_icache() we implement an optimisation for CPUs where we\nknow we don't actually have to flush the whole range, we just need to\ndo a single icbi.\n\nHowever we still execute the icbi on the user address of the start of\nthe range we're flushing. On CPUs that also implement KUAP (Power9)\nthat leads to the spurious fault above.\n\nWe should be able to pass any address, including a kernel address, to\nthe icbi on these CPUs, which would avoid any interaction with KUAP.\nBut I don't want to make that change in a bug fix, just in case it\nsurfaces some strange behaviour on some CPU.\n\nSo for now just disable KUAP around the icbi. Note the icbi is treated\nas a load, so we allow read access, not write as you'd expect.\n\nFixes: 890274c2dc4c (\"powerpc/64s: Implement KUAP for Radix MMU\")\nCc: stable@vger.kernel.org # v5.2+\nReported-by: Stefan Berger <stefanb@linux.ibm.com>\nSigned-off-by: Michael Ellerman <mpe@ellerman.id.au>\nLink: https://lore.kernel.org/r/20200303235708.26004-1-mpe@ellerman.id.au",
+  "author_name": "Michael Ellerman",
+  "author_email": "mpe@ellerman.id.au",
+  "author_date": "Tue Mar 3 23:28:47 2020 +1100",
+  "author_date_iso": "2020-03-03T23:28:47+11:00",
+  "committer_name": "Michael Ellerman",
+  "committer_email": "mpe@ellerman.id.au",
+  "committer_date": "Thu Mar 5 17:15:08 2020 +1100",
+  "committer_date_iso": "2020-03-05T17:15:08+11:00",
+  "files_changed": [
+    "arch/powerpc/mm/mem.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "arch/powerpc/mm/mem.c",
+      "insertions": 2,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 2,
+  "total_deletions": 0,
+  "total_changes": 2,
+  "parents": [
+    "fc37a1632d40c80c067eb1bc235139f5867a2667"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v5.6",
+    "v5.6-rc5",
+    "v5.6-rc6",
+    "v5.6-rc7",
+    "v5.7-rc1"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "exploit"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/powerpc/mm/mem.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

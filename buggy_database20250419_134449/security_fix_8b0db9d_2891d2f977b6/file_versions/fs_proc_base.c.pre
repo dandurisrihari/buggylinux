@@ -1,0 +1,60 @@
+commit 18f661bcf898742212182d75f22f05b048cc04bb
+Author: Stephen Wilson <wilsons@start.ca>
+Date:   Sun Mar 13 15:49:22 2011 -0400
+
+    proc: hold cred_guard_mutex in check_mem_permission()
+    
+    Avoid a potential race when task exec's and we get a new ->mm but check against
+    the old credentials in ptrace_may_access().
+    
+    Holding of the mutex is implemented by factoring out the body of the code into a
+    helper function __check_mem_permission().  Performing this factorization now
+    simplifies upcoming changes and minimizes churn in the diff's.
+    
+    Signed-off-by: Stephen Wilson <wilsons@start.ca>
+    Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+
+diff --git a/fs/proc/base.c b/fs/proc/base.c
+index 9af49a3984f1..013f116b3223 100644
+--- a/fs/proc/base.c
++++ b/fs/proc/base.c
+@@ -191,10 +191,7 @@ static int proc_root_link(struct inode *inode, struct path *path)
+ 	return result;
+ }
+ 
+-/*
+- * Return zero if current may access user memory in @task, -error if not.
+- */
+-static int check_mem_permission(struct task_struct *task)
++static int __check_mem_permission(struct task_struct *task)
+ {
+ 	/*
+ 	 * A task can always look at itself, in case it chooses
+@@ -222,6 +219,27 @@ static int check_mem_permission(struct task_struct *task)
+ 	return -EPERM;
+ }
+ 
++/*
++ * Return zero if current may access user memory in @task, -error if not.
++ */
++static int check_mem_permission(struct task_struct *task)
++{
++	int err;
++
++	/*
++	 * Avoid racing if task exec's as we might get a new mm but validate
++	 * against old credentials.
++	 */
++	err = mutex_lock_killable(&task->signal->cred_guard_mutex);
++	if (err)
++		return err;
++
++	err = __check_mem_permission(task);
++	mutex_unlock(&task->signal->cred_guard_mutex);
++
++	return err;
++}
++
+ struct mm_struct *mm_for_maps(struct task_struct *task)
+ {
+ 	struct mm_struct *mm;

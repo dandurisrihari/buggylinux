@@ -1,0 +1,155 @@
+Commit Hash: c68cf5285e1896a2b725ec01a1351f08610165b8
+Subject: arm64: pauth: don't sign leaf functions
+
+
+Security Keywords:
+- authentication
+
+Full commit message:
+arm64: pauth: don't sign leaf functions
+
+Currently, when CONFIG_ARM64_PTR_AUTH_KERNEL=y (and
+CONFIG_UNWIND_PATCH_PAC_INTO_SCS=n), we enable pointer authentication
+for all functions, including leaf functions. This isn't necessary, and
+is unfortunate for a few reasons:
+
+* Any PACIASP instruction is implicitly a `BTI C` landing pad, and
+  forcing the addition of a PACIASP in every function introduces a
+  larger set of BTI gadgets than is necessary.
+
+* The PACIASP and AUTIASP instructions make leaf functions larger than
+  necessary, bloating the kernel Image. For a defconfig v6.2-rc3 kernel,
+  this appears to add ~64KiB relative to not signing leaf functions,
+  which is unfortunate but not entirely onerous.
+
+* The PACIASP and AUTIASP instructions potentially make leaf functions
+  more expensive in terms of performance and/or power. For many trivial
+  leaf functions, this is clearly unnecessary, e.g.
+
+  | <arch_local_save_flags>:
+  |        d503233f        paciasp
+  |        d53b4220        mrs     x0, daif
+  |        d50323bf        autiasp
+  |        d65f03c0        ret
+
+  | <calibration_delay_done>:
+  |        d503233f        paciasp
+  |        d50323bf        autiasp
+  |        d65f03c0        ret
+  |        d503201f        nop
+
+* When CONFIG_UNWIND_PATCH_PAC_INTO_SCS=y we disable pointer
+  authentication for leaf functions, so clearly this is not functionally
+  necessary, indicates we have an inconsistent threat model, and
+  convolutes the Makefile logic.
+
+We've used pointer authentication in leaf functions since the
+introduction of in-kernel pointer authentication in commit:
+
+  74afda4016a7437e ("arm64: compile the kernel with ptrauth return address signing")
+
+... but at the time we had no rationale for signing leaf functions.
+
+Subsequently, we considered avoiding signing leaf functions:
+
+  https://lore.kernel.org/linux-arm-kernel/1586856741-26839-1-git-send-email-amit.kachhap@arm.com/
+  https://lore.kernel.org/linux-arm-kernel/1588149371-20310-1-git-send-email-amit.kachhap@arm.com/
+
+... however at the time we didn't have an abundance of reasons to avoid
+signing leaf functions as above (e.g. the BTI case), we had no hardware
+to make performance measurements, and it was reasoned that this gave
+some level of protection against a limited set of code-reuse gadgets
+which would fall through to a RET. We documented this in commit:
+
+  717b938e22f8dbf0 ("arm64: Document why we enable PAC support for leaf functions")
+
+Notably, this was before we supported any forward-edge CFI scheme (e.g.
+Arm BTI, or Clang CFI/kCFI), which would prevent jumping into the middle
+of a function.
+
+In addition, even with signing forced for leaf functions, AUTIASP may be
+placed before a number of instructions which might constitute such a
+gadget, e.g.
+
+| <user_regs_reset_single_step>:
+|        f9400022        ldr     x2, [x1]
+|        d503233f        paciasp
+|        d50323bf        autiasp
+|        f9408401        ldr     x1, [x0, #264]
+|        720b005f        tst     w2, #0x200000
+|        b26b0022        orr     x2, x1, #0x200000
+|        926af821        and     x1, x1, #0xffffffffffdfffff
+|        9a820021        csel    x1, x1, x2, eq  // eq = none
+|        f9008401        str     x1, [x0, #264]
+|        d65f03c0        ret
+
+| <fpsimd_cpu_dead>:
+|        2a0003e3        mov     w3, w0
+|        9000ff42        adrp    x2, ffff800009ffd000 <xen_dynamic_chip+0x48>
+|        9120e042        add     x2, x2, #0x838
+|        52800000        mov     w0, #0x0                        // #0
+|        d503233f        paciasp
+|        f000d041        adrp    x1, ffff800009a20000 <this_cpu_vector>
+|        d50323bf        autiasp
+|        9102c021        add     x1, x1, #0xb0
+|        f8635842        ldr     x2, [x2, w3, uxtw #3]
+|        f821685f        str     xzr, [x2, x1]
+|        d65f03c0        ret
+|        d503201f        nop
+
+So generally, trying to use AUTIASP to detect such gadgetization is not
+robust, and this is dealt with far better by forward-edge CFI (which is
+designed to prevent such cases). We should bite the bullet and stop
+pretending that AUTIASP is a mitigation for such forward-edge
+gadgetization.
+
+For the above reasons, this patch has the kernel consistently sign
+non-leaf functions and avoid signing leaf functions.
+
+Considering a defconfig v6.2-rc3 kernel built with LLVM 15.0.6:
+
+* The vmlinux is ~43KiB smaller:
+
+  | [mark@lakrids:~/src/linux]% ls -al vmlinux-*
+  | -rwxr-xr-x 1 mark mark 338547808 Jan 25 17:17 vmlinux-after
+  | -rwxr-xr-x 1 mark mark 338591472 Jan 25 17:22 vmlinux-before
+
+* The resulting Image is 64KiB smaller:
+
+  | [mark@lakrids:~/src/linux]% ls -al Image-*
+  | -rwxr-xr-x 1 mark mark 32702976 Jan 25 17:17 Image-after
+  | -rwxr-xr-x 1 mark mark 32768512 Jan 25 17:22 Image-before
+
+* There are ~400 fewer BTI gadgets:
+
+  | [mark@lakrids:~/src/linux]% usekorg 12.1.0 aarch64-linux-objdump -d vmlinux-before 2> /dev/null | grep -ow 'paciasp\|bti\sc\?' | sort | uniq -c
+  |    1219 bti     c
+  |   61982 paciasp
+
+  | [mark@lakrids:~/src/linux]% usekorg 12.1.0 aarch64-linux-objdump -d vmlinux-after 2> /dev/null | grep -ow 'paciasp\|bti\sc\?' | sort | uniq -c
+  |   10099 bti     c
+  |   52699 paciasp
+
+  Which is +8880 BTIs, and -9283 PACIASPs, for -403 unnecessary BTI
+  gadgets. While this is small relative to the total, distinguishing the
+  two cases will make it easier to analyse and reduce this set further
+  in future.
+
+Signed-off-by: Mark Rutland <mark.rutland@arm.com>
+Reviewed-by: Ard Biesheuvel <ardb@kernel.org>
+Reviewed-by: Mark Brown <broonie@kernel.org>
+Cc: Amit Daniel Kachhap <amit.kachhap@arm.com>
+Cc: Will Deacon <will@kernel.org>
+Link: https://lore.kernel.org/r/20230131105809.991288-3-mark.rutland@arm.com
+Signed-off-by: Catalin Marinas <catalin.marinas@arm.com>
+
+Metadata:
+Author: Mark Rutland <mark.rutland@arm.com>
+Author Date: Tue Jan 31 10:58:09 2023 +0000
+Committer: Catalin Marinas <catalin.marinas@arm.com>
+Commit Date: Tue Jan 31 16:03:37 2023 +0000
+
+Files Changed: 1
+Lines Added: 8
+Lines Removed: 20
+Total Changes: 28

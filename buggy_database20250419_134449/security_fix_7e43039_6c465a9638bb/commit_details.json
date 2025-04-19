@@ -1,0 +1,54 @@
+{
+  "hash": "7e43039a49c2da45edc1d9d7c9ede4003ab45a5f",
+  "hash_short": "7e43039a",
+  "subject": "r6040: Fix kmemleak in probe and remove",
+  "body": "There is a memory leaks reported by kmemleak:\n\n  unreferenced object 0xffff888116111000 (size 2048):\n    comm \"modprobe\", pid 817, jiffies 4294759745 (age 76.502s)\n    hex dump (first 32 bytes):\n      00 c4 0a 04 81 88 ff ff 08 10 11 16 81 88 ff ff  ................\n      08 10 11 16 81 88 ff ff 00 00 00 00 00 00 00 00  ................\n    backtrace:\n      [<ffffffff815bcd82>] kmalloc_trace+0x22/0x60\n      [<ffffffff827e20ee>] phy_device_create+0x4e/0x90\n      [<ffffffff827e6072>] get_phy_device+0xd2/0x220\n      [<ffffffff827e7844>] mdiobus_scan+0xa4/0x2e0\n      [<ffffffff827e8be2>] __mdiobus_register+0x482/0x8b0\n      [<ffffffffa01f5d24>] r6040_init_one+0x714/0xd2c [r6040]\n      ...\n\nThe problem occurs in probe process as follows:\n  r6040_init_one:\n    mdiobus_register\n      mdiobus_scan    <- alloc and register phy_device,\n                         the reference count of phy_device is 3\n    r6040_mii_probe\n      phy_connect     <- connect to the first phy_device,\n                         so the reference count of the first\n                         phy_device is 4, others are 3\n    register_netdev   <- fault inject succeeded, goto error handling path\n\n    // error handling path\n    err_out_mdio_unregister:\n      mdiobus_unregister(lp->mii_bus);\n    err_out_mdio:\n      mdiobus_free(lp->mii_bus);    <- the reference count of the first\n                                       phy_device is 1, it is not released\n                                       and other phy_devices are released\n  // similarly, the remove process also has the same problem\n\nThe root cause is traced to the phy_device is not disconnected when\nremoves one r6040 device in r6040_remove_one() or on error handling path\nafter r6040_mii probed successfully. In r6040_mii_probe(), a net ethernet\ndevice is connected to the first PHY device of mii_bus, in order to\nnotify the connected driver when the link status changes, which is the\ndefault behavior of the PHY infrastructure to handle everything.\nTherefore the phy_device should be disconnected when removes one r6040\ndevice or on error handling path.\n\nFix it by adding phy_disconnect() when removes one r6040 device or on\nerror handling path after r6040_mii probed successfully.\n\nFixes: 3831861b4ad8 (\"r6040: implement phylib\")\nSigned-off-by: Li Zetao <lizetao1@huawei.com>\nReviewed-by: Leon Romanovsky <leonro@nvidia.com>\nLink: https://lore.kernel.org/r/20221213125614.927754-1-lizetao1@huawei.com\nSigned-off-by: Paolo Abeni <pabeni@redhat.com>",
+  "full_message": "r6040: Fix kmemleak in probe and remove\n\nThere is a memory leaks reported by kmemleak:\n\n  unreferenced object 0xffff888116111000 (size 2048):\n    comm \"modprobe\", pid 817, jiffies 4294759745 (age 76.502s)\n    hex dump (first 32 bytes):\n      00 c4 0a 04 81 88 ff ff 08 10 11 16 81 88 ff ff  ................\n      08 10 11 16 81 88 ff ff 00 00 00 00 00 00 00 00  ................\n    backtrace:\n      [<ffffffff815bcd82>] kmalloc_trace+0x22/0x60\n      [<ffffffff827e20ee>] phy_device_create+0x4e/0x90\n      [<ffffffff827e6072>] get_phy_device+0xd2/0x220\n      [<ffffffff827e7844>] mdiobus_scan+0xa4/0x2e0\n      [<ffffffff827e8be2>] __mdiobus_register+0x482/0x8b0\n      [<ffffffffa01f5d24>] r6040_init_one+0x714/0xd2c [r6040]\n      ...\n\nThe problem occurs in probe process as follows:\n  r6040_init_one:\n    mdiobus_register\n      mdiobus_scan    <- alloc and register phy_device,\n                         the reference count of phy_device is 3\n    r6040_mii_probe\n      phy_connect     <- connect to the first phy_device,\n                         so the reference count of the first\n                         phy_device is 4, others are 3\n    register_netdev   <- fault inject succeeded, goto error handling path\n\n    // error handling path\n    err_out_mdio_unregister:\n      mdiobus_unregister(lp->mii_bus);\n    err_out_mdio:\n      mdiobus_free(lp->mii_bus);    <- the reference count of the first\n                                       phy_device is 1, it is not released\n                                       and other phy_devices are released\n  // similarly, the remove process also has the same problem\n\nThe root cause is traced to the phy_device is not disconnected when\nremoves one r6040 device in r6040_remove_one() or on error handling path\nafter r6040_mii probed successfully. In r6040_mii_probe(), a net ethernet\ndevice is connected to the first PHY device of mii_bus, in order to\nnotify the connected driver when the link status changes, which is the\ndefault behavior of the PHY infrastructure to handle everything.\nTherefore the phy_device should be disconnected when removes one r6040\ndevice or on error handling path.\n\nFix it by adding phy_disconnect() when removes one r6040 device or on\nerror handling path after r6040_mii probed successfully.\n\nFixes: 3831861b4ad8 (\"r6040: implement phylib\")\nSigned-off-by: Li Zetao <lizetao1@huawei.com>\nReviewed-by: Leon Romanovsky <leonro@nvidia.com>\nLink: https://lore.kernel.org/r/20221213125614.927754-1-lizetao1@huawei.com\nSigned-off-by: Paolo Abeni <pabeni@redhat.com>",
+  "author_name": "Li Zetao",
+  "author_email": "lizetao1@huawei.com",
+  "author_date": "Tue Dec 13 20:56:14 2022 +0800",
+  "author_date_iso": "2022-12-13T20:56:14+08:00",
+  "committer_name": "Paolo Abeni",
+  "committer_email": "pabeni@redhat.com",
+  "committer_date": "Thu Dec 15 12:48:34 2022 +0100",
+  "committer_date_iso": "2022-12-15T12:48:34+01:00",
+  "files_changed": [
+    "drivers/net/ethernet/rdc/r6040.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "drivers/net/ethernet/rdc/r6040.c",
+      "insertions": 4,
+      "deletions": 1
+    }
+  ],
+  "total_insertions": 4,
+  "total_deletions": 1,
+  "total_changes": 5,
+  "parents": [
+    "3ff8bff704f4de125dca2262e5b5b963a3da1d87"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "inject"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "drivers/net/ethernet/rdc/r6040.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

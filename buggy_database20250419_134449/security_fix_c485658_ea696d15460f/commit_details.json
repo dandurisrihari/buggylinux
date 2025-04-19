@@ -1,0 +1,78 @@
+{
+  "hash": "c485658bae87faccd7aed540fd2ca3ab37992310",
+  "hash_short": "c485658b",
+  "subject": "net: sctp: fix skb leakage in COOKIE ECHO path of chunk->auth_chunk",
+  "body": "While working on ec0223ec48a9 (\"net: sctp: fix sctp_sf_do_5_1D_ce to\nverify if we/peer is AUTH capable\"), we noticed that there's a skb\nmemory leakage in the error path.\n\nRunning the same reproducer as in ec0223ec48a9 and by unconditionally\njumping to the error label (to simulate an error condition) in\nsctp_sf_do_5_1D_ce() receive path lets kmemleak detector bark about\nthe unfreed chunk->auth_chunk skb clone:\n\nUnreferenced object 0xffff8800b8f3a000 (size 256):\n  comm \"softirq\", pid 0, jiffies 4294769856 (age 110.757s)\n  hex dump (first 32 bytes):\n    00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................\n    89 ab 75 5e d4 01 58 13 00 00 00 00 00 00 00 00  ..u^..X.........\n  backtrace:\n    [<ffffffff816660be>] kmemleak_alloc+0x4e/0xb0\n    [<ffffffff8119f328>] kmem_cache_alloc+0xc8/0x210\n    [<ffffffff81566929>] skb_clone+0x49/0xb0\n    [<ffffffffa0467459>] sctp_endpoint_bh_rcv+0x1d9/0x230 [sctp]\n    [<ffffffffa046fdbc>] sctp_inq_push+0x4c/0x70 [sctp]\n    [<ffffffffa047e8de>] sctp_rcv+0x82e/0x9a0 [sctp]\n    [<ffffffff815abd38>] ip_local_deliver_finish+0xa8/0x210\n    [<ffffffff815a64af>] nf_reinject+0xbf/0x180\n    [<ffffffffa04b4762>] nfqnl_recv_verdict+0x1d2/0x2b0 [nfnetlink_queue]\n    [<ffffffffa04aa40b>] nfnetlink_rcv_msg+0x14b/0x250 [nfnetlink]\n    [<ffffffff815a3269>] netlink_rcv_skb+0xa9/0xc0\n    [<ffffffffa04aa7cf>] nfnetlink_rcv+0x23f/0x408 [nfnetlink]\n    [<ffffffff815a2bd8>] netlink_unicast+0x168/0x250\n    [<ffffffff815a2fa1>] netlink_sendmsg+0x2e1/0x3f0\n    [<ffffffff8155cc6b>] sock_sendmsg+0x8b/0xc0\n    [<ffffffff8155d449>] ___sys_sendmsg+0x369/0x380\n\nWhat happens is that commit bbd0d59809f9 clones the skb containing\nthe AUTH chunk in sctp_endpoint_bh_rcv() when having the edge case\nthat an endpoint requires COOKIE-ECHO chunks to be authenticated:\n\n  ---------- INIT[RANDOM; CHUNKS; HMAC-ALGO] ---------->\n  <------- INIT-ACK[RANDOM; CHUNKS; HMAC-ALGO] ---------\n  ------------------ AUTH; COOKIE-ECHO ---------------->\n  <-------------------- COOKIE-ACK ---------------------\n\nWhen we enter sctp_sf_do_5_1D_ce() and before we actually get to\nthe point where we process (and subsequently free) a non-NULL\nchunk->auth_chunk, we could hit the \"goto nomem_init\" path from\nan error condition and thus leave the cloned skb around w/o\nfreeing it.\n\nThe fix is to centrally free such clones in sctp_chunk_destroy()\nhandler that is invoked from sctp_chunk_free() after all refs have\ndropped; and also move both kfree_skb(chunk->auth_chunk) there,\nso that chunk->auth_chunk is either NULL (since sctp_chunkify()\nallocs new chunks through kmem_cache_zalloc()) or non-NULL with\na valid skb pointer. chunk->skb and chunk->auth_chunk are the\nonly skbs in the sctp_chunk structure that need to be handeled.\n\nWhile at it, we should use consume_skb() for both. It is the same\nas dev_kfree_skb() but more appropriately named as we are not\na device but a protocol. Also, this effectively replaces the\nkfree_skb() from both invocations into consume_skb(). Functions\nare the same only that kfree_skb() assumes that the frame was\nbeing dropped after a failure (e.g. for tools like drop monitor),\nusage of consume_skb() seems more appropriate in function\nsctp_chunk_destroy() though.\n\nFixes: bbd0d59809f9 (\"[SCTP]: Implement the receive and verification of AUTH chunk\")\nSigned-off-by: Daniel Borkmann <dborkman@redhat.com>\nCc: Vlad Yasevich <yasevich@gmail.com>\nCc: Neil Horman <nhorman@tuxdriver.com>\nAcked-by: Vlad Yasevich <vyasevich@gmail.com>\nAcked-by: Neil Horman <nhorman@tuxdriver.com>\nSigned-off-by: David S. Miller <davem@davemloft.net>",
+  "full_message": "net: sctp: fix skb leakage in COOKIE ECHO path of chunk->auth_chunk\n\nWhile working on ec0223ec48a9 (\"net: sctp: fix sctp_sf_do_5_1D_ce to\nverify if we/peer is AUTH capable\"), we noticed that there's a skb\nmemory leakage in the error path.\n\nRunning the same reproducer as in ec0223ec48a9 and by unconditionally\njumping to the error label (to simulate an error condition) in\nsctp_sf_do_5_1D_ce() receive path lets kmemleak detector bark about\nthe unfreed chunk->auth_chunk skb clone:\n\nUnreferenced object 0xffff8800b8f3a000 (size 256):\n  comm \"softirq\", pid 0, jiffies 4294769856 (age 110.757s)\n  hex dump (first 32 bytes):\n    00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................\n    89 ab 75 5e d4 01 58 13 00 00 00 00 00 00 00 00  ..u^..X.........\n  backtrace:\n    [<ffffffff816660be>] kmemleak_alloc+0x4e/0xb0\n    [<ffffffff8119f328>] kmem_cache_alloc+0xc8/0x210\n    [<ffffffff81566929>] skb_clone+0x49/0xb0\n    [<ffffffffa0467459>] sctp_endpoint_bh_rcv+0x1d9/0x230 [sctp]\n    [<ffffffffa046fdbc>] sctp_inq_push+0x4c/0x70 [sctp]\n    [<ffffffffa047e8de>] sctp_rcv+0x82e/0x9a0 [sctp]\n    [<ffffffff815abd38>] ip_local_deliver_finish+0xa8/0x210\n    [<ffffffff815a64af>] nf_reinject+0xbf/0x180\n    [<ffffffffa04b4762>] nfqnl_recv_verdict+0x1d2/0x2b0 [nfnetlink_queue]\n    [<ffffffffa04aa40b>] nfnetlink_rcv_msg+0x14b/0x250 [nfnetlink]\n    [<ffffffff815a3269>] netlink_rcv_skb+0xa9/0xc0\n    [<ffffffffa04aa7cf>] nfnetlink_rcv+0x23f/0x408 [nfnetlink]\n    [<ffffffff815a2bd8>] netlink_unicast+0x168/0x250\n    [<ffffffff815a2fa1>] netlink_sendmsg+0x2e1/0x3f0\n    [<ffffffff8155cc6b>] sock_sendmsg+0x8b/0xc0\n    [<ffffffff8155d449>] ___sys_sendmsg+0x369/0x380\n\nWhat happens is that commit bbd0d59809f9 clones the skb containing\nthe AUTH chunk in sctp_endpoint_bh_rcv() when having the edge case\nthat an endpoint requires COOKIE-ECHO chunks to be authenticated:\n\n  ---------- INIT[RANDOM; CHUNKS; HMAC-ALGO] ---------->\n  <------- INIT-ACK[RANDOM; CHUNKS; HMAC-ALGO] ---------\n  ------------------ AUTH; COOKIE-ECHO ---------------->\n  <-------------------- COOKIE-ACK ---------------------\n\nWhen we enter sctp_sf_do_5_1D_ce() and before we actually get to\nthe point where we process (and subsequently free) a non-NULL\nchunk->auth_chunk, we could hit the \"goto nomem_init\" path from\nan error condition and thus leave the cloned skb around w/o\nfreeing it.\n\nThe fix is to centrally free such clones in sctp_chunk_destroy()\nhandler that is invoked from sctp_chunk_free() after all refs have\ndropped; and also move both kfree_skb(chunk->auth_chunk) there,\nso that chunk->auth_chunk is either NULL (since sctp_chunkify()\nallocs new chunks through kmem_cache_zalloc()) or non-NULL with\na valid skb pointer. chunk->skb and chunk->auth_chunk are the\nonly skbs in the sctp_chunk structure that need to be handeled.\n\nWhile at it, we should use consume_skb() for both. It is the same\nas dev_kfree_skb() but more appropriately named as we are not\na device but a protocol. Also, this effectively replaces the\nkfree_skb() from both invocations into consume_skb(). Functions\nare the same only that kfree_skb() assumes that the frame was\nbeing dropped after a failure (e.g. for tools like drop monitor),\nusage of consume_skb() seems more appropriate in function\nsctp_chunk_destroy() though.\n\nFixes: bbd0d59809f9 (\"[SCTP]: Implement the receive and verification of AUTH chunk\")\nSigned-off-by: Daniel Borkmann <dborkman@redhat.com>\nCc: Vlad Yasevich <yasevich@gmail.com>\nCc: Neil Horman <nhorman@tuxdriver.com>\nAcked-by: Vlad Yasevich <vyasevich@gmail.com>\nAcked-by: Neil Horman <nhorman@tuxdriver.com>\nSigned-off-by: David S. Miller <davem@davemloft.net>",
+  "author_name": "Daniel Borkmann",
+  "author_email": "dborkman@redhat.com",
+  "author_date": "Tue Mar 4 16:35:51 2014 +0100",
+  "author_date_iso": "2014-03-04T16:35:51+01:00",
+  "committer_name": "David S. Miller",
+  "committer_email": "davem@davemloft.net",
+  "committer_date": "Wed Mar 5 20:40:25 2014 -0500",
+  "committer_date_iso": "2014-03-05T20:40:25-05:00",
+  "files_changed": [
+    "net/sctp/sm_make_chunk.c",
+    "net/sctp/sm_statefuns.c"
+  ],
+  "files_changed_count": 2,
+  "stats": [
+    {
+      "file": "net/sctp/sm_make_chunk.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "net/sctp/sm_statefuns.c",
+      "insertions": 0,
+      "deletions": 5
+    }
+  ],
+  "total_insertions": 2,
+  "total_deletions": 7,
+  "total_changes": 9,
+  "parents": [
+    "10c3271712f58215f4d336a1e30aa25be09cd5d1"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v3.14",
+    "v3.14-rc7",
+    "v3.14-rc8",
+    "v3.15",
+    "v3.15-rc1",
+    "v3.15-rc2",
+    "v3.15-rc3",
+    "v3.15-rc4",
+    "v3.15-rc5",
+    "v3.15-rc6"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "AUTH"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "net/sctp/sm_make_chunk.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "net/sctp/sm_statefuns.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

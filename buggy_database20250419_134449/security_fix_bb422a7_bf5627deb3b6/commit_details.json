@@ -1,0 +1,66 @@
+{
+  "hash": "bb422a738f6566f7439cd347d54e321e4fe92a9f",
+  "hash_short": "bb422a73",
+  "subject": "mm,vmscan: Make unregister_shrinker() no-op if register_shrinker() failed.",
+  "body": "Syzbot caught an oops at unregister_shrinker() because combination of\ncommit 1d3d4437eae1bb29 (\"vmscan: per-node deferred work\") and fault\ninjection made register_shrinker() fail and the caller of\nregister_shrinker() did not check for failure.\n\n----------\n[  554.881422] FAULT_INJECTION: forcing a failure.\n[  554.881422] name failslab, interval 1, probability 0, space 0, times 0\n[  554.881438] CPU: 1 PID: 13231 Comm: syz-executor1 Not tainted 4.14.0-rc8+ #82\n[  554.881443] Hardware name: Google Google Compute Engine/Google Compute Engine, BIOS Google 01/01/2011\n[  554.881445] Call Trace:\n[  554.881459]  dump_stack+0x194/0x257\n[  554.881474]  ? arch_local_irq_restore+0x53/0x53\n[  554.881486]  ? find_held_lock+0x35/0x1d0\n[  554.881507]  should_fail+0x8c0/0xa40\n[  554.881522]  ? fault_create_debugfs_attr+0x1f0/0x1f0\n[  554.881537]  ? check_noncircular+0x20/0x20\n[  554.881546]  ? find_next_zero_bit+0x2c/0x40\n[  554.881560]  ? ida_get_new_above+0x421/0x9d0\n[  554.881577]  ? find_held_lock+0x35/0x1d0\n[  554.881594]  ? __lock_is_held+0xb6/0x140\n[  554.881628]  ? check_same_owner+0x320/0x320\n[  554.881634]  ? lock_downgrade+0x990/0x990\n[  554.881649]  ? find_held_lock+0x35/0x1d0\n[  554.881672]  should_failslab+0xec/0x120\n[  554.881684]  __kmalloc+0x63/0x760\n[  554.881692]  ? lock_downgrade+0x990/0x990\n[  554.881712]  ? register_shrinker+0x10e/0x2d0\n[  554.881721]  ? trace_event_raw_event_module_request+0x320/0x320\n[  554.881737]  register_shrinker+0x10e/0x2d0\n[  554.881747]  ? prepare_kswapd_sleep+0x1f0/0x1f0\n[  554.881755]  ? _down_write_nest_lock+0x120/0x120\n[  554.881765]  ? memcpy+0x45/0x50\n[  554.881785]  sget_userns+0xbcd/0xe20\n(...snipped...)\n[  554.898693] kasan: CONFIG_KASAN_INLINE enabled\n[  554.898724] kasan: GPF could be caused by NULL-ptr deref or user memory access\n[  554.898732] general protection fault: 0000 [#1] SMP KASAN\n[  554.898737] Dumping ftrace buffer:\n[  554.898741]    (ftrace buffer empty)\n[  554.898743] Modules linked in:\n[  554.898752] CPU: 1 PID: 13231 Comm: syz-executor1 Not tainted 4.14.0-rc8+ #82\n[  554.898755] Hardware name: Google Google Compute Engine/Google Compute Engine, BIOS Google 01/01/2011\n[  554.898760] task: ffff8801d1dbe5c0 task.stack: ffff8801c9e38000\n[  554.898772] RIP: 0010:__list_del_entry_valid+0x7e/0x150\n[  554.898775] RSP: 0018:ffff8801c9e3f108 EFLAGS: 00010246\n[  554.898780] RAX: dffffc0000000000 RBX: 0000000000000000 RCX: 0000000000000000\n[  554.898784] RDX: 0000000000000000 RSI: ffff8801c53c6f98 RDI: ffff8801c53c6fa0\n[  554.898788] RBP: ffff8801c9e3f120 R08: 1ffff100393c7d55 R09: 0000000000000004\n[  554.898791] R10: ffff8801c9e3ef70 R11: 0000000000000000 R12: 0000000000000000\n[  554.898795] R13: dffffc0000000000 R14: 1ffff100393c7e45 R15: ffff8801c53c6f98\n[  554.898800] FS:  0000000000000000(0000) GS:ffff8801db300000(0000) knlGS:0000000000000000\n[  554.898804] CS:  0010 DS: 002b ES: 002b CR0: 0000000080050033\n[  554.898807] CR2: 00000000dbc23000 CR3: 00000001c7269000 CR4: 00000000001406e0\n[  554.898813] DR0: 0000000020000000 DR1: 0000000020000000 DR2: 0000000000000000\n[  554.898816] DR3: 0000000000000000 DR6: 00000000fffe0ff0 DR7: 0000000000000600\n[  554.898818] Call Trace:\n[  554.898828]  unregister_shrinker+0x79/0x300\n[  554.898837]  ? perf_trace_mm_vmscan_writepage+0x750/0x750\n[  554.898844]  ? down_write+0x87/0x120\n[  554.898851]  ? deactivate_super+0x139/0x1b0\n[  554.898857]  ? down_read+0x150/0x150\n[  554.898864]  ? check_same_owner+0x320/0x320\n[  554.898875]  deactivate_locked_super+0x64/0xd0\n[  554.898883]  deactivate_super+0x141/0x1b0\n----------\n\nSince allowing register_shrinker() callers to call unregister_shrinker()\nwhen register_shrinker() failed can simplify error recovery path, this\npatch makes unregister_shrinker() no-op when register_shrinker() failed.\nAlso, reset shrinker->nr_deferred in case unregister_shrinker() was\nby error called twice.\n\nSigned-off-by: Tetsuo Handa <penguin-kernel@I-love.SAKURA.ne.jp>\nSigned-off-by: Aliaksei Karaliou <akaraliou.dev@gmail.com>\nReported-by: syzbot <syzkaller@googlegroups.com>\nCc: Glauber Costa <glauber@scylladb.com>\nCc: Al Viro <viro@zeniv.linux.org.uk>\nSigned-off-by: Al Viro <viro@zeniv.linux.org.uk>",
+  "full_message": "mm,vmscan: Make unregister_shrinker() no-op if register_shrinker() failed.\n\nSyzbot caught an oops at unregister_shrinker() because combination of\ncommit 1d3d4437eae1bb29 (\"vmscan: per-node deferred work\") and fault\ninjection made register_shrinker() fail and the caller of\nregister_shrinker() did not check for failure.\n\n----------\n[  554.881422] FAULT_INJECTION: forcing a failure.\n[  554.881422] name failslab, interval 1, probability 0, space 0, times 0\n[  554.881438] CPU: 1 PID: 13231 Comm: syz-executor1 Not tainted 4.14.0-rc8+ #82\n[  554.881443] Hardware name: Google Google Compute Engine/Google Compute Engine, BIOS Google 01/01/2011\n[  554.881445] Call Trace:\n[  554.881459]  dump_stack+0x194/0x257\n[  554.881474]  ? arch_local_irq_restore+0x53/0x53\n[  554.881486]  ? find_held_lock+0x35/0x1d0\n[  554.881507]  should_fail+0x8c0/0xa40\n[  554.881522]  ? fault_create_debugfs_attr+0x1f0/0x1f0\n[  554.881537]  ? check_noncircular+0x20/0x20\n[  554.881546]  ? find_next_zero_bit+0x2c/0x40\n[  554.881560]  ? ida_get_new_above+0x421/0x9d0\n[  554.881577]  ? find_held_lock+0x35/0x1d0\n[  554.881594]  ? __lock_is_held+0xb6/0x140\n[  554.881628]  ? check_same_owner+0x320/0x320\n[  554.881634]  ? lock_downgrade+0x990/0x990\n[  554.881649]  ? find_held_lock+0x35/0x1d0\n[  554.881672]  should_failslab+0xec/0x120\n[  554.881684]  __kmalloc+0x63/0x760\n[  554.881692]  ? lock_downgrade+0x990/0x990\n[  554.881712]  ? register_shrinker+0x10e/0x2d0\n[  554.881721]  ? trace_event_raw_event_module_request+0x320/0x320\n[  554.881737]  register_shrinker+0x10e/0x2d0\n[  554.881747]  ? prepare_kswapd_sleep+0x1f0/0x1f0\n[  554.881755]  ? _down_write_nest_lock+0x120/0x120\n[  554.881765]  ? memcpy+0x45/0x50\n[  554.881785]  sget_userns+0xbcd/0xe20\n(...snipped...)\n[  554.898693] kasan: CONFIG_KASAN_INLINE enabled\n[  554.898724] kasan: GPF could be caused by NULL-ptr deref or user memory access\n[  554.898732] general protection fault: 0000 [#1] SMP KASAN\n[  554.898737] Dumping ftrace buffer:\n[  554.898741]    (ftrace buffer empty)\n[  554.898743] Modules linked in:\n[  554.898752] CPU: 1 PID: 13231 Comm: syz-executor1 Not tainted 4.14.0-rc8+ #82\n[  554.898755] Hardware name: Google Google Compute Engine/Google Compute Engine, BIOS Google 01/01/2011\n[  554.898760] task: ffff8801d1dbe5c0 task.stack: ffff8801c9e38000\n[  554.898772] RIP: 0010:__list_del_entry_valid+0x7e/0x150\n[  554.898775] RSP: 0018:ffff8801c9e3f108 EFLAGS: 00010246\n[  554.898780] RAX: dffffc0000000000 RBX: 0000000000000000 RCX: 0000000000000000\n[  554.898784] RDX: 0000000000000000 RSI: ffff8801c53c6f98 RDI: ffff8801c53c6fa0\n[  554.898788] RBP: ffff8801c9e3f120 R08: 1ffff100393c7d55 R09: 0000000000000004\n[  554.898791] R10: ffff8801c9e3ef70 R11: 0000000000000000 R12: 0000000000000000\n[  554.898795] R13: dffffc0000000000 R14: 1ffff100393c7e45 R15: ffff8801c53c6f98\n[  554.898800] FS:  0000000000000000(0000) GS:ffff8801db300000(0000) knlGS:0000000000000000\n[  554.898804] CS:  0010 DS: 002b ES: 002b CR0: 0000000080050033\n[  554.898807] CR2: 00000000dbc23000 CR3: 00000001c7269000 CR4: 00000000001406e0\n[  554.898813] DR0: 0000000020000000 DR1: 0000000020000000 DR2: 0000000000000000\n[  554.898816] DR3: 0000000000000000 DR6: 00000000fffe0ff0 DR7: 0000000000000600\n[  554.898818] Call Trace:\n[  554.898828]  unregister_shrinker+0x79/0x300\n[  554.898837]  ? perf_trace_mm_vmscan_writepage+0x750/0x750\n[  554.898844]  ? down_write+0x87/0x120\n[  554.898851]  ? deactivate_super+0x139/0x1b0\n[  554.898857]  ? down_read+0x150/0x150\n[  554.898864]  ? check_same_owner+0x320/0x320\n[  554.898875]  deactivate_locked_super+0x64/0xd0\n[  554.898883]  deactivate_super+0x141/0x1b0\n----------\n\nSince allowing register_shrinker() callers to call unregister_shrinker()\nwhen register_shrinker() failed can simplify error recovery path, this\npatch makes unregister_shrinker() no-op when register_shrinker() failed.\nAlso, reset shrinker->nr_deferred in case unregister_shrinker() was\nby error called twice.\n\nSigned-off-by: Tetsuo Handa <penguin-kernel@I-love.SAKURA.ne.jp>\nSigned-off-by: Aliaksei Karaliou <akaraliou.dev@gmail.com>\nReported-by: syzbot <syzkaller@googlegroups.com>\nCc: Glauber Costa <glauber@scylladb.com>\nCc: Al Viro <viro@zeniv.linux.org.uk>\nSigned-off-by: Al Viro <viro@zeniv.linux.org.uk>",
+  "author_name": "Tetsuo Handa",
+  "author_email": "penguin-kernel@I-love.SAKURA.ne.jp",
+  "author_date": "Mon Dec 18 20:31:41 2017 +0900",
+  "author_date_iso": "2017-12-18T20:31:41+09:00",
+  "committer_name": "Al Viro",
+  "committer_email": "viro@zeniv.linux.org.uk",
+  "committer_date": "Mon Dec 18 15:03:09 2017 -0500",
+  "committer_date_iso": "2017-12-18T15:03:09-05:00",
+  "files_changed": [
+    "mm/vmscan.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "mm/vmscan.c",
+      "insertions": 3,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 3,
+  "total_deletions": 0,
+  "total_changes": 3,
+  "parents": [
+    "d7ee946942bdd12394809305e3df05aa4c8b7b8f"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v4.15",
+    "v4.15-rc7",
+    "v4.15-rc8",
+    "v4.15-rc9",
+    "v4.16",
+    "v4.16-rc1",
+    "v4.16-rc2",
+    "v4.16-rc3",
+    "v4.16-rc4",
+    "v4.16-rc5"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "injection"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "mm/vmscan.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

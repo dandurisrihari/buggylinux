@@ -1,0 +1,114 @@
+{
+  "hash": "88b4a07e6610f4c93b08b0bb103318218db1e9f6",
+  "hash_short": "88b4a07e",
+  "subject": "[PATCH] eCryptfs: Public key transport mechanism",
+  "body": "This is the transport code for public key functionality in eCryptfs.  It\nmanages encryption/decryption request queues with a transport mechanism.\nCurrently, netlink is the only implemented transport.\n\nEach inode has a unique File Encryption Key (FEK).  Under passphrase, a File\nEncryption Key Encryption Key (FEKEK) is generated from a salt/passphrase\ncombo on mount.  This FEKEK encrypts each FEK and writes it into the header of\neach file using the packet format specified in RFC 2440.  This is all\nsymmetric key encryption, so it can all be done via the kernel crypto API.\n\nThese new patches introduce public key encryption of the FEK.  There is no\nasymmetric key encryption support in the kernel crypto API, so eCryptfs pushes\nthe FEK encryption and decryption out to a userspace daemon.  After\nconsidering our requirements and determining the complexity of using various\ntransport mechanisms, we settled on netlink for this communication.\n\neCryptfs stores authentication tokens into the kernel keyring.  These tokens\ncorrelate with individual keys.  For passphrase mode of operation, the\nauthentication token contains the symmetric FEKEK.  For public key, the\nauthentication token contains a PKI type and an opaque data blob managed by\nindividual PKI modules in userspace.\n\nEach user who opens a file under an eCryptfs partition mounted in public key\nmode must be running a daemon.  That daemon has the user's credentials and has\naccess to all of the keys to which the user should have access.  The daemon,\nwhen started, initializes the pluggable PKI modules available on the system\nand registers itself with the eCryptfs kernel module.  Userspace utilities\nregister public key authentication tokens into the user session keyring.\nThese authentication tokens correlate key signatures with PKI modules and PKI\nblobs.  The PKI blobs contain PKI-specific information necessary for the PKI\nmodule to carry out asymmetric key encryption and decryption.\n\nWhen the eCryptfs module parses the header of an existing file and finds a Tag\n1 (Public Key) packet (see RFC 2440), it reads in the public key identifier\n(signature).  The asymmetrically encrypted FEK is in the Tag 1 packet;\neCryptfs puts together a decrypt request packet containing the signature and\nthe encrypted FEK, then it passes it to the daemon registered for the\ncurrent->euid via a netlink unicast to the PID of the daemon, which was\nregistered at the time the daemon was started by the user.\n\nThe daemon actually just makes calls to libecryptfs, which implements request\npacket parsing and manages PKI modules.  libecryptfs grabs the public key\nauthentication token for the given signature from the user session keyring.\nThis auth tok tells libecryptfs which PKI module should receive the request.\nlibecryptfs then makes a decrypt() call to the PKI module, and it passes along\nthe PKI block from the auth tok.  The PKI uses the blob to figure out how it\nshould decrypt the data passed to it; it performs the decryption and passes\nthe decrypted data back to libecryptfs.  libecryptfs then puts together a\nreply packet with the decrypted FEK and passes that back to the eCryptfs\nmodule.\n\nThe eCryptfs module manages these request callouts to userspace code via\nmessage context structs.  The module maintains an array of message context\nstructs and places the elements of the array on two lists: a free and an\nallocated list.  When eCryptfs wants to make a request, it moves a msg ctx\nfrom the free list to the allocated list, sets its state to pending, and fires\noff the message to the user's registered daemon.\n\nWhen eCryptfs receives a netlink message (via the callback), it correlates the\nmsg ctx struct in the alloc list with the data in the message itself.  The\nmsg->index contains the offset of the array of msg ctx structs.  It verifies\nthat the registered daemon PID is the same as the PID of the process that sent\nthe message.  It also validates a sequence number between the received packet\nand the msg ctx.  Then, it copies the contents of the message (the reply\npacket) into the msg ctx struct, sets the state in the msg ctx to done, and\nwakes up the process that was sleeping while waiting for the reply.\n\nThe sleeping process was whatever was performing the sys_open().  This process\noriginally called ecryptfs_send_message(); it is now in\necryptfs_wait_for_response().  When it wakes up and sees that the msg ctx\nstate was set to done, it returns a pointer to the message contents (the reply\npacket) and returns.  If all went well, this packet contains the decrypted\nFEK, which is then copied into the crypt_stat struct, and life continues as\nnormal.\n\nThe case for creation of a new file is very similar, only instead of a decrypt\nrequest, eCryptfs sends out an encrypt request.\n\n> - We have a great clod of key mangement code in-kernel.  Why is that\n>   not suitable (or growable) for public key management?\n\neCryptfs uses Howells' keyring to store persistent key data and PKI state\ninformation.  It defers public key cryptographic transformations to userspace\ncode.  The userspace data manipulation request really is orthogonal to key\nmanagement in and of itself.  What eCryptfs basically needs is a secure way to\ncommunicate with a particular daemon for a particular task doing a syscall,\nbased on the UID.  Nothing running under another UID should be able to access\nthat channel of communication.\n\n> - Is it appropriate that new infrastructure for public key\n> management be private to a particular fs?\n\nThe messaging.c file contains a lot of code that, perhaps, could be extracted\ninto a separate kernel service.  In essence, this would be a sort of\nrequest/reply mechanism that would involve a userspace daemon.  I am not aware\nof anything that does quite what eCryptfs does, so I was not aware of any\nexisting tools to do just what we wanted.\n\n>   What happens if one of these daemons exits without sending a quit\n>   message?\n\nThere is a stale uid<->pid association in the hash table for that user.  When\nthe user registers a new daemon, eCryptfs cleans up the old association and\ngenerates a new one.  See ecryptfs_process_helo().\n\n> - _why_ does it use netlink?\n\nNetlink provides the transport mechanism that would minimize the complexity of\nthe implementation, given that we can have multiple daemons (one per user).  I\nexplored the possibility of using relayfs, but that would involve having to\nintroduce control channels and a protocol for creating and tearing down\nchannels for the daemons.  We do not have to worry about any of that with\nnetlink.\n\nSigned-off-by: Michael Halcrow <mhalcrow@us.ibm.com>\nCc: David Howells <dhowells@redhat.com>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>\nSigned-off-by: Linus Torvalds <torvalds@linux-foundation.org>",
+  "full_message": "[PATCH] eCryptfs: Public key transport mechanism\n\nThis is the transport code for public key functionality in eCryptfs.  It\nmanages encryption/decryption request queues with a transport mechanism.\nCurrently, netlink is the only implemented transport.\n\nEach inode has a unique File Encryption Key (FEK).  Under passphrase, a File\nEncryption Key Encryption Key (FEKEK) is generated from a salt/passphrase\ncombo on mount.  This FEKEK encrypts each FEK and writes it into the header of\neach file using the packet format specified in RFC 2440.  This is all\nsymmetric key encryption, so it can all be done via the kernel crypto API.\n\nThese new patches introduce public key encryption of the FEK.  There is no\nasymmetric key encryption support in the kernel crypto API, so eCryptfs pushes\nthe FEK encryption and decryption out to a userspace daemon.  After\nconsidering our requirements and determining the complexity of using various\ntransport mechanisms, we settled on netlink for this communication.\n\neCryptfs stores authentication tokens into the kernel keyring.  These tokens\ncorrelate with individual keys.  For passphrase mode of operation, the\nauthentication token contains the symmetric FEKEK.  For public key, the\nauthentication token contains a PKI type and an opaque data blob managed by\nindividual PKI modules in userspace.\n\nEach user who opens a file under an eCryptfs partition mounted in public key\nmode must be running a daemon.  That daemon has the user's credentials and has\naccess to all of the keys to which the user should have access.  The daemon,\nwhen started, initializes the pluggable PKI modules available on the system\nand registers itself with the eCryptfs kernel module.  Userspace utilities\nregister public key authentication tokens into the user session keyring.\nThese authentication tokens correlate key signatures with PKI modules and PKI\nblobs.  The PKI blobs contain PKI-specific information necessary for the PKI\nmodule to carry out asymmetric key encryption and decryption.\n\nWhen the eCryptfs module parses the header of an existing file and finds a Tag\n1 (Public Key) packet (see RFC 2440), it reads in the public key identifier\n(signature).  The asymmetrically encrypted FEK is in the Tag 1 packet;\neCryptfs puts together a decrypt request packet containing the signature and\nthe encrypted FEK, then it passes it to the daemon registered for the\ncurrent->euid via a netlink unicast to the PID of the daemon, which was\nregistered at the time the daemon was started by the user.\n\nThe daemon actually just makes calls to libecryptfs, which implements request\npacket parsing and manages PKI modules.  libecryptfs grabs the public key\nauthentication token for the given signature from the user session keyring.\nThis auth tok tells libecryptfs which PKI module should receive the request.\nlibecryptfs then makes a decrypt() call to the PKI module, and it passes along\nthe PKI block from the auth tok.  The PKI uses the blob to figure out how it\nshould decrypt the data passed to it; it performs the decryption and passes\nthe decrypted data back to libecryptfs.  libecryptfs then puts together a\nreply packet with the decrypted FEK and passes that back to the eCryptfs\nmodule.\n\nThe eCryptfs module manages these request callouts to userspace code via\nmessage context structs.  The module maintains an array of message context\nstructs and places the elements of the array on two lists: a free and an\nallocated list.  When eCryptfs wants to make a request, it moves a msg ctx\nfrom the free list to the allocated list, sets its state to pending, and fires\noff the message to the user's registered daemon.\n\nWhen eCryptfs receives a netlink message (via the callback), it correlates the\nmsg ctx struct in the alloc list with the data in the message itself.  The\nmsg->index contains the offset of the array of msg ctx structs.  It verifies\nthat the registered daemon PID is the same as the PID of the process that sent\nthe message.  It also validates a sequence number between the received packet\nand the msg ctx.  Then, it copies the contents of the message (the reply\npacket) into the msg ctx struct, sets the state in the msg ctx to done, and\nwakes up the process that was sleeping while waiting for the reply.\n\nThe sleeping process was whatever was performing the sys_open().  This process\noriginally called ecryptfs_send_message(); it is now in\necryptfs_wait_for_response().  When it wakes up and sees that the msg ctx\nstate was set to done, it returns a pointer to the message contents (the reply\npacket) and returns.  If all went well, this packet contains the decrypted\nFEK, which is then copied into the crypt_stat struct, and life continues as\nnormal.\n\nThe case for creation of a new file is very similar, only instead of a decrypt\nrequest, eCryptfs sends out an encrypt request.\n\n> - We have a great clod of key mangement code in-kernel.  Why is that\n>   not suitable (or growable) for public key management?\n\neCryptfs uses Howells' keyring to store persistent key data and PKI state\ninformation.  It defers public key cryptographic transformations to userspace\ncode.  The userspace data manipulation request really is orthogonal to key\nmanagement in and of itself.  What eCryptfs basically needs is a secure way to\ncommunicate with a particular daemon for a particular task doing a syscall,\nbased on the UID.  Nothing running under another UID should be able to access\nthat channel of communication.\n\n> - Is it appropriate that new infrastructure for public key\n> management be private to a particular fs?\n\nThe messaging.c file contains a lot of code that, perhaps, could be extracted\ninto a separate kernel service.  In essence, this would be a sort of\nrequest/reply mechanism that would involve a userspace daemon.  I am not aware\nof anything that does quite what eCryptfs does, so I was not aware of any\nexisting tools to do just what we wanted.\n\n>   What happens if one of these daemons exits without sending a quit\n>   message?\n\nThere is a stale uid<->pid association in the hash table for that user.  When\nthe user registers a new daemon, eCryptfs cleans up the old association and\ngenerates a new one.  See ecryptfs_process_helo().\n\n> - _why_ does it use netlink?\n\nNetlink provides the transport mechanism that would minimize the complexity of\nthe implementation, given that we can have multiple daemons (one per user).  I\nexplored the possibility of using relayfs, but that would involve having to\nintroduce control channels and a protocol for creating and tearing down\nchannels for the daemons.  We do not have to worry about any of that with\nnetlink.\n\nSigned-off-by: Michael Halcrow <mhalcrow@us.ibm.com>\nCc: David Howells <dhowells@redhat.com>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>\nSigned-off-by: Linus Torvalds <torvalds@linux-foundation.org>",
+  "author_name": "Michael Halcrow",
+  "author_email": "mhalcrow@us.ibm.com",
+  "author_date": "Mon Feb 12 00:53:43 2007 -0800",
+  "author_date_iso": "2007-02-12T00:53:43-08:00",
+  "committer_name": "Linus Torvalds",
+  "committer_email": "torvalds@woody.linux-foundation.org",
+  "committer_date": "Mon Feb 12 09:48:36 2007 -0800",
+  "committer_date_iso": "2007-02-12T09:48:36-08:00",
+  "files_changed": [
+    "fs/Kconfig",
+    "fs/ecryptfs/ecryptfs_kernel.h",
+    "fs/ecryptfs/messaging.c",
+    "fs/ecryptfs/netlink.c",
+    "include/linux/netlink.h"
+  ],
+  "files_changed_count": 5,
+  "stats": [
+    {
+      "file": "fs/Kconfig",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "fs/ecryptfs/ecryptfs_kernel.h",
+      "insertions": 98,
+      "deletions": 3
+    },
+    {
+      "file": "fs/ecryptfs/messaging.c",
+      "insertions": 505,
+      "deletions": 0
+    },
+    {
+      "file": "fs/ecryptfs/netlink.c",
+      "insertions": 255,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/netlink.h",
+      "insertions": 1,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 860,
+  "total_deletions": 4,
+  "total_changes": 864,
+  "parents": [
+    "b5d5dfbd59577aed72263f22e28d3eaf98e1c6e5"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v2.6.21",
+    "v2.6.21-rc1",
+    "v2.6.21-rc2",
+    "v2.6.21-rc3",
+    "v2.6.21-rc4",
+    "v2.6.21-rc5",
+    "v2.6.21-rc6",
+    "v2.6.21-rc7",
+    "v2.6.22",
+    "v2.6.22-rc1"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "authentication"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "fs/Kconfig",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/ecryptfs/ecryptfs_kernel.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/ecryptfs/messaging.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/ecryptfs/netlink.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/netlink.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

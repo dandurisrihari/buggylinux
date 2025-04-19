@@ -1,0 +1,64 @@
+commit 7852e36186d2a1983c215836d7e3d7b8927c930d
+Author: Johannes Berg <johannes.berg@intel.com>
+Date:   Fri Jan 20 13:55:24 2012 +0100
+
+    mac80211: remove dummy STA support
+    
+    The dummy STA support was added because I didn't
+    want to change the driver API at the time. Now
+    that we have state transitions triggering station
+    add/remove in the driver, we only call add once a
+    station reaches ASSOCIATED, so we can remove the
+    dummy station stuff again.
+    
+    While at it, tighten the RX check and accept only
+    port control (EAP) frames from the AP station if
+    it's not associated yet -- in other cases there's
+    no race.
+    
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/mac80211/mlme.c b/net/mac80211/mlme.c
+index 40b929d57a97..d04811a29cdf 100644
+--- a/net/mac80211/mlme.c
++++ b/net/mac80211/mlme.c
+@@ -1581,7 +1581,7 @@ static bool ieee80211_assoc_success(struct ieee80211_work *wk,
+ 	 * station info was already allocated and inserted before
+ 	 * the association and should be available to us
+ 	 */
+-	sta = sta_info_get_rx(sdata, cbss->bssid);
++	sta = sta_info_get(sdata, cbss->bssid);
+ 	if (WARN_ON(!sta)) {
+ 		mutex_unlock(&sdata->local->sta_mtx);
+ 		return false;
+@@ -1648,14 +1648,7 @@ static bool ieee80211_assoc_success(struct ieee80211_work *wk,
+ 		return false;
+ 	}
+ 
+-	/* sta_info_reinsert will also unlock the mutex lock */
+-	err = sta_info_reinsert(sta);
+-	sta = NULL;
+-	if (err) {
+-		printk(KERN_DEBUG "%s: failed to insert STA entry for"
+-		       " the AP (error %d)\n", sdata->name, err);
+-		return false;
+-	}
++	mutex_unlock(&sdata->local->sta_mtx);
+ 
+ 	/*
+ 	 * Always handle WMM once after association regardless
+@@ -2536,12 +2529,10 @@ static int ieee80211_pre_assoc(struct ieee80211_sub_if_data *sdata,
+ 	if (!sta)
+ 		return -ENOMEM;
+ 
+-	sta->dummy = true;
+-
+ 	err = sta_info_insert(sta);
+ 	sta = NULL;
+ 	if (err) {
+-		printk(KERN_DEBUG "%s: failed to insert Dummy STA entry for"
++		printk(KERN_DEBUG "%s: failed to insert STA entry for"
+ 		       " the AP (error %d)\n", sdata->name, err);
+ 		return err;
+ 	}

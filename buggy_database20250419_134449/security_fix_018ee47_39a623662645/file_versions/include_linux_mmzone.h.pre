@@ -1,0 +1,264 @@
+commit ac35a490237446b71e3b4b782b1596967edd0aa8
+Author: Yu Zhao <yuzhao@google.com>
+Date:   Sun Sep 18 02:00:03 2022 -0600
+
+    mm: multi-gen LRU: minimal implementation
+    
+    To avoid confusion, the terms "promotion" and "demotion" will be applied
+    to the multi-gen LRU, as a new convention; the terms "activation" and
+    "deactivation" will be applied to the active/inactive LRU, as usual.
+    
+    The aging produces young generations.  Given an lruvec, it increments
+    max_seq when max_seq-min_seq+1 approaches MIN_NR_GENS.  The aging promotes
+    hot pages to the youngest generation when it finds them accessed through
+    page tables; the demotion of cold pages happens consequently when it
+    increments max_seq.  Promotion in the aging path does not involve any LRU
+    list operations, only the updates of the gen counter and
+    lrugen->nr_pages[]; demotion, unless as the result of the increment of
+    max_seq, requires LRU list operations, e.g., lru_deactivate_fn().  The
+    aging has the complexity O(nr_hot_pages), since it is only interested in
+    hot pages.
+    
+    The eviction consumes old generations.  Given an lruvec, it increments
+    min_seq when lrugen->lists[] indexed by min_seq%MAX_NR_GENS becomes empty.
+    A feedback loop modeled after the PID controller monitors refaults over
+    anon and file types and decides which type to evict when both types are
+    available from the same generation.
+    
+    The protection of pages accessed multiple times through file descriptors
+    takes place in the eviction path.  Each generation is divided into
+    multiple tiers.  A page accessed N times through file descriptors is in
+    tier order_base_2(N).  Tiers do not have dedicated lrugen->lists[], only
+    bits in folio->flags.  The aforementioned feedback loop also monitors
+    refaults over all tiers and decides when to protect pages in which tiers
+    (N>1), using the first tier (N=0,1) as a baseline.  The first tier
+    contains single-use unmapped clean pages, which are most likely the best
+    choices.  In contrast to promotion in the aging path, the protection of a
+    page in the eviction path is achieved by moving this page to the next
+    generation, i.e., min_seq+1, if the feedback loop decides so.  This
+    approach has the following advantages:
+    
+    1. It removes the cost of activation in the buffered access path by
+       inferring whether pages accessed multiple times through file
+       descriptors are statistically hot and thus worth protecting in the
+       eviction path.
+    2. It takes pages accessed through page tables into account and avoids
+       overprotecting pages accessed multiple times through file
+       descriptors. (Pages accessed through page tables are in the first
+       tier, since N=0.)
+    3. More tiers provide better protection for pages accessed more than
+       twice through file descriptors, when under heavy buffered I/O
+       workloads.
+    
+    Server benchmark results:
+      Single workload:
+        fio (buffered I/O): +[30, 32]%
+                    IOPS         BW
+          5.19-rc1: 2673k        10.2GiB/s
+          patch1-6: 3491k        13.3GiB/s
+    
+      Single workload:
+        memcached (anon): -[4, 6]%
+                    Ops/sec      KB/sec
+          5.19-rc1: 1161501.04   45177.25
+          patch1-6: 1106168.46   43025.04
+    
+      Configurations:
+        CPU: two Xeon 6154
+        Mem: total 256G
+    
+        Node 1 was only used as a ram disk to reduce the variance in the
+        results.
+    
+        patch drivers/block/brd.c <<EOF
+        99,100c99,100
+        <   gfp_flags = GFP_NOIO | __GFP_ZERO | __GFP_HIGHMEM;
+        <   page = alloc_page(gfp_flags);
+        ---
+        >   gfp_flags = GFP_NOIO | __GFP_ZERO | __GFP_HIGHMEM | __GFP_THISNODE;
+        >   page = alloc_pages_node(1, gfp_flags, 0);
+        EOF
+    
+        cat >>/etc/systemd/system.conf <<EOF
+        CPUAffinity=numa
+        NUMAPolicy=bind
+        NUMAMask=0
+        EOF
+    
+        cat >>/etc/memcached.conf <<EOF
+        -m 184320
+        -s /var/run/memcached/memcached.sock
+        -a 0766
+        -t 36
+        -B binary
+        EOF
+    
+        cat fio.sh
+        modprobe brd rd_nr=1 rd_size=113246208
+        swapoff -a
+        mkfs.ext4 /dev/ram0
+        mount -t ext4 /dev/ram0 /mnt
+    
+        mkdir /sys/fs/cgroup/user.slice/test
+        echo 38654705664 >/sys/fs/cgroup/user.slice/test/memory.max
+        echo $$ >/sys/fs/cgroup/user.slice/test/cgroup.procs
+        fio -name=mglru --numjobs=72 --directory=/mnt --size=1408m \
+          --buffered=1 --ioengine=io_uring --iodepth=128 \
+          --iodepth_batch_submit=32 --iodepth_batch_complete=32 \
+          --rw=randread --random_distribution=random --norandommap \
+          --time_based --ramp_time=10m --runtime=5m --group_reporting
+    
+        cat memcached.sh
+        modprobe brd rd_nr=1 rd_size=113246208
+        swapoff -a
+        mkswap /dev/ram0
+        swapon /dev/ram0
+    
+        memtier_benchmark -S /var/run/memcached/memcached.sock \
+          -P memcache_binary -n allkeys --key-minimum=1 \
+          --key-maximum=65000000 --key-pattern=P:P -c 1 -t 36 \
+          --ratio 1:0 --pipeline 8 -d 2000
+    
+        memtier_benchmark -S /var/run/memcached/memcached.sock \
+          -P memcache_binary -n allkeys --key-minimum=1 \
+          --key-maximum=65000000 --key-pattern=R:R -c 1 -t 36 \
+          --ratio 0:1 --pipeline 8 --randomize --distinct-client-seed
+    
+    Client benchmark results:
+      kswapd profiles:
+        5.19-rc1
+          40.33%  page_vma_mapped_walk (overhead)
+          21.80%  lzo1x_1_do_compress (real work)
+           7.53%  do_raw_spin_lock
+           3.95%  _raw_spin_unlock_irq
+           2.52%  vma_interval_tree_iter_next
+           2.37%  folio_referenced_one
+           2.28%  vma_interval_tree_subtree_search
+           1.97%  anon_vma_interval_tree_iter_first
+           1.60%  ptep_clear_flush
+           1.06%  __zram_bvec_write
+    
+        patch1-6
+          39.03%  lzo1x_1_do_compress (real work)
+          18.47%  page_vma_mapped_walk (overhead)
+           6.74%  _raw_spin_unlock_irq
+           3.97%  do_raw_spin_lock
+           2.49%  ptep_clear_flush
+           2.48%  anon_vma_interval_tree_iter_first
+           1.92%  folio_referenced_one
+           1.88%  __zram_bvec_write
+           1.48%  memmove
+           1.31%  vma_interval_tree_iter_next
+    
+      Configurations:
+        CPU: single Snapdragon 7c
+        Mem: total 4G
+    
+        ChromeOS MemoryPressure [1]
+    
+    [1] https://chromium.googlesource.com/chromiumos/platform/tast-tests/
+    
+    Link: https://lkml.kernel.org/r/20220918080010.2920238-7-yuzhao@google.com
+    Signed-off-by: Yu Zhao <yuzhao@google.com>
+    Acked-by: Brian Geffon <bgeffon@google.com>
+    Acked-by: Jan Alexander Steffens (heftig) <heftig@archlinux.org>
+    Acked-by: Oleksandr Natalenko <oleksandr@natalenko.name>
+    Acked-by: Steven Barrett <steven@liquorix.net>
+    Acked-by: Suleiman Souhlal <suleiman@google.com>
+    Tested-by: Daniel Byrne <djbyrne@mtu.edu>
+    Tested-by: Donald Carr <d@chaos-reins.com>
+    Tested-by: Holger Hoffstätte <holger@applied-asynchrony.com>
+    Tested-by: Konstantin Kharlamov <Hi-Angel@yandex.ru>
+    Tested-by: Shuang Zhai <szhai2@cs.rochester.edu>
+    Tested-by: Sofia Trinh <sofia.trinh@edi.works>
+    Tested-by: Vaibhav Jain <vaibhav@linux.ibm.com>
+    Cc: Andi Kleen <ak@linux.intel.com>
+    Cc: Aneesh Kumar K.V <aneesh.kumar@linux.ibm.com>
+    Cc: Barry Song <baohua@kernel.org>
+    Cc: Catalin Marinas <catalin.marinas@arm.com>
+    Cc: Dave Hansen <dave.hansen@linux.intel.com>
+    Cc: Hillf Danton <hdanton@sina.com>
+    Cc: Jens Axboe <axboe@kernel.dk>
+    Cc: Johannes Weiner <hannes@cmpxchg.org>
+    Cc: Jonathan Corbet <corbet@lwn.net>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Cc: Matthew Wilcox <willy@infradead.org>
+    Cc: Mel Gorman <mgorman@suse.de>
+    Cc: Miaohe Lin <linmiaohe@huawei.com>
+    Cc: Michael Larabel <Michael@MichaelLarabel.com>
+    Cc: Michal Hocko <mhocko@kernel.org>
+    Cc: Mike Rapoport <rppt@kernel.org>
+    Cc: Mike Rapoport <rppt@linux.ibm.com>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Qi Zheng <zhengqi.arch@bytedance.com>
+    Cc: Tejun Heo <tj@kernel.org>
+    Cc: Vlastimil Babka <vbabka@suse.cz>
+    Cc: Will Deacon <will@kernel.org>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+
+diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
+index 6f4ea078d90f..7e343420bfb1 100644
+--- a/include/linux/mmzone.h
++++ b/include/linux/mmzone.h
+@@ -350,6 +350,28 @@ enum lruvec_flags {
+ #define MIN_NR_GENS		2U
+ #define MAX_NR_GENS		4U
+ 
++/*
++ * Each generation is divided into multiple tiers. A page accessed N times
++ * through file descriptors is in tier order_base_2(N). A page in the first tier
++ * (N=0,1) is marked by PG_referenced unless it was faulted in through page
++ * tables or read ahead. A page in any other tier (N>1) is marked by
++ * PG_referenced and PG_workingset. This implies a minimum of two tiers is
++ * supported without using additional bits in folio->flags.
++ *
++ * In contrast to moving across generations which requires the LRU lock, moving
++ * across tiers only involves atomic operations on folio->flags and therefore
++ * has a negligible cost in the buffered access path. In the eviction path,
++ * comparisons of refaulted/(evicted+protected) from the first tier and the
++ * rest infer whether pages accessed multiple times through file descriptors
++ * are statistically hot and thus worth protecting.
++ *
++ * MAX_NR_TIERS is set to 4 so that the multi-gen LRU can support twice the
++ * number of categories of the active/inactive LRU when keeping track of
++ * accesses through file descriptors. This uses MAX_NR_TIERS-2 spare bits in
++ * folio->flags.
++ */
++#define MAX_NR_TIERS		4U
++
+ #ifndef __GENERATING_BOUNDS_H
+ 
+ struct lruvec;
+@@ -364,6 +386,16 @@ enum {
+ 	LRU_GEN_FILE,
+ };
+ 
++#define MIN_LRU_BATCH		BITS_PER_LONG
++#define MAX_LRU_BATCH		(MIN_LRU_BATCH * 64)
++
++/* whether to keep historical stats from evicted generations */
++#ifdef CONFIG_LRU_GEN_STATS
++#define NR_HIST_GENS		MAX_NR_GENS
++#else
++#define NR_HIST_GENS		1U
++#endif
++
+ /*
+  * The youngest generation number is stored in max_seq for both anon and file
+  * types as they are aged on an equal footing. The oldest generation numbers are
+@@ -386,6 +418,15 @@ struct lru_gen_struct {
+ 	struct list_head lists[MAX_NR_GENS][ANON_AND_FILE][MAX_NR_ZONES];
+ 	/* the multi-gen LRU sizes, eventually consistent */
+ 	long nr_pages[MAX_NR_GENS][ANON_AND_FILE][MAX_NR_ZONES];
++	/* the exponential moving average of refaulted */
++	unsigned long avg_refaulted[ANON_AND_FILE][MAX_NR_TIERS];
++	/* the exponential moving average of evicted+protected */
++	unsigned long avg_total[ANON_AND_FILE][MAX_NR_TIERS];
++	/* the first tier doesn't need protection, hence the minus one */
++	unsigned long protected[NR_HIST_GENS][ANON_AND_FILE][MAX_NR_TIERS - 1];
++	/* can be modified without holding the LRU lock */
++	atomic_long_t evicted[NR_HIST_GENS][ANON_AND_FILE][MAX_NR_TIERS];
++	atomic_long_t refaulted[NR_HIST_GENS][ANON_AND_FILE][MAX_NR_TIERS];
+ };
+ 
+ void lru_gen_init_lruvec(struct lruvec *lruvec);

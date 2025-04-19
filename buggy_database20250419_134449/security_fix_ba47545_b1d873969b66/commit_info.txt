@@ -1,0 +1,123 @@
+Commit Hash: ba47545c756b55f4b114c45fea7d52dd1577e181
+Subject: Merge branch 'SCM_PIDFD-SCM_PEERPIDFD'
+
+
+Security Keywords:
+- authentication
+
+Full commit message:
+Merge branch 'SCM_PIDFD-SCM_PEERPIDFD'
+
+Alexander Mikhalitsyn says:
+
+====================
+Add SCM_PIDFD and SO_PEERPIDFD
+
+1. Implement SCM_PIDFD, a new type of CMSG type analogical to SCM_CREDENTIALS,
+but it contains pidfd instead of plain pid, which allows programmers not
+to care about PID reuse problem.
+
+2. Add SO_PEERPIDFD which allows to get pidfd of peer socket holder pidfd.
+This thing is direct analog of SO_PEERCRED which allows to get plain PID.
+
+3. Add SCM_PIDFD / SO_PEERPIDFD kselftest
+
+Idea comes from UAPI kernel group:
+https://uapi-group.org/kernel-features/
+
+Big thanks to Christian Brauner and Lennart Poettering for productive
+discussions about this and Luca Boccassi for testing and reviewing this.
+
+=== Motivation behind this patchset
+
+Eric Dumazet raised a question:
+> It seems that we already can use pidfd_open() (since linux-5.3), and
+> pass the resulting fd in af_unix SCM_RIGHTS message ?
+
+Yes, it's possible, but it means that from the receiver side we need
+to trust the sent pidfd (in SCM_RIGHTS),
+or always use combination of SCM_RIGHTS+SCM_CREDENTIALS, then we can
+extract pidfd from SCM_RIGHTS,
+then acquire plain pid from pidfd and after compare it with the pid
+from SCM_CREDENTIALS.
+
+A few comments from other folks regarding this.
+
+Christian Brauner wrote:
+
+>Let me try and provide some of the missing background.
+
+>There are a range of use-cases where we would like to authenticate a
+>client through sockets without being susceptible to PID recycling
+>attacks. Currently, we can't do this as the race isn't fully fixable.
+>We can only apply mitigations.
+
+>What this patchset will allows us to do is to get a pidfd without the
+>client having to send us an fd explicitly via SCM_RIGHTS. As that's
+>already possibly as you correctly point out.
+
+>But for protocols like polkit this is quite important. Every message is
+>standalone and we would need to force a complete protocol change where
+>we would need to require that every client allocate and send a pidfd via
+>SCM_RIGHTS. That would also mean patching through all polkit users.
+
+>For something like systemd-journald where we provide logging facilities
+>and want to add metadata to the log we would also immensely benefit from
+>being able to get a receiver-side controlled pidfd.
+
+>With the message type we envisioned we don't need to change the sender
+>at all and can be safe against pid recycling.
+
+>Link: https://gitlab.freedesktop.org/polkit/polkit/-/merge_requests/154
+>Link: https://uapi-group.org/kernel-features
+
+Lennart Poettering wrote:
+
+>So yes, this is of course possible, but it would mean the pidfd would
+>have to be transported as part of the user protocol, explicitly sent
+>by the sender. (Moreover, the receiver after receiving the pidfd would
+>then still have to somehow be able to prove that the pidfd it just
+>received actually refers to the peer's process and not some random
+>process. – this part is actually solvable in userspace, but ugly)
+
+>The big thing is simply that we want that the pidfd is associated
+>*implicity* with each AF_UNIX connection, not explicitly. A lot of
+>userspace already relies on this, both in the authentication area
+>(polkit) as well as in the logging area (systemd-journald). Right now
+>using the PID field from SO_PEERCREDS/SCM_CREDENTIALS is racy though
+>and very hard to get right. Making this available as pidfd too, would
+>solve this raciness, without otherwise changing semantics of it all:
+>receivers can still enable the creds stuff as they wish, and the data
+>is then implicitly appended to the connections/datagrams the sender
+>initiates.
+
+>Or to turn this around: things like polkit are typically used to
+>authenticate arbitrary dbus methods calls: some service implements a
+>dbus method call, and when an unprivileged client then issues that
+>call, it will take the client's info, go to polkit and ask it if this
+>is ok. If we wanted to send the pidfd as part of the protocol we
+>basically would have to extend every single method call to contain the
+>client's pidfd along with it as an additional argument, which would be
+>a massive undertaking: it would change the prototypes of basically
+>*all* methods a service defines… And that's just ugly.
+
+>Note that Alex' patch set doesn't expose anything that wasn't exposed
+>before, or attach, propagate what wasn't before. All it does, is make
+>the field already available anyway (the struct ucred .pid field)
+>available also in a better way (as a pidfd), to solve a variety of
+>races, with no effect on the protocol actually spoken within the
+>AF_UNIX transport. It's a seamless improvement of the status quo.
+====================
+
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+Metadata:
+Author: David S. Miller <davem@davemloft.net>
+Author Date: Mon Jun 12 10:45:50 2023 +0100
+Committer: David S. Miller <davem@davemloft.net>
+Commit Date: Mon Jun 12 10:45:50 2023 +0100
+
+Files Changed: 0
+Lines Added: 565
+Lines Removed: 13
+Total Changes: 578

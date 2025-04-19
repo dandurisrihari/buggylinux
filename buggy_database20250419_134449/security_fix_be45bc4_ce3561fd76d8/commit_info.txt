@@ -1,0 +1,61 @@
+Commit Hash: be45bc4eff33d9a7dae84a2150f242a91a617402
+Subject: KVM: SVM: Set RFLAGS.IF=1 in C code, to get VMRUN out of the STI shadow
+
+
+Security Keywords:
+- injection
+
+Full commit message:
+KVM: SVM: Set RFLAGS.IF=1 in C code, to get VMRUN out of the STI shadow
+
+Enable/disable local IRQs, i.e. set/clear RFLAGS.IF, in the common
+svm_vcpu_enter_exit() just after/before guest_state_{enter,exit}_irqoff()
+so that VMRUN is not executed in an STI shadow.  AMD CPUs have a quirk
+(some would say "bug"), where the STI shadow bleeds into the guest's
+intr_state field if a #VMEXIT occurs during injection of an event, i.e. if
+the VMRUN doesn't complete before the subsequent #VMEXIT.
+
+The spurious "interrupts masked" state is relatively benign, as it only
+occurs during event injection and is transient.  Because KVM is already
+injecting an event, the guest can't be in HLT, and if KVM is querying IRQ
+blocking for injection, then KVM would need to force an immediate exit
+anyways since injecting multiple events is impossible.
+
+However, because KVM copies int_state verbatim from vmcb02 to vmcb12, the
+spurious STI shadow is visible to L1 when running a nested VM, which can
+trip sanity checks, e.g. in VMware's VMM.
+
+Hoist the STI+CLI all the way to C code, as the aforementioned calls to
+guest_state_{enter,exit}_irqoff() already inform lockdep that IRQs are
+enabled/disabled, and taking a fault on VMRUN with RFLAGS.IF=1 is already
+possible.  I.e. if there's kernel code that is confused by running with
+RFLAGS.IF=1, then it's already a problem.  In practice, since GIF=0 also
+blocks NMIs, the only change in exposure to non-KVM code (relative to
+surrounding VMRUN with STI+CLI) is exception handling code, and except for
+the kvm_rebooting=1 case, all exception in the core VM-Enter/VM-Exit path
+are fatal.
+
+Use the "raw" variants to enable/disable IRQs to avoid tracing in the
+"no instrumentation" code; the guest state helpers also take care of
+tracing IRQ state.
+
+Oppurtunstically document why KVM needs to do STI in the first place.
+
+Reported-by: Doug Covelli <doug.covelli@broadcom.com>
+Closes: https://lore.kernel.org/all/CADH9ctBs1YPmE4aCfGPNBwA10cA8RuAk2gO7542DjMZgs4uzJQ@mail.gmail.com
+Fixes: f14eec0a3203 ("KVM: SVM: move more vmentry code to assembly")
+Cc: stable@vger.kernel.org
+Reviewed-by: Jim Mattson <jmattson@google.com>
+Link: https://lore.kernel.org/r/20250224165442.2338294-2-seanjc@google.com
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+
+Metadata:
+Author: Sean Christopherson <seanjc@google.com>
+Author Date: Mon Feb 24 08:54:41 2025 -0800
+Committer: Sean Christopherson <seanjc@google.com>
+Commit Date: Fri Feb 28 09:15:23 2025 -0800
+
+Files Changed: 2
+Lines Added: 15
+Lines Removed: 9
+Total Changes: 24

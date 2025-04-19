@@ -1,0 +1,106 @@
+{
+  "hash": "7dd73802f97d2a1602b1cf5c1d6623fb08cb15c5",
+  "hash_short": "7dd73802",
+  "subject": "Merge tag 'xfs-iomap-stale-fixes' of git://git.kernel.org/pub/scm/linux/kernel/git/dgc/linux-xfs into xfs-6.2-mergeB",
+  "body": "xfs, iomap: fix data corruption due to stale cached iomaps\n\nThis patch series fixes a data corruption that occurs in a specific\nmulti-threaded write workload. The workload combined\nracing unaligned adjacent buffered writes with low memory conditions\nthat caused both writeback and memory reclaim to race with the\nwrites.\n\nThe result of this was random partial blocks containing zeroes\ninstead of the correct data.  The underlying problem is that iomap\ncaches the write iomap for the duration of the write() operation,\nbut it fails to take into account that the extent underlying the\niomap can change whilst the write is in progress.\n\nThe short story is that an iomap can span mutliple folios, and so\nunder low memory writeback can be cleaning folios the write()\noverlaps. Whilst the overlapping data is cached in memory, this\nisn't a problem, but because the folios are now clean they can be\nreclaimed. Once reclaimed, the write() does the wrong thing when\nre-instantiating partial folios because the iomap no longer reflects\nthe underlying state of the extent. e.g. it thinks the extent is\nunwritten, so it zeroes the partial range, when in fact the\nunderlying extent is now written and so it should have read the data\nfrom disk.  This is how we get random zero ranges in the file\ninstead of the correct data.\n\nThe gory details of the race condition can be found here:\n\nhttps://lore.kernel.org/linux-xfs/20220817093627.GZ3600936@dread.disaster.area/\n\nFixing the problem has two aspects. The first aspect of the problem\nis ensuring that iomap can detect a stale cached iomap during a\nwrite in a race-free manner. We already do this stale iomap\ndetection in the writeback path, so we have a mechanism for\ndetecting that the iomap backing the data range may have changed\nand needs to be remapped.\n\nIn the case of the write() path, we have to ensure that the iomap is\nvalidated at a point in time when the page cache is stable and\ncannot be reclaimed from under us. We also need to validate the\nextent before we start performing any modifications to the folio\nstate or contents. Combine these two requirements together, and the\nonly \"safe\" place to validate the iomap is after we have looked up\nand locked the folio we are going to copy the data into, but before\nwe've performed any initialisation operations on that folio.\n\nIf the iomap fails validation, we then mark it stale, unlock the\nfolio and end the write. This effectively means a stale iomap\nresults in a short write. Filesystems should already be able to\nhandle this, as write operations can end short for many reasons and\nneed to iterate through another mapping cycle to be completed. Hence\nthe iomap changes needed to detect and handle stale iomaps during\nwrite() operations is relatively simple...\n\nHowever, the assumption is that filesystems should already be able\nto handle write failures safely, and that's where the second\n(first?) part of the problem exists. That is, handling a partial\nwrite is harder than just \"punching out the unused delayed\nallocation extent\". This is because mmap() based faults can race\nwith writes, and if they land in the delalloc region that the write\nallocated, then punching out the delalloc region can cause data\ncorruption.\n\nThis data corruption problem is exposed by generic/346 when iomap is\nconverted to detect stale iomaps during write() operations. Hence\nwrite failure in the filesytems needs to handle the fact that the\nwrite() in progress doesn't necessarily own the data in the page\ncache over the range of the delalloc extent it just allocated.\n\nAs a result, we can't just truncate the page cache over the range\nthe write() didn't reach and punch all the delalloc extent. We have\nto walk the page cache over the untouched range and skip over any\ndirty data region in the cache in that range. Which is ....\nnon-trivial.\n\nThat is, iterating the page cache has to handle partially populated\nfolios (i.e. block size < page size) that contain data. The data\nmight be discontiguous within a folio. Indeed, there might be\n*multiple* discontiguous data regions within a single folio. And to\nmake matters more complex, multi-page folios mean we just don't know\nhow many sub-folio regions we might have to iterate to find all\nthese regions. All the corner cases between the conversions and\nrounding between filesystem block size, folio size and multi-page\nfolio size combined with unaligned write offsets kept breaking my\nbrain.\n\nHowever, if we convert the code to track the processed\nwrite regions by byte ranges instead of fileystem block or page\ncache index, we could simply use mapping_seek_hole_data() to find\nthe start and end of each discrete data region within the range we\nneeded to scan. SEEK_DATA finds the start of the cached data region,\nSEEK_HOLE finds the end of the region. These are byte based\ninterfaces that understand partially uptodate folio regions, and so\ncan iterate discrete sub-folio data regions directly. This largely\nsolved the problem of discovering the dirty regions we need to keep\nthe delalloc extent over.\n\nHowever, to use mapping_seek_hole_data() without needing to export\nit, we have to move all the delalloc extent cleanup to the iomap\ncore and so now the iomap core can clean up delayed allocation\nextents in a safe, sane and filesystem neutral manner.\n\nWith all this done, the original data corruption never occurs\nanymore, and we now have a generic mechanism for ensuring that page\ncache writes do not do the wrong thing when writeback and reclaim\nchange the state of the physical extent and/or page cache contents\nwhilst the write is in progress.\n\nSigned-off-by: Dave Chinner <dchinner@redhat.com>\nSigned-off-by: Darrick J. Wong <djwong@kernel.org>\n\n* tag 'xfs-iomap-stale-fixes' of git://git.kernel.org/pub/scm/linux/kernel/git/dgc/linux-xfs:\n  xfs: drop write error injection is unfixable, remove it\n  xfs: use iomap_valid method to detect stale cached iomaps\n  iomap: write iomap validity checks\n  xfs: xfs_bmap_punch_delalloc_range() should take a byte range\n  iomap: buffered write failure should not truncate the page cache\n  xfs,iomap: move delalloc punching to iomap\n  xfs: use byte ranges for write cleanup ranges\n  xfs: punching delalloc extents on write failure is racy\n  xfs: write page faults in iomap are not buffered writes",
+  "full_message": "Merge tag 'xfs-iomap-stale-fixes' of git://git.kernel.org/pub/scm/linux/kernel/git/dgc/linux-xfs into xfs-6.2-mergeB\n\nxfs, iomap: fix data corruption due to stale cached iomaps\n\nThis patch series fixes a data corruption that occurs in a specific\nmulti-threaded write workload. The workload combined\nracing unaligned adjacent buffered writes with low memory conditions\nthat caused both writeback and memory reclaim to race with the\nwrites.\n\nThe result of this was random partial blocks containing zeroes\ninstead of the correct data.  The underlying problem is that iomap\ncaches the write iomap for the duration of the write() operation,\nbut it fails to take into account that the extent underlying the\niomap can change whilst the write is in progress.\n\nThe short story is that an iomap can span mutliple folios, and so\nunder low memory writeback can be cleaning folios the write()\noverlaps. Whilst the overlapping data is cached in memory, this\nisn't a problem, but because the folios are now clean they can be\nreclaimed. Once reclaimed, the write() does the wrong thing when\nre-instantiating partial folios because the iomap no longer reflects\nthe underlying state of the extent. e.g. it thinks the extent is\nunwritten, so it zeroes the partial range, when in fact the\nunderlying extent is now written and so it should have read the data\nfrom disk.  This is how we get random zero ranges in the file\ninstead of the correct data.\n\nThe gory details of the race condition can be found here:\n\nhttps://lore.kernel.org/linux-xfs/20220817093627.GZ3600936@dread.disaster.area/\n\nFixing the problem has two aspects. The first aspect of the problem\nis ensuring that iomap can detect a stale cached iomap during a\nwrite in a race-free manner. We already do this stale iomap\ndetection in the writeback path, so we have a mechanism for\ndetecting that the iomap backing the data range may have changed\nand needs to be remapped.\n\nIn the case of the write() path, we have to ensure that the iomap is\nvalidated at a point in time when the page cache is stable and\ncannot be reclaimed from under us. We also need to validate the\nextent before we start performing any modifications to the folio\nstate or contents. Combine these two requirements together, and the\nonly \"safe\" place to validate the iomap is after we have looked up\nand locked the folio we are going to copy the data into, but before\nwe've performed any initialisation operations on that folio.\n\nIf the iomap fails validation, we then mark it stale, unlock the\nfolio and end the write. This effectively means a stale iomap\nresults in a short write. Filesystems should already be able to\nhandle this, as write operations can end short for many reasons and\nneed to iterate through another mapping cycle to be completed. Hence\nthe iomap changes needed to detect and handle stale iomaps during\nwrite() operations is relatively simple...\n\nHowever, the assumption is that filesystems should already be able\nto handle write failures safely, and that's where the second\n(first?) part of the problem exists. That is, handling a partial\nwrite is harder than just \"punching out the unused delayed\nallocation extent\". This is because mmap() based faults can race\nwith writes, and if they land in the delalloc region that the write\nallocated, then punching out the delalloc region can cause data\ncorruption.\n\nThis data corruption problem is exposed by generic/346 when iomap is\nconverted to detect stale iomaps during write() operations. Hence\nwrite failure in the filesytems needs to handle the fact that the\nwrite() in progress doesn't necessarily own the data in the page\ncache over the range of the delalloc extent it just allocated.\n\nAs a result, we can't just truncate the page cache over the range\nthe write() didn't reach and punch all the delalloc extent. We have\nto walk the page cache over the untouched range and skip over any\ndirty data region in the cache in that range. Which is ....\nnon-trivial.\n\nThat is, iterating the page cache has to handle partially populated\nfolios (i.e. block size < page size) that contain data. The data\nmight be discontiguous within a folio. Indeed, there might be\n*multiple* discontiguous data regions within a single folio. And to\nmake matters more complex, multi-page folios mean we just don't know\nhow many sub-folio regions we might have to iterate to find all\nthese regions. All the corner cases between the conversions and\nrounding between filesystem block size, folio size and multi-page\nfolio size combined with unaligned write offsets kept breaking my\nbrain.\n\nHowever, if we convert the code to track the processed\nwrite regions by byte ranges instead of fileystem block or page\ncache index, we could simply use mapping_seek_hole_data() to find\nthe start and end of each discrete data region within the range we\nneeded to scan. SEEK_DATA finds the start of the cached data region,\nSEEK_HOLE finds the end of the region. These are byte based\ninterfaces that understand partially uptodate folio regions, and so\ncan iterate discrete sub-folio data regions directly. This largely\nsolved the problem of discovering the dirty regions we need to keep\nthe delalloc extent over.\n\nHowever, to use mapping_seek_hole_data() without needing to export\nit, we have to move all the delalloc extent cleanup to the iomap\ncore and so now the iomap core can clean up delayed allocation\nextents in a safe, sane and filesystem neutral manner.\n\nWith all this done, the original data corruption never occurs\nanymore, and we now have a generic mechanism for ensuring that page\ncache writes do not do the wrong thing when writeback and reclaim\nchange the state of the physical extent and/or page cache contents\nwhilst the write is in progress.\n\nSigned-off-by: Dave Chinner <dchinner@redhat.com>\nSigned-off-by: Darrick J. Wong <djwong@kernel.org>\n\n* tag 'xfs-iomap-stale-fixes' of git://git.kernel.org/pub/scm/linux/kernel/git/dgc/linux-xfs:\n  xfs: drop write error injection is unfixable, remove it\n  xfs: use iomap_valid method to detect stale cached iomaps\n  iomap: write iomap validity checks\n  xfs: xfs_bmap_punch_delalloc_range() should take a byte range\n  iomap: buffered write failure should not truncate the page cache\n  xfs,iomap: move delalloc punching to iomap\n  xfs: use byte ranges for write cleanup ranges\n  xfs: punching delalloc extents on write failure is racy\n  xfs: write page faults in iomap are not buffered writes",
+  "author_name": "Darrick J. Wong",
+  "author_email": "djwong@kernel.org",
+  "author_date": "Mon Nov 28 17:23:58 2022 -0800",
+  "author_date_iso": "2022-11-28T17:23:58-08:00",
+  "committer_name": "Darrick J. Wong",
+  "committer_email": "djwong@kernel.org",
+  "committer_date": "Mon Nov 28 17:23:58 2022 -0800",
+  "committer_date_iso": "2022-11-28T17:23:58-08:00",
+  "files_changed": [],
+  "files_changed_count": 0,
+  "stats": [
+    {
+      "file": "fs/iomap/buffered-io.c",
+      "insertions": 253,
+      "deletions": 1
+    },
+    {
+      "file": "fs/iomap/iter.c",
+      "insertions": 18,
+      "deletions": 1
+    },
+    {
+      "file": "fs/xfs/libxfs/xfs_bmap.c",
+      "insertions": 4,
+      "deletions": 2
+    },
+    {
+      "file": "fs/xfs/libxfs/xfs_errortag.h",
+      "insertions": 5,
+      "deletions": 7
+    },
+    {
+      "file": "fs/xfs/xfs_aops.c",
+      "insertions": 7,
+      "deletions": 11
+    },
+    {
+      "file": "fs/xfs/xfs_bmap_util.c",
+      "insertions": 6,
+      "deletions": 4
+    },
+    {
+      "file": "fs/xfs/xfs_bmap_util.h",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "fs/xfs/xfs_error.c",
+      "insertions": 20,
+      "deletions": 7
+    },
+    {
+      "file": "fs/xfs/xfs_file.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "fs/xfs/xfs_iomap.c",
+      "insertions": 102,
+      "deletions": 67
+    },
+    {
+      "file": "fs/xfs/xfs_iomap.h",
+      "insertions": 4,
+      "deletions": 2
+    },
+    {
+      "file": "fs/xfs/xfs_pnfs.c",
+      "insertions": 4,
+      "deletions": 2
+    },
+    {
+      "file": "include/linux/iomap.h",
+      "insertions": 39,
+      "deletions": 8
+    }
+  ],
+  "total_insertions": 464,
+  "total_deletions": 114,
+  "total_changes": 578,
+  "parents": [
+    "28b4b0596343d19d140da059eee0e5c2b5328731",
+    "6e8af15ccdc4e138a5b529c1901a0013e1dcaa09"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": true,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "injection"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": []
+}

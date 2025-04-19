@@ -1,0 +1,68 @@
+Commit Hash: 7dcbf17e3f917f691d2ae9ed4a34283bd0e74a95
+Subject: hfsplus: refactor copy_name to not use strncpy
+
+
+Security Keywords:
+- hardening
+
+Full commit message:
+hfsplus: refactor copy_name to not use strncpy
+
+strncpy() is deprecated with NUL-terminated destination strings [1].
+
+The copy_name() method does a lot of manual buffer manipulation to
+eventually arrive with its desired string. If we don't know the
+namespace this attr has or belongs to we want to prepend "osx." to our
+final string. Following this, we're copying xattr_name and doing a
+bizarre manual NUL-byte assignment with a memset where n=1.
+
+Really, we can use some more obvious string APIs to acomplish this,
+improving readability and security. Following the same control flow as
+before: if we don't know the namespace let's use scnprintf() to form our
+prefix + xattr_name pairing (while NUL-terminating too!). Otherwise, use
+strscpy() to return the number of bytes copied into our buffer.
+Additionally, for non-empty strings, include the NUL-byte in the length
+-- matching the behavior of the previous implementation.
+
+Note that strscpy() _can_ return -E2BIG but this is already handled by
+all callsites:
+
+In both hfsplus_listxattr_finder_info() and hfsplus_listxattr(), ret is
+already type ssize_t so we can change the return type of copy_name() to
+match (understanding that scnprintf()'s return type is different yet
+fully representable by ssize_t). Furthermore, listxattr() in fs/xattr.c
+is well-equipped to handle a potential -E2BIG return result from
+vfs_listxattr():
+|	ssize_t error;
+...
+|	error = vfs_listxattr(d, klist, size);
+|	if (error > 0) {
+|		if (size && copy_to_user(list, klist, error))
+|			error = -EFAULT;
+|	} else if (error == -ERANGE && size >= XATTR_LIST_MAX) {
+|		/* The file system tried to returned a list bigger
+|			than XATTR_LIST_MAX bytes. Not possible. */
+|		error = -E2BIG;
+|	}
+... the error can potentially already be -E2BIG, skipping this else-if
+and ending up at the same state as other errors.
+
+Link: https://www.kernel.org/doc/html/latest/process/deprecated.html#strncpy-on-nul-terminated-strings [1]
+Link: https://manpages.debian.org/testing/linux-manual-4.8/strscpy.9.en.html
+Link: https://github.com/KSPP/linux/issues/90
+Cc:  <linux-hardening@vger.kernel.org>
+Signed-off-by: Justin Stitt <justinstitt@google.com>
+Reviewed-by: Kees Cook <keescook@chromium.org>
+Link: https://lore.kernel.org/r/20240401-strncpy-fs-hfsplus-xattr-c-v2-1-6e089999355e@google.com
+Signed-off-by: Kees Cook <keescook@chromium.org>
+
+Metadata:
+Author: Justin Stitt <justinstitt@google.com>
+Author Date: Mon Apr 1 18:10:48 2024 +0000
+Committer: Kees Cook <keescook@chromium.org>
+Commit Date: Wed Apr 24 16:55:28 2024 -0700
+
+Files Changed: 1
+Lines Added: 10
+Lines Removed: 12
+Total Changes: 22

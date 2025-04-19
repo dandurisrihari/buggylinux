@@ -1,0 +1,56 @@
+commit 9319676595a2da8022327119e89c8b13f934835e
+Author: Paolo Bonzini <pbonzini@redhat.com>
+Date:   Mon Jul 27 08:45:00 2020 -0400
+
+    selftests: kvm: do not set guest mode flag
+    
+    Setting KVM_STATE_NESTED_GUEST_MODE enables various consistency checks
+    on VMCS12 and therefore causes KVM_SET_NESTED_STATE to fail spuriously
+    with -EINVAL.  Do not set the flag so that we're sure to cover the
+    conditions included by the test, and cover the case where VMCS12 is
+    set and KVM_SET_NESTED_STATE is called with invalid VMCS12 contents.
+    
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/tools/testing/selftests/kvm/x86_64/vmx_set_nested_state_test.c b/tools/testing/selftests/kvm/x86_64/vmx_set_nested_state_test.c
+index 54cdefdfb49d..d14a34f1b018 100644
+--- a/tools/testing/selftests/kvm/x86_64/vmx_set_nested_state_test.c
++++ b/tools/testing/selftests/kvm/x86_64/vmx_set_nested_state_test.c
+@@ -76,10 +76,8 @@ void set_default_state(struct kvm_nested_state *state)
+ void set_default_vmx_state(struct kvm_nested_state *state, int size)
+ {
+ 	memset(state, 0, size);
+-	state->flags = KVM_STATE_NESTED_GUEST_MODE  |
+-			KVM_STATE_NESTED_RUN_PENDING;
+ 	if (have_evmcs)
+-		state->flags |= KVM_STATE_NESTED_EVMCS;
++		state->flags = KVM_STATE_NESTED_EVMCS;
+ 	state->format = 0;
+ 	state->size = size;
+ 	state->hdr.vmx.vmxon_pa = 0x1000;
+@@ -190,17 +188,20 @@ void test_vmx_nested_state(struct kvm_vm *vm)
+ 	state->size = sizeof(*state);
+ 	test_nested_state(vm, state);
+ 
++	/*
++	 * KVM_SET_NESTED_STATE succeeds with invalid VMCS
++	 * contents but L2 not running.
++	 */
++	set_default_vmx_state(state, state_sz);
++	state->flags = 0;
++	test_nested_state(vm, state);
++
+ 	/* vmxon_pa cannot be the same address as vmcs_pa. */
+ 	set_default_vmx_state(state, state_sz);
+ 	state->hdr.vmx.vmxon_pa = 0;
+ 	state->hdr.vmx.vmcs12_pa = 0;
+ 	test_nested_state_expect_einval(vm, state);
+ 
+-	/* The revision id for vmcs12 must be VMCS12_REVISION. */
+-	set_default_vmx_state(state, state_sz);
+-	set_revision_id_for_vmcs12(state, 0);
+-	test_nested_state_expect_einval(vm, state);
+-
+ 	/*
+ 	 * Test that if we leave nesting the state reflects that when we get
+ 	 * it again.

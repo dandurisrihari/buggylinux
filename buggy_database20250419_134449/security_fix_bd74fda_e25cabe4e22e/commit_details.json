@@ -1,0 +1,162 @@
+{
+  "hash": "bd74fdaea146029e4fa12c6de89adbe0779348a9",
+  "hash_short": "bd74fdae",
+  "subject": "mm: multi-gen LRU: support page table walks",
+  "body": "To further exploit spatial locality, the aging prefers to walk page tables\nto search for young PTEs and promote hot pages.  A kill switch will be\nadded in the next patch to disable this behavior.  When disabled, the\naging relies on the rmap only.\n\nNB: this behavior has nothing similar with the page table scanning in the\n2.4 kernel [1], which searches page tables for old PTEs, adds cold pages\nto swapcache and unmaps them.\n\nTo avoid confusion, the term \"iteration\" specifically means the traversal\nof an entire mm_struct list; the term \"walk\" will be applied to page\ntables and the rmap, as usual.\n\nAn mm_struct list is maintained for each memcg, and an mm_struct follows\nits owner task to the new memcg when this task is migrated.  Given an\nlruvec, the aging iterates lruvec_memcg()->mm_list and calls\nwalk_page_range() with each mm_struct on this list to promote hot pages\nbefore it increments max_seq.\n\nWhen multiple page table walkers iterate the same list, each of them gets\na unique mm_struct; therefore they can run concurrently.  Page table\nwalkers ignore any misplaced pages, e.g., if an mm_struct was migrated,\npages it left in the previous memcg will not be promoted when its current\nmemcg is under reclaim.  Similarly, page table walkers will not promote\npages from nodes other than the one under reclaim.\n\nThis patch uses the following optimizations when walking page tables:\n1. It tracks the usage of mm_struct's between context switches so that\n   page table walkers can skip processes that have been sleeping since\n   the last iteration.\n2. It uses generational Bloom filters to record populated branches so\n   that page table walkers can reduce their search space based on the\n   query results, e.g., to skip page tables containing mostly holes or\n   misplaced pages.\n3. It takes advantage of the accessed bit in non-leaf PMD entries when\n   CONFIG_ARCH_HAS_NONLEAF_PMD_YOUNG=y.\n4. It does not zigzag between a PGD table and the same PMD table\n   spanning multiple VMAs. IOW, it finishes all the VMAs within the\n   range of the same PMD table before it returns to a PGD table. This\n   improves the cache performance for workloads that have large\n   numbers of tiny VMAs [2], especially when CONFIG_PGTABLE_LEVELS=5.\n\nServer benchmark results:\n  Single workload:\n    fio (buffered I/O): no change\n\n  Single workload:\n    memcached (anon): +[8, 10]%\n                Ops/sec      KB/sec\n      patch1-7: 1147696.57   44640.29\n      patch1-8: 1245274.91   48435.66\n\n  Configurations:\n    no change\n\nClient benchmark results:\n  kswapd profiles:\n    patch1-7\n      48.16%  lzo1x_1_do_compress (real work)\n       8.20%  page_vma_mapped_walk (overhead)\n       7.06%  _raw_spin_unlock_irq\n       2.92%  ptep_clear_flush\n       2.53%  __zram_bvec_write\n       2.11%  do_raw_spin_lock\n       2.02%  memmove\n       1.93%  lru_gen_look_around\n       1.56%  free_unref_page_list\n       1.40%  memset\n\n    patch1-8\n      49.44%  lzo1x_1_do_compress (real work)\n       6.19%  page_vma_mapped_walk (overhead)\n       5.97%  _raw_spin_unlock_irq\n       3.13%  get_pfn_folio\n       2.85%  ptep_clear_flush\n       2.42%  __zram_bvec_write\n       2.08%  do_raw_spin_lock\n       1.92%  memmove\n       1.44%  alloc_zspage\n       1.36%  memset\n\n  Configurations:\n    no change\n\nThanks to the following developers for their efforts [3].\n  kernel test robot <lkp@intel.com>\n\n[1] https://lwn.net/Articles/23732/\n[2] https://llvm.org/docs/ScudoHardenedAllocator.html\n[3] https://lore.kernel.org/r/202204160827.ekEARWQo-lkp@intel.com/\n\nLink: https://lkml.kernel.org/r/20220918080010.2920238-9-yuzhao@google.com\nSigned-off-by: Yu Zhao <yuzhao@google.com>\nAcked-by: Brian Geffon <bgeffon@google.com>\nAcked-by: Jan Alexander Steffens (heftig) <heftig@archlinux.org>\nAcked-by: Oleksandr Natalenko <oleksandr@natalenko.name>\nAcked-by: Steven Barrett <steven@liquorix.net>\nAcked-by: Suleiman Souhlal <suleiman@google.com>\nTested-by: Daniel Byrne <djbyrne@mtu.edu>\nTested-by: Donald Carr <d@chaos-reins.com>\nTested-by: Holger Hoffst\u00e4tte <holger@applied-asynchrony.com>\nTested-by: Konstantin Kharlamov <Hi-Angel@yandex.ru>\nTested-by: Shuang Zhai <szhai2@cs.rochester.edu>\nTested-by: Sofia Trinh <sofia.trinh@edi.works>\nTested-by: Vaibhav Jain <vaibhav@linux.ibm.com>\nCc: Andi Kleen <ak@linux.intel.com>\nCc: Aneesh Kumar K.V <aneesh.kumar@linux.ibm.com>\nCc: Barry Song <baohua@kernel.org>\nCc: Catalin Marinas <catalin.marinas@arm.com>\nCc: Dave Hansen <dave.hansen@linux.intel.com>\nCc: Hillf Danton <hdanton@sina.com>\nCc: Jens Axboe <axboe@kernel.dk>\nCc: Johannes Weiner <hannes@cmpxchg.org>\nCc: Jonathan Corbet <corbet@lwn.net>\nCc: Linus Torvalds <torvalds@linux-foundation.org>\nCc: Matthew Wilcox <willy@infradead.org>\nCc: Mel Gorman <mgorman@suse.de>\nCc: Miaohe Lin <linmiaohe@huawei.com>\nCc: Michael Larabel <Michael@MichaelLarabel.com>\nCc: Michal Hocko <mhocko@kernel.org>\nCc: Mike Rapoport <rppt@kernel.org>\nCc: Mike Rapoport <rppt@linux.ibm.com>\nCc: Peter Zijlstra <peterz@infradead.org>\nCc: Qi Zheng <zhengqi.arch@bytedance.com>\nCc: Tejun Heo <tj@kernel.org>\nCc: Vlastimil Babka <vbabka@suse.cz>\nCc: Will Deacon <will@kernel.org>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>",
+  "full_message": "mm: multi-gen LRU: support page table walks\n\nTo further exploit spatial locality, the aging prefers to walk page tables\nto search for young PTEs and promote hot pages.  A kill switch will be\nadded in the next patch to disable this behavior.  When disabled, the\naging relies on the rmap only.\n\nNB: this behavior has nothing similar with the page table scanning in the\n2.4 kernel [1], which searches page tables for old PTEs, adds cold pages\nto swapcache and unmaps them.\n\nTo avoid confusion, the term \"iteration\" specifically means the traversal\nof an entire mm_struct list; the term \"walk\" will be applied to page\ntables and the rmap, as usual.\n\nAn mm_struct list is maintained for each memcg, and an mm_struct follows\nits owner task to the new memcg when this task is migrated.  Given an\nlruvec, the aging iterates lruvec_memcg()->mm_list and calls\nwalk_page_range() with each mm_struct on this list to promote hot pages\nbefore it increments max_seq.\n\nWhen multiple page table walkers iterate the same list, each of them gets\na unique mm_struct; therefore they can run concurrently.  Page table\nwalkers ignore any misplaced pages, e.g., if an mm_struct was migrated,\npages it left in the previous memcg will not be promoted when its current\nmemcg is under reclaim.  Similarly, page table walkers will not promote\npages from nodes other than the one under reclaim.\n\nThis patch uses the following optimizations when walking page tables:\n1. It tracks the usage of mm_struct's between context switches so that\n   page table walkers can skip processes that have been sleeping since\n   the last iteration.\n2. It uses generational Bloom filters to record populated branches so\n   that page table walkers can reduce their search space based on the\n   query results, e.g., to skip page tables containing mostly holes or\n   misplaced pages.\n3. It takes advantage of the accessed bit in non-leaf PMD entries when\n   CONFIG_ARCH_HAS_NONLEAF_PMD_YOUNG=y.\n4. It does not zigzag between a PGD table and the same PMD table\n   spanning multiple VMAs. IOW, it finishes all the VMAs within the\n   range of the same PMD table before it returns to a PGD table. This\n   improves the cache performance for workloads that have large\n   numbers of tiny VMAs [2], especially when CONFIG_PGTABLE_LEVELS=5.\n\nServer benchmark results:\n  Single workload:\n    fio (buffered I/O): no change\n\n  Single workload:\n    memcached (anon): +[8, 10]%\n                Ops/sec      KB/sec\n      patch1-7: 1147696.57   44640.29\n      patch1-8: 1245274.91   48435.66\n\n  Configurations:\n    no change\n\nClient benchmark results:\n  kswapd profiles:\n    patch1-7\n      48.16%  lzo1x_1_do_compress (real work)\n       8.20%  page_vma_mapped_walk (overhead)\n       7.06%  _raw_spin_unlock_irq\n       2.92%  ptep_clear_flush\n       2.53%  __zram_bvec_write\n       2.11%  do_raw_spin_lock\n       2.02%  memmove\n       1.93%  lru_gen_look_around\n       1.56%  free_unref_page_list\n       1.40%  memset\n\n    patch1-8\n      49.44%  lzo1x_1_do_compress (real work)\n       6.19%  page_vma_mapped_walk (overhead)\n       5.97%  _raw_spin_unlock_irq\n       3.13%  get_pfn_folio\n       2.85%  ptep_clear_flush\n       2.42%  __zram_bvec_write\n       2.08%  do_raw_spin_lock\n       1.92%  memmove\n       1.44%  alloc_zspage\n       1.36%  memset\n\n  Configurations:\n    no change\n\nThanks to the following developers for their efforts [3].\n  kernel test robot <lkp@intel.com>\n\n[1] https://lwn.net/Articles/23732/\n[2] https://llvm.org/docs/ScudoHardenedAllocator.html\n[3] https://lore.kernel.org/r/202204160827.ekEARWQo-lkp@intel.com/\n\nLink: https://lkml.kernel.org/r/20220918080010.2920238-9-yuzhao@google.com\nSigned-off-by: Yu Zhao <yuzhao@google.com>\nAcked-by: Brian Geffon <bgeffon@google.com>\nAcked-by: Jan Alexander Steffens (heftig) <heftig@archlinux.org>\nAcked-by: Oleksandr Natalenko <oleksandr@natalenko.name>\nAcked-by: Steven Barrett <steven@liquorix.net>\nAcked-by: Suleiman Souhlal <suleiman@google.com>\nTested-by: Daniel Byrne <djbyrne@mtu.edu>\nTested-by: Donald Carr <d@chaos-reins.com>\nTested-by: Holger Hoffst\u00e4tte <holger@applied-asynchrony.com>\nTested-by: Konstantin Kharlamov <Hi-Angel@yandex.ru>\nTested-by: Shuang Zhai <szhai2@cs.rochester.edu>\nTested-by: Sofia Trinh <sofia.trinh@edi.works>\nTested-by: Vaibhav Jain <vaibhav@linux.ibm.com>\nCc: Andi Kleen <ak@linux.intel.com>\nCc: Aneesh Kumar K.V <aneesh.kumar@linux.ibm.com>\nCc: Barry Song <baohua@kernel.org>\nCc: Catalin Marinas <catalin.marinas@arm.com>\nCc: Dave Hansen <dave.hansen@linux.intel.com>\nCc: Hillf Danton <hdanton@sina.com>\nCc: Jens Axboe <axboe@kernel.dk>\nCc: Johannes Weiner <hannes@cmpxchg.org>\nCc: Jonathan Corbet <corbet@lwn.net>\nCc: Linus Torvalds <torvalds@linux-foundation.org>\nCc: Matthew Wilcox <willy@infradead.org>\nCc: Mel Gorman <mgorman@suse.de>\nCc: Miaohe Lin <linmiaohe@huawei.com>\nCc: Michael Larabel <Michael@MichaelLarabel.com>\nCc: Michal Hocko <mhocko@kernel.org>\nCc: Mike Rapoport <rppt@kernel.org>\nCc: Mike Rapoport <rppt@linux.ibm.com>\nCc: Peter Zijlstra <peterz@infradead.org>\nCc: Qi Zheng <zhengqi.arch@bytedance.com>\nCc: Tejun Heo <tj@kernel.org>\nCc: Vlastimil Babka <vbabka@suse.cz>\nCc: Will Deacon <will@kernel.org>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>",
+  "author_name": "Yu Zhao",
+  "author_email": "yuzhao@google.com",
+  "author_date": "Sun Sep 18 02:00:05 2022 -0600",
+  "author_date_iso": "2022-09-18T02:00:05-06:00",
+  "committer_name": "Andrew Morton",
+  "committer_email": "akpm@linux-foundation.org",
+  "committer_date": "Mon Sep 26 19:46:09 2022 -0700",
+  "committer_date_iso": "2022-09-26T19:46:09-07:00",
+  "files_changed": [
+    "fs/exec.c",
+    "include/linux/memcontrol.h",
+    "include/linux/mm_types.h",
+    "include/linux/mmzone.h",
+    "include/linux/swap.h",
+    "kernel/exit.c",
+    "kernel/fork.c",
+    "kernel/sched/core.c",
+    "mm/memcontrol.c",
+    "mm/vmscan.c"
+  ],
+  "files_changed_count": 10,
+  "stats": [
+    {
+      "file": "fs/exec.c",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/memcontrol.h",
+      "insertions": 5,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/mm_types.h",
+      "insertions": 76,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/mmzone.h",
+      "insertions": 55,
+      "deletions": 1
+    },
+    {
+      "file": "include/linux/swap.h",
+      "insertions": 4,
+      "deletions": 0
+    },
+    {
+      "file": "kernel/exit.c",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "kernel/fork.c",
+      "insertions": 9,
+      "deletions": 0
+    },
+    {
+      "file": "kernel/sched/core.c",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "mm/memcontrol.c",
+      "insertions": 25,
+      "deletions": 0
+    },
+    {
+      "file": "mm/vmscan.c",
+      "insertions": 994,
+      "deletions": 16
+    }
+  ],
+  "total_insertions": 1172,
+  "total_deletions": 17,
+  "total_changes": 1189,
+  "parents": [
+    "018ee47f14893d500131dfca2ff9f3ff8ebd4ed2"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "exploit"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "kernel/fork.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/mm_types.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "kernel/exit.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/exec.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/mmzone.h",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/swap.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/memcontrol.h",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "kernel/sched/core.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/memcontrol.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/vmscan.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

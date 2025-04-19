@@ -1,0 +1,90 @@
+{
+  "hash": "c6d3cd32fd0064af7611d00877a67e6993bf220b",
+  "hash_short": "c6d3cd32",
+  "subject": "arm64: ftrace: use HAVE_FUNCTION_GRAPH_RET_ADDR_PTR",
+  "body": "When CONFIG_FUNCTION_GRAPH_TRACER is selected and the function graph\ntracer is in use, unwind_frame() may erroneously associate a traced\nfunction with an incorrect return address. This can happen when starting\nan unwind from a pt_regs, or when unwinding across an exception\nboundary.\n\nThis can be seen when recording with perf while the function graph\ntracer is in use. For example:\n\n| # echo function_graph > /sys/kernel/debug/tracing/current_tracer\n| # perf record -g -e raw_syscalls:sys_enter:k /bin/true\n| # perf report\n\n... reports the callchain erroneously as:\n\n| el0t_64_sync\n| el0t_64_sync_handler\n| el0_svc_common.constprop.0\n| perf_callchain\n| get_perf_callchain\n| syscall_trace_enter\n| syscall_trace_enter\n\n... whereas when the function graph tracer is not in use, it reports:\n\n| el0t_64_sync\n| el0t_64_sync_handler\n| el0_svc\n| do_el0_svc\n| el0_svc_common.constprop.0\n| syscall_trace_enter\n| syscall_trace_enter\n\nThe underlying problem is that ftrace_graph_get_ret_stack() takes an\nindex offset from the most recent entry added to the fgraph return\nstack. We start an unwind at offset 0, and increment the offset each\ntime we encounter a rewritten return address (i.e. when we see\n`return_to_handler`). This is broken in two cases:\n\n1) Between creating a pt_regs and starting the unwind, function calls\n   may place entries on the stack, leaving an arbitrary offset which we\n   can only determine by performing a full unwind from the caller of the\n   unwind code (and relying on none of the unwind code being\n   instrumented).\n\n   This can result in erroneous entries being reported in a backtrace\n   recorded by perf or kfence when the function graph tracer is in use.\n   Currently show_regs() is unaffected as dump_backtrace() performs an\n   initial unwind.\n\n2) When unwinding across an exception boundary (whether continuing an\n   unwind or starting a new unwind from regs), we currently always skip\n   the LR of the interrupted context. Where this was live and contained\n   a rewritten address, we won't consume the corresponding fgraph ret\n   stack entry, leaving subsequent entries off-by-one.\n\n   This can result in erroneous entries being reported in a backtrace\n   performed by any in-kernel unwinder when that backtrace crosses an\n   exception boundary, with entries after the boundary being reported\n   incorrectly. This includes perf, kfence, show_regs(), panic(), etc.\n\nTo fix this, we need to be able to uniquely identify each rewritten\nreturn address such that we can map this back to the original return\naddress. We can use HAVE_FUNCTION_GRAPH_RET_ADDR_PTR to associate\neach rewritten return address with a unique location on the stack. As\nthe return address is passed in the LR (and so is not guaranteed a\nunique location in memory), we use the FP upon entry to the function\n(i.e. the address of the caller's frame record) as the return address\npointer. Any nested call will have a different FP value as the caller\nmust create its own frame record and update FP to point to this.\n\nSince ftrace_graph_ret_addr() requires the return address with the PAC\nstripped, the stripping of the PAC is moved before the fixup of the\nrewritten address. As we would unconditionally strip the PAC, moving\nthis earlier is not harmful, and we can avoid a redundant strip in the\nreturn address fixup code.\n\nI've tested this with the perf case above, the ftrace selftests, and\na number of ad-hoc unwinder tests. The tests all pass, and I have seen\nno unexpected behaviour as a result of this change. I've tested with\npointer authentication under QEMU TCG where magic-sysrq+l correctly\nrecovers the original return addresses.\n\nNote that this doesn't fix the issue of skipping a live LR at an\nexception boundary, which is a more general problem and requires more\nsubstantial rework. Were we to consume the LR in all cases this would\nresult in warnings where the interrupted context's LR contains\n`return_to_handler`, but the FP has been altered, e.g.\n\n| func:\n|\t<--- ftrace entry ---> \t// logs FP & LR, rewrites LR\n| \tSTP\tFP, LR, [SP, #-16]!\n| \tMOV\tFP, SP\n| \t<--- INTERRUPT --->\n\n... as ftrace_graph_get_ret_stack() fill not find a matching entry,\ntriggering the WARN_ON_ONCE() in unwind_frame().\n\nLink: https://lore.kernel.org/r/20211025164925.GB2001@C02TD0UTHF1T.local\nLink: https://lore.kernel.org/r/20211027132529.30027-1-mark.rutland@arm.com\nSigned-off-by: Mark Rutland <mark.rutland@arm.com>\nCc: Catalin Marinas <catalin.marinas@arm.com>\nCc: Madhavan T. Venkataraman <madvenka@linux.microsoft.com>\nCc: Mark Brown <broonie@kernel.org>\nCc: Steven Rostedt <rostedt@goodmis.org>\nCc: Will Deacon <will@kernel.org>\nReviewed-by: Mark Brown <broonie@kernel.org>\nLink: https://lore.kernel.org/r/20211029162245.39761-1-mark.rutland@arm.com\nSigned-off-by: Will Deacon <will@kernel.org>",
+  "full_message": "arm64: ftrace: use HAVE_FUNCTION_GRAPH_RET_ADDR_PTR\n\nWhen CONFIG_FUNCTION_GRAPH_TRACER is selected and the function graph\ntracer is in use, unwind_frame() may erroneously associate a traced\nfunction with an incorrect return address. This can happen when starting\nan unwind from a pt_regs, or when unwinding across an exception\nboundary.\n\nThis can be seen when recording with perf while the function graph\ntracer is in use. For example:\n\n| # echo function_graph > /sys/kernel/debug/tracing/current_tracer\n| # perf record -g -e raw_syscalls:sys_enter:k /bin/true\n| # perf report\n\n... reports the callchain erroneously as:\n\n| el0t_64_sync\n| el0t_64_sync_handler\n| el0_svc_common.constprop.0\n| perf_callchain\n| get_perf_callchain\n| syscall_trace_enter\n| syscall_trace_enter\n\n... whereas when the function graph tracer is not in use, it reports:\n\n| el0t_64_sync\n| el0t_64_sync_handler\n| el0_svc\n| do_el0_svc\n| el0_svc_common.constprop.0\n| syscall_trace_enter\n| syscall_trace_enter\n\nThe underlying problem is that ftrace_graph_get_ret_stack() takes an\nindex offset from the most recent entry added to the fgraph return\nstack. We start an unwind at offset 0, and increment the offset each\ntime we encounter a rewritten return address (i.e. when we see\n`return_to_handler`). This is broken in two cases:\n\n1) Between creating a pt_regs and starting the unwind, function calls\n   may place entries on the stack, leaving an arbitrary offset which we\n   can only determine by performing a full unwind from the caller of the\n   unwind code (and relying on none of the unwind code being\n   instrumented).\n\n   This can result in erroneous entries being reported in a backtrace\n   recorded by perf or kfence when the function graph tracer is in use.\n   Currently show_regs() is unaffected as dump_backtrace() performs an\n   initial unwind.\n\n2) When unwinding across an exception boundary (whether continuing an\n   unwind or starting a new unwind from regs), we currently always skip\n   the LR of the interrupted context. Where this was live and contained\n   a rewritten address, we won't consume the corresponding fgraph ret\n   stack entry, leaving subsequent entries off-by-one.\n\n   This can result in erroneous entries being reported in a backtrace\n   performed by any in-kernel unwinder when that backtrace crosses an\n   exception boundary, with entries after the boundary being reported\n   incorrectly. This includes perf, kfence, show_regs(), panic(), etc.\n\nTo fix this, we need to be able to uniquely identify each rewritten\nreturn address such that we can map this back to the original return\naddress. We can use HAVE_FUNCTION_GRAPH_RET_ADDR_PTR to associate\neach rewritten return address with a unique location on the stack. As\nthe return address is passed in the LR (and so is not guaranteed a\nunique location in memory), we use the FP upon entry to the function\n(i.e. the address of the caller's frame record) as the return address\npointer. Any nested call will have a different FP value as the caller\nmust create its own frame record and update FP to point to this.\n\nSince ftrace_graph_ret_addr() requires the return address with the PAC\nstripped, the stripping of the PAC is moved before the fixup of the\nrewritten address. As we would unconditionally strip the PAC, moving\nthis earlier is not harmful, and we can avoid a redundant strip in the\nreturn address fixup code.\n\nI've tested this with the perf case above, the ftrace selftests, and\na number of ad-hoc unwinder tests. The tests all pass, and I have seen\nno unexpected behaviour as a result of this change. I've tested with\npointer authentication under QEMU TCG where magic-sysrq+l correctly\nrecovers the original return addresses.\n\nNote that this doesn't fix the issue of skipping a live LR at an\nexception boundary, which is a more general problem and requires more\nsubstantial rework. Were we to consume the LR in all cases this would\nresult in warnings where the interrupted context's LR contains\n`return_to_handler`, but the FP has been altered, e.g.\n\n| func:\n|\t<--- ftrace entry ---> \t// logs FP & LR, rewrites LR\n| \tSTP\tFP, LR, [SP, #-16]!\n| \tMOV\tFP, SP\n| \t<--- INTERRUPT --->\n\n... as ftrace_graph_get_ret_stack() fill not find a matching entry,\ntriggering the WARN_ON_ONCE() in unwind_frame().\n\nLink: https://lore.kernel.org/r/20211025164925.GB2001@C02TD0UTHF1T.local\nLink: https://lore.kernel.org/r/20211027132529.30027-1-mark.rutland@arm.com\nSigned-off-by: Mark Rutland <mark.rutland@arm.com>\nCc: Catalin Marinas <catalin.marinas@arm.com>\nCc: Madhavan T. Venkataraman <madvenka@linux.microsoft.com>\nCc: Mark Brown <broonie@kernel.org>\nCc: Steven Rostedt <rostedt@goodmis.org>\nCc: Will Deacon <will@kernel.org>\nReviewed-by: Mark Brown <broonie@kernel.org>\nLink: https://lore.kernel.org/r/20211029162245.39761-1-mark.rutland@arm.com\nSigned-off-by: Will Deacon <will@kernel.org>",
+  "author_name": "Mark Rutland",
+  "author_email": "mark.rutland@arm.com",
+  "author_date": "Fri Oct 29 17:22:45 2021 +0100",
+  "author_date_iso": "2021-10-29T17:22:45+01:00",
+  "committer_name": "Will Deacon",
+  "committer_email": "will@kernel.org",
+  "committer_date": "Tue Nov 16 09:47:54 2021 +0000",
+  "committer_date_iso": "2021-11-16T09:47:54+00:00",
+  "files_changed": [
+    "arch/arm64/include/asm/ftrace.h",
+    "arch/arm64/include/asm/stacktrace.h",
+    "arch/arm64/kernel/ftrace.c",
+    "arch/arm64/kernel/stacktrace.c"
+  ],
+  "files_changed_count": 4,
+  "stats": [
+    {
+      "file": "arch/arm64/include/asm/ftrace.h",
+      "insertions": 11,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/include/asm/stacktrace.h",
+      "insertions": 0,
+      "deletions": 6
+    },
+    {
+      "file": "arch/arm64/kernel/ftrace.c",
+      "insertions": 3,
+      "deletions": 3
+    },
+    {
+      "file": "arch/arm64/kernel/stacktrace.c",
+      "insertions": 8,
+      "deletions": 10
+    }
+  ],
+  "total_insertions": 22,
+  "total_deletions": 19,
+  "total_changes": 41,
+  "parents": [
+    "fa55b7dcdc43c1aa1ba12bca9d2dd4318c2a0dbf"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "authentication"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/arm64/include/asm/ftrace.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/include/asm/stacktrace.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/kernel/ftrace.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/kernel/stacktrace.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

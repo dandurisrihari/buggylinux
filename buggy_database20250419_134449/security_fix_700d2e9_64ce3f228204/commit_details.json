@@ -1,0 +1,54 @@
+{
+  "hash": "700d2e9a36b93601270c1e15550acde2521386c5",
+  "hash_short": "700d2e9a",
+  "subject": "mm, page_alloc: reduce page alloc/free sanity checks",
+  "body": "Historically, we have performed sanity checks on all struct pages being\nallocated or freed, making sure they have no unexpected page flags or\ncertain field values.  This can detect insufficient cleanup and some cases\nof use-after-free, although on its own it can't always identify the\nculprit.  The result is a warning and the \"bad page\" being leaked.\n\nThe checks do need some cpu cycles, so in 4.7 with commits 479f854a207c\n(\"mm, page_alloc: defer debugging checks of pages allocated from the PCP\")\nand 4db7548ccbd9 (\"mm, page_alloc: defer debugging checks of freed pages\nuntil a PCP drain\") they were no longer performed in the hot paths when\nallocating and freeing from pcplists, but only when pcplists are bypassed,\nrefilled or drained.  For debugging purposes, with CONFIG_DEBUG_VM enabled\nthe checks were instead still done in the hot paths and not when refilling\nor draining pcplists.\n\nWith 4462b32c9285 (\"mm, page_alloc: more extensive free page checking with\ndebug_pagealloc\"), enabling debug_pagealloc also moved the sanity checks\nback to hot pahs.  When both debug_pagealloc and CONFIG_DEBUG_VM are\nenabled, the checks are done both in hotpaths and pcplist refill/drain.\n\nEven though the non-debug default today might seem to be a sensible\ntradeoff between overhead and ability to detect bad pages, on closer look\nit's arguably not.  As most allocations go through the pcplists, catching\nany bad pages when refilling or draining pcplists has only a small chance,\ninsufficient for debugging or serious hardening purposes.  On the other\nhand the cost of the checks is concentrated in the already expensive\ndrain/refill batching operations, and those are done under the often\ncontended zone lock.  That was recently identified as an issue for page\nallocation and the zone lock contention reduced by moving the checks\noutside of the locked section with a patch \"mm: reduce lock contention of\npcp buffer refill\", but the cost of the checks is still visible compared\nto their removal [1].  In the pcplist draining path free_pcppages_bulk()\nthe checks are still done under zone->lock.\n\nThus, remove the checks from pcplist refill and drain paths completely.\nIntroduce a static key check_pages_enabled to control checks during page\nallocation a freeing (whether pcplist is used or bypassed). The static\nkey is enabled if either is true:\n\n- kernel is built with CONFIG_DEBUG_VM=y (debugging)\n- debug_pagealloc or page poisoning is boot-time enabled (debugging)\n- init_on_alloc or init_on_free is boot-time enabled (hardening)\n\nThe resulting user visible changes:\n- no checks when draining/refilling pcplists - less overhead, with\n  likely no practical reduction of ability to catch bad pages\n- no checks when bypassing pcplists in default config (no\n  debugging/hardening) - less overhead etc. as above\n- on typical hardened kernels [2], checks are now performed on each page\n  allocation/free (previously only when bypassing/draining/refilling\n  pcplists) - the init_on_alloc/init_on_free enabled should be sufficient\n  indication for preferring more costly alloc/free operations for\n  hardening purposes and we shouldn't need to introduce another toggle\n- code (various wrappers) removal and simplification\n\n[1] https://lore.kernel.org/all/68ba44d8-6899-c018-dcb3-36f3a96e6bea@sra.uni-hannover.de/\n[2] https://lore.kernel.org/all/63ebc499.a70a0220.9ac51.29ea@mx.google.com/\n\n[akpm@linux-foundation.org: coding-style cleanups]\n[akpm@linux-foundation.org: make check_pages_enabled static]\nLink: https://lkml.kernel.org/r/20230216095131.17336-1-vbabka@suse.cz\nReported-by: Alexander Halbuer <halbuer@sra.uni-hannover.de>\nReported-by: Andrew Morton <akpm@linux-foundation.org>\nSigned-off-by: Vlastimil Babka <vbabka@suse.cz>\nCc: Kees Cook <keescook@chromium.org>\nCc: Mel Gorman <mgorman@techsingularity.net>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>",
+  "full_message": "mm, page_alloc: reduce page alloc/free sanity checks\n\nHistorically, we have performed sanity checks on all struct pages being\nallocated or freed, making sure they have no unexpected page flags or\ncertain field values.  This can detect insufficient cleanup and some cases\nof use-after-free, although on its own it can't always identify the\nculprit.  The result is a warning and the \"bad page\" being leaked.\n\nThe checks do need some cpu cycles, so in 4.7 with commits 479f854a207c\n(\"mm, page_alloc: defer debugging checks of pages allocated from the PCP\")\nand 4db7548ccbd9 (\"mm, page_alloc: defer debugging checks of freed pages\nuntil a PCP drain\") they were no longer performed in the hot paths when\nallocating and freeing from pcplists, but only when pcplists are bypassed,\nrefilled or drained.  For debugging purposes, with CONFIG_DEBUG_VM enabled\nthe checks were instead still done in the hot paths and not when refilling\nor draining pcplists.\n\nWith 4462b32c9285 (\"mm, page_alloc: more extensive free page checking with\ndebug_pagealloc\"), enabling debug_pagealloc also moved the sanity checks\nback to hot pahs.  When both debug_pagealloc and CONFIG_DEBUG_VM are\nenabled, the checks are done both in hotpaths and pcplist refill/drain.\n\nEven though the non-debug default today might seem to be a sensible\ntradeoff between overhead and ability to detect bad pages, on closer look\nit's arguably not.  As most allocations go through the pcplists, catching\nany bad pages when refilling or draining pcplists has only a small chance,\ninsufficient for debugging or serious hardening purposes.  On the other\nhand the cost of the checks is concentrated in the already expensive\ndrain/refill batching operations, and those are done under the often\ncontended zone lock.  That was recently identified as an issue for page\nallocation and the zone lock contention reduced by moving the checks\noutside of the locked section with a patch \"mm: reduce lock contention of\npcp buffer refill\", but the cost of the checks is still visible compared\nto their removal [1].  In the pcplist draining path free_pcppages_bulk()\nthe checks are still done under zone->lock.\n\nThus, remove the checks from pcplist refill and drain paths completely.\nIntroduce a static key check_pages_enabled to control checks during page\nallocation a freeing (whether pcplist is used or bypassed). The static\nkey is enabled if either is true:\n\n- kernel is built with CONFIG_DEBUG_VM=y (debugging)\n- debug_pagealloc or page poisoning is boot-time enabled (debugging)\n- init_on_alloc or init_on_free is boot-time enabled (hardening)\n\nThe resulting user visible changes:\n- no checks when draining/refilling pcplists - less overhead, with\n  likely no practical reduction of ability to catch bad pages\n- no checks when bypassing pcplists in default config (no\n  debugging/hardening) - less overhead etc. as above\n- on typical hardened kernels [2], checks are now performed on each page\n  allocation/free (previously only when bypassing/draining/refilling\n  pcplists) - the init_on_alloc/init_on_free enabled should be sufficient\n  indication for preferring more costly alloc/free operations for\n  hardening purposes and we shouldn't need to introduce another toggle\n- code (various wrappers) removal and simplification\n\n[1] https://lore.kernel.org/all/68ba44d8-6899-c018-dcb3-36f3a96e6bea@sra.uni-hannover.de/\n[2] https://lore.kernel.org/all/63ebc499.a70a0220.9ac51.29ea@mx.google.com/\n\n[akpm@linux-foundation.org: coding-style cleanups]\n[akpm@linux-foundation.org: make check_pages_enabled static]\nLink: https://lkml.kernel.org/r/20230216095131.17336-1-vbabka@suse.cz\nReported-by: Alexander Halbuer <halbuer@sra.uni-hannover.de>\nReported-by: Andrew Morton <akpm@linux-foundation.org>\nSigned-off-by: Vlastimil Babka <vbabka@suse.cz>\nCc: Kees Cook <keescook@chromium.org>\nCc: Mel Gorman <mgorman@techsingularity.net>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>",
+  "author_name": "Vlastimil Babka",
+  "author_email": "vbabka@suse.cz",
+  "author_date": "Thu Feb 16 10:51:31 2023 +0100",
+  "author_date_iso": "2023-02-16T10:51:31+01:00",
+  "committer_name": "Andrew Morton",
+  "committer_email": "akpm@linux-foundation.org",
+  "committer_date": "Tue Mar 28 16:20:06 2023 -0700",
+  "committer_date_iso": "2023-03-28T16:20:06-07:00",
+  "files_changed": [
+    "mm/page_alloc.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "mm/page_alloc.c",
+      "insertions": 52,
+      "deletions": 135
+    }
+  ],
+  "total_insertions": 52,
+  "total_deletions": 135,
+  "total_changes": 187,
+  "parents": [
+    "2ede3c13be889900f8f5c04b5dc6298201d835c4"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "hardening"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "mm/page_alloc.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

@@ -1,0 +1,210 @@
+{
+  "hash": "cb2517653fccaf9f9b4ae968c7ee005c1bbacdc5",
+  "hash_short": "cb251765",
+  "subject": "sched/debug: Make schedstats a runtime tunable that is disabled by default",
+  "body": "schedstats is very useful during debugging and performance tuning but it\nincurs overhead to calculate the stats. As such, even though it can be\ndisabled at build time, it is often enabled as the information is useful.\n\nThis patch adds a kernel command-line and sysctl tunable to enable or\ndisable schedstats on demand (when it's built in). It is disabled\nby default as someone who knows they need it can also learn to enable\nit when necessary.\n\nThe benefits are dependent on how scheduler-intensive the workload is.\nIf it is then the patch reduces the number of cycles spent calculating\nthe stats with a small benefit from reducing the cache footprint of the\nscheduler.\n\nThese measurements were taken from a 48-core 2-socket\nmachine with Xeon(R) E5-2670 v3 cpus although they were also tested on a\nsingle socket machine 8-core machine with Intel i7-3770 processors.\n\nnetperf-tcp\n                           4.5.0-rc1             4.5.0-rc1\n                             vanilla          nostats-v3r1\nHmean    64         560.45 (  0.00%)      575.98 (  2.77%)\nHmean    128        766.66 (  0.00%)      795.79 (  3.80%)\nHmean    256        950.51 (  0.00%)      981.50 (  3.26%)\nHmean    1024      1433.25 (  0.00%)     1466.51 (  2.32%)\nHmean    2048      2810.54 (  0.00%)     2879.75 (  2.46%)\nHmean    3312      4618.18 (  0.00%)     4682.09 (  1.38%)\nHmean    4096      5306.42 (  0.00%)     5346.39 (  0.75%)\nHmean    8192     10581.44 (  0.00%)    10698.15 (  1.10%)\nHmean    16384    18857.70 (  0.00%)    18937.61 (  0.42%)\n\nSmall gains here, UDP_STREAM showed nothing intresting and neither did\nthe TCP_RR tests. The gains on the 8-core machine were very similar.\n\ntbench4\n                                 4.5.0-rc1             4.5.0-rc1\n                                   vanilla          nostats-v3r1\nHmean    mb/sec-1         500.85 (  0.00%)      522.43 (  4.31%)\nHmean    mb/sec-2         984.66 (  0.00%)     1018.19 (  3.41%)\nHmean    mb/sec-4        1827.91 (  0.00%)     1847.78 (  1.09%)\nHmean    mb/sec-8        3561.36 (  0.00%)     3611.28 (  1.40%)\nHmean    mb/sec-16       5824.52 (  0.00%)     5929.03 (  1.79%)\nHmean    mb/sec-32      10943.10 (  0.00%)    10802.83 ( -1.28%)\nHmean    mb/sec-64      15950.81 (  0.00%)    16211.31 (  1.63%)\nHmean    mb/sec-128     15302.17 (  0.00%)    15445.11 (  0.93%)\nHmean    mb/sec-256     14866.18 (  0.00%)    15088.73 (  1.50%)\nHmean    mb/sec-512     15223.31 (  0.00%)    15373.69 (  0.99%)\nHmean    mb/sec-1024    14574.25 (  0.00%)    14598.02 (  0.16%)\nHmean    mb/sec-2048    13569.02 (  0.00%)    13733.86 (  1.21%)\nHmean    mb/sec-3072    12865.98 (  0.00%)    13209.23 (  2.67%)\n\nSmall gains of 2-4% at low thread counts and otherwise flat.  The\ngains on the 8-core machine were slightly different\n\ntbench4 on 8-core i7-3770 single socket machine\nHmean    mb/sec-1        442.59 (  0.00%)      448.73 (  1.39%)\nHmean    mb/sec-2        796.68 (  0.00%)      794.39 ( -0.29%)\nHmean    mb/sec-4       1322.52 (  0.00%)     1343.66 (  1.60%)\nHmean    mb/sec-8       2611.65 (  0.00%)     2694.86 (  3.19%)\nHmean    mb/sec-16      2537.07 (  0.00%)     2609.34 (  2.85%)\nHmean    mb/sec-32      2506.02 (  0.00%)     2578.18 (  2.88%)\nHmean    mb/sec-64      2511.06 (  0.00%)     2569.16 (  2.31%)\nHmean    mb/sec-128     2313.38 (  0.00%)     2395.50 (  3.55%)\nHmean    mb/sec-256     2110.04 (  0.00%)     2177.45 (  3.19%)\nHmean    mb/sec-512     2072.51 (  0.00%)     2053.97 ( -0.89%)\n\nIn constract, this shows a relatively steady 2-3% gain at higher thread\ncounts. Due to the nature of the patch and the type of workload, it's\nnot a surprise that the result will depend on the CPU used.\n\nhackbench-pipes\n                         4.5.0-rc1             4.5.0-rc1\n                           vanilla          nostats-v3r1\nAmean    1        0.0637 (  0.00%)      0.0660 ( -3.59%)\nAmean    4        0.1229 (  0.00%)      0.1181 (  3.84%)\nAmean    7        0.1921 (  0.00%)      0.1911 (  0.52%)\nAmean    12       0.3117 (  0.00%)      0.2923 (  6.23%)\nAmean    21       0.4050 (  0.00%)      0.3899 (  3.74%)\nAmean    30       0.4586 (  0.00%)      0.4433 (  3.33%)\nAmean    48       0.5910 (  0.00%)      0.5694 (  3.65%)\nAmean    79       0.8663 (  0.00%)      0.8626 (  0.43%)\nAmean    110      1.1543 (  0.00%)      1.1517 (  0.22%)\nAmean    141      1.4457 (  0.00%)      1.4290 (  1.16%)\nAmean    172      1.7090 (  0.00%)      1.6924 (  0.97%)\nAmean    192      1.9126 (  0.00%)      1.9089 (  0.19%)\n\nSome small gains and losses and while the variance data is not included,\nit's close to the noise. The UMA machine did not show anything particularly\ndifferent\n\npipetest\n                             4.5.0-rc1             4.5.0-rc1\n                               vanilla          nostats-v2r2\nMin         Time        4.13 (  0.00%)        3.99 (  3.39%)\n1st-qrtle   Time        4.38 (  0.00%)        4.27 (  2.51%)\n2nd-qrtle   Time        4.46 (  0.00%)        4.39 (  1.57%)\n3rd-qrtle   Time        4.56 (  0.00%)        4.51 (  1.10%)\nMax-90%     Time        4.67 (  0.00%)        4.60 (  1.50%)\nMax-93%     Time        4.71 (  0.00%)        4.65 (  1.27%)\nMax-95%     Time        4.74 (  0.00%)        4.71 (  0.63%)\nMax-99%     Time        4.88 (  0.00%)        4.79 (  1.84%)\nMax         Time        4.93 (  0.00%)        4.83 (  2.03%)\nMean        Time        4.48 (  0.00%)        4.39 (  1.91%)\nBest99%Mean Time        4.47 (  0.00%)        4.39 (  1.91%)\nBest95%Mean Time        4.46 (  0.00%)        4.38 (  1.93%)\nBest90%Mean Time        4.45 (  0.00%)        4.36 (  1.98%)\nBest50%Mean Time        4.36 (  0.00%)        4.25 (  2.49%)\nBest10%Mean Time        4.23 (  0.00%)        4.10 (  3.13%)\nBest5%Mean  Time        4.19 (  0.00%)        4.06 (  3.20%)\nBest1%Mean  Time        4.13 (  0.00%)        4.00 (  3.39%)\n\nSmall improvement and similar gains were seen on the UMA machine.\n\nThe gain is small but it stands to reason that doing less work in the\nscheduler is a good thing. The downside is that the lack of schedstats and\ntracepoints may be surprising to experts doing performance analysis until\nthey find the existence of the schedstats= parameter or schedstats sysctl.\nIt will be automatically activated for latencytop and sleep profiling to\nalleviate the problem. For tracepoints, there is a simple warning as it's\nnot safe to activate schedstats in the context when it's known the tracepoint\nmay be wanted but is unavailable.\n\nSigned-off-by: Mel Gorman <mgorman@techsingularity.net>\nReviewed-by: Matt Fleming <matt@codeblueprint.co.uk>\nReviewed-by: Srikar Dronamraju <srikar@linux.vnet.ibm.com>\nCc: Linus Torvalds <torvalds@linux-foundation.org>\nCc: Mike Galbraith <mgalbraith@suse.de>\nCc: Peter Zijlstra <peterz@infradead.org>\nCc: Thomas Gleixner <tglx@linutronix.de>\nLink: http://lkml.kernel.org/r/1454663316-22048-1-git-send-email-mgorman@techsingularity.net\nSigned-off-by: Ingo Molnar <mingo@kernel.org>",
+  "full_message": "sched/debug: Make schedstats a runtime tunable that is disabled by default\n\nschedstats is very useful during debugging and performance tuning but it\nincurs overhead to calculate the stats. As such, even though it can be\ndisabled at build time, it is often enabled as the information is useful.\n\nThis patch adds a kernel command-line and sysctl tunable to enable or\ndisable schedstats on demand (when it's built in). It is disabled\nby default as someone who knows they need it can also learn to enable\nit when necessary.\n\nThe benefits are dependent on how scheduler-intensive the workload is.\nIf it is then the patch reduces the number of cycles spent calculating\nthe stats with a small benefit from reducing the cache footprint of the\nscheduler.\n\nThese measurements were taken from a 48-core 2-socket\nmachine with Xeon(R) E5-2670 v3 cpus although they were also tested on a\nsingle socket machine 8-core machine with Intel i7-3770 processors.\n\nnetperf-tcp\n                           4.5.0-rc1             4.5.0-rc1\n                             vanilla          nostats-v3r1\nHmean    64         560.45 (  0.00%)      575.98 (  2.77%)\nHmean    128        766.66 (  0.00%)      795.79 (  3.80%)\nHmean    256        950.51 (  0.00%)      981.50 (  3.26%)\nHmean    1024      1433.25 (  0.00%)     1466.51 (  2.32%)\nHmean    2048      2810.54 (  0.00%)     2879.75 (  2.46%)\nHmean    3312      4618.18 (  0.00%)     4682.09 (  1.38%)\nHmean    4096      5306.42 (  0.00%)     5346.39 (  0.75%)\nHmean    8192     10581.44 (  0.00%)    10698.15 (  1.10%)\nHmean    16384    18857.70 (  0.00%)    18937.61 (  0.42%)\n\nSmall gains here, UDP_STREAM showed nothing intresting and neither did\nthe TCP_RR tests. The gains on the 8-core machine were very similar.\n\ntbench4\n                                 4.5.0-rc1             4.5.0-rc1\n                                   vanilla          nostats-v3r1\nHmean    mb/sec-1         500.85 (  0.00%)      522.43 (  4.31%)\nHmean    mb/sec-2         984.66 (  0.00%)     1018.19 (  3.41%)\nHmean    mb/sec-4        1827.91 (  0.00%)     1847.78 (  1.09%)\nHmean    mb/sec-8        3561.36 (  0.00%)     3611.28 (  1.40%)\nHmean    mb/sec-16       5824.52 (  0.00%)     5929.03 (  1.79%)\nHmean    mb/sec-32      10943.10 (  0.00%)    10802.83 ( -1.28%)\nHmean    mb/sec-64      15950.81 (  0.00%)    16211.31 (  1.63%)\nHmean    mb/sec-128     15302.17 (  0.00%)    15445.11 (  0.93%)\nHmean    mb/sec-256     14866.18 (  0.00%)    15088.73 (  1.50%)\nHmean    mb/sec-512     15223.31 (  0.00%)    15373.69 (  0.99%)\nHmean    mb/sec-1024    14574.25 (  0.00%)    14598.02 (  0.16%)\nHmean    mb/sec-2048    13569.02 (  0.00%)    13733.86 (  1.21%)\nHmean    mb/sec-3072    12865.98 (  0.00%)    13209.23 (  2.67%)\n\nSmall gains of 2-4% at low thread counts and otherwise flat.  The\ngains on the 8-core machine were slightly different\n\ntbench4 on 8-core i7-3770 single socket machine\nHmean    mb/sec-1        442.59 (  0.00%)      448.73 (  1.39%)\nHmean    mb/sec-2        796.68 (  0.00%)      794.39 ( -0.29%)\nHmean    mb/sec-4       1322.52 (  0.00%)     1343.66 (  1.60%)\nHmean    mb/sec-8       2611.65 (  0.00%)     2694.86 (  3.19%)\nHmean    mb/sec-16      2537.07 (  0.00%)     2609.34 (  2.85%)\nHmean    mb/sec-32      2506.02 (  0.00%)     2578.18 (  2.88%)\nHmean    mb/sec-64      2511.06 (  0.00%)     2569.16 (  2.31%)\nHmean    mb/sec-128     2313.38 (  0.00%)     2395.50 (  3.55%)\nHmean    mb/sec-256     2110.04 (  0.00%)     2177.45 (  3.19%)\nHmean    mb/sec-512     2072.51 (  0.00%)     2053.97 ( -0.89%)\n\nIn constract, this shows a relatively steady 2-3% gain at higher thread\ncounts. Due to the nature of the patch and the type of workload, it's\nnot a surprise that the result will depend on the CPU used.\n\nhackbench-pipes\n                         4.5.0-rc1             4.5.0-rc1\n                           vanilla          nostats-v3r1\nAmean    1        0.0637 (  0.00%)      0.0660 ( -3.59%)\nAmean    4        0.1229 (  0.00%)      0.1181 (  3.84%)\nAmean    7        0.1921 (  0.00%)      0.1911 (  0.52%)\nAmean    12       0.3117 (  0.00%)      0.2923 (  6.23%)\nAmean    21       0.4050 (  0.00%)      0.3899 (  3.74%)\nAmean    30       0.4586 (  0.00%)      0.4433 (  3.33%)\nAmean    48       0.5910 (  0.00%)      0.5694 (  3.65%)\nAmean    79       0.8663 (  0.00%)      0.8626 (  0.43%)\nAmean    110      1.1543 (  0.00%)      1.1517 (  0.22%)\nAmean    141      1.4457 (  0.00%)      1.4290 (  1.16%)\nAmean    172      1.7090 (  0.00%)      1.6924 (  0.97%)\nAmean    192      1.9126 (  0.00%)      1.9089 (  0.19%)\n\nSome small gains and losses and while the variance data is not included,\nit's close to the noise. The UMA machine did not show anything particularly\ndifferent\n\npipetest\n                             4.5.0-rc1             4.5.0-rc1\n                               vanilla          nostats-v2r2\nMin         Time        4.13 (  0.00%)        3.99 (  3.39%)\n1st-qrtle   Time        4.38 (  0.00%)        4.27 (  2.51%)\n2nd-qrtle   Time        4.46 (  0.00%)        4.39 (  1.57%)\n3rd-qrtle   Time        4.56 (  0.00%)        4.51 (  1.10%)\nMax-90%     Time        4.67 (  0.00%)        4.60 (  1.50%)\nMax-93%     Time        4.71 (  0.00%)        4.65 (  1.27%)\nMax-95%     Time        4.74 (  0.00%)        4.71 (  0.63%)\nMax-99%     Time        4.88 (  0.00%)        4.79 (  1.84%)\nMax         Time        4.93 (  0.00%)        4.83 (  2.03%)\nMean        Time        4.48 (  0.00%)        4.39 (  1.91%)\nBest99%Mean Time        4.47 (  0.00%)        4.39 (  1.91%)\nBest95%Mean Time        4.46 (  0.00%)        4.38 (  1.93%)\nBest90%Mean Time        4.45 (  0.00%)        4.36 (  1.98%)\nBest50%Mean Time        4.36 (  0.00%)        4.25 (  2.49%)\nBest10%Mean Time        4.23 (  0.00%)        4.10 (  3.13%)\nBest5%Mean  Time        4.19 (  0.00%)        4.06 (  3.20%)\nBest1%Mean  Time        4.13 (  0.00%)        4.00 (  3.39%)\n\nSmall improvement and similar gains were seen on the UMA machine.\n\nThe gain is small but it stands to reason that doing less work in the\nscheduler is a good thing. The downside is that the lack of schedstats and\ntracepoints may be surprising to experts doing performance analysis until\nthey find the existence of the schedstats= parameter or schedstats sysctl.\nIt will be automatically activated for latencytop and sleep profiling to\nalleviate the problem. For tracepoints, there is a simple warning as it's\nnot safe to activate schedstats in the context when it's known the tracepoint\nmay be wanted but is unavailable.\n\nSigned-off-by: Mel Gorman <mgorman@techsingularity.net>\nReviewed-by: Matt Fleming <matt@codeblueprint.co.uk>\nReviewed-by: Srikar Dronamraju <srikar@linux.vnet.ibm.com>\nCc: Linus Torvalds <torvalds@linux-foundation.org>\nCc: Mike Galbraith <mgalbraith@suse.de>\nCc: Peter Zijlstra <peterz@infradead.org>\nCc: Thomas Gleixner <tglx@linutronix.de>\nLink: http://lkml.kernel.org/r/1454663316-22048-1-git-send-email-mgorman@techsingularity.net\nSigned-off-by: Ingo Molnar <mingo@kernel.org>",
+  "author_name": "Mel Gorman",
+  "author_email": "mgorman@techsingularity.net",
+  "author_date": "Fri Feb 5 09:08:36 2016 +0000",
+  "author_date_iso": "2016-02-05T09:08:36+00:00",
+  "committer_name": "Ingo Molnar",
+  "committer_email": "mingo@kernel.org",
+  "committer_date": "Tue Feb 9 11:54:23 2016 +0100",
+  "committer_date_iso": "2016-02-09T11:54:23+01:00",
+  "files_changed": [
+    "Documentation/kernel-parameters.txt",
+    "Documentation/sysctl/kernel.txt",
+    "include/linux/latencytop.h",
+    "include/linux/sched.h",
+    "include/linux/sched/sysctl.h",
+    "kernel/latencytop.c",
+    "kernel/profile.c",
+    "kernel/sched/core.c",
+    "kernel/sched/debug.c",
+    "kernel/sched/fair.c",
+    "kernel/sched/sched.h",
+    "kernel/sched/stats.h",
+    "kernel/sysctl.c"
+  ],
+  "files_changed_count": 13,
+  "stats": [
+    {
+      "file": "Documentation/kernel-parameters.txt",
+      "insertions": 5,
+      "deletions": 0
+    },
+    {
+      "file": "Documentation/sysctl/kernel.txt",
+      "insertions": 8,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/latencytop.h",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/sched.h",
+      "insertions": 4,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/sched/sysctl.h",
+      "insertions": 4,
+      "deletions": 0
+    },
+    {
+      "file": "kernel/latencytop.c",
+      "insertions": 13,
+      "deletions": 1
+    },
+    {
+      "file": "kernel/profile.c",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "kernel/sched/core.c",
+      "insertions": 68,
+      "deletions": 2
+    },
+    {
+      "file": "kernel/sched/debug.c",
+      "insertions": 54,
+      "deletions": 48
+    },
+    {
+      "file": "kernel/sched/fair.c",
+      "insertions": 78,
+      "deletions": 35
+    },
+    {
+      "file": "kernel/sched/sched.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "kernel/sched/stats.h",
+      "insertions": 5,
+      "deletions": 3
+    },
+    {
+      "file": "kernel/sysctl.c",
+      "insertions": 12,
+      "deletions": 1
+    }
+  ],
+  "total_insertions": 256,
+  "total_deletions": 90,
+  "total_changes": 346,
+  "parents": [
+    "a6e4491c682a7b28574a62e6f311a0acec50b318"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v4.10",
+    "v4.10-rc1",
+    "v4.10-rc2",
+    "v4.10-rc3",
+    "v4.10-rc4",
+    "v4.10-rc5",
+    "v4.10-rc6",
+    "v4.10-rc7",
+    "v4.10-rc8",
+    "v4.11"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "sec-1"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "Documentation/sysctl/kernel.txt",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/latencytop.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "Documentation/kernel-parameters.txt",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/sched.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "kernel/profile.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "kernel/latencytop.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/sched/sysctl.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "kernel/sched/stats.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "kernel/sched/debug.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "kernel/sched/sched.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "kernel/sched/fair.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "kernel/sched/core.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "kernel/sysctl.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

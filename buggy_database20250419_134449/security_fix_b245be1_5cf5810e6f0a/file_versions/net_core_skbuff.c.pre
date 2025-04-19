@@ -1,0 +1,61 @@
+commit 49ca0d8bfaf3bc46d5eef60ce67b00eb195bd392
+Author: Willem de Bruijn <willemb@google.com>
+Date:   Fri Jan 30 13:29:31 2015 -0500
+
+    net-timestamp: no-payload option
+    
+    Add timestamping option SOF_TIMESTAMPING_OPT_TSONLY. For transmit
+    timestamps, this loops timestamps on top of empty packets.
+    
+    Doing so reduces the pressure on SO_RCVBUF. Payload inspection and
+    cmsg reception (aside from timestamps) are no longer possible. This
+    works together with a follow on patch that allows administrators to
+    only allow tx timestamping if it does not loop payload or metadata.
+    
+    Signed-off-by: Willem de Bruijn <willemb@google.com>
+    
+    ----
+    
+    Changes (rfc -> v1)
+      - add documentation
+      - remove unnecessary skb->len test (thanks to Richard Cochran)
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/core/skbuff.c b/net/core/skbuff.c
+index 56db472e9b86..65a3798f43e6 100644
+--- a/net/core/skbuff.c
++++ b/net/core/skbuff.c
+@@ -3710,19 +3710,28 @@ void __skb_tstamp_tx(struct sk_buff *orig_skb,
+ 		     struct sock *sk, int tstype)
+ {
+ 	struct sk_buff *skb;
++	bool tsonly = sk->sk_tsflags & SOF_TIMESTAMPING_OPT_TSONLY;
+ 
+ 	if (!sk)
+ 		return;
+ 
+-	if (hwtstamps)
+-		*skb_hwtstamps(orig_skb) = *hwtstamps;
++	if (tsonly)
++		skb = alloc_skb(0, GFP_ATOMIC);
+ 	else
+-		orig_skb->tstamp = ktime_get_real();
+-
+-	skb = skb_clone(orig_skb, GFP_ATOMIC);
++		skb = skb_clone(orig_skb, GFP_ATOMIC);
+ 	if (!skb)
+ 		return;
+ 
++	if (tsonly) {
++		skb_shinfo(skb)->tx_flags = skb_shinfo(orig_skb)->tx_flags;
++		skb_shinfo(skb)->tskey = skb_shinfo(orig_skb)->tskey;
++	}
++
++	if (hwtstamps)
++		*skb_hwtstamps(skb) = *hwtstamps;
++	else
++		skb->tstamp = ktime_get_real();
++
+ 	__skb_complete_tx_timestamp(skb, sk, tstype);
+ }
+ EXPORT_SYMBOL_GPL(__skb_tstamp_tx);

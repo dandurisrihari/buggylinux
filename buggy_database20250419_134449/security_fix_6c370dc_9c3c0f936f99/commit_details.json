@@ -1,0 +1,406 @@
+{
+  "hash": "6c370dc65374db5afbc5c6c64c662f922a2555ad",
+  "hash_short": "6c370dc6",
+  "subject": "Merge branch 'kvm-guestmemfd' into HEAD",
+  "body": "Introduce several new KVM uAPIs to ultimately create a guest-first memory\nsubsystem within KVM, a.k.a. guest_memfd.  Guest-first memory allows KVM\nto provide features, enhancements, and optimizations that are kludgly\nor outright impossible to implement in a generic memory subsystem.\n\nThe core KVM ioctl() for guest_memfd is KVM_CREATE_GUEST_MEMFD, which\nsimilar to the generic memfd_create(), creates an anonymous file and\nreturns a file descriptor that refers to it.  Again like \"regular\"\nmemfd files, guest_memfd files live in RAM, have volatile storage,\nand are automatically released when the last reference is dropped.\nThe key differences between memfd files (and every other memory subystem)\nis that guest_memfd files are bound to their owning virtual machine,\ncannot be mapped, read, or written by userspace, and cannot be resized.\nguest_memfd files do however support PUNCH_HOLE, which can be used to\nconvert a guest memory area between the shared and guest-private states.\n\nA second KVM ioctl(), KVM_SET_MEMORY_ATTRIBUTES, allows userspace to\nspecify attributes for a given page of guest memory.  In the long term,\nit will likely be extended to allow userspace to specify per-gfn RWX\nprotections, including allowing memory to be writable in the guest\nwithout it also being writable in host userspace.\n\nThe immediate and driving use case for guest_memfd are Confidential\n(CoCo) VMs, specifically AMD's SEV-SNP, Intel's TDX, and KVM's own pKVM.\nFor such use cases, being able to map memory into KVM guests without\nrequiring said memory to be mapped into the host is a hard requirement.\nWhile SEV+ and TDX prevent untrusted software from reading guest private\ndata by encrypting guest memory, pKVM provides confidentiality and\nintegrity *without* relying on memory encryption.  In addition, with\nSEV-SNP and especially TDX, accessing guest private memory can be fatal\nto the host, i.e. KVM must be prevent host userspace from accessing\nguest memory irrespective of hardware behavior.\n\nLong term, guest_memfd may be useful for use cases beyond CoCo VMs,\nfor example hardening userspace against unintentional accesses to guest\nmemory.  As mentioned earlier, KVM's ABI uses userspace VMA protections to\ndefine the allow guest protection (with an exception granted to mapping\nguest memory executable), and similarly KVM currently requires the guest\nmapping size to be a strict subset of the host userspace mapping size.\nDecoupling the mappings sizes would allow userspace to precisely map\nonly what is needed and with the required permissions, without impacting\nguest performance.\n\nA guest-first memory subsystem also provides clearer line of sight to\nthings like a dedicated memory pool (for slice-of-hardware VMs) and\nelimination of \"struct page\" (for offload setups where userspace _never_\nneeds to DMA from or into guest memory).\n\nguest_memfd is the result of 3+ years of development and exploration;\ntaking on memory management responsibilities in KVM was not the first,\nsecond, or even third choice for supporting CoCo VMs.  But after many\nfailed attempts to avoid KVM-specific backing memory, and looking at\nwhere things ended up, it is quite clear that of all approaches tried,\nguest_memfd is the simplest, most robust, and most extensible, and the\nright thing to do for KVM and the kernel at-large.\n\nThe \"development cycle\" for this version is going to be very short;\nideally, next week I will merge it as is in kvm/next, taking this through\nthe KVM tree for 6.8 immediately after the end of the merge window.\nThe series is still based on 6.6 (plus KVM changes for 6.7) so it\nwill require a small fixup for changes to get_file_rcu() introduced in\n6.7 by commit 0ede61d8589c (\"file: convert to SLAB_TYPESAFE_BY_RCU\").\nThe fixup will be done as part of the merge commit, and most of the text\nabove will become the commit message for the merge.\n\nPending post-merge work includes:\n- hugepage support\n- looking into using the restrictedmem framework for guest memory\n- introducing a testing mechanism to poison memory, possibly using\n  the same memory attributes introduced here\n- SNP and TDX support\n\nThere are two non-KVM patches buried in the middle of this series:\n\n  fs: Rename anon_inode_getfile_secure() and anon_inode_getfd_secure()\n  mm: Add AS_UNMOVABLE to mark mapping as completely unmovable\n\nThe first is small and mostly suggested-by Christian Brauner; the second\na bit less so but it was written by an mm person (Vlastimil Babka).",
+  "full_message": "Merge branch 'kvm-guestmemfd' into HEAD\n\nIntroduce several new KVM uAPIs to ultimately create a guest-first memory\nsubsystem within KVM, a.k.a. guest_memfd.  Guest-first memory allows KVM\nto provide features, enhancements, and optimizations that are kludgly\nor outright impossible to implement in a generic memory subsystem.\n\nThe core KVM ioctl() for guest_memfd is KVM_CREATE_GUEST_MEMFD, which\nsimilar to the generic memfd_create(), creates an anonymous file and\nreturns a file descriptor that refers to it.  Again like \"regular\"\nmemfd files, guest_memfd files live in RAM, have volatile storage,\nand are automatically released when the last reference is dropped.\nThe key differences between memfd files (and every other memory subystem)\nis that guest_memfd files are bound to their owning virtual machine,\ncannot be mapped, read, or written by userspace, and cannot be resized.\nguest_memfd files do however support PUNCH_HOLE, which can be used to\nconvert a guest memory area between the shared and guest-private states.\n\nA second KVM ioctl(), KVM_SET_MEMORY_ATTRIBUTES, allows userspace to\nspecify attributes for a given page of guest memory.  In the long term,\nit will likely be extended to allow userspace to specify per-gfn RWX\nprotections, including allowing memory to be writable in the guest\nwithout it also being writable in host userspace.\n\nThe immediate and driving use case for guest_memfd are Confidential\n(CoCo) VMs, specifically AMD's SEV-SNP, Intel's TDX, and KVM's own pKVM.\nFor such use cases, being able to map memory into KVM guests without\nrequiring said memory to be mapped into the host is a hard requirement.\nWhile SEV+ and TDX prevent untrusted software from reading guest private\ndata by encrypting guest memory, pKVM provides confidentiality and\nintegrity *without* relying on memory encryption.  In addition, with\nSEV-SNP and especially TDX, accessing guest private memory can be fatal\nto the host, i.e. KVM must be prevent host userspace from accessing\nguest memory irrespective of hardware behavior.\n\nLong term, guest_memfd may be useful for use cases beyond CoCo VMs,\nfor example hardening userspace against unintentional accesses to guest\nmemory.  As mentioned earlier, KVM's ABI uses userspace VMA protections to\ndefine the allow guest protection (with an exception granted to mapping\nguest memory executable), and similarly KVM currently requires the guest\nmapping size to be a strict subset of the host userspace mapping size.\nDecoupling the mappings sizes would allow userspace to precisely map\nonly what is needed and with the required permissions, without impacting\nguest performance.\n\nA guest-first memory subsystem also provides clearer line of sight to\nthings like a dedicated memory pool (for slice-of-hardware VMs) and\nelimination of \"struct page\" (for offload setups where userspace _never_\nneeds to DMA from or into guest memory).\n\nguest_memfd is the result of 3+ years of development and exploration;\ntaking on memory management responsibilities in KVM was not the first,\nsecond, or even third choice for supporting CoCo VMs.  But after many\nfailed attempts to avoid KVM-specific backing memory, and looking at\nwhere things ended up, it is quite clear that of all approaches tried,\nguest_memfd is the simplest, most robust, and most extensible, and the\nright thing to do for KVM and the kernel at-large.\n\nThe \"development cycle\" for this version is going to be very short;\nideally, next week I will merge it as is in kvm/next, taking this through\nthe KVM tree for 6.8 immediately after the end of the merge window.\nThe series is still based on 6.6 (plus KVM changes for 6.7) so it\nwill require a small fixup for changes to get_file_rcu() introduced in\n6.7 by commit 0ede61d8589c (\"file: convert to SLAB_TYPESAFE_BY_RCU\").\nThe fixup will be done as part of the merge commit, and most of the text\nabove will become the commit message for the merge.\n\nPending post-merge work includes:\n- hugepage support\n- looking into using the restrictedmem framework for guest memory\n- introducing a testing mechanism to poison memory, possibly using\n  the same memory attributes introduced here\n- SNP and TDX support\n\nThere are two non-KVM patches buried in the middle of this series:\n\n  fs: Rename anon_inode_getfile_secure() and anon_inode_getfd_secure()\n  mm: Add AS_UNMOVABLE to mark mapping as completely unmovable\n\nThe first is small and mostly suggested-by Christian Brauner; the second\na bit less so but it was written by an mm person (Vlastimil Babka).",
+  "author_name": "Paolo Bonzini",
+  "author_email": "pbonzini@redhat.com",
+  "author_date": "Mon Nov 13 05:58:30 2023 -0500",
+  "author_date_iso": "2023-11-13T05:58:30-05:00",
+  "committer_name": "Paolo Bonzini",
+  "committer_email": "pbonzini@redhat.com",
+  "committer_date": "Tue Nov 14 08:31:31 2023 -0500",
+  "committer_date_iso": "2023-11-14T08:31:31-05:00",
+  "files_changed": [
+    "arch/arm64/include/asm/kvm_host.h",
+    "arch/powerpc/include/asm/kvm_host.h",
+    "arch/powerpc/kvm/book3s_hv.c",
+    "arch/powerpc/kvm/powerpc.c",
+    "arch/x86/kvm/mmu/mmu.c",
+    "fs/anon_inodes.c",
+    "fs/userfaultfd.c",
+    "include/linux/kvm_host.h",
+    "include/linux/pagemap.h",
+    "io_uring/io_uring.c",
+    "mm/compaction.c",
+    "mm/migrate.c",
+    "tools/testing/selftests/kvm/include/test_util.h",
+    "virt/kvm/guest_memfd.c"
+  ],
+  "files_changed_count": 14,
+  "stats": [
+    {
+      "file": "Documentation/virt/kvm/api.rst",
+      "insertions": 201,
+      "deletions": 0
+    },
+    {
+      "file": "arch/arm64/include/asm/kvm_host.h",
+      "insertions": 0,
+      "deletions": 2
+    },
+    {
+      "file": "arch/arm64/kvm/Kconfig",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/loongarch/include/asm/kvm_host.h",
+      "insertions": 0,
+      "deletions": 1
+    },
+    {
+      "file": "arch/loongarch/kvm/Kconfig",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/mips/include/asm/kvm_host.h",
+      "insertions": 0,
+      "deletions": 2
+    },
+    {
+      "file": "arch/mips/kvm/Kconfig",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/powerpc/include/asm/kvm_host.h",
+      "insertions": 0,
+      "deletions": 2
+    },
+    {
+      "file": "arch/powerpc/kvm/Kconfig",
+      "insertions": 4,
+      "deletions": 4
+    },
+    {
+      "file": "arch/powerpc/kvm/book3s_hv.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/powerpc/kvm/powerpc.c",
+      "insertions": 1,
+      "deletions": 6
+    },
+    {
+      "file": "arch/riscv/include/asm/kvm_host.h",
+      "insertions": 0,
+      "deletions": 2
+    },
+    {
+      "file": "arch/riscv/kvm/Kconfig",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/x86/include/asm/kvm_host.h",
+      "insertions": 13,
+      "deletions": 4
+    },
+    {
+      "file": "arch/x86/include/uapi/asm/kvm.h",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/kvm/Kconfig",
+      "insertions": 13,
+      "deletions": 1
+    },
+    {
+      "file": "arch/x86/kvm/debugfs.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/x86/kvm/mmu/mmu.c",
+      "insertions": 257,
+      "deletions": 14
+    },
+    {
+      "file": "arch/x86/kvm/mmu/mmu_internal.h",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/kvm/vmx/vmx.c",
+      "insertions": 5,
+      "deletions": 6
+    },
+    {
+      "file": "arch/x86/kvm/x86.c",
+      "insertions": 23,
+      "deletions": 3
+    },
+    {
+      "file": "fs/anon_inodes.c",
+      "insertions": 34,
+      "deletions": 17
+    },
+    {
+      "file": "fs/userfaultfd.c",
+      "insertions": 3,
+      "deletions": 2
+    },
+    {
+      "file": "include/linux/anon_inodes.h",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "include/linux/kvm_host.h",
+      "insertions": 119,
+      "deletions": 23
+    },
+    {
+      "file": "include/linux/kvm_types.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/pagemap.h",
+      "insertions": 18,
+      "deletions": 1
+    },
+    {
+      "file": "include/uapi/linux/kvm.h",
+      "insertions": 49,
+      "deletions": 0
+    },
+    {
+      "file": "io_uring/io_uring.c",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "mm/compaction.c",
+      "insertions": 31,
+      "deletions": 12
+    },
+    {
+      "file": "mm/migrate.c",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/Makefile",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/aarch64/page_fault_test.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/testing/selftests/kvm/dirty_log_test.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/testing/selftests/kvm/guest_memfd_test.c",
+      "insertions": 200,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/include/kvm_util_base.h",
+      "insertions": 136,
+      "deletions": 14
+    },
+    {
+      "file": "tools/testing/selftests/kvm/include/test_util.h",
+      "insertions": 5,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/include/ucall_common.h",
+      "insertions": 11,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/include/x86_64/processor.h",
+      "insertions": 15,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/kvm_page_table_test.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/testing/selftests/kvm/lib/kvm_util.c",
+      "insertions": 134,
+      "deletions": 90
+    },
+    {
+      "file": "tools/testing/selftests/kvm/lib/memstress.c",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "tools/testing/selftests/kvm/s390x/cmma_test.c",
+      "insertions": 3,
+      "deletions": 8
+    },
+    {
+      "file": "tools/testing/selftests/kvm/set_memory_region_test.c",
+      "insertions": 151,
+      "deletions": 2
+    },
+    {
+      "file": "tools/testing/selftests/kvm/x86_64/private_mem_conversions_test.c",
+      "insertions": 482,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/x86_64/private_mem_kvm_exits_test.c",
+      "insertions": 120,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/kvm/x86_64/ucna_injection_test.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "virt/kvm/Kconfig",
+      "insertions": 17,
+      "deletions": 0
+    },
+    {
+      "file": "virt/kvm/Makefile.kvm",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "virt/kvm/dirty_ring.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "virt/kvm/guest_memfd.c",
+      "insertions": 534,
+      "deletions": 0
+    },
+    {
+      "file": "virt/kvm/kvm_main.c",
+      "insertions": 431,
+      "deletions": 76
+    },
+    {
+      "file": "virt/kvm/kvm_mm.h",
+      "insertions": 26,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 3065,
+  "total_deletions": 307,
+  "total_changes": 3372,
+  "parents": [
+    "b85ea95d086471afb4ad062012a4d73cd328fa86",
+    "5d74316466f4aabdd2ee1e33b45e4933c9bc3ea1"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": true,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "hardening"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/powerpc/include/asm/kvm_host.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/powerpc/kvm/powerpc.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/anon_inodes.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/powerpc/kvm/book3s_hv.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/arm64/include/asm/kvm_host.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kvm/mmu/mmu.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/kvm_host.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/pagemap.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/userfaultfd.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/compaction.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "tools/testing/selftests/kvm/include/test_util.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/migrate.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "virt/kvm/guest_memfd.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "io_uring/io_uring.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

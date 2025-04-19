@@ -1,0 +1,51 @@
+commit c71a192976ded2f2f416d03c4f595cdd4478b825
+Author: Jakub Kicinski <kuba@kernel.org>
+Date:   Wed Jan 29 19:15:18 2025 -0800
+
+    net: ipv6: fix dst refleaks in rpl, seg6 and ioam6 lwtunnels
+    
+    dst_cache_get() gives us a reference, we need to release it.
+    
+    Discovered by the ioam6.sh test, kmemleak was recently fixed
+    to catch per-cpu memory leaks.
+    
+    Fixes: 985ec6f5e623 ("net: ipv6: rpl_iptunnel: mitigate 2-realloc issue")
+    Fixes: 40475b63761a ("net: ipv6: seg6_iptunnel: mitigate 2-realloc issue")
+    Fixes: dce525185bc9 ("net: ipv6: ioam6_iptunnel: mitigate 2-realloc issue")
+    Reviewed-by: Justin Iurman <justin.iurman@uliege.be>
+    Reviewed-by: Simon Horman <horms@kernel.org>
+    Link: https://patch.msgid.link/20250130031519.2716843-1-kuba@kernel.org
+    Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+diff --git a/net/ipv6/ioam6_iptunnel.c b/net/ipv6/ioam6_iptunnel.c
+index 28e5a89dc255..3936c137a572 100644
+--- a/net/ipv6/ioam6_iptunnel.c
++++ b/net/ipv6/ioam6_iptunnel.c
+@@ -336,7 +336,7 @@ static int ioam6_do_encap(struct net *net, struct sk_buff *skb,
+ 
+ static int ioam6_output(struct net *net, struct sock *sk, struct sk_buff *skb)
+ {
+-	struct dst_entry *dst = skb_dst(skb), *cache_dst;
++	struct dst_entry *dst = skb_dst(skb), *cache_dst = NULL;
+ 	struct in6_addr orig_daddr;
+ 	struct ioam6_lwt *ilwt;
+ 	int err = -EINVAL;
+@@ -407,7 +407,6 @@ static int ioam6_output(struct net *net, struct sock *sk, struct sk_buff *skb)
+ 		cache_dst = ip6_route_output(net, NULL, &fl6);
+ 		if (cache_dst->error) {
+ 			err = cache_dst->error;
+-			dst_release(cache_dst);
+ 			goto drop;
+ 		}
+ 
+@@ -426,8 +425,10 @@ static int ioam6_output(struct net *net, struct sock *sk, struct sk_buff *skb)
+ 		return dst_output(net, sk, skb);
+ 	}
+ out:
++	dst_release(cache_dst);
+ 	return dst->lwtstate->orig_output(net, sk, skb);
+ drop:
++	dst_release(cache_dst);
+ 	kfree_skb(skb);
+ 	return err;
+ }

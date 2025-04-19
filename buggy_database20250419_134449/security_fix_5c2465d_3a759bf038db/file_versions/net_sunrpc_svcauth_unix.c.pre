@@ -1,0 +1,79 @@
+commit 438623a06bacd69c40c4af633bb09a3bbb9dfc78
+Author: Chuck Lever <chuck.lever@oracle.com>
+Date:   Thu Jul 15 15:52:06 2021 -0400
+
+    SUNRPC: Add svc_rqst::rq_auth_stat
+    
+    I'd like to take commit 4532608d71c8 ("SUNRPC: Clean up generic
+    dispatcher code") even further by using only private local SVC
+    dispatchers for all kernel RPC services. This change would enable
+    the removal of the logic that switches between
+    svc_generic_dispatch() and a service's private dispatcher, and
+    simplify the invocation of the service's pc_release method
+    so that humans can visually verify that it is always invoked
+    properly.
+    
+    All that will come later.
+    
+    First, let's provide a better way to return authentication errors
+    from SVC dispatcher functions. Instead of overloading the dispatch
+    method's *statp argument, add a field to struct svc_rqst that can
+    hold an error value.
+    
+    Signed-off-by: Chuck Lever <chuck.lever@oracle.com>
+    Signed-off-by: Anna Schumaker <Anna.Schumaker@Netapp.com>
+
+diff --git a/net/sunrpc/svcauth_unix.c b/net/sunrpc/svcauth_unix.c
+index 35b7966ac3b3..eacfebf326dd 100644
+--- a/net/sunrpc/svcauth_unix.c
++++ b/net/sunrpc/svcauth_unix.c
+@@ -725,7 +725,7 @@ svcauth_unix_set_client(struct svc_rqst *rqstp)
+ EXPORT_SYMBOL_GPL(svcauth_unix_set_client);
+ 
+ static int
+-svcauth_null_accept(struct svc_rqst *rqstp, __be32 *authp)
++svcauth_null_accept(struct svc_rqst *rqstp)
+ {
+ 	struct kvec	*argv = &rqstp->rq_arg.head[0];
+ 	struct kvec	*resv = &rqstp->rq_res.head[0];
+@@ -736,12 +736,12 @@ svcauth_null_accept(struct svc_rqst *rqstp, __be32 *authp)
+ 
+ 	if (svc_getu32(argv) != 0) {
+ 		dprintk("svc: bad null cred\n");
+-		*authp = rpc_autherr_badcred;
++		rqstp->rq_auth_stat = rpc_autherr_badcred;
+ 		return SVC_DENIED;
+ 	}
+ 	if (svc_getu32(argv) != htonl(RPC_AUTH_NULL) || svc_getu32(argv) != 0) {
+ 		dprintk("svc: bad null verf\n");
+-		*authp = rpc_autherr_badverf;
++		rqstp->rq_auth_stat = rpc_autherr_badverf;
+ 		return SVC_DENIED;
+ 	}
+ 
+@@ -785,7 +785,7 @@ struct auth_ops svcauth_null = {
+ 
+ 
+ static int
+-svcauth_unix_accept(struct svc_rqst *rqstp, __be32 *authp)
++svcauth_unix_accept(struct svc_rqst *rqstp)
+ {
+ 	struct kvec	*argv = &rqstp->rq_arg.head[0];
+ 	struct kvec	*resv = &rqstp->rq_res.head[0];
+@@ -827,7 +827,7 @@ svcauth_unix_accept(struct svc_rqst *rqstp, __be32 *authp)
+ 	}
+ 	groups_sort(cred->cr_group_info);
+ 	if (svc_getu32(argv) != htonl(RPC_AUTH_NULL) || svc_getu32(argv) != 0) {
+-		*authp = rpc_autherr_badverf;
++		rqstp->rq_auth_stat = rpc_autherr_badverf;
+ 		return SVC_DENIED;
+ 	}
+ 
+@@ -839,7 +839,7 @@ svcauth_unix_accept(struct svc_rqst *rqstp, __be32 *authp)
+ 	return SVC_OK;
+ 
+ badcred:
+-	*authp = rpc_autherr_badcred;
++	rqstp->rq_auth_stat = rpc_autherr_badcred;
+ 	return SVC_DENIED;
+ }

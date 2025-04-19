@@ -1,0 +1,174 @@
+{
+  "hash": "688e6c7258164de86d626e8e983ca8d28015c263",
+  "hash_short": "688e6c72",
+  "subject": "drm/i915: Slaughter the thundering i915_wait_request herd",
+  "body": "One particularly stressful scenario consists of many independent tasks\nall competing for GPU time and waiting upon the results (e.g. realtime\ntranscoding of many, many streams). One bottleneck in particular is that\neach client waits on its own results, but every client is woken up after\nevery batchbuffer - hence the thunder of hooves as then every client must\ndo its heavyweight dance to read a coherent seqno to see if it is the\nlucky one.\n\nIdeally, we only want one client to wake up after the interrupt and\ncheck its request for completion. Since the requests must retire in\norder, we can select the first client on the oldest request to be woken.\nOnce that client has completed his wait, we can then wake up the\nnext client and so on. However, all clients then incur latency as every\nprocess in the chain may be delayed for scheduling - this may also then\ncause some priority inversion. To reduce the latency, when a client\nis added or removed from the list, we scan the tree for completed\nseqno and wake up all the completed waiters in parallel.\n\nUsing igt/benchmarks/gem_latency, we can demonstrate this effect. The\nbenchmark measures the number of GPU cycles between completion of a\nbatch and the client waking up from a call to wait-ioctl. With many\nconcurrent waiters, with each on a different request, we observe that\nthe wakeup latency before the patch scales nearly linearly with the\nnumber of waiters (before external factors kick in making the scaling much\nworse). After applying the patch, we can see that only the single waiter\nfor the request is being woken up, providing a constant wakeup latency\nfor every operation. However, the situation is not quite as rosy for\nmany waiters on the same request, though to the best of my knowledge this\nis much less likely in practice. Here, we can observe that the\nconcurrent waiters incur extra latency from being woken up by the\nsolitary bottom-half, rather than directly by the interrupt. This\nappears to be scheduler induced (having discounted adverse effects from\nhaving a rbtree walk/erase in the wakeup path), each additional\nwake_up_process() costs approximately 1us on big core. Another effect of\nperforming the secondary wakeups from the first bottom-half is the\nincurred delay this imposes on high priority threads - rather than\nimmediately returning to userspace and leaving the interrupt handler to\nwake the others.\n\nTo offset the delay incurred with additional waiters on a request, we\ncould use a hybrid scheme that did a quick read in the interrupt handler\nand dequeued all the completed waiters (incurring the overhead in the\ninterrupt handler, not the best plan either as we then incur GPU\nsubmission latency) but we would still have to wake up the bottom-half\nevery time to do the heavyweight slow read. Or we could only kick the\nwaiters on the seqno with the same priority as the current task (i.e. in\nthe realtime waiter scenario, only it is woken up immediately by the\ninterrupt and simply queues the next waiter before returning to userspace,\nminimising its delay at the expense of the chain, and also reducing\ncontention on its scheduler runqueue). This is effective at avoid long\npauses in the interrupt handler and at avoiding the extra latency in\nrealtime/high-priority waiters.\n\nv2: Convert from a kworker per engine into a dedicated kthread for the\nbottom-half.\nv3: Rename request members and tweak comments.\nv4: Use a per-engine spinlock in the breadcrumbs bottom-half.\nv5: Fix race in locklessly checking waiter status and kicking the task on\nadding a new waiter.\nv6: Fix deciding when to force the timer to hide missing interrupts.\nv7: Move the bottom-half from the kthread to the first client process.\nv8: Reword a few comments\nv9: Break the busy loop when the interrupt is unmasked or has fired.\nv10: Comments, unnecessary churn, better debugging from Tvrtko\nv11: Wake all completed waiters on removing the current bottom-half to\nreduce the latency of waking up a herd of clients all waiting on the\nsame request.\nv12: Rearrange missed-interrupt fault injection so that it works with\nigt/drv_missed_irq_hang\nv13: Rename intel_breadcrumb and friends to intel_wait in preparation\nfor signal handling.\nv14: RCU commentary, assert_spin_locked\nv15: Hide BUG_ON behind the compiler; report on gem_latency findings.\nv16: Sort seqno-groups by priority so that first-waiter has the highest\ntask priority (and so avoid priority inversion).\nv17: Add waiters to post-mortem GPU hang state.\nv18: Return early for a completed wait after acquiring the spinlock.\nAvoids adding ourselves to the tree if the is already complete, and\nskips the awkward question of why we don't do completion wakeups for\nwaits earlier than or equal to ourselves.\nv19: Prepare for init_breadcrumbs to fail. Later patches may want to\nallocate during init, so be prepared to propagate back the error code.\n\nTestcase: igt/gem_concurrent_blit\nTestcase: igt/benchmarks/gem_latency\nSigned-off-by: Chris Wilson <chris@chris-wilson.co.uk>\nCc: \"Rogozhkin, Dmitry V\" <dmitry.v.rogozhkin@intel.com>\nCc: \"Gong, Zhipeng\" <zhipeng.gong@intel.com>\nCc: Tvrtko Ursulin <tvrtko.ursulin@linux.intel.com>\nCc: Dave Gordon <david.s.gordon@intel.com>\nCc: \"Goel, Akash\" <akash.goel@intel.com>\nReviewed-by: Tvrtko Ursulin <tvrtko.ursulin@linux.intel.com> #v18\nLink: http://patchwork.freedesktop.org/patch/msgid/1467390209-3576-6-git-send-email-chris@chris-wilson.co.uk",
+  "full_message": "drm/i915: Slaughter the thundering i915_wait_request herd\n\nOne particularly stressful scenario consists of many independent tasks\nall competing for GPU time and waiting upon the results (e.g. realtime\ntranscoding of many, many streams). One bottleneck in particular is that\neach client waits on its own results, but every client is woken up after\nevery batchbuffer - hence the thunder of hooves as then every client must\ndo its heavyweight dance to read a coherent seqno to see if it is the\nlucky one.\n\nIdeally, we only want one client to wake up after the interrupt and\ncheck its request for completion. Since the requests must retire in\norder, we can select the first client on the oldest request to be woken.\nOnce that client has completed his wait, we can then wake up the\nnext client and so on. However, all clients then incur latency as every\nprocess in the chain may be delayed for scheduling - this may also then\ncause some priority inversion. To reduce the latency, when a client\nis added or removed from the list, we scan the tree for completed\nseqno and wake up all the completed waiters in parallel.\n\nUsing igt/benchmarks/gem_latency, we can demonstrate this effect. The\nbenchmark measures the number of GPU cycles between completion of a\nbatch and the client waking up from a call to wait-ioctl. With many\nconcurrent waiters, with each on a different request, we observe that\nthe wakeup latency before the patch scales nearly linearly with the\nnumber of waiters (before external factors kick in making the scaling much\nworse). After applying the patch, we can see that only the single waiter\nfor the request is being woken up, providing a constant wakeup latency\nfor every operation. However, the situation is not quite as rosy for\nmany waiters on the same request, though to the best of my knowledge this\nis much less likely in practice. Here, we can observe that the\nconcurrent waiters incur extra latency from being woken up by the\nsolitary bottom-half, rather than directly by the interrupt. This\nappears to be scheduler induced (having discounted adverse effects from\nhaving a rbtree walk/erase in the wakeup path), each additional\nwake_up_process() costs approximately 1us on big core. Another effect of\nperforming the secondary wakeups from the first bottom-half is the\nincurred delay this imposes on high priority threads - rather than\nimmediately returning to userspace and leaving the interrupt handler to\nwake the others.\n\nTo offset the delay incurred with additional waiters on a request, we\ncould use a hybrid scheme that did a quick read in the interrupt handler\nand dequeued all the completed waiters (incurring the overhead in the\ninterrupt handler, not the best plan either as we then incur GPU\nsubmission latency) but we would still have to wake up the bottom-half\nevery time to do the heavyweight slow read. Or we could only kick the\nwaiters on the seqno with the same priority as the current task (i.e. in\nthe realtime waiter scenario, only it is woken up immediately by the\ninterrupt and simply queues the next waiter before returning to userspace,\nminimising its delay at the expense of the chain, and also reducing\ncontention on its scheduler runqueue). This is effective at avoid long\npauses in the interrupt handler and at avoiding the extra latency in\nrealtime/high-priority waiters.\n\nv2: Convert from a kworker per engine into a dedicated kthread for the\nbottom-half.\nv3: Rename request members and tweak comments.\nv4: Use a per-engine spinlock in the breadcrumbs bottom-half.\nv5: Fix race in locklessly checking waiter status and kicking the task on\nadding a new waiter.\nv6: Fix deciding when to force the timer to hide missing interrupts.\nv7: Move the bottom-half from the kthread to the first client process.\nv8: Reword a few comments\nv9: Break the busy loop when the interrupt is unmasked or has fired.\nv10: Comments, unnecessary churn, better debugging from Tvrtko\nv11: Wake all completed waiters on removing the current bottom-half to\nreduce the latency of waking up a herd of clients all waiting on the\nsame request.\nv12: Rearrange missed-interrupt fault injection so that it works with\nigt/drv_missed_irq_hang\nv13: Rename intel_breadcrumb and friends to intel_wait in preparation\nfor signal handling.\nv14: RCU commentary, assert_spin_locked\nv15: Hide BUG_ON behind the compiler; report on gem_latency findings.\nv16: Sort seqno-groups by priority so that first-waiter has the highest\ntask priority (and so avoid priority inversion).\nv17: Add waiters to post-mortem GPU hang state.\nv18: Return early for a completed wait after acquiring the spinlock.\nAvoids adding ourselves to the tree if the is already complete, and\nskips the awkward question of why we don't do completion wakeups for\nwaits earlier than or equal to ourselves.\nv19: Prepare for init_breadcrumbs to fail. Later patches may want to\nallocate during init, so be prepared to propagate back the error code.\n\nTestcase: igt/gem_concurrent_blit\nTestcase: igt/benchmarks/gem_latency\nSigned-off-by: Chris Wilson <chris@chris-wilson.co.uk>\nCc: \"Rogozhkin, Dmitry V\" <dmitry.v.rogozhkin@intel.com>\nCc: \"Gong, Zhipeng\" <zhipeng.gong@intel.com>\nCc: Tvrtko Ursulin <tvrtko.ursulin@linux.intel.com>\nCc: Dave Gordon <david.s.gordon@intel.com>\nCc: \"Goel, Akash\" <akash.goel@intel.com>\nReviewed-by: Tvrtko Ursulin <tvrtko.ursulin@linux.intel.com> #v18\nLink: http://patchwork.freedesktop.org/patch/msgid/1467390209-3576-6-git-send-email-chris@chris-wilson.co.uk",
+  "author_name": "Chris Wilson",
+  "author_email": "chris@chris-wilson.co.uk",
+  "author_date": "Fri Jul 1 17:23:15 2016 +0100",
+  "author_date_iso": "2016-07-01T17:23:15+01:00",
+  "committer_name": "Chris Wilson",
+  "committer_email": "chris@chris-wilson.co.uk",
+  "committer_date": "Fri Jul 1 20:58:43 2016 +0100",
+  "committer_date_iso": "2016-07-01T20:58:43+01:00",
+  "files_changed": [
+    "drivers/gpu/drm/i915/Makefile",
+    "drivers/gpu/drm/i915/i915_debugfs.c",
+    "drivers/gpu/drm/i915/i915_drv.h",
+    "drivers/gpu/drm/i915/i915_gem.c",
+    "drivers/gpu/drm/i915/i915_gpu_error.c",
+    "drivers/gpu/drm/i915/i915_irq.c",
+    "drivers/gpu/drm/i915/intel_breadcrumbs.c",
+    "drivers/gpu/drm/i915/intel_lrc.c",
+    "drivers/gpu/drm/i915/intel_ringbuffer.c",
+    "drivers/gpu/drm/i915/intel_ringbuffer.h"
+  ],
+  "files_changed_count": 10,
+  "stats": [
+    {
+      "file": "drivers/gpu/drm/i915/Makefile",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/gpu/drm/i915/i915_debugfs.c",
+      "insertions": 15,
+      "deletions": 1
+    },
+    {
+      "file": "drivers/gpu/drm/i915/i915_drv.h",
+      "insertions": 38,
+      "deletions": 2
+    },
+    {
+      "file": "drivers/gpu/drm/i915/i915_gem.c",
+      "insertions": 53,
+      "deletions": 90
+    },
+    {
+      "file": "drivers/gpu/drm/i915/i915_gpu_error.c",
+      "insertions": 58,
+      "deletions": 2
+    },
+    {
+      "file": "drivers/gpu/drm/i915/i915_irq.c",
+      "insertions": 9,
+      "deletions": 11
+    },
+    {
+      "file": "drivers/gpu/drm/i915/intel_breadcrumbs.c",
+      "insertions": 380,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/gpu/drm/i915/intel_lrc.c",
+      "insertions": 6,
+      "deletions": 1
+    },
+    {
+      "file": "drivers/gpu/drm/i915/intel_ringbuffer.c",
+      "insertions": 11,
+      "deletions": 1
+    },
+    {
+      "file": "drivers/gpu/drm/i915/intel_ringbuffer.h",
+      "insertions": 77,
+      "deletions": 2
+    }
+  ],
+  "total_insertions": 648,
+  "total_deletions": 110,
+  "total_changes": 758,
+  "parents": [
+    "1f15b76f1ec973d1eb5d21b6d98b21aebb9025f1"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v4.10",
+    "v4.10-rc1",
+    "v4.10-rc2",
+    "v4.10-rc3",
+    "v4.10-rc4",
+    "v4.10-rc5",
+    "v4.10-rc6",
+    "v4.10-rc7",
+    "v4.10-rc8",
+    "v4.11"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "injection"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "drivers/gpu/drm/i915/Makefile",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "drivers/gpu/drm/i915/i915_gem.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "drivers/gpu/drm/i915/intel_breadcrumbs.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "drivers/gpu/drm/i915/i915_gpu_error.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "drivers/gpu/drm/i915/i915_debugfs.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "drivers/gpu/drm/i915/intel_lrc.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "drivers/gpu/drm/i915/i915_drv.h",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "drivers/gpu/drm/i915/intel_ringbuffer.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "drivers/gpu/drm/i915/i915_irq.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "drivers/gpu/drm/i915/intel_ringbuffer.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

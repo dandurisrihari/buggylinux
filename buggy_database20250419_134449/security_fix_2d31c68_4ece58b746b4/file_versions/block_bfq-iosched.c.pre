@@ -1,0 +1,111 @@
+commit 4fdb3b9f2a280eeea3407321705275fc9a77e3a6
+Author: Federico Gavioli <f.gavioli97@gmail.com>
+Date:   Tue Jan 3 15:55:01 2023 +0100
+
+    block, bfq: retrieve independent access ranges from request queue
+    
+    This patch implements the code to gather the content of the
+    independent_access_ranges structure from the request_queue and copy
+    it into the queue's bfq_data. This copy is done at queue initialization.
+    
+    We copy the access ranges into the bfq_data to avoid taking the queue
+    lock each time we access the ranges.
+    
+    This implementation, however, puts a limit to the maximum independent
+    ranges supported by the scheduler. Such a limit is equal to the constant
+    BFQ_MAX_ACTUATORS. This limit was placed to avoid the allocation of
+    dynamic memory.
+    
+    Reviewed-by: Damien Le Moal <damien.lemoal@opensource.wdc.com>
+    Co-developed-by: Rory Chen <rory.c.chen@seagate.com>
+    Signed-off-by: Rory Chen <rory.c.chen@seagate.com>
+    Signed-off-by: Federico Gavioli <f.gavioli97@gmail.com>
+    Signed-off-by: Paolo Valente <paolo.valente@linaro.org>
+    Link: https://lore.kernel.org/r/20230103145503.71712-7-paolo.valente@linaro.org
+    Signed-off-by: Jens Axboe <axboe@kernel.dk>
+
+diff --git a/block/bfq-iosched.c b/block/bfq-iosched.c
+index 0859981726ac..56486f24b4c5 100644
+--- a/block/bfq-iosched.c
++++ b/block/bfq-iosched.c
+@@ -1793,10 +1793,25 @@ static bool bfq_bfqq_higher_class_or_weight(struct bfq_queue *bfqq,
+  */
+ static unsigned int bfq_actuator_index(struct bfq_data *bfqd, struct bio *bio)
+ {
+-	/*
+-	 * Multi-actuator support not complete yet, so always return 0
+-	 * for the moment (to keep incomplete mechanisms off).
+-	 */
++	unsigned int i;
++	sector_t end;
++
++	/* no search needed if one or zero ranges present */
++	if (bfqd->num_actuators == 1)
++		return 0;
++
++	/* bio_end_sector(bio) gives the sector after the last one */
++	end = bio_end_sector(bio) - 1;
++
++	for (i = 0; i < bfqd->num_actuators; i++) {
++		if (end >= bfqd->sector[i] &&
++		    end < bfqd->sector[i] + bfqd->nr_sectors[i])
++			return i;
++	}
++
++	WARN_ONCE(true,
++		  "bfq_actuator_index: bio sector out of ranges: end=%llu\n",
++		  end);
+ 	return 0;
+ }
+ 
+@@ -7105,6 +7120,8 @@ static int bfq_init_queue(struct request_queue *q, struct elevator_type *e)
+ {
+ 	struct bfq_data *bfqd;
+ 	struct elevator_queue *eq;
++	unsigned int i;
++	struct blk_independent_access_ranges *ia_ranges = q->disk->ia_ranges;
+ 
+ 	eq = elevator_alloc(q, e);
+ 	if (!eq)
+@@ -7147,12 +7164,38 @@ static int bfq_init_queue(struct request_queue *q, struct elevator_type *e)
+ 
+ 	bfqd->queue = q;
+ 
++	bfqd->num_actuators = 1;
+ 	/*
+-	 * Multi-actuator support not complete yet, unconditionally
+-	 * set to only one actuator for the moment (to keep incomplete
+-	 * mechanisms off).
++	 * If the disk supports multiple actuators, copy independent
++	 * access ranges from the request queue structure.
+ 	 */
+-	bfqd->num_actuators = 1;
++	spin_lock_irq(&q->queue_lock);
++	if (ia_ranges) {
++		/*
++		 * Check if the disk ia_ranges size exceeds the current bfq
++		 * actuator limit.
++		 */
++		if (ia_ranges->nr_ia_ranges > BFQ_MAX_ACTUATORS) {
++			pr_crit("nr_ia_ranges higher than act limit: iars=%d, max=%d.\n",
++				ia_ranges->nr_ia_ranges, BFQ_MAX_ACTUATORS);
++			pr_crit("Falling back to single actuator mode.\n");
++		} else {
++			bfqd->num_actuators = ia_ranges->nr_ia_ranges;
++
++			for (i = 0; i < bfqd->num_actuators; i++) {
++				bfqd->sector[i] = ia_ranges->ia_range[i].sector;
++				bfqd->nr_sectors[i] =
++					ia_ranges->ia_range[i].nr_sectors;
++			}
++		}
++	}
++
++	/* Otherwise use single-actuator dev info */
++	if (bfqd->num_actuators == 1) {
++		bfqd->sector[0] = 0;
++		bfqd->nr_sectors[0] = get_capacity(q->disk);
++	}
++	spin_unlock_irq(&q->queue_lock);
+ 
+ 	INIT_LIST_HEAD(&bfqd->dispatch);

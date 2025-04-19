@@ -1,0 +1,106 @@
+commit 41b4b289adaaf53e563a2cde17c45c492608edb0
+Author: Sebastian Smolorz <Sebastian.Smolorz@gmx.de>
+Date:   Tue Jun 22 16:53:37 2010 +0200
+
+    at76c50x-usb: Move function at76_join() several lines up
+    
+    This patch does a simple code move of at76_join() so that
+    at76_mac80211_tx() follows at76_join() in the driver's source file.
+    
+    This is a preparatory patch for the following patch where we need
+    to call at76_join() from at76_mac80211_tx() in order to
+    authenticate successfully with a bssid.
+    
+    Signed-off-by: Sebastian Smolorz <sesmo@gmx.net>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/drivers/net/wireless/at76c50x-usb.c b/drivers/net/wireless/at76c50x-usb.c
+index 8a2d4afc74f8..cb3d4b70bcbc 100644
+--- a/drivers/net/wireless/at76c50x-usb.c
++++ b/drivers/net/wireless/at76c50x-usb.c
+@@ -1649,6 +1649,42 @@ static struct fwentry *at76_load_firmware(struct usb_device *udev,
+ 		return NULL;
+ }
+ 
++static int at76_join(struct at76_priv *priv)
++{
++	struct at76_req_join join;
++	int ret;
++
++	memset(&join, 0, sizeof(struct at76_req_join));
++	memcpy(join.essid, priv->essid, priv->essid_size);
++	join.essid_size = priv->essid_size;
++	memcpy(join.bssid, priv->bssid, ETH_ALEN);
++	join.bss_type = INFRASTRUCTURE_MODE;
++	join.channel = priv->channel;
++	join.timeout = cpu_to_le16(2000);
++
++	at76_dbg(DBG_MAC80211, "%s: sending CMD_JOIN", __func__);
++	ret = at76_set_card_command(priv->udev, CMD_JOIN, &join,
++				    sizeof(struct at76_req_join));
++
++	if (ret < 0) {
++		printk(KERN_ERR "%s: at76_set_card_command failed: %d\n",
++		       wiphy_name(priv->hw->wiphy), ret);
++		return 0;
++	}
++
++	ret = at76_wait_completion(priv, CMD_JOIN);
++	at76_dbg(DBG_MAC80211, "%s: CMD_JOIN returned: 0x%02x", __func__, ret);
++	if (ret != CMD_STATUS_COMPLETE) {
++		printk(KERN_ERR "%s: at76_wait_completion failed: %d\n",
++		       wiphy_name(priv->hw->wiphy), ret);
++		return 0;
++	}
++
++	at76_set_pm_mode(priv);
++
++	return 0;
++}
++
+ static void at76_mac80211_tx_callback(struct urb *urb)
+ {
+ 	struct at76_priv *priv = urb->context;
+@@ -1818,42 +1854,6 @@ static void at76_remove_interface(struct ieee80211_hw *hw,
+ 	at76_dbg(DBG_MAC80211, "%s()", __func__);
+ }
+ 
+-static int at76_join(struct at76_priv *priv)
+-{
+-	struct at76_req_join join;
+-	int ret;
+-
+-	memset(&join, 0, sizeof(struct at76_req_join));
+-	memcpy(join.essid, priv->essid, priv->essid_size);
+-	join.essid_size = priv->essid_size;
+-	memcpy(join.bssid, priv->bssid, ETH_ALEN);
+-	join.bss_type = INFRASTRUCTURE_MODE;
+-	join.channel = priv->channel;
+-	join.timeout = cpu_to_le16(2000);
+-
+-	at76_dbg(DBG_MAC80211, "%s: sending CMD_JOIN", __func__);
+-	ret = at76_set_card_command(priv->udev, CMD_JOIN, &join,
+-				    sizeof(struct at76_req_join));
+-
+-	if (ret < 0) {
+-		printk(KERN_ERR "%s: at76_set_card_command failed: %d\n",
+-		       wiphy_name(priv->hw->wiphy), ret);
+-		return 0;
+-	}
+-
+-	ret = at76_wait_completion(priv, CMD_JOIN);
+-	at76_dbg(DBG_MAC80211, "%s: CMD_JOIN returned: 0x%02x", __func__, ret);
+-	if (ret != CMD_STATUS_COMPLETE) {
+-		printk(KERN_ERR "%s: at76_wait_completion failed: %d\n",
+-		       wiphy_name(priv->hw->wiphy), ret);
+-		return 0;
+-	}
+-
+-	at76_set_pm_mode(priv);
+-
+-	return 0;
+-}
+-
+ static void at76_dwork_hw_scan(struct work_struct *work)
+ {
+ 	struct at76_priv *priv = container_of(work, struct at76_priv,

@@ -1,0 +1,65 @@
+{
+  "hash": "ab87f9a56c8ee9fa6856cb13d8f2905db913baae",
+  "hash_short": "ab87f9a5",
+  "subject": "namei: LOOKUP_{IN_ROOT,BENEATH}: permit limited \"..\" resolution",
+  "body": "Allow LOOKUP_BENEATH and LOOKUP_IN_ROOT to safely permit \"..\" resolution\n(in the case of LOOKUP_BENEATH the resolution will still fail if \"..\"\nresolution would resolve a path outside of the root -- while\nLOOKUP_IN_ROOT will chroot(2)-style scope it). Magic-link jumps are\nstill disallowed entirely[*].\n\nAs Jann explains[1,2], the need for this patch (and the original no-\"..\"\nrestriction) is explained by observing there is a fairly easy-to-exploit\nrace condition with chroot(2) (and thus by extension LOOKUP_IN_ROOT and\nLOOKUP_BENEATH if \"..\" is allowed) where a rename(2) of a path can be\nused to \"skip over\" nd->root and thus escape to the filesystem above\nnd->root.\n\n  thread1 [attacker]:\n    for (;;)\n      renameat2(AT_FDCWD, \"/a/b/c\", AT_FDCWD, \"/a/d\", RENAME_EXCHANGE);\n  thread2 [victim]:\n    for (;;)\n      openat2(dirb, \"b/c/../../etc/shadow\",\n              { .flags = O_PATH, .resolve = RESOLVE_IN_ROOT } );\n\nWith fairly significant regularity, thread2 will resolve to\n\"/etc/shadow\" rather than \"/a/b/etc/shadow\". There is also a similar\n(though somewhat more privileged) attack using MS_MOVE.\n\nWith this patch, such cases will be detected *during* \"..\" resolution\nand will return -EAGAIN for userspace to decide to either retry or abort\nthe lookup. It should be noted that \"..\" is the weak point of chroot(2)\n-- walking *into* a subdirectory tautologically cannot result in you\nwalking *outside* nd->root (except through a bind-mount or magic-link).\nThere is also no other way for a directory's parent to change (which is\nthe primary worry with \"..\" resolution here) other than a rename or\nMS_MOVE.\n\nThe primary reason for deferring to userspace with -EAGAIN is that an\nin-kernel retry loop (or doing a path_is_under() check after re-taking\nthe relevant seqlocks) can become unreasonably expensive on machines\nwith lots of VFS activity (nfsd can cause lots of rename_lock updates).\nThus it should be up to userspace how many times they wish to retry the\nlookup -- the selftests for this attack indicate that there is a ~35%\nchance of the lookup succeeding on the first try even with an attacker\nthrashing rename_lock.\n\nA variant of the above attack is included in the selftests for\nopenat2(2) later in this patch series. I've run this test on several\nmachines for several days and no instances of a breakout were detected.\nWhile this is not concrete proof that this is safe, when combined with\nthe above argument it should lend some trustworthiness to this\nconstruction.\n\n[*] It may be acceptable in the future to do a path_is_under() check for\n    magic-links after they are resolved. However this seems unlikely to\n    be a feature that people *really* need -- it can be added later if\n    it turns out a lot of people want it.\n\n[1]: https://lore.kernel.org/lkml/CAG48ez1jzNvxB+bfOBnERFGp=oMM0vHWuLD6EULmne3R6xa53w@mail.gmail.com/\n[2]: https://lore.kernel.org/lkml/CAG48ez30WJhbsro2HOc_DR7V91M+hNFzBP5ogRMZaxbAORvqzg@mail.gmail.com/\n\nCc: Christian Brauner <christian.brauner@ubuntu.com>\nSuggested-by: Jann Horn <jannh@google.com>\nSuggested-by: Linus Torvalds <torvalds@linux-foundation.org>\nSigned-off-by: Aleksa Sarai <cyphar@cyphar.com>\nSigned-off-by: Al Viro <viro@zeniv.linux.org.uk>",
+  "full_message": "namei: LOOKUP_{IN_ROOT,BENEATH}: permit limited \"..\" resolution\n\nAllow LOOKUP_BENEATH and LOOKUP_IN_ROOT to safely permit \"..\" resolution\n(in the case of LOOKUP_BENEATH the resolution will still fail if \"..\"\nresolution would resolve a path outside of the root -- while\nLOOKUP_IN_ROOT will chroot(2)-style scope it). Magic-link jumps are\nstill disallowed entirely[*].\n\nAs Jann explains[1,2], the need for this patch (and the original no-\"..\"\nrestriction) is explained by observing there is a fairly easy-to-exploit\nrace condition with chroot(2) (and thus by extension LOOKUP_IN_ROOT and\nLOOKUP_BENEATH if \"..\" is allowed) where a rename(2) of a path can be\nused to \"skip over\" nd->root and thus escape to the filesystem above\nnd->root.\n\n  thread1 [attacker]:\n    for (;;)\n      renameat2(AT_FDCWD, \"/a/b/c\", AT_FDCWD, \"/a/d\", RENAME_EXCHANGE);\n  thread2 [victim]:\n    for (;;)\n      openat2(dirb, \"b/c/../../etc/shadow\",\n              { .flags = O_PATH, .resolve = RESOLVE_IN_ROOT } );\n\nWith fairly significant regularity, thread2 will resolve to\n\"/etc/shadow\" rather than \"/a/b/etc/shadow\". There is also a similar\n(though somewhat more privileged) attack using MS_MOVE.\n\nWith this patch, such cases will be detected *during* \"..\" resolution\nand will return -EAGAIN for userspace to decide to either retry or abort\nthe lookup. It should be noted that \"..\" is the weak point of chroot(2)\n-- walking *into* a subdirectory tautologically cannot result in you\nwalking *outside* nd->root (except through a bind-mount or magic-link).\nThere is also no other way for a directory's parent to change (which is\nthe primary worry with \"..\" resolution here) other than a rename or\nMS_MOVE.\n\nThe primary reason for deferring to userspace with -EAGAIN is that an\nin-kernel retry loop (or doing a path_is_under() check after re-taking\nthe relevant seqlocks) can become unreasonably expensive on machines\nwith lots of VFS activity (nfsd can cause lots of rename_lock updates).\nThus it should be up to userspace how many times they wish to retry the\nlookup -- the selftests for this attack indicate that there is a ~35%\nchance of the lookup succeeding on the first try even with an attacker\nthrashing rename_lock.\n\nA variant of the above attack is included in the selftests for\nopenat2(2) later in this patch series. I've run this test on several\nmachines for several days and no instances of a breakout were detected.\nWhile this is not concrete proof that this is safe, when combined with\nthe above argument it should lend some trustworthiness to this\nconstruction.\n\n[*] It may be acceptable in the future to do a path_is_under() check for\n    magic-links after they are resolved. However this seems unlikely to\n    be a feature that people *really* need -- it can be added later if\n    it turns out a lot of people want it.\n\n[1]: https://lore.kernel.org/lkml/CAG48ez1jzNvxB+bfOBnERFGp=oMM0vHWuLD6EULmne3R6xa53w@mail.gmail.com/\n[2]: https://lore.kernel.org/lkml/CAG48ez30WJhbsro2HOc_DR7V91M+hNFzBP5ogRMZaxbAORvqzg@mail.gmail.com/\n\nCc: Christian Brauner <christian.brauner@ubuntu.com>\nSuggested-by: Jann Horn <jannh@google.com>\nSuggested-by: Linus Torvalds <torvalds@linux-foundation.org>\nSigned-off-by: Aleksa Sarai <cyphar@cyphar.com>\nSigned-off-by: Al Viro <viro@zeniv.linux.org.uk>",
+  "author_name": "Aleksa Sarai",
+  "author_email": "cyphar@cyphar.com",
+  "author_date": "Sat Dec 7 01:13:35 2019 +1100",
+  "author_date_iso": "2019-12-07T01:13:35+11:00",
+  "committer_name": "Al Viro",
+  "committer_email": "viro@zeniv.linux.org.uk",
+  "committer_date": "Sun Dec 8 19:09:44 2019 -0500",
+  "committer_date_iso": "2019-12-08T19:09:44-05:00",
+  "files_changed": [
+    "fs/namei.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "fs/namei.c",
+      "insertions": 27,
+      "deletions": 16
+    }
+  ],
+  "total_insertions": 27,
+  "total_deletions": 16,
+  "total_changes": 43,
+  "parents": [
+    "8db52c7e7ee1bd861b6096fcafc0fe7d0f24a994"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v5.6",
+    "v5.6-rc1",
+    "v5.6-rc2",
+    "v5.6-rc3",
+    "v5.6-rc4",
+    "v5.6-rc5",
+    "v5.6-rc6",
+    "v5.6-rc7",
+    "v5.7-rc1"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "exploit"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "fs/namei.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

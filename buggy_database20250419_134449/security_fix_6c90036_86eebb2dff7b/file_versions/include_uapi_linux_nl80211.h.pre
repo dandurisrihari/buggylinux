@@ -1,0 +1,80 @@
+commit fe4943702c850fa07f963eaa6f1530d9d4c2da78
+Author: Srinivas Dasari <dasaris@codeaurora.org>
+Date:   Wed Jan 23 18:06:56 2019 +0530
+
+    cfg80211: Authentication offload to user space in AP mode
+    
+    commit 40cbfa90218b ("cfg80211/nl80211: Optional authentication
+    offload to userspace")' introduced authentication offload to user
+    space by the host drivers in station mode. This commit extends
+    the same for the AP mode too.
+    
+    Extend NL80211_ATTR_EXTERNAL_AUTH_SUPPORT to also claim the
+    support of external authentication from the user space in AP mode.
+    A new flag parameter is introduced in cfg80211_ap_settings to
+    intend the same while "start ap".
+    
+    Host driver to use NL80211_CMD_FRAME interface to transmit and
+    receive the authentication frames to / from the user space.
+    
+    Host driver to indicate the flag NL80211_RXMGMT_FLAG_EXTERNAL_AUTH
+    while sending the authentication frame to the user space. This
+    intends to the user space that the driver wishes it to process
+    the authentication frame for certain protocols, though it had
+    initially advertised the support for SME functionality.
+    
+    User space shall accordingly do the authentication and indicate
+    its final status through the command NL80211_CMD_EXTERNAL_AUTH.
+    Allow the command even if userspace doesn't include the attribute
+    NL80211_ATTR_SSID for AP interface.
+    
+    Host driver shall continue with the association sequence and
+    indicate the STA connection status through cfg80211_new_sta.
+    
+    To facilitate the host drivers in AP mode for matching the pmkid
+    by the stations during the association, NL80211_CMD_EXTERNAL_AUTH
+    is also enhanced to include the pmkid to drivers after
+    the authentication.
+    This pmkid can also be used in the STA mode to include in the
+    association request.
+    
+    Also modify nl80211_external_auth to not mandate SSID in AP mode.
+    
+    Signed-off-by: Srinivas Dasari <dasaris@codeaurora.org>
+    [remove useless nla_get_flag() usage]
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+diff --git a/include/uapi/linux/nl80211.h b/include/uapi/linux/nl80211.h
+index 5f9d5cd458a1..8b0fdb9e133b 100644
+--- a/include/uapi/linux/nl80211.h
++++ b/include/uapi/linux/nl80211.h
+@@ -2266,10 +2266,10 @@ enum nl80211_commands {
+  *     &enum nl80211_external_auth_action value). This is used with the
+  *     %NL80211_CMD_EXTERNAL_AUTH request event.
+  * @NL80211_ATTR_EXTERNAL_AUTH_SUPPORT: Flag attribute indicating that the user
+- *     space supports external authentication. This attribute shall be used
+- *     only with %NL80211_CMD_CONNECT request. The driver may offload
+- *     authentication processing to user space if this capability is indicated
+- *     in NL80211_CMD_CONNECT requests from the user space.
++ *	space supports external authentication. This attribute shall be used
++ *	with %NL80211_CMD_CONNECT and %NL80211_CMD_START_AP request. The driver
++ *	may offload authentication processing to user space if this capability
++ *	is indicated in the respective requests from the user space.
+  *
+  * @NL80211_ATTR_NSS: Station's New/updated  RX_NSS value notified using this
+  *	u8 attribute. This is used with %NL80211_CMD_STA_OPMODE_CHANGED.
+@@ -5631,9 +5631,14 @@ enum nl80211_crit_proto_id {
+  * Used by cfg80211_rx_mgmt()
+  *
+  * @NL80211_RXMGMT_FLAG_ANSWERED: frame was answered by device/driver.
++ * @NL80211_RXMGMT_FLAG_EXTERNAL_AUTH: Host driver intends to offload
++ *	the authentication. Exclusively defined for host drivers that
++ *	advertises the SME functionality but would like the userspace
++ *	to handle certain authentication algorithms (e.g. SAE).
+  */
+ enum nl80211_rxmgmt_flags {
+ 	NL80211_RXMGMT_FLAG_ANSWERED = 1 << 0,
++	NL80211_RXMGMT_FLAG_EXTERNAL_AUTH = 1 << 1,
+ };
+ 
+ /*

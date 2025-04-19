@@ -1,0 +1,102 @@
+{
+  "hash": "601366678c93618f37a685332c0ba07e5556798c",
+  "hash_short": "60136667",
+  "subject": "perf data: Allow to use stdio functions for pipe mode",
+  "body": "When perf data is in a pipe, it reads each event separately using\nread(2) syscall.  This is a huge performance bottleneck when\nprocessing large data like in perf inject.  Also perf inject needs to\nuse write(2) syscall for the output.\n\nSo convert it to use buffer I/O functions in stdio library for pipe\ndata.  This makes inject-build-id bench time drops from 20ms to 8ms.\n\n  $ perf bench internals inject-build-id\n  # Running 'internals/inject-build-id' benchmark:\n    Average build-id injection took: 8.074 msec (+- 0.013 msec)\n    Average time per event: 0.792 usec (+- 0.001 usec)\n    Average memory usage: 8328 KB (+- 0 KB)\n    Average build-id-all injection took: 5.490 msec (+- 0.008 msec)\n    Average time per event: 0.538 usec (+- 0.001 usec)\n    Average memory usage: 7563 KB (+- 0 KB)\n\nThis patch enables it just for perf inject when used with pipe (it's a\ndefault behavior).  Maybe we could do it for perf record and/or report\nlater..\n\nCommitter testing:\n\nBefore:\n\n  $ perf stat -r 5 perf bench internals inject-build-id\n  # Running 'internals/inject-build-id' benchmark:\n    Average build-id injection took: 13.605 msec (+- 0.064 msec)\n    Average time per event: 1.334 usec (+- 0.006 usec)\n    Average memory usage: 12220 KB (+- 7 KB)\n    Average build-id-all injection took: 11.458 msec (+- 0.058 msec)\n    Average time per event: 1.123 usec (+- 0.006 usec)\n    Average memory usage: 11546 KB (+- 8 KB)\n  # Running 'internals/inject-build-id' benchmark:\n    Average build-id injection took: 13.673 msec (+- 0.057 msec)\n    Average time per event: 1.341 usec (+- 0.006 usec)\n    Average memory usage: 12508 KB (+- 8 KB)\n    Average build-id-all injection took: 11.437 msec (+- 0.046 msec)\n    Average time per event: 1.121 usec (+- 0.004 usec)\n    Average memory usage: 11812 KB (+- 7 KB)\n  # Running 'internals/inject-build-id' benchmark:\n    Average build-id injection took: 13.641 msec (+- 0.069 msec)\n    Average time per event: 1.337 usec (+- 0.007 usec)\n    Average memory usage: 12302 KB (+- 8 KB)\n    Average build-id-all injection took: 10.820 msec (+- 0.106 msec)\n    Average time per event: 1.061 usec (+- 0.010 usec)\n    Average memory usage: 11616 KB (+- 7 KB)\n  # Running 'internals/inject-build-id' benchmark:\n    Average build-id injection took: 13.379 msec (+- 0.074 msec)\n    Average time per event: 1.312 usec (+- 0.007 usec)\n    Average memory usage: 12334 KB (+- 8 KB)\n    Average build-id-all injection took: 11.288 msec (+- 0.071 msec)\n    Average time per event: 1.107 usec (+- 0.007 usec)\n    Average memory usage: 11657 KB (+- 8 KB)\n  # Running 'internals/inject-build-id' benchmark:\n    Average build-id injection took: 13.534 msec (+- 0.058 msec)\n    Average time per event: 1.327 usec (+- 0.006 usec)\n    Average memory usage: 12264 KB (+- 8 KB)\n    Average build-id-all injection took: 11.557 msec (+- 0.076 msec)\n    Average time per event: 1.133 usec (+- 0.007 usec)\n    Average memory usage: 11593 KB (+- 8 KB)\n\n   Performance counter stats for 'perf bench internals inject-build-id' (5 runs):\n\n            4,060.05 msec task-clock:u              #    1.566 CPUs utilized            ( +-  0.65% )\n                   0      context-switches:u        #    0.000 K/sec\n                   0      cpu-migrations:u          #    0.000 K/sec\n             101,888      page-faults:u             #    0.025 M/sec                    ( +-  0.12% )\n       3,745,833,163      cycles:u                  #    0.923 GHz                      ( +-  0.10% )  (83.22%)\n         194,346,613      stalled-cycles-frontend:u #    5.19% frontend cycles idle     ( +-  0.57% )  (83.30%)\n         708,495,034      stalled-cycles-backend:u  #   18.91% backend cycles idle      ( +-  0.48% )  (83.48%)\n       5,629,328,628      instructions:u            #    1.50  insn per cycle\n                                                    #    0.13  stalled cycles per insn  ( +-  0.21% )  (83.57%)\n       1,236,697,927      branches:u                #  304.602 M/sec                    ( +-  0.16% )  (83.44%)\n          17,564,877      branch-misses:u           #    1.42% of all branches          ( +-  0.23% )  (82.99%)\n\n              2.5934 +- 0.0128 seconds time elapsed  ( +-  0.49% )\n\n  $\n\nAfter:\n\n  $ perf stat -r 5 perf bench internals inject-build-id\n  # Running 'internals/inject-build-id' benchmark:\n    Average build-id injection took: 8.560 msec (+- 0.125 msec)\n    Average time per event: 0.839 usec (+- 0.012 usec)\n    Average memory usage: 12520 KB (+- 8 KB)\n    Average build-id-all injection took: 5.789 msec (+- 0.054 msec)\n    Average time per event: 0.568 usec (+- 0.005 usec)\n    Average memory usage: 11919 KB (+- 9 KB)\n  # Running 'internals/inject-build-id' benchmark:\n    Average build-id injection took: 8.639 msec (+- 0.111 msec)\n    Average time per event: 0.847 usec (+- 0.011 usec)\n    Average memory usage: 12732 KB (+- 8 KB)\n    Average build-id-all injection took: 5.647 msec (+- 0.069 msec)\n    Average time per event: 0.554 usec (+- 0.007 usec)\n    Average memory usage: 12093 KB (+- 7 KB)\n  # Running 'internals/inject-build-id' benchmark:\n    Average build-id injection took: 8.551 msec (+- 0.096 msec)\n    Average time per event: 0.838 usec (+- 0.009 usec)\n    Average memory usage: 12739 KB (+- 8 KB)\n    Average build-id-all injection took: 5.617 msec (+- 0.061 msec)\n    Average time per event: 0.551 usec (+- 0.006 usec)\n    Average memory usage: 12105 KB (+- 7 KB)\n  # Running 'internals/inject-build-id' benchmark:\n    Average build-id injection took: 8.403 msec (+- 0.097 msec)\n    Average time per event: 0.824 usec (+- 0.010 usec)\n    Average memory usage: 12770 KB (+- 8 KB)\n    Average build-id-all injection took: 5.611 msec (+- 0.085 msec)\n    Average time per event: 0.550 usec (+- 0.008 usec)\n    Average memory usage: 12134 KB (+- 8 KB)\n  # Running 'internals/inject-build-id' benchmark:\n    Average build-id injection took: 8.518 msec (+- 0.102 msec)\n    Average time per event: 0.835 usec (+- 0.010 usec)\n    Average memory usage: 12518 KB (+- 10 KB)\n    Average build-id-all injection took: 5.503 msec (+- 0.073 msec)\n    Average time per event: 0.540 usec (+- 0.007 usec)\n    Average memory usage: 11882 KB (+- 8 KB)\n\n   Performance counter stats for 'perf bench internals inject-build-id' (5 runs):\n\n            2,394.88 msec task-clock:u              #    1.577 CPUs utilized            ( +-  0.83% )\n                   0      context-switches:u        #    0.000 K/sec\n                   0      cpu-migrations:u          #    0.000 K/sec\n             103,181      page-faults:u             #    0.043 M/sec                    ( +-  0.11% )\n       3,548,172,030      cycles:u                  #    1.482 GHz                      ( +-  0.30% )  (83.26%)\n          81,537,700      stalled-cycles-frontend:u #    2.30% frontend cycles idle     ( +-  1.54% )  (83.24%)\n         876,631,544      stalled-cycles-backend:u  #   24.71% backend cycles idle      ( +-  1.14% )  (83.45%)\n       5,960,361,707      instructions:u            #    1.68  insn per cycle\n                                                    #    0.15  stalled cycles per insn  ( +-  0.27% )  (83.26%)\n       1,269,413,491      branches:u                #  530.054 M/sec                    ( +-  0.10% )  (83.48%)\n          11,372,453      branch-misses:u           #    0.90% of all branches          ( +-  0.52% )  (83.31%)\n\n             1.51874 +- 0.00642 seconds time elapsed  ( +-  0.42% )\n\n  $\n\nSigned-off-by: Namhyung Kim <namhyung@kernel.org>\nAcked-by: Jiri Olsa <jolsa@redhat.com>\nTested-by: Arnaldo Carvalho de Melo <acme@redhat.com>\nCc: Alexander Shishkin <alexander.shishkin@linux.intel.com>\nCc: Ian Rogers <irogers@google.com>\nCc: Mark Rutland <mark.rutland@arm.com>\nCc: Peter Zijlstra <peterz@infradead.org>\nCc: Stephane Eranian <eranian@google.com>\nLink: http://lore.kernel.org/lkml/20201030054742.87740-1-namhyung@kernel.org\nSigned-off-by: Arnaldo Carvalho de Melo <acme@redhat.com>",
+  "full_message": "perf data: Allow to use stdio functions for pipe mode\n\nWhen perf data is in a pipe, it reads each event separately using\nread(2) syscall.  This is a huge performance bottleneck when\nprocessing large data like in perf inject.  Also perf inject needs to\nuse write(2) syscall for the output.\n\nSo convert it to use buffer I/O functions in stdio library for pipe\ndata.  This makes inject-build-id bench time drops from 20ms to 8ms.\n\n  $ perf bench internals inject-build-id\n  # Running 'internals/inject-build-id' benchmark:\n    Average build-id injection took: 8.074 msec (+- 0.013 msec)\n    Average time per event: 0.792 usec (+- 0.001 usec)\n    Average memory usage: 8328 KB (+- 0 KB)\n    Average build-id-all injection took: 5.490 msec (+- 0.008 msec)\n    Average time per event: 0.538 usec (+- 0.001 usec)\n    Average memory usage: 7563 KB (+- 0 KB)\n\nThis patch enables it just for perf inject when used with pipe (it's a\ndefault behavior).  Maybe we could do it for perf record and/or report\nlater..\n\nCommitter testing:\n\nBefore:\n\n  $ perf stat -r 5 perf bench internals inject-build-id\n  # Running 'internals/inject-build-id' benchmark:\n    Average build-id injection took: 13.605 msec (+- 0.064 msec)\n    Average time per event: 1.334 usec (+- 0.006 usec)\n    Average memory usage: 12220 KB (+- 7 KB)\n    Average build-id-all injection took: 11.458 msec (+- 0.058 msec)\n    Average time per event: 1.123 usec (+- 0.006 usec)\n    Average memory usage: 11546 KB (+- 8 KB)\n  # Running 'internals/inject-build-id' benchmark:\n    Average build-id injection took: 13.673 msec (+- 0.057 msec)\n    Average time per event: 1.341 usec (+- 0.006 usec)\n    Average memory usage: 12508 KB (+- 8 KB)\n    Average build-id-all injection took: 11.437 msec (+- 0.046 msec)\n    Average time per event: 1.121 usec (+- 0.004 usec)\n    Average memory usage: 11812 KB (+- 7 KB)\n  # Running 'internals/inject-build-id' benchmark:\n    Average build-id injection took: 13.641 msec (+- 0.069 msec)\n    Average time per event: 1.337 usec (+- 0.007 usec)\n    Average memory usage: 12302 KB (+- 8 KB)\n    Average build-id-all injection took: 10.820 msec (+- 0.106 msec)\n    Average time per event: 1.061 usec (+- 0.010 usec)\n    Average memory usage: 11616 KB (+- 7 KB)\n  # Running 'internals/inject-build-id' benchmark:\n    Average build-id injection took: 13.379 msec (+- 0.074 msec)\n    Average time per event: 1.312 usec (+- 0.007 usec)\n    Average memory usage: 12334 KB (+- 8 KB)\n    Average build-id-all injection took: 11.288 msec (+- 0.071 msec)\n    Average time per event: 1.107 usec (+- 0.007 usec)\n    Average memory usage: 11657 KB (+- 8 KB)\n  # Running 'internals/inject-build-id' benchmark:\n    Average build-id injection took: 13.534 msec (+- 0.058 msec)\n    Average time per event: 1.327 usec (+- 0.006 usec)\n    Average memory usage: 12264 KB (+- 8 KB)\n    Average build-id-all injection took: 11.557 msec (+- 0.076 msec)\n    Average time per event: 1.133 usec (+- 0.007 usec)\n    Average memory usage: 11593 KB (+- 8 KB)\n\n   Performance counter stats for 'perf bench internals inject-build-id' (5 runs):\n\n            4,060.05 msec task-clock:u              #    1.566 CPUs utilized            ( +-  0.65% )\n                   0      context-switches:u        #    0.000 K/sec\n                   0      cpu-migrations:u          #    0.000 K/sec\n             101,888      page-faults:u             #    0.025 M/sec                    ( +-  0.12% )\n       3,745,833,163      cycles:u                  #    0.923 GHz                      ( +-  0.10% )  (83.22%)\n         194,346,613      stalled-cycles-frontend:u #    5.19% frontend cycles idle     ( +-  0.57% )  (83.30%)\n         708,495,034      stalled-cycles-backend:u  #   18.91% backend cycles idle      ( +-  0.48% )  (83.48%)\n       5,629,328,628      instructions:u            #    1.50  insn per cycle\n                                                    #    0.13  stalled cycles per insn  ( +-  0.21% )  (83.57%)\n       1,236,697,927      branches:u                #  304.602 M/sec                    ( +-  0.16% )  (83.44%)\n          17,564,877      branch-misses:u           #    1.42% of all branches          ( +-  0.23% )  (82.99%)\n\n              2.5934 +- 0.0128 seconds time elapsed  ( +-  0.49% )\n\n  $\n\nAfter:\n\n  $ perf stat -r 5 perf bench internals inject-build-id\n  # Running 'internals/inject-build-id' benchmark:\n    Average build-id injection took: 8.560 msec (+- 0.125 msec)\n    Average time per event: 0.839 usec (+- 0.012 usec)\n    Average memory usage: 12520 KB (+- 8 KB)\n    Average build-id-all injection took: 5.789 msec (+- 0.054 msec)\n    Average time per event: 0.568 usec (+- 0.005 usec)\n    Average memory usage: 11919 KB (+- 9 KB)\n  # Running 'internals/inject-build-id' benchmark:\n    Average build-id injection took: 8.639 msec (+- 0.111 msec)\n    Average time per event: 0.847 usec (+- 0.011 usec)\n    Average memory usage: 12732 KB (+- 8 KB)\n    Average build-id-all injection took: 5.647 msec (+- 0.069 msec)\n    Average time per event: 0.554 usec (+- 0.007 usec)\n    Average memory usage: 12093 KB (+- 7 KB)\n  # Running 'internals/inject-build-id' benchmark:\n    Average build-id injection took: 8.551 msec (+- 0.096 msec)\n    Average time per event: 0.838 usec (+- 0.009 usec)\n    Average memory usage: 12739 KB (+- 8 KB)\n    Average build-id-all injection took: 5.617 msec (+- 0.061 msec)\n    Average time per event: 0.551 usec (+- 0.006 usec)\n    Average memory usage: 12105 KB (+- 7 KB)\n  # Running 'internals/inject-build-id' benchmark:\n    Average build-id injection took: 8.403 msec (+- 0.097 msec)\n    Average time per event: 0.824 usec (+- 0.010 usec)\n    Average memory usage: 12770 KB (+- 8 KB)\n    Average build-id-all injection took: 5.611 msec (+- 0.085 msec)\n    Average time per event: 0.550 usec (+- 0.008 usec)\n    Average memory usage: 12134 KB (+- 8 KB)\n  # Running 'internals/inject-build-id' benchmark:\n    Average build-id injection took: 8.518 msec (+- 0.102 msec)\n    Average time per event: 0.835 usec (+- 0.010 usec)\n    Average memory usage: 12518 KB (+- 10 KB)\n    Average build-id-all injection took: 5.503 msec (+- 0.073 msec)\n    Average time per event: 0.540 usec (+- 0.007 usec)\n    Average memory usage: 11882 KB (+- 8 KB)\n\n   Performance counter stats for 'perf bench internals inject-build-id' (5 runs):\n\n            2,394.88 msec task-clock:u              #    1.577 CPUs utilized            ( +-  0.83% )\n                   0      context-switches:u        #    0.000 K/sec\n                   0      cpu-migrations:u          #    0.000 K/sec\n             103,181      page-faults:u             #    0.043 M/sec                    ( +-  0.11% )\n       3,548,172,030      cycles:u                  #    1.482 GHz                      ( +-  0.30% )  (83.26%)\n          81,537,700      stalled-cycles-frontend:u #    2.30% frontend cycles idle     ( +-  1.54% )  (83.24%)\n         876,631,544      stalled-cycles-backend:u  #   24.71% backend cycles idle      ( +-  1.14% )  (83.45%)\n       5,960,361,707      instructions:u            #    1.68  insn per cycle\n                                                    #    0.15  stalled cycles per insn  ( +-  0.27% )  (83.26%)\n       1,269,413,491      branches:u                #  530.054 M/sec                    ( +-  0.10% )  (83.48%)\n          11,372,453      branch-misses:u           #    0.90% of all branches          ( +-  0.52% )  (83.31%)\n\n             1.51874 +- 0.00642 seconds time elapsed  ( +-  0.42% )\n\n  $\n\nSigned-off-by: Namhyung Kim <namhyung@kernel.org>\nAcked-by: Jiri Olsa <jolsa@redhat.com>\nTested-by: Arnaldo Carvalho de Melo <acme@redhat.com>\nCc: Alexander Shishkin <alexander.shishkin@linux.intel.com>\nCc: Ian Rogers <irogers@google.com>\nCc: Mark Rutland <mark.rutland@arm.com>\nCc: Peter Zijlstra <peterz@infradead.org>\nCc: Stephane Eranian <eranian@google.com>\nLink: http://lore.kernel.org/lkml/20201030054742.87740-1-namhyung@kernel.org\nSigned-off-by: Arnaldo Carvalho de Melo <acme@redhat.com>",
+  "author_name": "Namhyung Kim",
+  "author_email": "namhyung@kernel.org",
+  "author_date": "Fri Oct 30 14:47:42 2020 +0900",
+  "author_date_iso": "2020-10-30T14:47:42+09:00",
+  "committer_name": "Arnaldo Carvalho de Melo",
+  "committer_email": "acme@redhat.com",
+  "committer_date": "Mon Nov 16 13:37:28 2020 -0300",
+  "committer_date_iso": "2020-11-16T13:37:28-03:00",
+  "files_changed": [
+    "tools/perf/builtin-inject.c",
+    "tools/perf/util/data.c",
+    "tools/perf/util/data.h",
+    "tools/perf/util/header.c",
+    "tools/perf/util/session.c"
+  ],
+  "files_changed_count": 5,
+  "stats": [
+    {
+      "file": "tools/perf/builtin-inject.c",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/data.c",
+      "insertions": 38,
+      "deletions": 3
+    },
+    {
+      "file": "tools/perf/util/data.h",
+      "insertions": 10,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/util/header.c",
+      "insertions": 4,
+      "deletions": 4
+    },
+    {
+      "file": "tools/perf/util/session.c",
+      "insertions": 4,
+      "deletions": 3
+    }
+  ],
+  "total_insertions": 58,
+  "total_deletions": 11,
+  "total_changes": 69,
+  "parents": [
+    "0a04244cabc5560ce1e08555e8712a4cd20ab6ce"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "inject"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "tools/perf/builtin-inject.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "tools/perf/util/data.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "tools/perf/util/data.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "tools/perf/util/header.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "tools/perf/util/session.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

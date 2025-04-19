@@ -1,0 +1,122 @@
+commit d5d8184d35c990b1324d9b30bcd0e4e8aa08f56d
+Author: Christoffer Dall <c.dall@virtualopensystems.com>
+Date:   Sun Jan 20 18:28:07 2013 -0500
+
+    KVM: ARM: Memory virtualization setup
+    
+    This commit introduces the framework for guest memory management
+    through the use of 2nd stage translation. Each VM has a pointer
+    to a level-1 table (the pgd field in struct kvm_arch) which is
+    used for the 2nd stage translations. Entries are added when handling
+    guest faults (later patch) and the table itself can be allocated and
+    freed through the following functions implemented in
+    arch/arm/kvm/arm_mmu.c:
+     - kvm_alloc_stage2_pgd(struct kvm *kvm);
+     - kvm_free_stage2_pgd(struct kvm *kvm);
+    
+    Each entry in TLBs and caches are tagged with a VMID identifier in
+    addition to ASIDs. The VMIDs are assigned consecutively to VMs in the
+    order that VMs are executed, and caches and tlbs are invalidated when
+    the VMID space has been used to allow for more than 255 simultaenously
+    running guests.
+    
+    The 2nd stage pgd is allocated in kvm_arch_init_vm(). The table is
+    freed in kvm_arch_destroy_vm(). Both functions are called from the main
+    KVM code.
+    
+    We pre-allocate page table memory to be able to synchronize using a
+    spinlock and be called under rcu_read_lock from the MMU notifiers.  We
+    steal the mmu_memory_cache implementation from x86 and adapt for our
+    specific usage.
+    
+    We support MMU notifiers (thanks to Marc Zyngier) through
+    kvm_unmap_hva and kvm_set_spte_hva.
+    
+    Finally, define kvm_phys_addr_ioremap() to map a device at a guest IPA,
+    which is used by VGIC support to map the virtual CPU interface registers
+    to the guest. This support is added by Marc Zyngier.
+    
+    Reviewed-by: Will Deacon <will.deacon@arm.com>
+    Reviewed-by: Marcelo Tosatti <mtosatti@redhat.com>
+    Signed-off-by: Marc Zyngier <marc.zyngier@arm.com>
+    Signed-off-by: Christoffer Dall <c.dall@virtualopensystems.com>
+
+diff --git a/arch/arm/kvm/arm.c b/arch/arm/kvm/arm.c
+index 2c6b780e78a7..d810afb6cb84 100644
+--- a/arch/arm/kvm/arm.c
++++ b/arch/arm/kvm/arm.c
+@@ -81,12 +81,33 @@ void kvm_arch_sync_events(struct kvm *kvm)
+ {
+ }
+ 
++/**
++ * kvm_arch_init_vm - initializes a VM data structure
++ * @kvm:	pointer to the KVM struct
++ */
+ int kvm_arch_init_vm(struct kvm *kvm, unsigned long type)
+ {
++	int ret = 0;
++
+ 	if (type)
+ 		return -EINVAL;
+ 
+-	return 0;
++	ret = kvm_alloc_stage2_pgd(kvm);
++	if (ret)
++		goto out_fail_alloc;
++
++	ret = create_hyp_mappings(kvm, kvm + 1);
++	if (ret)
++		goto out_free_stage2_pgd;
++
++	/* Mark the initial VMID generation invalid */
++	kvm->arch.vmid_gen = 0;
++
++	return ret;
++out_free_stage2_pgd:
++	kvm_free_stage2_pgd(kvm);
++out_fail_alloc:
++	return ret;
+ }
+ 
+ int kvm_arch_vcpu_fault(struct kvm_vcpu *vcpu, struct vm_fault *vmf)
+@@ -104,10 +125,16 @@ int kvm_arch_create_memslot(struct kvm_memory_slot *slot, unsigned long npages)
+ 	return 0;
+ }
+ 
++/**
++ * kvm_arch_destroy_vm - destroy the VM data structure
++ * @kvm:	pointer to the KVM struct
++ */
+ void kvm_arch_destroy_vm(struct kvm *kvm)
+ {
+ 	int i;
+ 
++	kvm_free_stage2_pgd(kvm);
++
+ 	for (i = 0; i < KVM_MAX_VCPUS; ++i) {
+ 		if (kvm->vcpus[i]) {
+ 			kvm_arch_vcpu_free(kvm->vcpus[i]);
+@@ -196,7 +223,13 @@ struct kvm_vcpu *kvm_arch_vcpu_create(struct kvm *kvm, unsigned int id)
+ 	if (err)
+ 		goto free_vcpu;
+ 
++	err = create_hyp_mappings(vcpu, vcpu + 1);
++	if (err)
++		goto vcpu_uninit;
++
+ 	return vcpu;
++vcpu_uninit:
++	kvm_vcpu_uninit(vcpu);
+ free_vcpu:
+ 	kmem_cache_free(kvm_vcpu_cache, vcpu);
+ out:
+@@ -210,6 +243,8 @@ int kvm_arch_vcpu_postcreate(struct kvm_vcpu *vcpu)
+ 
+ void kvm_arch_vcpu_free(struct kvm_vcpu *vcpu)
+ {
++	kvm_mmu_free_memory_caches(vcpu);
++	kmem_cache_free(kvm_vcpu_cache, vcpu);
+ }
+ 
+ void kvm_arch_vcpu_destroy(struct kvm_vcpu *vcpu)

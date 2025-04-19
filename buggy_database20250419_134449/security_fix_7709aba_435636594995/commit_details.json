@@ -1,0 +1,114 @@
+{
+  "hash": "7709aba8f71613ae5d18d8c00adb54948e6bedb3",
+  "hash_short": "7709aba8",
+  "subject": "KVM: x86: Morph pending exceptions to pending VM-Exits at queue time",
+  "body": "Morph pending exceptions to pending VM-Exits (due to interception) when\nthe exception is queued instead of waiting until nested events are\nchecked at VM-Entry.  This fixes a longstanding bug where KVM fails to\nhandle an exception that occurs during delivery of a previous exception,\nKVM (L0) and L1 both want to intercept the exception (e.g. #PF for shadow\npaging), and KVM determines that the exception is in the guest's domain,\ni.e. queues the new exception for L2.  Deferring the interception check\ncauses KVM to esclate various combinations of injected+pending exceptions\nto double fault (#DF) without consulting L1's interception desires, and\nends up injecting a spurious #DF into L2.\n\nKVM has fudged around the issue for #PF by special casing emulated #PF\ninjection for shadow paging, but the underlying issue is not unique to\nshadow paging in L0, e.g. if KVM is intercepting #PF because the guest\nhas a smaller maxphyaddr and L1 (but not L0) is using shadow paging.\nOther exceptions are affected as well, e.g. if KVM is intercepting #GP\nfor one of SVM's workaround or for the VMware backdoor emulation stuff.\nThe other cases have gone unnoticed because the #DF is spurious if and\nonly if L1 resolves the exception, e.g. KVM's goofs go unnoticed if L1\nwould have injected #DF anyways.\n\nThe hack-a-fix has also led to ugly code, e.g. bailing from the emulator\nif #PF injection forced a nested VM-Exit and the emulator finds itself\nback in L1.  Allowing for direct-to-VM-Exit queueing also neatly solves\nthe async #PF in L2 mess; no need to set a magic flag and token, simply\nqueue a #PF nested VM-Exit.\n\nDeal with event migration by flagging that a pending exception was queued\nby userspace and check for interception at the next KVM_RUN, e.g. so that\nKVM does the right thing regardless of the order in which userspace\nrestores nested state vs. event state.\n\nWhen \"getting\" events from userspace, simply drop any pending excpetion\nthat is destined to be intercepted if there is also an injected exception\nto be migrated.  Ideally, KVM would migrate both events, but that would\nrequire new ABI, and practically speaking losing the event is unlikely to\nbe noticed, let alone fatal.  The injected exception is captured, RIP\nstill points at the original faulting instruction, etc...  So either the\ninjection on the target will trigger the same intercepted exception, or\nthe source of the intercepted exception was transient and/or\nnon-deterministic, thus dropping it is ok-ish.\n\nFixes: a04aead144fd (\"KVM: nSVM: fix running nested guests when npt=0\")\nFixes: feaf0c7dc473 (\"KVM: nVMX: Do not generate #DF if #PF happens during exception delivery into L2\")\nCc: Jim Mattson <jmattson@google.com>\nSigned-off-by: Sean Christopherson <seanjc@google.com>\nReviewed-by: Maxim Levitsky <mlevitsk@redhat.com>\nLink: https://lore.kernel.org/r/20220830231614.3580124-22-seanjc@google.com\nSigned-off-by: Paolo Bonzini <pbonzini@redhat.com>",
+  "full_message": "KVM: x86: Morph pending exceptions to pending VM-Exits at queue time\n\nMorph pending exceptions to pending VM-Exits (due to interception) when\nthe exception is queued instead of waiting until nested events are\nchecked at VM-Entry.  This fixes a longstanding bug where KVM fails to\nhandle an exception that occurs during delivery of a previous exception,\nKVM (L0) and L1 both want to intercept the exception (e.g. #PF for shadow\npaging), and KVM determines that the exception is in the guest's domain,\ni.e. queues the new exception for L2.  Deferring the interception check\ncauses KVM to esclate various combinations of injected+pending exceptions\nto double fault (#DF) without consulting L1's interception desires, and\nends up injecting a spurious #DF into L2.\n\nKVM has fudged around the issue for #PF by special casing emulated #PF\ninjection for shadow paging, but the underlying issue is not unique to\nshadow paging in L0, e.g. if KVM is intercepting #PF because the guest\nhas a smaller maxphyaddr and L1 (but not L0) is using shadow paging.\nOther exceptions are affected as well, e.g. if KVM is intercepting #GP\nfor one of SVM's workaround or for the VMware backdoor emulation stuff.\nThe other cases have gone unnoticed because the #DF is spurious if and\nonly if L1 resolves the exception, e.g. KVM's goofs go unnoticed if L1\nwould have injected #DF anyways.\n\nThe hack-a-fix has also led to ugly code, e.g. bailing from the emulator\nif #PF injection forced a nested VM-Exit and the emulator finds itself\nback in L1.  Allowing for direct-to-VM-Exit queueing also neatly solves\nthe async #PF in L2 mess; no need to set a magic flag and token, simply\nqueue a #PF nested VM-Exit.\n\nDeal with event migration by flagging that a pending exception was queued\nby userspace and check for interception at the next KVM_RUN, e.g. so that\nKVM does the right thing regardless of the order in which userspace\nrestores nested state vs. event state.\n\nWhen \"getting\" events from userspace, simply drop any pending excpetion\nthat is destined to be intercepted if there is also an injected exception\nto be migrated.  Ideally, KVM would migrate both events, but that would\nrequire new ABI, and practically speaking losing the event is unlikely to\nbe noticed, let alone fatal.  The injected exception is captured, RIP\nstill points at the original faulting instruction, etc...  So either the\ninjection on the target will trigger the same intercepted exception, or\nthe source of the intercepted exception was transient and/or\nnon-deterministic, thus dropping it is ok-ish.\n\nFixes: a04aead144fd (\"KVM: nSVM: fix running nested guests when npt=0\")\nFixes: feaf0c7dc473 (\"KVM: nVMX: Do not generate #DF if #PF happens during exception delivery into L2\")\nCc: Jim Mattson <jmattson@google.com>\nSigned-off-by: Sean Christopherson <seanjc@google.com>\nReviewed-by: Maxim Levitsky <mlevitsk@redhat.com>\nLink: https://lore.kernel.org/r/20220830231614.3580124-22-seanjc@google.com\nSigned-off-by: Paolo Bonzini <pbonzini@redhat.com>",
+  "author_name": "Sean Christopherson",
+  "author_email": "seanjc@google.com",
+  "author_date": "Tue Aug 30 23:16:08 2022 +0000",
+  "author_date_iso": "2022-08-30T23:16:08+00:00",
+  "committer_name": "Paolo Bonzini",
+  "committer_email": "pbonzini@redhat.com",
+  "committer_date": "Mon Sep 26 12:03:10 2022 -0400",
+  "committer_date_iso": "2022-09-26T12:03:10-04:00",
+  "files_changed": [
+    "arch/x86/include/asm/kvm_host.h",
+    "arch/x86/kvm/svm/nested.c",
+    "arch/x86/kvm/vmx/nested.c",
+    "arch/x86/kvm/vmx/vmx.c",
+    "arch/x86/kvm/x86.c",
+    "arch/x86/kvm/x86.h"
+  ],
+  "files_changed_count": 6,
+  "stats": [
+    {
+      "file": "arch/x86/include/asm/kvm_host.h",
+      "insertions": 7,
+      "deletions": 5
+    },
+    {
+      "file": "arch/x86/kvm/svm/nested.c",
+      "insertions": 13,
+      "deletions": 32
+    },
+    {
+      "file": "arch/x86/kvm/vmx/nested.c",
+      "insertions": 47,
+      "deletions": 62
+    },
+    {
+      "file": "arch/x86/kvm/vmx/vmx.c",
+      "insertions": 4,
+      "deletions": 2
+    },
+    {
+      "file": "arch/x86/kvm/x86.c",
+      "insertions": 110,
+      "deletions": 49
+    },
+    {
+      "file": "arch/x86/kvm/x86.h",
+      "insertions": 7,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 188,
+  "total_deletions": 150,
+  "total_changes": 338,
+  "parents": [
+    "f43f8a3ba9a615316fc0c059758dc1503bb17292"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "injection"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/x86/include/asm/kvm_host.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kvm/x86.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kvm/svm/nested.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kvm/x86.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kvm/vmx/nested.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kvm/vmx/vmx.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

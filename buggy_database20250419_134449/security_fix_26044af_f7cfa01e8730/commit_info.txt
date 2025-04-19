@@ -1,0 +1,74 @@
+Commit Hash: 26044aff37a5455b19a91785086914fd33053ef4
+Subject: x86/crash: Disable virt in core NMI crash handler to avoid double shootdown
+
+
+Security Keywords:
+- hardening
+
+Full commit message:
+x86/crash: Disable virt in core NMI crash handler to avoid double shootdown
+
+Disable virtualization in crash_nmi_callback() and rework the
+emergency_vmx_disable_all() path to do an NMI shootdown if and only if a
+shootdown has not already occurred.   NMI crash shootdown fundamentally
+can't support multiple invocations as responding CPUs are deliberately
+put into halt state without unblocking NMIs.  But, the emergency reboot
+path doesn't have any work of its own, it simply cares about disabling
+virtualization, i.e. so long as a shootdown occurred, emergency reboot
+doesn't care who initiated the shootdown, or when.
+
+If "crash_kexec_post_notifiers" is specified on the kernel command line,
+panic() will invoke crash_smp_send_stop() and result in a second call to
+nmi_shootdown_cpus() during native_machine_emergency_restart().
+
+Invoke the callback _before_ disabling virtualization, as the current
+VMCS needs to be cleared before doing VMXOFF.  Note, this results in a
+subtle change in ordering between disabling virtualization and stopping
+Intel PT on the responding CPUs.  While VMX and Intel PT do interact,
+VMXOFF and writes to MSR_IA32_RTIT_CTL do not induce faults between one
+another, which is all that matters when panicking.
+
+Harden nmi_shootdown_cpus() against multiple invocations to try and
+capture any such kernel bugs via a WARN instead of hanging the system
+during a crash/dump, e.g. prior to the recent hardening of
+register_nmi_handler(), re-registering the NMI handler would trigger a
+double list_add() and hang the system if CONFIG_BUG_ON_DATA_CORRUPTION=y.
+
+ list_add double add: new=ffffffff82220800, prev=ffffffff8221cfe8, next=ffffffff82220800.
+ WARNING: CPU: 2 PID: 1319 at lib/list_debug.c:29 __list_add_valid+0x67/0x70
+ Call Trace:
+  __register_nmi_handler+0xcf/0x130
+  nmi_shootdown_cpus+0x39/0x90
+  native_machine_emergency_restart+0x1c9/0x1d0
+  panic+0x237/0x29b
+
+Extract the disabling logic to a common helper to deduplicate code, and
+to prepare for doing the shootdown in the emergency reboot path if SVM
+is supported.
+
+Note, prior to commit ed72736183c4 ("x86/reboot: Force all cpus to exit
+VMX root if VMX is supported"), nmi_shootdown_cpus() was subtly protected
+against a second invocation by a cpu_vmx_enabled() check as the kdump
+handler would disable VMX if it ran first.
+
+Fixes: ed72736183c4 ("x86/reboot: Force all cpus to exit VMX root if VMX is supported")
+Cc: stable@vger.kernel.org
+Reported-by: Guilherme G. Piccoli <gpiccoli@igalia.com>
+Cc: Vitaly Kuznetsov <vkuznets@redhat.com>
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Link: https://lore.kernel.org/all/20220427224924.592546-2-gpiccoli@igalia.com
+Tested-by: Guilherme G. Piccoli <gpiccoli@igalia.com>
+Reviewed-by: Thomas Gleixner <tglx@linutronix.de>
+Link: https://lore.kernel.org/r/20221130233650.1404148-2-seanjc@google.com
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+
+Metadata:
+Author: Sean Christopherson <seanjc@google.com>
+Author Date: Wed Nov 30 23:36:47 2022 +0000
+Committer: Sean Christopherson <seanjc@google.com>
+Commit Date: Tue Jan 24 10:05:21 2023 -0800
+
+Files Changed: 3
+Lines Added: 56
+Lines Removed: 28
+Total Changes: 84

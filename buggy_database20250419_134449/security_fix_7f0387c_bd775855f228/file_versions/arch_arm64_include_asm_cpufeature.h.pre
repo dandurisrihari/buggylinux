@@ -1,0 +1,58 @@
+commit 34f66c4c4d5518c11bfb7d10defff8f814c9f28a
+Author: Mark Rutland <mark.rutland@arm.com>
+Date:   Mon Oct 16 11:24:36 2023 +0100
+
+    arm64: Use a positive cpucap for FP/SIMD
+    
+    Currently we have a negative cpucap which describes the *absence* of
+    FP/SIMD rather than *presence* of FP/SIMD. This largely works, but is
+    somewhat awkward relative to other cpucaps that describe the presence of
+    a feature, and it would be nicer to have a cpucap which describes the
+    presence of FP/SIMD:
+    
+    * This will allow the cpucap to be treated as a standard
+      ARM64_CPUCAP_SYSTEM_FEATURE, which can be detected with the standard
+      has_cpuid_feature() function and ARM64_CPUID_FIELDS() description.
+    
+    * This ensures that the cpucap will only transition from not-present to
+      present, reducing the risk of unintentional and/or unsafe usage of
+      FP/SIMD before cpucaps are finalized.
+    
+    * This will allow using arm64_cpu_capabilities::cpu_enable() to enable
+      the use of FP/SIMD later, with FP/SIMD being disabled at boot time
+      otherwise. This will ensure that any unintentional and/or unsafe usage
+      of FP/SIMD prior to this is trapped, and will ensure that FP/SIMD is
+      never unintentionally enabled for userspace in mismatched big.LITTLE
+      systems.
+    
+    This patch replaces the negative ARM64_HAS_NO_FPSIMD cpucap with a
+    positive ARM64_HAS_FPSIMD cpucap, making changes as described above.
+    Note that as FP/SIMD will now be trapped when not supported system-wide,
+    do_fpsimd_acc() must handle these traps in the same way as for SVE and
+    SME. The commentary in fpsimd_restore_current_state() is updated to
+    describe the new scheme.
+    
+    No users of system_supports_fpsimd() need to know that FP/SIMD is
+    available prior to alternatives being patched, so this is updated to
+    use alternative_has_cap_likely() to check for the ARM64_HAS_FPSIMD
+    cpucap, without generating code to test the system_cpucaps bitmap.
+    
+    Signed-off-by: Mark Rutland <mark.rutland@arm.com>
+    Reviewed-by: Mark Brown <broonie@kernel.org>
+    Cc: Suzuki K Poulose <suzuki.poulose@arm.com>
+    Cc: Will Deacon <will@kernel.org>
+    Signed-off-by: Catalin Marinas <catalin.marinas@arm.com>
+
+diff --git a/arch/arm64/include/asm/cpufeature.h b/arch/arm64/include/asm/cpufeature.h
+index 1233a8ff96a8..a1698945916e 100644
+--- a/arch/arm64/include/asm/cpufeature.h
++++ b/arch/arm64/include/asm/cpufeature.h
+@@ -760,7 +760,7 @@ static inline bool system_supports_mixed_endian(void)
+ 
+ static __always_inline bool system_supports_fpsimd(void)
+ {
+-	return !cpus_have_const_cap(ARM64_HAS_NO_FPSIMD);
++	return alternative_has_cap_likely(ARM64_HAS_FPSIMD);
+ }
+ 
+ static inline bool system_uses_hw_pan(void)

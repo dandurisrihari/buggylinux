@@ -1,0 +1,74 @@
+Commit Hash: 9a22bf6debbf5169f750af53c7f86eb4e3cd6712
+Subject: x86/traps: Add #VE support for TDX guest
+
+
+Security Keywords:
+- privilege escalation
+
+Full commit message:
+x86/traps: Add #VE support for TDX guest
+
+Virtualization Exceptions (#VE) are delivered to TDX guests due to
+specific guest actions which may happen in either user space or the
+kernel:
+
+ * Specific instructions (WBINVD, for example)
+ * Specific MSR accesses
+ * Specific CPUID leaf accesses
+ * Access to specific guest physical addresses
+
+Syscall entry code has a critical window where the kernel stack is not
+yet set up. Any exception in this window leads to hard to debug issues
+and can be exploited for privilege escalation. Exceptions in the NMI
+entry code also cause issues. Returning from the exception handler with
+IRET will re-enable NMIs and nested NMI will corrupt the NMI stack.
+
+For these reasons, the kernel avoids #VEs during the syscall gap and
+the NMI entry code. Entry code paths do not access TD-shared memory,
+MMIO regions, use #VE triggering MSRs, instructions, or CPUID leaves
+that might generate #VE. VMM can remove memory from TD at any point,
+but access to unaccepted (or missing) private memory leads to VM
+termination, not to #VE.
+
+Similarly to page faults and breakpoints, #VEs are allowed in NMI
+handlers once the kernel is ready to deal with nested NMIs.
+
+During #VE delivery, all interrupts, including NMIs, are blocked until
+TDGETVEINFO is called. It prevents #VE nesting until the kernel reads
+the VE info.
+
+TDGETVEINFO retrieves the #VE info from the TDX module, which also
+clears the "#VE valid" flag.  This must be done before anything else as
+any #VE that occurs while the valid flag is set escalates to #DF by TDX
+module. It will result in an oops.
+
+Virtual NMIs are inhibited if the #VE valid flag is set. NMI will not be
+delivered until TDGETVEINFO is called.
+
+For now, convert unhandled #VE's (everything, until later in this
+series) so that they appear just like a #GP by calling the
+ve_raise_fault() directly. The ve_raise_fault() function is similar
+to #GP handler and is responsible for sending SIGSEGV to userspace
+and CPU die and notifying debuggers and other die chain users.
+
+Co-developed-by: Sean Christopherson <sean.j.christopherson@intel.com>
+Co-developed-by: Kuppuswamy Sathyanarayanan <sathyanarayanan.kuppuswamy@linux.intel.com>
+Signed-off-by: Sean Christopherson <sean.j.christopherson@intel.com>
+Signed-off-by: Kuppuswamy Sathyanarayanan <sathyanarayanan.kuppuswamy@linux.intel.com>
+Signed-off-by: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+Signed-off-by: Dave Hansen <dave.hansen@linux.intel.com>
+Reviewed-by: Andi Kleen <ak@linux.intel.com>
+Reviewed-by: Tony Luck <tony.luck@intel.com>
+Reviewed-by: Dave Hansen <dave.hansen@linux.intel.com>
+Link: https://lkml.kernel.org/r/20220405232939.73860-8-kirill.shutemov@linux.intel.com
+
+Metadata:
+Author: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+Author Date: Wed Apr 6 02:29:16 2022 +0300
+Committer: Dave Hansen <dave.hansen@linux.intel.com>
+Commit Date: Thu Apr 7 08:27:51 2022 -0700
+
+Files Changed: 5
+Lines Added: 152
+Lines Removed: 0
+Total Changes: 152

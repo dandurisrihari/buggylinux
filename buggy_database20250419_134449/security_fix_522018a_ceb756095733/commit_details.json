@@ -1,0 +1,66 @@
+{
+  "hash": "522018a0de6b6fcce60c04f86dfc5f0e4b6a1b36",
+  "hash_short": "522018a0",
+  "subject": "cachefiles: fix slab-use-after-free in fscache_withdraw_volume()",
+  "body": "We got the following issue in our fault injection stress test:\n\n==================================================================\nBUG: KASAN: slab-use-after-free in fscache_withdraw_volume+0x2e1/0x370\nRead of size 4 at addr ffff88810680be08 by task ondemand-04-dae/5798\n\nCPU: 0 PID: 5798 Comm: ondemand-04-dae Not tainted 6.8.0-dirty #565\nCall Trace:\n kasan_check_range+0xf6/0x1b0\n fscache_withdraw_volume+0x2e1/0x370\n cachefiles_withdraw_volume+0x31/0x50\n cachefiles_withdraw_cache+0x3ad/0x900\n cachefiles_put_unbind_pincount+0x1f6/0x250\n cachefiles_daemon_release+0x13b/0x290\n __fput+0x204/0xa00\n task_work_run+0x139/0x230\n\nAllocated by task 5820:\n __kmalloc+0x1df/0x4b0\n fscache_alloc_volume+0x70/0x600\n __fscache_acquire_volume+0x1c/0x610\n erofs_fscache_register_volume+0x96/0x1a0\n erofs_fscache_register_fs+0x49a/0x690\n erofs_fc_fill_super+0x6c0/0xcc0\n vfs_get_super+0xa9/0x140\n vfs_get_tree+0x8e/0x300\n do_new_mount+0x28c/0x580\n [...]\n\nFreed by task 5820:\n kfree+0xf1/0x2c0\n fscache_put_volume.part.0+0x5cb/0x9e0\n erofs_fscache_unregister_fs+0x157/0x1b0\n erofs_kill_sb+0xd9/0x1c0\n deactivate_locked_super+0xa3/0x100\n vfs_get_super+0x105/0x140\n vfs_get_tree+0x8e/0x300\n do_new_mount+0x28c/0x580\n [...]\n==================================================================\n\nFollowing is the process that triggers the issue:\n\n        mount failed         |         daemon exit\n------------------------------------------------------------\n deactivate_locked_super        cachefiles_daemon_release\n  erofs_kill_sb\n   erofs_fscache_unregister_fs\n    fscache_relinquish_volume\n     __fscache_relinquish_volume\n      fscache_put_volume(fscache_volume, fscache_volume_put_relinquish)\n       zero = __refcount_dec_and_test(&fscache_volume->ref, &ref);\n                                 cachefiles_put_unbind_pincount\n                                  cachefiles_daemon_unbind\n                                   cachefiles_withdraw_cache\n                                    cachefiles_withdraw_volumes\n                                     list_del_init(&volume->cache_link)\n       fscache_free_volume(fscache_volume)\n        cache->ops->free_volume\n         cachefiles_free_volume\n          list_del_init(&cachefiles_volume->cache_link);\n        kfree(fscache_volume)\n                                     cachefiles_withdraw_volume\n                                      fscache_withdraw_volume\n                                       fscache_volume->n_accesses\n                                       // fscache_volume UAF !!!\n\nThe fscache_volume in cache->volumes must not have been freed yet, but its\nreference count may be 0. So use the new fscache_try_get_volume() helper\nfunction try to get its reference count.\n\nIf the reference count of fscache_volume is 0, fscache_put_volume() is\nfreeing it, so wait for it to be removed from cache->volumes.\n\nIf its reference count is not 0, call cachefiles_withdraw_volume() with\nreference count protection to avoid the above issue.\n\nFixes: fe2140e2f57f (\"cachefiles: Implement volume support\")\nSigned-off-by: Baokun Li <libaokun1@huawei.com>\nLink: https://lore.kernel.org/r/20240628062930.2467993-3-libaokun@huaweicloud.com\nSigned-off-by: Christian Brauner <brauner@kernel.org>",
+  "full_message": "cachefiles: fix slab-use-after-free in fscache_withdraw_volume()\n\nWe got the following issue in our fault injection stress test:\n\n==================================================================\nBUG: KASAN: slab-use-after-free in fscache_withdraw_volume+0x2e1/0x370\nRead of size 4 at addr ffff88810680be08 by task ondemand-04-dae/5798\n\nCPU: 0 PID: 5798 Comm: ondemand-04-dae Not tainted 6.8.0-dirty #565\nCall Trace:\n kasan_check_range+0xf6/0x1b0\n fscache_withdraw_volume+0x2e1/0x370\n cachefiles_withdraw_volume+0x31/0x50\n cachefiles_withdraw_cache+0x3ad/0x900\n cachefiles_put_unbind_pincount+0x1f6/0x250\n cachefiles_daemon_release+0x13b/0x290\n __fput+0x204/0xa00\n task_work_run+0x139/0x230\n\nAllocated by task 5820:\n __kmalloc+0x1df/0x4b0\n fscache_alloc_volume+0x70/0x600\n __fscache_acquire_volume+0x1c/0x610\n erofs_fscache_register_volume+0x96/0x1a0\n erofs_fscache_register_fs+0x49a/0x690\n erofs_fc_fill_super+0x6c0/0xcc0\n vfs_get_super+0xa9/0x140\n vfs_get_tree+0x8e/0x300\n do_new_mount+0x28c/0x580\n [...]\n\nFreed by task 5820:\n kfree+0xf1/0x2c0\n fscache_put_volume.part.0+0x5cb/0x9e0\n erofs_fscache_unregister_fs+0x157/0x1b0\n erofs_kill_sb+0xd9/0x1c0\n deactivate_locked_super+0xa3/0x100\n vfs_get_super+0x105/0x140\n vfs_get_tree+0x8e/0x300\n do_new_mount+0x28c/0x580\n [...]\n==================================================================\n\nFollowing is the process that triggers the issue:\n\n        mount failed         |         daemon exit\n------------------------------------------------------------\n deactivate_locked_super        cachefiles_daemon_release\n  erofs_kill_sb\n   erofs_fscache_unregister_fs\n    fscache_relinquish_volume\n     __fscache_relinquish_volume\n      fscache_put_volume(fscache_volume, fscache_volume_put_relinquish)\n       zero = __refcount_dec_and_test(&fscache_volume->ref, &ref);\n                                 cachefiles_put_unbind_pincount\n                                  cachefiles_daemon_unbind\n                                   cachefiles_withdraw_cache\n                                    cachefiles_withdraw_volumes\n                                     list_del_init(&volume->cache_link)\n       fscache_free_volume(fscache_volume)\n        cache->ops->free_volume\n         cachefiles_free_volume\n          list_del_init(&cachefiles_volume->cache_link);\n        kfree(fscache_volume)\n                                     cachefiles_withdraw_volume\n                                      fscache_withdraw_volume\n                                       fscache_volume->n_accesses\n                                       // fscache_volume UAF !!!\n\nThe fscache_volume in cache->volumes must not have been freed yet, but its\nreference count may be 0. So use the new fscache_try_get_volume() helper\nfunction try to get its reference count.\n\nIf the reference count of fscache_volume is 0, fscache_put_volume() is\nfreeing it, so wait for it to be removed from cache->volumes.\n\nIf its reference count is not 0, call cachefiles_withdraw_volume() with\nreference count protection to avoid the above issue.\n\nFixes: fe2140e2f57f (\"cachefiles: Implement volume support\")\nSigned-off-by: Baokun Li <libaokun1@huawei.com>\nLink: https://lore.kernel.org/r/20240628062930.2467993-3-libaokun@huaweicloud.com\nSigned-off-by: Christian Brauner <brauner@kernel.org>",
+  "author_name": "Baokun Li",
+  "author_email": "libaokun1@huawei.com",
+  "author_date": "Fri Jun 28 14:29:23 2024 +0800",
+  "author_date_iso": "2024-06-28T14:29:23+08:00",
+  "committer_name": "Christian Brauner",
+  "committer_email": "brauner@kernel.org",
+  "committer_date": "Wed Jul 3 10:36:14 2024 +0200",
+  "committer_date_iso": "2024-07-03T10:36:14+02:00",
+  "files_changed": [
+    "fs/cachefiles/cache.c",
+    "include/trace/events/fscache.h"
+  ],
+  "files_changed_count": 2,
+  "stats": [
+    {
+      "file": "fs/cachefiles/cache.c",
+      "insertions": 10,
+      "deletions": 0
+    },
+    {
+      "file": "include/trace/events/fscache.h",
+      "insertions": 4,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 14,
+  "total_deletions": 0,
+  "total_changes": 14,
+  "parents": [
+    "85b08b31a22b481ec6528130daf94eee4452e23f"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "injection"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "fs/cachefiles/cache.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/trace/events/fscache.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

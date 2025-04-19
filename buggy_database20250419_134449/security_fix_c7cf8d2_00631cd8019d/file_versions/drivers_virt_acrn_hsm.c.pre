@@ -1,0 +1,110 @@
+commit ce011e1363a1fe43de0ca05abc394022ee4fefeb
+Author: Shuo Liu <shuo.a.liu@intel.com>
+Date:   Sun Feb 7 11:10:33 2021 +0800
+
+    virt: acrn: Introduce interfaces for PCI device passthrough
+    
+    PCI device passthrough enables an OS in a virtual machine to directly
+    access a PCI device in the host. It promises almost the native
+    performance, which is required in performance-critical scenarios of
+    ACRN.
+    
+    HSM provides the following ioctls:
+     - Assign - ACRN_IOCTL_ASSIGN_PCIDEV
+       Pass data struct acrn_pcidev from userspace to the hypervisor, and
+       inform the hypervisor to assign a PCI device to a User VM.
+    
+     - De-assign - ACRN_IOCTL_DEASSIGN_PCIDEV
+       Pass data struct acrn_pcidev from userspace to the hypervisor, and
+       inform the hypervisor to de-assign a PCI device from a User VM.
+    
+     - Set a interrupt of a passthrough device - ACRN_IOCTL_SET_PTDEV_INTR
+       Pass data struct acrn_ptdev_irq from userspace to the hypervisor,
+       and inform the hypervisor to map a INTx interrupt of passthrough
+       device of User VM.
+    
+     - Reset passthrough device interrupt - ACRN_IOCTL_RESET_PTDEV_INTR
+       Pass data struct acrn_ptdev_irq from userspace to the hypervisor,
+       and inform the hypervisor to unmap a INTx interrupt of passthrough
+       device of User VM.
+    
+    Cc: Zhi Wang <zhi.a.wang@intel.com>
+    Cc: Zhenyu Wang <zhenyuw@linux.intel.com>
+    Cc: Yu Wang <yu1.wang@intel.com>
+    Cc: Reinette Chatre <reinette.chatre@intel.com>
+    Cc: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+    Reviewed-by: Zhi Wang <zhi.a.wang@intel.com>
+    Reviewed-by: Reinette Chatre <reinette.chatre@intel.com>
+    Signed-off-by: Shuo Liu <shuo.a.liu@intel.com>
+    Link: https://lore.kernel.org/r/20210207031040.49576-12-shuo.a.liu@intel.com
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/virt/acrn/hsm.c b/drivers/virt/acrn/hsm.c
+index 1cc0c612dc09..94d70b1c1e5c 100644
+--- a/drivers/virt/acrn/hsm.c
++++ b/drivers/virt/acrn/hsm.c
+@@ -49,7 +49,9 @@ static long acrn_dev_ioctl(struct file *filp, unsigned int cmd,
+ 	struct acrn_vm_creation *vm_param;
+ 	struct acrn_vcpu_regs *cpu_regs;
+ 	struct acrn_ioreq_notify notify;
++	struct acrn_ptdev_irq *irq_info;
+ 	struct acrn_vm_memmap memmap;
++	struct acrn_pcidev *pcidev;
+ 	int i, ret = 0;
+ 
+ 	if (vm->vmid == ACRN_INVALID_VMID && cmd != ACRN_IOCTL_CREATE_VM) {
+@@ -148,6 +150,54 @@ static long acrn_dev_ioctl(struct file *filp, unsigned int cmd,
+ 
+ 		ret = acrn_vm_memseg_unmap(vm, &memmap);
+ 		break;
++	case ACRN_IOCTL_ASSIGN_PCIDEV:
++		pcidev = memdup_user((void __user *)ioctl_param,
++				     sizeof(struct acrn_pcidev));
++		if (IS_ERR(pcidev))
++			return PTR_ERR(pcidev);
++
++		ret = hcall_assign_pcidev(vm->vmid, virt_to_phys(pcidev));
++		if (ret < 0)
++			dev_dbg(acrn_dev.this_device,
++				"Failed to assign pci device!\n");
++		kfree(pcidev);
++		break;
++	case ACRN_IOCTL_DEASSIGN_PCIDEV:
++		pcidev = memdup_user((void __user *)ioctl_param,
++				     sizeof(struct acrn_pcidev));
++		if (IS_ERR(pcidev))
++			return PTR_ERR(pcidev);
++
++		ret = hcall_deassign_pcidev(vm->vmid, virt_to_phys(pcidev));
++		if (ret < 0)
++			dev_dbg(acrn_dev.this_device,
++				"Failed to deassign pci device!\n");
++		kfree(pcidev);
++		break;
++	case ACRN_IOCTL_SET_PTDEV_INTR:
++		irq_info = memdup_user((void __user *)ioctl_param,
++				       sizeof(struct acrn_ptdev_irq));
++		if (IS_ERR(irq_info))
++			return PTR_ERR(irq_info);
++
++		ret = hcall_set_ptdev_intr(vm->vmid, virt_to_phys(irq_info));
++		if (ret < 0)
++			dev_dbg(acrn_dev.this_device,
++				"Failed to configure intr for ptdev!\n");
++		kfree(irq_info);
++		break;
++	case ACRN_IOCTL_RESET_PTDEV_INTR:
++		irq_info = memdup_user((void __user *)ioctl_param,
++				       sizeof(struct acrn_ptdev_irq));
++		if (IS_ERR(irq_info))
++			return PTR_ERR(irq_info);
++
++		ret = hcall_reset_ptdev_intr(vm->vmid, virt_to_phys(irq_info));
++		if (ret < 0)
++			dev_dbg(acrn_dev.this_device,
++				"Failed to reset intr for ptdev!\n");
++		kfree(irq_info);
++		break;
+ 	case ACRN_IOCTL_CREATE_IOREQ_CLIENT:
+ 		if (vm->default_client)
+ 			return -EEXIST;

@@ -1,0 +1,54 @@
+{
+  "hash": "5ae5bc12d0728db60a0aa9b62160ffc038875f1a",
+  "hash_short": "5ae5bc12",
+  "subject": "powerpc/eeh: Fix EEH handling for hugepages in ioremap space.",
+  "body": "During the EEH MMIO error checking, the current implementation fails to map\nthe (virtual) MMIO address back to the pci device on radix with hugepage\nmappings for I/O. This results into failure to dispatch EEH event with no\nrecovery even when EEH capability has been enabled on the device.\n\neeh_check_failure(token)\t\t# token = virtual MMIO address\n  addr = eeh_token_to_phys(token);\n  edev = eeh_addr_cache_get_dev(addr);\n  if (!edev)\n\treturn 0;\n  eeh_dev_check_failure(edev);\t<= Dispatch the EEH event\n\nIn case of hugepage mappings, eeh_token_to_phys() has a bug in virt -> phys\ntranslation that results in wrong physical address, which is then passed to\neeh_addr_cache_get_dev() to match it against cached pci I/O address ranges\nto get to a PCI device. Hence, it fails to find a match and the EEH event\nnever gets dispatched leaving the device in failed state.\n\nThe commit 33439620680be (\"powerpc/eeh: Handle hugepages in ioremap space\")\nintroduced following logic to translate virt to phys for hugepage mappings:\n\neeh_token_to_phys():\n+\tpa = pte_pfn(*ptep);\n+\n+\t/* On radix we can do hugepage mappings for io, so handle that */\n+       if (hugepage_shift) {\n+               pa <<= hugepage_shift;\t\t\t<= This is wrong\n+               pa |= token & ((1ul << hugepage_shift) - 1);\n+       }\n\nThis patch fixes the virt -> phys translation in eeh_token_to_phys()\nfunction.\n\n  $ cat /sys/kernel/debug/powerpc/eeh_address_cache\n  mem addr range [0x0000040080000000-0x00000400807fffff]: 0030:01:00.1\n  mem addr range [0x0000040080800000-0x0000040080ffffff]: 0030:01:00.1\n  mem addr range [0x0000040081000000-0x00000400817fffff]: 0030:01:00.0\n  mem addr range [0x0000040081800000-0x0000040081ffffff]: 0030:01:00.0\n  mem addr range [0x0000040082000000-0x000004008207ffff]: 0030:01:00.1\n  mem addr range [0x0000040082080000-0x00000400820fffff]: 0030:01:00.0\n  mem addr range [0x0000040082100000-0x000004008210ffff]: 0030:01:00.1\n  mem addr range [0x0000040082110000-0x000004008211ffff]: 0030:01:00.0\n\nAbove is the list of cached io address ranges of pci 0030:01:00.<fn>.\n\nBefore this patch:\n\nTracing 'arg1' of function eeh_addr_cache_get_dev() during error injection\nclearly shows that 'addr=' contains wrong physical address:\n\n   kworker/u16:0-7       [001] ....   108.883775: eeh_addr_cache_get_dev:\n\t   (eeh_addr_cache_get_dev+0xc/0xf0) addr=0x80103000a510\n\ndmesg shows no EEH recovery messages:\n\n  [  108.563768] bnx2x: [bnx2x_timer:5801(eth2)]MFW seems hanged: drv_pulse (0x9ae) != mcp_pulse (0x7fff)\n  [  108.563788] bnx2x: [bnx2x_hw_stats_update:870(eth2)]NIG timer max (4294967295)\n  [  108.883788] bnx2x: [bnx2x_acquire_hw_lock:2013(eth1)]lock_status 0xffffffff  resource_bit 0x1\n  [  108.884407] bnx2x 0030:01:00.0 eth1: MDC/MDIO access timeout\n  [  108.884976] bnx2x 0030:01:00.0 eth1: MDC/MDIO access timeout\n  <..>\n\nAfter this patch:\n\neeh_addr_cache_get_dev() trace shows correct physical address:\n\n  <idle>-0       [001] ..s.  1043.123828: eeh_addr_cache_get_dev:\n\t  (eeh_addr_cache_get_dev+0xc/0xf0) addr=0x40080bc7cd8\n\ndmesg logs shows EEH recovery getting triggerred:\n\n  [  964.323980] bnx2x: [bnx2x_timer:5801(eth2)]MFW seems hanged: drv_pulse (0x746f) != mcp_pulse (0x7fff)\n  [  964.323991] EEH: Recovering PHB#30-PE#10000\n  [  964.324002] EEH: PE location: N/A, PHB location: N/A\n  [  964.324006] EEH: Frozen PHB#30-PE#10000 detected\n  <..>\n\nFixes: 33439620680b (\"powerpc/eeh: Handle hugepages in ioremap space\")\nCc: stable@vger.kernel.org # v5.3+\nReported-by: Dominic DeMarco <ddemarc@us.ibm.com>\nSigned-off-by: Mahesh Salgaonkar <mahesh@linux.ibm.com>\nSigned-off-by: Aneesh Kumar K.V <aneesh.kumar@linux.ibm.com>\nSigned-off-by: Michael Ellerman <mpe@ellerman.id.au>\nLink: https://lore.kernel.org/r/161821396263.48361.2796709239866588652.stgit@jupiter",
+  "full_message": "powerpc/eeh: Fix EEH handling for hugepages in ioremap space.\n\nDuring the EEH MMIO error checking, the current implementation fails to map\nthe (virtual) MMIO address back to the pci device on radix with hugepage\nmappings for I/O. This results into failure to dispatch EEH event with no\nrecovery even when EEH capability has been enabled on the device.\n\neeh_check_failure(token)\t\t# token = virtual MMIO address\n  addr = eeh_token_to_phys(token);\n  edev = eeh_addr_cache_get_dev(addr);\n  if (!edev)\n\treturn 0;\n  eeh_dev_check_failure(edev);\t<= Dispatch the EEH event\n\nIn case of hugepage mappings, eeh_token_to_phys() has a bug in virt -> phys\ntranslation that results in wrong physical address, which is then passed to\neeh_addr_cache_get_dev() to match it against cached pci I/O address ranges\nto get to a PCI device. Hence, it fails to find a match and the EEH event\nnever gets dispatched leaving the device in failed state.\n\nThe commit 33439620680be (\"powerpc/eeh: Handle hugepages in ioremap space\")\nintroduced following logic to translate virt to phys for hugepage mappings:\n\neeh_token_to_phys():\n+\tpa = pte_pfn(*ptep);\n+\n+\t/* On radix we can do hugepage mappings for io, so handle that */\n+       if (hugepage_shift) {\n+               pa <<= hugepage_shift;\t\t\t<= This is wrong\n+               pa |= token & ((1ul << hugepage_shift) - 1);\n+       }\n\nThis patch fixes the virt -> phys translation in eeh_token_to_phys()\nfunction.\n\n  $ cat /sys/kernel/debug/powerpc/eeh_address_cache\n  mem addr range [0x0000040080000000-0x00000400807fffff]: 0030:01:00.1\n  mem addr range [0x0000040080800000-0x0000040080ffffff]: 0030:01:00.1\n  mem addr range [0x0000040081000000-0x00000400817fffff]: 0030:01:00.0\n  mem addr range [0x0000040081800000-0x0000040081ffffff]: 0030:01:00.0\n  mem addr range [0x0000040082000000-0x000004008207ffff]: 0030:01:00.1\n  mem addr range [0x0000040082080000-0x00000400820fffff]: 0030:01:00.0\n  mem addr range [0x0000040082100000-0x000004008210ffff]: 0030:01:00.1\n  mem addr range [0x0000040082110000-0x000004008211ffff]: 0030:01:00.0\n\nAbove is the list of cached io address ranges of pci 0030:01:00.<fn>.\n\nBefore this patch:\n\nTracing 'arg1' of function eeh_addr_cache_get_dev() during error injection\nclearly shows that 'addr=' contains wrong physical address:\n\n   kworker/u16:0-7       [001] ....   108.883775: eeh_addr_cache_get_dev:\n\t   (eeh_addr_cache_get_dev+0xc/0xf0) addr=0x80103000a510\n\ndmesg shows no EEH recovery messages:\n\n  [  108.563768] bnx2x: [bnx2x_timer:5801(eth2)]MFW seems hanged: drv_pulse (0x9ae) != mcp_pulse (0x7fff)\n  [  108.563788] bnx2x: [bnx2x_hw_stats_update:870(eth2)]NIG timer max (4294967295)\n  [  108.883788] bnx2x: [bnx2x_acquire_hw_lock:2013(eth1)]lock_status 0xffffffff  resource_bit 0x1\n  [  108.884407] bnx2x 0030:01:00.0 eth1: MDC/MDIO access timeout\n  [  108.884976] bnx2x 0030:01:00.0 eth1: MDC/MDIO access timeout\n  <..>\n\nAfter this patch:\n\neeh_addr_cache_get_dev() trace shows correct physical address:\n\n  <idle>-0       [001] ..s.  1043.123828: eeh_addr_cache_get_dev:\n\t  (eeh_addr_cache_get_dev+0xc/0xf0) addr=0x40080bc7cd8\n\ndmesg logs shows EEH recovery getting triggerred:\n\n  [  964.323980] bnx2x: [bnx2x_timer:5801(eth2)]MFW seems hanged: drv_pulse (0x746f) != mcp_pulse (0x7fff)\n  [  964.323991] EEH: Recovering PHB#30-PE#10000\n  [  964.324002] EEH: PE location: N/A, PHB location: N/A\n  [  964.324006] EEH: Frozen PHB#30-PE#10000 detected\n  <..>\n\nFixes: 33439620680b (\"powerpc/eeh: Handle hugepages in ioremap space\")\nCc: stable@vger.kernel.org # v5.3+\nReported-by: Dominic DeMarco <ddemarc@us.ibm.com>\nSigned-off-by: Mahesh Salgaonkar <mahesh@linux.ibm.com>\nSigned-off-by: Aneesh Kumar K.V <aneesh.kumar@linux.ibm.com>\nSigned-off-by: Michael Ellerman <mpe@ellerman.id.au>\nLink: https://lore.kernel.org/r/161821396263.48361.2796709239866588652.stgit@jupiter",
+  "author_name": "Mahesh Salgaonkar",
+  "author_email": "mahesh@linux.ibm.com",
+  "author_date": "Mon Apr 12 13:22:50 2021 +0530",
+  "author_date_iso": "2021-04-12T13:22:50+05:30",
+  "committer_name": "Michael Ellerman",
+  "committer_email": "mpe@ellerman.id.au",
+  "committer_date": "Wed Apr 14 23:04:15 2021 +1000",
+  "committer_date_iso": "2021-04-14T23:04:15+10:00",
+  "files_changed": [
+    "arch/powerpc/kernel/eeh.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "arch/powerpc/kernel/eeh.c",
+      "insertions": 4,
+      "deletions": 7
+    }
+  ],
+  "total_insertions": 4,
+  "total_deletions": 7,
+  "total_changes": 11,
+  "parents": [
+    "fd6db2892ebaa1383a93b4a609c65b96e615510a"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "injection"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/powerpc/kernel/eeh.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

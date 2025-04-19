@@ -1,0 +1,76 @@
+Commit Hash: 1dd2eefb8efa97b6b495c4f09fa8232727b93db1
+Subject: Merge branch 'eapol-over-nl80211' into mac80211-next
+
+
+Security Keywords:
+- authentication
+
+Full commit message:
+Merge branch 'eapol-over-nl80211' into mac80211-next
+
+This is the EAPoL over nl80211 patchset from Denis Kenzior, minus some
+infrastructure patches I'd split out and applied earlier. Denis described
+it as follows:
+
+This patchset adds support for running 802.11 authentication mechanisms (e.g.
+802.1X, 4-Way Handshake, etc) over NL80211 instead of putting them onto the
+network device.  This has the advantage of fixing several long-standing race
+conditions that result from userspace operating on multiple transports in order
+to manage a 802.11 connection (e.g. NL80211 and wireless netdev, wlan0, etc).
+
+For example, userspace would sometimes see 4-Way handshake packets before
+NL80211 signaled that the connection has been established.  Leading to ugly
+hacks or having the STA wait for retransmissions from the AP.
+
+This also provides a way to mitigate a particularly nasty race condition where
+the encryption key could be set prior to the 4-way handshake packet 4/4 being
+sent.  This would result in the packet being sent encrypted and discarded by
+the peer.  The mitigation strategy for this race is for userspace to explicitly
+tell the kernel that a particular EAPoL packet should not be encrypted.
+
+To make this possible this patchset introduces a new NL80211 command and several
+new attributes.  A userspace that is capable of processing EAPoL packets over
+NL80211 includes a new NL80211_ATTR_CONTROL_PORT_OVER_NL80211 attribute in its
+NL80211_CMD_ASSOCIATE or NL80211_CMD_CONNECT requests being sent to the kernel.
+The previously added NL80211_ATTR_SOCKET_OWNER attribute must also be included.
+The latter is used by the kernel to send NL80211_CMD_CONTROL_PORT_FRAME
+notifications back to userspace via a netlink unicast.  If the
+NL80211_ATTR_CONTROL_PORT_OVER_NL80211 attribute is not specified, then legacy
+behavior is kept and control port packets continue to flow over the network
+interface.
+
+If control port over nl80211 transport is requested, then control port packets
+are intercepted just prior to being handed to the network device and sent over
+netlink via the NL80211_CMD_CONTROL_PORT_FRAME notification.
+NL80211_ATTR_CONTROL_PORT_ETHERTYPE and NL80211_ATTR_MAC are included to
+specify the control port frame protocol and source address respectively.  If
+the control port frame was received unencrypted then
+NL80211_ATTR_CONTROL_PORT_NO_ENCRYPT flag is also included.  NL80211_ATTR_FRAME
+attribute contains the raw control port frame with all transport layer headers
+stripped (e.g. this would be the raw EAPoL frame).
+
+Userspace can reply to control port frames either via legacy methods (by sending
+frames to the network device) or via NL80211_CMD_CONTROL_PORT_FRAME request.
+Userspace would included NL80211_ATTR_FRAME with the raw control port frame as
+well as NL80211_Attr_MAC and NL80211_ATTR_CONTROL_PORT_ETHERTYPE attributes to
+specify the destination address and protocol respectively.  This allows
+Pre-Authentication (protocol 0x88c7) frames to be sent via this mechanism as
+well.  Finally, NL80211_ATTR_CONTROL_PORT_NO_ENCRYPT flag can be included to
+tell the driver to send the frame unencrypted, e.g. for 4-Way handshake 4/4
+frames.
+
+The proposed patchset has been tested in a mac80211_hwsim based environment with
+hostapd and iwd.
+
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+Metadata:
+Author: Johannes Berg <johannes.berg@intel.com>
+Author Date: Thu Mar 29 14:04:07 2018 +0200
+Committer: Johannes Berg <johannes.berg@intel.com>
+Commit Date: Thu Mar 29 14:09:28 2018 +0200
+
+Files Changed: 0
+Lines Added: 395
+Lines Removed: 7
+Total Changes: 402

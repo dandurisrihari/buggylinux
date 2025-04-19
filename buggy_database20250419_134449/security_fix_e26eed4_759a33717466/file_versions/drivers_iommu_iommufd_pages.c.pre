@@ -1,0 +1,52 @@
+commit f4b20bb34c83dceade5470288f48f94ce3598ada
+Author: Jason Gunthorpe <jgg@ziepe.ca>
+Date:   Tue Nov 29 16:29:39 2022 -0400
+
+    iommufd: Add kernel support for testing iommufd
+    
+    Provide a mock kernel module for the iommu_domain that allows it to run
+    without any HW and the mocking provides a way to directly validate that
+    the PFNs loaded into the iommu_domain are correct. This exposes the access
+    kAPI toward userspace to allow userspace to explore the functionality of
+    pages.c and io_pagetable.c
+    
+    The mock also simulates the rare case of PAGE_SIZE > iommu page size as
+    the mock will operate at a 2K iommu page size. This allows exercising all
+    of the calculations to support this mismatch.
+    
+    This is also intended to support syzkaller exploring the same space.
+    
+    However, it is an unusually invasive config option to enable all of
+    this. The config option should not be enabled in a production kernel.
+    
+    Link: https://lore.kernel.org/r/16-v6-a196d26f289e+11787-iommufd_jgg@nvidia.com
+    Tested-by: Matthew Rosato <mjrosato@linux.ibm.com> # s390
+    Tested-by: Eric Auger <eric.auger@redhat.com> # aarch64
+    Signed-off-by: Jason Gunthorpe <jgg@nvidia.com>
+
+diff --git a/drivers/iommu/iommufd/pages.c b/drivers/iommu/iommufd/pages.c
+index bafeee9d73e8..640331b8a079 100644
+--- a/drivers/iommu/iommufd/pages.c
++++ b/drivers/iommu/iommufd/pages.c
+@@ -56,7 +56,11 @@
+ #include "io_pagetable.h"
+ #include "double_span.h"
+ 
++#ifndef CONFIG_IOMMUFD_TEST
+ #define TEMP_MEMORY_LIMIT 65536
++#else
++#define TEMP_MEMORY_LIMIT iommufd_test_memory_limit
++#endif
+ #define BATCH_BACKUP_SIZE 32
+ 
+ /*
+@@ -1756,6 +1760,10 @@ int iopt_pages_rw_access(struct iopt_pages *pages, unsigned long start_byte,
+ 	bool change_mm = current->mm != pages->source_mm;
+ 	int rc = 0;
+ 
++	if (IS_ENABLED(CONFIG_IOMMUFD_TEST) &&
++	    (flags & __IOMMUFD_ACCESS_RW_SLOW_PATH))
++		change_mm = true;
++
+ 	if ((flags & IOMMUFD_ACCESS_RW_WRITE) && !pages->writable)
+ 		return -EPERM;

@@ -1,0 +1,522 @@
+{
+  "hash": "874c8ca1e60b2c564a48f7e7acc40d328d5c8733",
+  "hash_short": "874c8ca1",
+  "subject": "netfs: Fix gcc-12 warning by embedding vfs inode in netfs_i_context",
+  "body": "While randstruct was satisfied with using an open-coded \"void *\" offset\ncast for the netfs_i_context <-> inode casting, __builtin_object_size() as\nused by FORTIFY_SOURCE was not as easily fooled.  This was causing the\nfollowing complaint[1] from gcc v12:\n\n  In file included from include/linux/string.h:253,\n                   from include/linux/ceph/ceph_debug.h:7,\n                   from fs/ceph/inode.c:2:\n  In function 'fortify_memset_chk',\n      inlined from 'netfs_i_context_init' at include/linux/netfs.h:326:2,\n      inlined from 'ceph_alloc_inode' at fs/ceph/inode.c:463:2:\n  include/linux/fortify-string.h:242:25: warning: call to '__write_overflow_field' declared with attribute warning: detected write beyond size of field (1st parameter); maybe use struct_group()? [-Wattribute-warning]\n    242 |                         __write_overflow_field(p_size_field, size);\n        |                         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\nFix this by embedding a struct inode into struct netfs_i_context (which\nshould perhaps be renamed to struct netfs_inode).  The struct inode\nvfs_inode fields are then removed from the 9p, afs, ceph and cifs inode\nstructs and vfs_inode is then simply changed to \"netfs.inode\" in those\nfilesystems.\n\nFurther, rename netfs_i_context to netfs_inode, get rid of the\nnetfs_inode() function that converted a netfs_i_context pointer to an\ninode pointer (that can now be done with &ctx->inode) and rename the\nnetfs_i_context() function to netfs_inode() (which is now a wrapper\naround container_of()).\n\nMost of the changes were done with:\n\n  perl -p -i -e 's/vfs_inode/netfs.inode/'g \\\n        `git grep -l 'vfs_inode' -- fs/{9p,afs,ceph,cifs}/*.[ch]`\n\nKees suggested doing it with a pair structure[2] and a special\ndeclarator to insert that into the network filesystem's inode\nwrapper[3], but I think it's cleaner to embed it - and then it doesn't\nmatter if struct randomisation reorders things.\n\nDave Chinner suggested using a filesystem-specific VFS_I() function in\neach filesystem to convert that filesystem's own inode wrapper struct\ninto the VFS inode struct[4].\n\nVersion #2:\n - Fix a couple of missed name changes due to a disabled cifs option.\n - Rename nfs_i_context to nfs_inode\n - Use \"netfs\" instead of \"nic\" as the member name in per-fs inode wrapper\n   structs.\n\n[ This also undoes commit 507160f46c55 (\"netfs: gcc-12: temporarily\n  disable '-Wattribute-warning' for now\") that is no longer needed ]\n\nFixes: bc899ee1c898 (\"netfs: Add a netfs inode context\")\nReported-by: Jeff Layton <jlayton@kernel.org>\nSigned-off-by: David Howells <dhowells@redhat.com>\nReviewed-by: Jeff Layton <jlayton@kernel.org>\nReviewed-by: Kees Cook <keescook@chromium.org>\nReviewed-by: Xiubo Li <xiubli@redhat.com>\ncc: Jonathan Corbet <corbet@lwn.net>\ncc: Eric Van Hensbergen <ericvh@gmail.com>\ncc: Latchesar Ionkov <lucho@ionkov.net>\ncc: Dominique Martinet <asmadeus@codewreck.org>\ncc: Christian Schoenebeck <linux_oss@crudebyte.com>\ncc: Marc Dionne <marc.dionne@auristor.com>\ncc: Ilya Dryomov <idryomov@gmail.com>\ncc: Steve French <smfrench@gmail.com>\ncc: William Kucharski <william.kucharski@oracle.com>\ncc: \"Matthew Wilcox (Oracle)\" <willy@infradead.org>\ncc: Dave Chinner <david@fromorbit.com>\ncc: linux-doc@vger.kernel.org\ncc: v9fs-developer@lists.sourceforge.net\ncc: linux-afs@lists.infradead.org\ncc: ceph-devel@vger.kernel.org\ncc: linux-cifs@vger.kernel.org\ncc: samba-technical@lists.samba.org\ncc: linux-fsdevel@vger.kernel.org\ncc: linux-hardening@vger.kernel.org\nLink: https://lore.kernel.org/r/d2ad3a3d7bdd794c6efb562d2f2b655fb67756b9.camel@kernel.org/ [1]\nLink: https://lore.kernel.org/r/20220517210230.864239-1-keescook@chromium.org/ [2]\nLink: https://lore.kernel.org/r/20220518202212.2322058-1-keescook@chromium.org/ [3]\nLink: https://lore.kernel.org/r/20220524101205.GI2306852@dread.disaster.area/ [4]\nLink: https://lore.kernel.org/r/165296786831.3591209.12111293034669289733.stgit@warthog.procyon.org.uk/ # v1\nLink: https://lore.kernel.org/r/165305805651.4094995.7763502506786714216.stgit@warthog.procyon.org.uk # v2\nSigned-off-by: Linus Torvalds <torvalds@linux-foundation.org>",
+  "full_message": "netfs: Fix gcc-12 warning by embedding vfs inode in netfs_i_context\n\nWhile randstruct was satisfied with using an open-coded \"void *\" offset\ncast for the netfs_i_context <-> inode casting, __builtin_object_size() as\nused by FORTIFY_SOURCE was not as easily fooled.  This was causing the\nfollowing complaint[1] from gcc v12:\n\n  In file included from include/linux/string.h:253,\n                   from include/linux/ceph/ceph_debug.h:7,\n                   from fs/ceph/inode.c:2:\n  In function 'fortify_memset_chk',\n      inlined from 'netfs_i_context_init' at include/linux/netfs.h:326:2,\n      inlined from 'ceph_alloc_inode' at fs/ceph/inode.c:463:2:\n  include/linux/fortify-string.h:242:25: warning: call to '__write_overflow_field' declared with attribute warning: detected write beyond size of field (1st parameter); maybe use struct_group()? [-Wattribute-warning]\n    242 |                         __write_overflow_field(p_size_field, size);\n        |                         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\nFix this by embedding a struct inode into struct netfs_i_context (which\nshould perhaps be renamed to struct netfs_inode).  The struct inode\nvfs_inode fields are then removed from the 9p, afs, ceph and cifs inode\nstructs and vfs_inode is then simply changed to \"netfs.inode\" in those\nfilesystems.\n\nFurther, rename netfs_i_context to netfs_inode, get rid of the\nnetfs_inode() function that converted a netfs_i_context pointer to an\ninode pointer (that can now be done with &ctx->inode) and rename the\nnetfs_i_context() function to netfs_inode() (which is now a wrapper\naround container_of()).\n\nMost of the changes were done with:\n\n  perl -p -i -e 's/vfs_inode/netfs.inode/'g \\\n        `git grep -l 'vfs_inode' -- fs/{9p,afs,ceph,cifs}/*.[ch]`\n\nKees suggested doing it with a pair structure[2] and a special\ndeclarator to insert that into the network filesystem's inode\nwrapper[3], but I think it's cleaner to embed it - and then it doesn't\nmatter if struct randomisation reorders things.\n\nDave Chinner suggested using a filesystem-specific VFS_I() function in\neach filesystem to convert that filesystem's own inode wrapper struct\ninto the VFS inode struct[4].\n\nVersion #2:\n - Fix a couple of missed name changes due to a disabled cifs option.\n - Rename nfs_i_context to nfs_inode\n - Use \"netfs\" instead of \"nic\" as the member name in per-fs inode wrapper\n   structs.\n\n[ This also undoes commit 507160f46c55 (\"netfs: gcc-12: temporarily\n  disable '-Wattribute-warning' for now\") that is no longer needed ]\n\nFixes: bc899ee1c898 (\"netfs: Add a netfs inode context\")\nReported-by: Jeff Layton <jlayton@kernel.org>\nSigned-off-by: David Howells <dhowells@redhat.com>\nReviewed-by: Jeff Layton <jlayton@kernel.org>\nReviewed-by: Kees Cook <keescook@chromium.org>\nReviewed-by: Xiubo Li <xiubli@redhat.com>\ncc: Jonathan Corbet <corbet@lwn.net>\ncc: Eric Van Hensbergen <ericvh@gmail.com>\ncc: Latchesar Ionkov <lucho@ionkov.net>\ncc: Dominique Martinet <asmadeus@codewreck.org>\ncc: Christian Schoenebeck <linux_oss@crudebyte.com>\ncc: Marc Dionne <marc.dionne@auristor.com>\ncc: Ilya Dryomov <idryomov@gmail.com>\ncc: Steve French <smfrench@gmail.com>\ncc: William Kucharski <william.kucharski@oracle.com>\ncc: \"Matthew Wilcox (Oracle)\" <willy@infradead.org>\ncc: Dave Chinner <david@fromorbit.com>\ncc: linux-doc@vger.kernel.org\ncc: v9fs-developer@lists.sourceforge.net\ncc: linux-afs@lists.infradead.org\ncc: ceph-devel@vger.kernel.org\ncc: linux-cifs@vger.kernel.org\ncc: samba-technical@lists.samba.org\ncc: linux-fsdevel@vger.kernel.org\ncc: linux-hardening@vger.kernel.org\nLink: https://lore.kernel.org/r/d2ad3a3d7bdd794c6efb562d2f2b655fb67756b9.camel@kernel.org/ [1]\nLink: https://lore.kernel.org/r/20220517210230.864239-1-keescook@chromium.org/ [2]\nLink: https://lore.kernel.org/r/20220518202212.2322058-1-keescook@chromium.org/ [3]\nLink: https://lore.kernel.org/r/20220524101205.GI2306852@dread.disaster.area/ [4]\nLink: https://lore.kernel.org/r/165296786831.3591209.12111293034669289733.stgit@warthog.procyon.org.uk/ # v1\nLink: https://lore.kernel.org/r/165305805651.4094995.7763502506786714216.stgit@warthog.procyon.org.uk # v2\nSigned-off-by: Linus Torvalds <torvalds@linux-foundation.org>",
+  "author_name": "David Howells",
+  "author_email": "dhowells@redhat.com",
+  "author_date": "Thu Jun 9 21:46:04 2022 +0100",
+  "author_date_iso": "2022-06-09T21:46:04+01:00",
+  "committer_name": "Linus Torvalds",
+  "committer_email": "torvalds@linux-foundation.org",
+  "committer_date": "Thu Jun 9 13:55:00 2022 -0700",
+  "committer_date_iso": "2022-06-09T13:55:00-07:00",
+  "files_changed": [
+    "Documentation/filesystems/netfs_library.rst",
+    "fs/9p/cache.c",
+    "fs/9p/v9fs.c",
+    "fs/9p/v9fs.h",
+    "fs/9p/vfs_addr.c",
+    "fs/9p/vfs_inode.c",
+    "fs/afs/callback.c",
+    "fs/afs/dir.c",
+    "fs/afs/dir_edit.c",
+    "fs/afs/dir_silly.c",
+    "fs/afs/dynroot.c",
+    "fs/afs/file.c",
+    "fs/afs/fs_operation.c",
+    "fs/afs/inode.c",
+    "fs/afs/internal.h",
+    "fs/afs/super.c",
+    "fs/afs/write.c",
+    "fs/ceph/addr.c",
+    "fs/ceph/cache.c",
+    "fs/ceph/cache.h",
+    "fs/ceph/caps.c",
+    "fs/ceph/file.c",
+    "fs/ceph/inode.c",
+    "fs/ceph/mds_client.c",
+    "fs/ceph/snap.c",
+    "fs/ceph/super.c",
+    "fs/ceph/super.h",
+    "fs/ceph/xattr.c",
+    "fs/cifs/cifsfs.c",
+    "fs/cifs/cifsglob.h",
+    "fs/cifs/file.c",
+    "fs/cifs/fscache.c",
+    "fs/cifs/fscache.h",
+    "fs/cifs/inode.c",
+    "fs/cifs/misc.c",
+    "fs/cifs/smb2ops.c",
+    "fs/netfs/buffered_read.c",
+    "fs/netfs/internal.h",
+    "fs/netfs/objects.c",
+    "include/linux/netfs.h"
+  ],
+  "files_changed_count": 40,
+  "stats": [
+    {
+      "file": "Documentation/filesystems/netfs_library.rst",
+      "insertions": 18,
+      "deletions": 19
+    },
+    {
+      "file": "fs/9p/cache.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "fs/9p/v9fs.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "fs/9p/v9fs.h",
+      "insertions": 3,
+      "deletions": 7
+    },
+    {
+      "file": "fs/9p/vfs_addr.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "fs/9p/vfs_inode.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "fs/afs/callback.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "fs/afs/dir.c",
+      "insertions": 16,
+      "deletions": 16
+    },
+    {
+      "file": "fs/afs/dir_edit.c",
+      "insertions": 5,
+      "deletions": 5
+    },
+    {
+      "file": "fs/afs/dir_silly.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "fs/afs/dynroot.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "fs/afs/file.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "fs/afs/fs_operation.c",
+      "insertions": 3,
+      "deletions": 3
+    },
+    {
+      "file": "fs/afs/inode.c",
+      "insertions": 19,
+      "deletions": 22
+    },
+    {
+      "file": "fs/afs/internal.h",
+      "insertions": 9,
+      "deletions": 14
+    },
+    {
+      "file": "fs/afs/super.c",
+      "insertions": 3,
+      "deletions": 3
+    },
+    {
+      "file": "fs/afs/write.c",
+      "insertions": 10,
+      "deletions": 11
+    },
+    {
+      "file": "fs/ceph/addr.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "fs/ceph/cache.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "fs/ceph/cache.h",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "fs/ceph/caps.c",
+      "insertions": 52,
+      "deletions": 52
+    },
+    {
+      "file": "fs/ceph/file.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "fs/ceph/inode.c",
+      "insertions": 5,
+      "deletions": 8
+    },
+    {
+      "file": "fs/ceph/mds_client.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "fs/ceph/snap.c",
+      "insertions": 4,
+      "deletions": 4
+    },
+    {
+      "file": "fs/ceph/super.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "fs/ceph/super.h",
+      "insertions": 3,
+      "deletions": 7
+    },
+    {
+      "file": "fs/ceph/xattr.c",
+      "insertions": 7,
+      "deletions": 7
+    },
+    {
+      "file": "fs/cifs/cifsfs.c",
+      "insertions": 4,
+      "deletions": 4
+    },
+    {
+      "file": "fs/cifs/cifsglob.h",
+      "insertions": 4,
+      "deletions": 8
+    },
+    {
+      "file": "fs/cifs/file.c",
+      "insertions": 4,
+      "deletions": 4
+    },
+    {
+      "file": "fs/cifs/fscache.c",
+      "insertions": 4,
+      "deletions": 4
+    },
+    {
+      "file": "fs/cifs/fscache.h",
+      "insertions": 4,
+      "deletions": 4
+    },
+    {
+      "file": "fs/cifs/inode.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "fs/cifs/misc.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "fs/cifs/smb2ops.c",
+      "insertions": 4,
+      "deletions": 4
+    },
+    {
+      "file": "fs/netfs/buffered_read.c",
+      "insertions": 3,
+      "deletions": 3
+    },
+    {
+      "file": "fs/netfs/internal.h",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "fs/netfs/objects.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "include/linux/netfs.h",
+      "insertions": 16,
+      "deletions": 25
+    }
+  ],
+  "total_insertions": 227,
+  "total_deletions": 261,
+  "total_changes": 488,
+  "parents": [
+    "3d9f55c57bc3659f986acc421eac431ff6edcc83"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "hardening"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "fs/9p/cache.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "Documentation/filesystems/netfs_library.rst",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/9p/vfs_inode.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/9p/v9fs.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/9p/v9fs.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/afs/dir.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/afs/dir_edit.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/afs/callback.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/9p/vfs_addr.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/afs/file.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/afs/dir_silly.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/afs/super.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/afs/dynroot.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/afs/fs_operation.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/afs/inode.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/afs/write.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/afs/internal.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/ceph/cache.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/ceph/file.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/ceph/addr.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/ceph/cache.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/ceph/caps.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/ceph/inode.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/cifs/cifsfs.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/cifs/cifsglob.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/ceph/mds_client.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/ceph/super.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/ceph/snap.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/ceph/super.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/ceph/xattr.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/cifs/fscache.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/cifs/file.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/cifs/fscache.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/netfs.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/cifs/inode.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/netfs/buffered_read.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/cifs/misc.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/cifs/smb2ops.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/netfs/objects.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/netfs/internal.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

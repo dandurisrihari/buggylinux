@@ -1,0 +1,78 @@
+{
+  "hash": "71cc849b7093bb83af966c0e60cb11b7f35cd746",
+  "hash_short": "71cc849b",
+  "subject": "KVM: x86: Fix split-irqchip vs interrupt injection window request",
+  "body": "kvm_cpu_accept_dm_intr and kvm_vcpu_ready_for_interrupt_injection are\na hodge-podge of conditions, hacked together to get something that\nmore or less works.  But what is actually needed is much simpler;\nin both cases the fundamental question is, do we have a place to stash\nan interrupt if userspace does KVM_INTERRUPT?\n\nIn userspace irqchip mode, that is !vcpu->arch.interrupt.injected.\nCurrently kvm_event_needs_reinjection(vcpu) covers it, but it is\nunnecessarily restrictive.\n\nIn split irqchip mode it's a bit more complicated, we need to check\nkvm_apic_accept_pic_intr(vcpu) (the IRQ window exit is basically an INTACK\ncycle and thus requires ExtINTs not to be masked) as well as\n!pending_userspace_extint(vcpu).  However, there is no need to\ncheck kvm_event_needs_reinjection(vcpu), since split irqchip keeps\npending ExtINT state separate from event injection state, and checking\nkvm_cpu_has_interrupt(vcpu) is wrong too since ExtINT has higher\npriority than APIC interrupts.  In fact the latter fixes a bug:\nwhen userspace requests an IRQ window vmexit, an interrupt in the\nlocal APIC can cause kvm_cpu_has_interrupt() to be true and thus\nkvm_vcpu_ready_for_interrupt_injection() to return false.  When this\nhappens, vcpu_run does not exit to userspace but the interrupt window\nvmexits keep occurring.  The VM loops without any hope of making progress.\n\nOnce we try to fix these with something like\n\n     return kvm_arch_interrupt_allowed(vcpu) &&\n-        !kvm_cpu_has_interrupt(vcpu) &&\n-        !kvm_event_needs_reinjection(vcpu) &&\n-        kvm_cpu_accept_dm_intr(vcpu);\n+        (!lapic_in_kernel(vcpu)\n+         ? !vcpu->arch.interrupt.injected\n+         : (kvm_apic_accept_pic_intr(vcpu)\n+            && !pending_userspace_extint(v)));\n\nwe realize two things.  First, thanks to the previous patch the complex\nconditional can reuse !kvm_cpu_has_extint(vcpu).  Second, the interrupt\nwindow request in vcpu_enter_guest()\n\n        bool req_int_win =\n                dm_request_for_irq_injection(vcpu) &&\n                kvm_cpu_accept_dm_intr(vcpu);\n\nshould be kept in sync with kvm_vcpu_ready_for_interrupt_injection():\nit is unnecessary to ask the processor for an interrupt window\nif we would not be able to return to userspace.  Therefore,\nkvm_cpu_accept_dm_intr(vcpu) is basically !kvm_cpu_has_extint(vcpu)\nANDed with the existing check for masked ExtINT.  It all makes sense:\n\n- we can accept an interrupt from userspace if there is a place\n  to stash it (and, for irqchip split, ExtINTs are not masked).\n  Interrupts from userspace _can_ be accepted even if right now\n  EFLAGS.IF=0.\n\n- in order to tell userspace we will inject its interrupt (\"IRQ\n  window open\" i.e. kvm_vcpu_ready_for_interrupt_injection), both\n  KVM and the vCPU need to be ready to accept the interrupt.\n\n... and this is what the patch implements.\n\nReported-by: David Woodhouse <dwmw@amazon.co.uk>\nAnalyzed-by: David Woodhouse <dwmw@amazon.co.uk>\nCc: stable@vger.kernel.org\nSigned-off-by: Paolo Bonzini <pbonzini@redhat.com>\nReviewed-by: Nikos Tsironis <ntsironis@arrikto.com>\nReviewed-by: David Woodhouse <dwmw@amazon.co.uk>\nTested-by: David Woodhouse <dwmw@amazon.co.uk>",
+  "full_message": "KVM: x86: Fix split-irqchip vs interrupt injection window request\n\nkvm_cpu_accept_dm_intr and kvm_vcpu_ready_for_interrupt_injection are\na hodge-podge of conditions, hacked together to get something that\nmore or less works.  But what is actually needed is much simpler;\nin both cases the fundamental question is, do we have a place to stash\nan interrupt if userspace does KVM_INTERRUPT?\n\nIn userspace irqchip mode, that is !vcpu->arch.interrupt.injected.\nCurrently kvm_event_needs_reinjection(vcpu) covers it, but it is\nunnecessarily restrictive.\n\nIn split irqchip mode it's a bit more complicated, we need to check\nkvm_apic_accept_pic_intr(vcpu) (the IRQ window exit is basically an INTACK\ncycle and thus requires ExtINTs not to be masked) as well as\n!pending_userspace_extint(vcpu).  However, there is no need to\ncheck kvm_event_needs_reinjection(vcpu), since split irqchip keeps\npending ExtINT state separate from event injection state, and checking\nkvm_cpu_has_interrupt(vcpu) is wrong too since ExtINT has higher\npriority than APIC interrupts.  In fact the latter fixes a bug:\nwhen userspace requests an IRQ window vmexit, an interrupt in the\nlocal APIC can cause kvm_cpu_has_interrupt() to be true and thus\nkvm_vcpu_ready_for_interrupt_injection() to return false.  When this\nhappens, vcpu_run does not exit to userspace but the interrupt window\nvmexits keep occurring.  The VM loops without any hope of making progress.\n\nOnce we try to fix these with something like\n\n     return kvm_arch_interrupt_allowed(vcpu) &&\n-        !kvm_cpu_has_interrupt(vcpu) &&\n-        !kvm_event_needs_reinjection(vcpu) &&\n-        kvm_cpu_accept_dm_intr(vcpu);\n+        (!lapic_in_kernel(vcpu)\n+         ? !vcpu->arch.interrupt.injected\n+         : (kvm_apic_accept_pic_intr(vcpu)\n+            && !pending_userspace_extint(v)));\n\nwe realize two things.  First, thanks to the previous patch the complex\nconditional can reuse !kvm_cpu_has_extint(vcpu).  Second, the interrupt\nwindow request in vcpu_enter_guest()\n\n        bool req_int_win =\n                dm_request_for_irq_injection(vcpu) &&\n                kvm_cpu_accept_dm_intr(vcpu);\n\nshould be kept in sync with kvm_vcpu_ready_for_interrupt_injection():\nit is unnecessary to ask the processor for an interrupt window\nif we would not be able to return to userspace.  Therefore,\nkvm_cpu_accept_dm_intr(vcpu) is basically !kvm_cpu_has_extint(vcpu)\nANDed with the existing check for masked ExtINT.  It all makes sense:\n\n- we can accept an interrupt from userspace if there is a place\n  to stash it (and, for irqchip split, ExtINTs are not masked).\n  Interrupts from userspace _can_ be accepted even if right now\n  EFLAGS.IF=0.\n\n- in order to tell userspace we will inject its interrupt (\"IRQ\n  window open\" i.e. kvm_vcpu_ready_for_interrupt_injection), both\n  KVM and the vCPU need to be ready to accept the interrupt.\n\n... and this is what the patch implements.\n\nReported-by: David Woodhouse <dwmw@amazon.co.uk>\nAnalyzed-by: David Woodhouse <dwmw@amazon.co.uk>\nCc: stable@vger.kernel.org\nSigned-off-by: Paolo Bonzini <pbonzini@redhat.com>\nReviewed-by: Nikos Tsironis <ntsironis@arrikto.com>\nReviewed-by: David Woodhouse <dwmw@amazon.co.uk>\nTested-by: David Woodhouse <dwmw@amazon.co.uk>",
+  "author_name": "Paolo Bonzini",
+  "author_email": "pbonzini@redhat.com",
+  "author_date": "Fri Nov 27 09:18:20 2020 +0100",
+  "author_date_iso": "2020-11-27T09:18:20+01:00",
+  "committer_name": "Paolo Bonzini",
+  "committer_email": "pbonzini@redhat.com",
+  "committer_date": "Fri Nov 27 09:27:28 2020 -0500",
+  "committer_date_iso": "2020-11-27T09:27:28-05:00",
+  "files_changed": [
+    "arch/x86/include/asm/kvm_host.h",
+    "arch/x86/kvm/irq.c",
+    "arch/x86/kvm/x86.c"
+  ],
+  "files_changed_count": 3,
+  "stats": [
+    {
+      "file": "arch/x86/include/asm/kvm_host.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/kvm/irq.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/x86/kvm/x86.c",
+      "insertions": 10,
+      "deletions": 8
+    }
+  ],
+  "total_insertions": 12,
+  "total_deletions": 9,
+  "total_changes": 21,
+  "parents": [
+    "72c3bcdcda494cbd600712a32e67702cdee60c07"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "injection"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/x86/include/asm/kvm_host.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kvm/irq.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kvm/x86.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

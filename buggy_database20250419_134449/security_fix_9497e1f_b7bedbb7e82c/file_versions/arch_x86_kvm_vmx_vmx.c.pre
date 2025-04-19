@@ -1,0 +1,45 @@
+commit 1051778f6e1e25c1203869586f4431785a35c13c
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Tue Aug 27 14:40:35 2019 -0700
+
+    KVM: x86: Handle emulation failure directly in kvm_task_switch()
+    
+    Consolidate the reporting of emulation failure into kvm_task_switch()
+    so that it can return EMULATE_USER_EXIT.  This helps pave the way for
+    removing EMULATE_FAIL altogether.
+    
+    This also fixes a theoretical bug where task switch interception could
+    suppress an EMULATE_USER_EXIT return.
+    
+    Signed-off-by: Sean Christopherson <sean.j.christopherson@intel.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index d4371599abe3..498270cfc71d 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -5074,21 +5074,13 @@ static int handle_task_switch(struct kvm_vcpu *vcpu)
+ 		       type != INTR_TYPE_NMI_INTR))
+ 		skip_emulated_instruction(vcpu);
+ 
+-	if (kvm_task_switch(vcpu, tss_selector,
+-			    type == INTR_TYPE_SOFT_INTR ? idt_index : -1, reason,
+-			    has_error_code, error_code) == EMULATE_FAIL) {
+-		vcpu->run->exit_reason = KVM_EXIT_INTERNAL_ERROR;
+-		vcpu->run->internal.suberror = KVM_INTERNAL_ERROR_EMULATION;
+-		vcpu->run->internal.ndata = 0;
+-		return 0;
+-	}
+-
+ 	/*
+ 	 * TODO: What about debug traps on tss switch?
+ 	 *       Are we supposed to inject them and update dr6?
+ 	 */
+-
+-	return 1;
++	return kvm_task_switch(vcpu, tss_selector,
++			       type == INTR_TYPE_SOFT_INTR ? idt_index : -1,
++			       reason, has_error_code, error_code) != EMULATE_USER_EXIT;
+ }
+ 
+ static int handle_ept_violation(struct kvm_vcpu *vcpu)

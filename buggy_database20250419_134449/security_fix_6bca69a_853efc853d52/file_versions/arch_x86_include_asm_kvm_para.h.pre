@@ -1,0 +1,64 @@
+commit ef68017eb5704eb2b0577c3aa6619e13caf2b59f
+Author: Andy Lutomirski <luto@kernel.org>
+Date:   Fri Feb 28 10:42:48 2020 -0800
+
+    x86/kvm: Handle async page faults directly through do_page_fault()
+    
+    KVM overloads #PF to indicate two types of not-actually-page-fault
+    events.  Right now, the KVM guest code intercepts them by modifying
+    the IDT and hooking the #PF vector.  This makes the already fragile
+    fault code even harder to understand, and it also pollutes call
+    traces with async_page_fault and do_async_page_fault for normal page
+    faults.
+    
+    Clean it up by moving the logic into do_page_fault() using a static
+    branch.  This gets rid of the platform trap_init override mechanism
+    completely.
+    
+    [ tglx: Fixed up 32bit, removed error code from the async functions and
+            massaged coding style ]
+    
+    Signed-off-by: Andy Lutomirski <luto@kernel.org>
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Reviewed-by: Alexandre Chartre <alexandre.chartre@oracle.com>
+    Acked-by: Paolo Bonzini <pbonzini@redhat.com>
+    Acked-by: Peter Zijlstra <peterz@infradead.org>
+    Link: https://lkml.kernel.org/r/20200505134059.169270470@linutronix.de
+
+diff --git a/arch/x86/include/asm/kvm_para.h b/arch/x86/include/asm/kvm_para.h
+index 9b4df6eaa11a..5261363adda3 100644
+--- a/arch/x86/include/asm/kvm_para.h
++++ b/arch/x86/include/asm/kvm_para.h
+@@ -91,8 +91,18 @@ unsigned int kvm_arch_para_hints(void);
+ void kvm_async_pf_task_wait(u32 token, int interrupt_kernel);
+ void kvm_async_pf_task_wake(u32 token);
+ u32 kvm_read_and_reset_pf_reason(void);
+-extern void kvm_disable_steal_time(void);
+-void do_async_page_fault(struct pt_regs *regs, unsigned long error_code, unsigned long address);
++void kvm_disable_steal_time(void);
++bool __kvm_handle_async_pf(struct pt_regs *regs, u32 token);
++
++DECLARE_STATIC_KEY_FALSE(kvm_async_pf_enabled);
++
++static __always_inline bool kvm_handle_async_pf(struct pt_regs *regs, u32 token)
++{
++	if (static_branch_unlikely(&kvm_async_pf_enabled))
++		return __kvm_handle_async_pf(regs, token);
++	else
++		return false;
++}
+ 
+ #ifdef CONFIG_PARAVIRT_SPINLOCKS
+ void __init kvm_spinlock_init(void);
+@@ -130,6 +140,11 @@ static inline void kvm_disable_steal_time(void)
+ {
+ 	return;
+ }
++
++static inline bool kvm_handle_async_pf(struct pt_regs *regs, u32 token)
++{
++	return false;
++}
+ #endif
+ 
+ #endif /* _ASM_X86_KVM_PARA_H */

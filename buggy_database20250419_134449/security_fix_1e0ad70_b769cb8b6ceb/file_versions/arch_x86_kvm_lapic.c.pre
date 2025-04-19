@@ -1,0 +1,73 @@
+commit 5d87db711937019cb8eba1137c37573d7a604be8
+Author: Radim Krčmář <rkrcmar@redhat.com>
+Date:   Fri Oct 10 19:15:08 2014 +0200
+
+    KVM: x86: add apic_timer_expired()
+    
+    Make the code reusable.
+    
+    If the timer was already pending, we shouldn't be waiting in a queue,
+    so wake_up can be skipped, simplifying the path.
+    
+    There is no 'reinject' case => the comment is removed.
+    Current race behaves correctly.
+    
+    Signed-off-by: Radim Krčmář <rkrcmar@redhat.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/lapic.c b/arch/x86/kvm/lapic.c
+index ee04adf6c73a..1ebd7ff33ac7 100644
+--- a/arch/x86/kvm/lapic.c
++++ b/arch/x86/kvm/lapic.c
+@@ -1050,6 +1050,26 @@ static void update_divide_count(struct kvm_lapic *apic)
+ 				   apic->divide_count);
+ }
+ 
++static void apic_timer_expired(struct kvm_lapic *apic)
++{
++	struct kvm_vcpu *vcpu = apic->vcpu;
++	wait_queue_head_t *q = &vcpu->wq;
++
++	/*
++	 * Note: KVM_REQ_PENDING_TIMER is implicitly checked in
++	 * vcpu_enter_guest.
++	 */
++	if (atomic_read(&apic->lapic_timer.pending))
++		return;
++
++	atomic_inc(&apic->lapic_timer.pending);
++	/* FIXME: this code should not know anything about vcpus */
++	kvm_make_request(KVM_REQ_PENDING_TIMER, vcpu);
++
++	if (waitqueue_active(q))
++		wake_up_interruptible(q);
++}
++
+ static void start_apic_timer(struct kvm_lapic *apic)
+ {
+ 	ktime_t now;
+@@ -1554,23 +1574,8 @@ static enum hrtimer_restart apic_timer_fn(struct hrtimer *data)
+ {
+ 	struct kvm_timer *ktimer = container_of(data, struct kvm_timer, timer);
+ 	struct kvm_lapic *apic = container_of(ktimer, struct kvm_lapic, lapic_timer);
+-	struct kvm_vcpu *vcpu = apic->vcpu;
+-	wait_queue_head_t *q = &vcpu->wq;
+-
+-	/*
+-	 * There is a race window between reading and incrementing, but we do
+-	 * not care about potentially losing timer events in the !reinject
+-	 * case anyway. Note: KVM_REQ_PENDING_TIMER is implicitly checked
+-	 * in vcpu_enter_guest.
+-	 */
+-	if (!atomic_read(&ktimer->pending)) {
+-		atomic_inc(&ktimer->pending);
+-		/* FIXME: this code should not know anything about vcpus */
+-		kvm_make_request(KVM_REQ_PENDING_TIMER, vcpu);
+-	}
+ 
+-	if (waitqueue_active(q))
+-		wake_up_interruptible(q);
++	apic_timer_expired(apic);
+ 
+ 	if (lapic_is_periodic(apic)) {
+ 		hrtimer_add_expires_ns(&ktimer->timer, ktimer->period);

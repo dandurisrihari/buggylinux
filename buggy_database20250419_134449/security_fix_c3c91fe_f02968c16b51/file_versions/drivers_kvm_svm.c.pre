@@ -1,0 +1,50 @@
+commit 298101da2f507c13eaf179ee4507a7c0fe3e7b06
+Author: Avi Kivity <avi@qumranet.com>
+Date:   Sun Nov 25 13:41:11 2007 +0200
+
+    KVM: Generalize exception injection mechanism
+    
+    Instead of each subarch doing its own thing, add an API for queuing an
+    injection, and manage failed exception injection centerally (i.e., if
+    an inject failed due to a shadow page fault, we need to requeue it).
+    
+    Signed-off-by: Avi Kivity <avi@qumranet.com>
+
+diff --git a/drivers/kvm/svm.c b/drivers/kvm/svm.c
+index c75c6b65b651..87072c647f28 100644
+--- a/drivers/kvm/svm.c
++++ b/drivers/kvm/svm.c
+@@ -188,6 +188,25 @@ static void svm_set_efer(struct kvm_vcpu *vcpu, u64 efer)
+ 	vcpu->shadow_efer = efer;
+ }
+ 
++static void svm_queue_exception(struct kvm_vcpu *vcpu, unsigned nr,
++				bool has_error_code, u32 error_code)
++{
++	struct vcpu_svm *svm = to_svm(vcpu);
++
++	svm->vmcb->control.event_inj = nr
++		| SVM_EVTINJ_VALID
++		| (has_error_code ? SVM_EVTINJ_VALID_ERR : 0)
++		| SVM_EVTINJ_TYPE_EXEPT;
++	svm->vmcb->control.event_inj_err = error_code;
++}
++
++static bool svm_exception_injected(struct kvm_vcpu *vcpu)
++{
++	struct vcpu_svm *svm = to_svm(vcpu);
++
++	return !(svm->vmcb->control.exit_int_info & SVM_EXITINTINFO_VALID);
++}
++
+ static void svm_inject_gp(struct kvm_vcpu *vcpu, unsigned error_code)
+ {
+ 	struct vcpu_svm *svm = to_svm(vcpu);
+@@ -1712,6 +1731,8 @@ static struct kvm_x86_ops svm_x86_ops = {
+ 	.patch_hypercall = svm_patch_hypercall,
+ 	.get_irq = svm_get_irq,
+ 	.set_irq = svm_set_irq,
++	.queue_exception = svm_queue_exception,
++	.exception_injected = svm_exception_injected,
+ 	.inject_pending_irq = svm_intr_assist,
+ 	.inject_pending_vectors = do_interrupt_requests,

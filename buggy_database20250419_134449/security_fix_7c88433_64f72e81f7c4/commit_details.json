@@ -1,0 +1,54 @@
+{
+  "hash": "7c884339bbff80250bfc11d56b5cf48640e6ebdb",
+  "hash_short": "7c884339",
+  "subject": "bpf: regsafe() must not skip check_ids()",
+  "body": "The verifier.c:regsafe() has the following shortcut:\n\n\tequal = memcmp(rold, rcur, offsetof(struct bpf_reg_state, parent)) == 0;\n\t...\n\tif (equal)\n\t\treturn true;\n\nWhich is executed regardless old register type. This is incorrect for\nregister types that might have an ID checked by check_ids(), namely:\n - PTR_TO_MAP_KEY\n - PTR_TO_MAP_VALUE\n - PTR_TO_PACKET_META\n - PTR_TO_PACKET\n\nThe following pattern could be used to exploit this:\n\n  0: r9 = map_lookup_elem(...)  ; Returns PTR_TO_MAP_VALUE_OR_NULL id=1.\n  1: r8 = map_lookup_elem(...)  ; Returns PTR_TO_MAP_VALUE_OR_NULL id=2.\n  2: r7 = ktime_get_ns()        ; Unbound SCALAR_VALUE.\n  3: r6 = ktime_get_ns()        ; Unbound SCALAR_VALUE.\n  4: if r6 > r7 goto +1         ; No new information about the state\n                                ; is derived from this check, thus\n                                ; produced verifier states differ only\n                                ; in 'insn_idx'.\n  5: r9 = r8                    ; Optionally make r9.id == r8.id.\n  --- checkpoint ---            ; Assume is_state_visisted() creates a\n                                ; checkpoint here.\n  6: if r9 == 0 goto <exit>     ; Nullness info is propagated to all\n                                ; registers with matching ID.\n  7: r1 = *(u64 *) r8           ; Not always safe.\n\nVerifier first visits path 1-7 where r8 is verified to be not null\nat (6). Later the jump from 4 to 6 is examined. The checkpoint for (6)\nlooks as follows:\n  R8_rD=map_value_or_null(id=2,off=0,ks=4,vs=8,imm=0)\n  R9_rwD=map_value_or_null(id=2,off=0,ks=4,vs=8,imm=0)\n  R10=fp0\n\nThe current state is:\n  R0=... R6=... R7=... fp-8=...\n  R8=map_value_or_null(id=2,off=0,ks=4,vs=8,imm=0)\n  R9=map_value_or_null(id=1,off=0,ks=4,vs=8,imm=0)\n  R10=fp0\n\nNote that R8 states are byte-to-byte identical, so regsafe() would\nexit early and skip call to check_ids(), thus ID mapping 2->2 will not\nbe added to 'idmap'. Next, states for R9 are compared: these are not\nidentical and check_ids() is executed, but 'idmap' is empty, so\ncheck_ids() adds mapping 2->1 to 'idmap' and returns success.\n\nThis commit pushes the 'equal' down to register types that don't need\ncheck_ids().\n\nSigned-off-by: Eduard Zingerman <eddyz87@gmail.com>\nLink: https://lore.kernel.org/r/20221209135733.28851-2-eddyz87@gmail.com\nSigned-off-by: Alexei Starovoitov <ast@kernel.org>",
+  "full_message": "bpf: regsafe() must not skip check_ids()\n\nThe verifier.c:regsafe() has the following shortcut:\n\n\tequal = memcmp(rold, rcur, offsetof(struct bpf_reg_state, parent)) == 0;\n\t...\n\tif (equal)\n\t\treturn true;\n\nWhich is executed regardless old register type. This is incorrect for\nregister types that might have an ID checked by check_ids(), namely:\n - PTR_TO_MAP_KEY\n - PTR_TO_MAP_VALUE\n - PTR_TO_PACKET_META\n - PTR_TO_PACKET\n\nThe following pattern could be used to exploit this:\n\n  0: r9 = map_lookup_elem(...)  ; Returns PTR_TO_MAP_VALUE_OR_NULL id=1.\n  1: r8 = map_lookup_elem(...)  ; Returns PTR_TO_MAP_VALUE_OR_NULL id=2.\n  2: r7 = ktime_get_ns()        ; Unbound SCALAR_VALUE.\n  3: r6 = ktime_get_ns()        ; Unbound SCALAR_VALUE.\n  4: if r6 > r7 goto +1         ; No new information about the state\n                                ; is derived from this check, thus\n                                ; produced verifier states differ only\n                                ; in 'insn_idx'.\n  5: r9 = r8                    ; Optionally make r9.id == r8.id.\n  --- checkpoint ---            ; Assume is_state_visisted() creates a\n                                ; checkpoint here.\n  6: if r9 == 0 goto <exit>     ; Nullness info is propagated to all\n                                ; registers with matching ID.\n  7: r1 = *(u64 *) r8           ; Not always safe.\n\nVerifier first visits path 1-7 where r8 is verified to be not null\nat (6). Later the jump from 4 to 6 is examined. The checkpoint for (6)\nlooks as follows:\n  R8_rD=map_value_or_null(id=2,off=0,ks=4,vs=8,imm=0)\n  R9_rwD=map_value_or_null(id=2,off=0,ks=4,vs=8,imm=0)\n  R10=fp0\n\nThe current state is:\n  R0=... R6=... R7=... fp-8=...\n  R8=map_value_or_null(id=2,off=0,ks=4,vs=8,imm=0)\n  R9=map_value_or_null(id=1,off=0,ks=4,vs=8,imm=0)\n  R10=fp0\n\nNote that R8 states are byte-to-byte identical, so regsafe() would\nexit early and skip call to check_ids(), thus ID mapping 2->2 will not\nbe added to 'idmap'. Next, states for R9 are compared: these are not\nidentical and check_ids() is executed, but 'idmap' is empty, so\ncheck_ids() adds mapping 2->1 to 'idmap' and returns success.\n\nThis commit pushes the 'equal' down to register types that don't need\ncheck_ids().\n\nSigned-off-by: Eduard Zingerman <eddyz87@gmail.com>\nLink: https://lore.kernel.org/r/20221209135733.28851-2-eddyz87@gmail.com\nSigned-off-by: Alexei Starovoitov <ast@kernel.org>",
+  "author_name": "Eduard Zingerman",
+  "author_email": "eddyz87@gmail.com",
+  "author_date": "Fri Dec 9 15:57:27 2022 +0200",
+  "author_date_iso": "2022-12-09T15:57:27+02:00",
+  "committer_name": "Alexei Starovoitov",
+  "committer_email": "ast@kernel.org",
+  "committer_date": "Sat Dec 10 13:20:52 2022 -0800",
+  "committer_date_iso": "2022-12-10T13:20:52-08:00",
+  "files_changed": [
+    "kernel/bpf/verifier.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "kernel/bpf/verifier.c",
+      "insertions": 8,
+      "deletions": 21
+    }
+  ],
+  "total_insertions": 8,
+  "total_deletions": 21,
+  "total_changes": 29,
+  "parents": [
+    "f3212ad5b7e93c002bd2dbe552c2b0b0033317ff"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "exploit"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "kernel/bpf/verifier.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

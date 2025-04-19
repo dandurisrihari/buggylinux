@@ -1,0 +1,36 @@
+commit 1051778f6e1e25c1203869586f4431785a35c13c
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Tue Aug 27 14:40:35 2019 -0700
+
+    KVM: x86: Handle emulation failure directly in kvm_task_switch()
+    
+    Consolidate the reporting of emulation failure into kvm_task_switch()
+    so that it can return EMULATE_USER_EXIT.  This helps pave the way for
+    removing EMULATE_FAIL altogether.
+    
+    This also fixes a theoretical bug where task switch interception could
+    suppress an EMULATE_USER_EXIT return.
+    
+    Signed-off-by: Sean Christopherson <sean.j.christopherson@intel.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 802dfb926ca7..bdee7e39accb 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -8693,9 +8693,12 @@ int kvm_task_switch(struct kvm_vcpu *vcpu, u16 tss_selector, int idt_index,
+ 
+ 	ret = emulator_task_switch(ctxt, tss_selector, idt_index, reason,
+ 				   has_error_code, error_code);
+-
+-	if (ret)
+-		return EMULATE_FAIL;
++	if (ret) {
++		vcpu->run->exit_reason = KVM_EXIT_INTERNAL_ERROR;
++		vcpu->run->internal.suberror = KVM_INTERNAL_ERROR_EMULATION;
++		vcpu->run->internal.ndata = 0;
++		return EMULATE_USER_EXIT;
++	}
+ 
+ 	kvm_rip_write(vcpu, ctxt->eip);
+ 	kvm_set_rflags(vcpu, ctxt->eflags);

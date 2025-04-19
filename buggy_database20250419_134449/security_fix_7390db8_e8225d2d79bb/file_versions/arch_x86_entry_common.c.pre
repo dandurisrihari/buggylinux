@@ -1,0 +1,54 @@
+commit 1e3ad78334a69b36e107232e337f9d693dcc9df2
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Wed Apr 3 16:36:44 2024 -0700
+
+    x86/syscall: Don't force use of indirect calls for system calls
+    
+    Make <asm/syscall.h> build a switch statement instead, and the compiler can
+    either decide to generate an indirect jump, or - more likely these days due
+    to mitigations - just a series of conditional branches.
+    
+    Yes, the conditional branches also have branch prediction, but the branch
+    prediction is much more controlled, in that it just causes speculatively
+    running the wrong system call (harmless), rather than speculatively running
+    possibly wrong random less controlled code gadgets.
+    
+    This doesn't mitigate other indirect calls, but the system call indirection
+    is the first and most easily triggered case.
+    
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+    Signed-off-by: Daniel Sneddon <daniel.sneddon@linux.intel.com>
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Reviewed-by: Josh Poimboeuf <jpoimboe@kernel.org>
+
+diff --git a/arch/x86/entry/common.c b/arch/x86/entry/common.c
+index 6356060caaf3..cea0e2a23b42 100644
+--- a/arch/x86/entry/common.c
++++ b/arch/x86/entry/common.c
+@@ -49,7 +49,7 @@ static __always_inline bool do_syscall_x64(struct pt_regs *regs, int nr)
+ 
+ 	if (likely(unr < NR_syscalls)) {
+ 		unr = array_index_nospec(unr, NR_syscalls);
+-		regs->ax = sys_call_table[unr](regs);
++		regs->ax = x64_sys_call(regs, unr);
+ 		return true;
+ 	}
+ 	return false;
+@@ -66,7 +66,7 @@ static __always_inline bool do_syscall_x32(struct pt_regs *regs, int nr)
+ 
+ 	if (IS_ENABLED(CONFIG_X86_X32_ABI) && likely(xnr < X32_NR_syscalls)) {
+ 		xnr = array_index_nospec(xnr, X32_NR_syscalls);
+-		regs->ax = x32_sys_call_table[xnr](regs);
++		regs->ax = x32_sys_call(regs, xnr);
+ 		return true;
+ 	}
+ 	return false;
+@@ -162,7 +162,7 @@ static __always_inline void do_syscall_32_irqs_on(struct pt_regs *regs, int nr)
+ 
+ 	if (likely(unr < IA32_NR_syscalls)) {
+ 		unr = array_index_nospec(unr, IA32_NR_syscalls);
+-		regs->ax = ia32_sys_call_table[unr](regs);
++		regs->ax = ia32_sys_call(regs, unr);
+ 	} else if (nr != -1) {
+ 		regs->ax = __ia32_sys_ni_syscall(regs);
+ 	}

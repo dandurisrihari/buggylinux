@@ -1,0 +1,205 @@
+Commit Hash: 0f8e26b38d7ac72b3ad764944a25dd5808f37a6e
+Subject: Merge tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm
+
+
+Security Keywords:
+- injection
+- bypass
+
+Full commit message:
+Merge tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm
+
+Pull kvm updates from Paolo Bonzini:
+ "Loongarch:
+
+   - Clear LLBCTL if secondary mmu mapping changes
+
+   - Add hypercall service support for usermode VMM
+
+  x86:
+
+   - Add a comment to kvm_mmu_do_page_fault() to explain why KVM
+     performs a direct call to kvm_tdp_page_fault() when RETPOLINE is
+     enabled
+
+   - Ensure that all SEV code is compiled out when disabled in Kconfig,
+     even if building with less brilliant compilers
+
+   - Remove a redundant TLB flush on AMD processors when guest CR4.PGE
+     changes
+
+   - Use str_enabled_disabled() to replace open coded strings
+
+   - Drop kvm_x86_ops.hwapic_irr_update() as KVM updates hardware's
+     APICv cache prior to every VM-Enter
+
+   - Overhaul KVM's CPUID feature infrastructure to track all vCPU
+     capabilities instead of just those where KVM needs to manage state
+     and/or explicitly enable the feature in hardware. Along the way,
+     refactor the code to make it easier to add features, and to make it
+     more self-documenting how KVM is handling each feature
+
+   - Rework KVM's handling of VM-Exits during event vectoring; this
+     plugs holes where KVM unintentionally puts the vCPU into infinite
+     loops in some scenarios (e.g. if emulation is triggered by the
+     exit), and brings parity between VMX and SVM
+
+   - Add pending request and interrupt injection information to the
+     kvm_exit and kvm_entry tracepoints respectively
+
+   - Fix a relatively benign flaw where KVM would end up redoing RDPKRU
+     when loading guest/host PKRU, due to a refactoring of the kernel
+     helpers that didn't account for KVM's pre-checking of the need to
+     do WRPKRU
+
+   - Make the completion of hypercalls go through the complete_hypercall
+     function pointer argument, no matter if the hypercall exits to
+     userspace or not.
+
+     Previously, the code assumed that KVM_HC_MAP_GPA_RANGE specifically
+     went to userspace, and all the others did not; the new code need
+     not special case KVM_HC_MAP_GPA_RANGE and in fact does not care at
+     all whether there was an exit to userspace or not
+
+   - As part of enabling TDX virtual machines, support support
+     separation of private/shared EPT into separate roots.
+
+     When TDX will be enabled, operations on private pages will need to
+     go through the privileged TDX Module via SEAMCALLs; as a result,
+     they are limited and relatively slow compared to reading a PTE.
+
+     The patches included in 6.14 allow KVM to keep a mirror of the
+     private EPT in host memory, and define entries in kvm_x86_ops to
+     operate on external page tables such as the TDX private EPT
+
+   - The recently introduced conversion of the NX-page reclamation
+     kthread to vhost_task moved the task under the main process. The
+     task is created as soon as KVM_CREATE_VM was invoked and this, of
+     course, broke userspace that didn't expect to see any child task of
+     the VM process until it started creating its own userspace threads.
+
+     In particular crosvm refuses to fork() if procfs shows any child
+     task, so unbreak it by creating the task lazily. This is arguably a
+     userspace bug, as there can be other kinds of legitimate worker
+     tasks and they wouldn't impede fork(); but it's not like userspace
+     has a way to distinguish kernel worker tasks right now. Should they
+     show as "Kthread: 1" in proc/.../status?
+
+  x86 - Intel:
+
+   - Fix a bug where KVM updates hardware's APICv cache of the highest
+     ISR bit while L2 is active, while ultimately results in a
+     hardware-accelerated L1 EOI effectively being lost
+
+   - Honor event priority when emulating Posted Interrupt delivery
+     during nested VM-Enter by queueing KVM_REQ_EVENT instead of
+     immediately handling the interrupt
+
+   - Rework KVM's processing of the Page-Modification Logging buffer to
+     reap entries in the same order they were created, i.e. to mark gfns
+     dirty in the same order that hardware marked the page/PTE dirty
+
+   - Misc cleanups
+
+  Generic:
+
+   - Cleanup and harden kvm_set_memory_region(); add proper lockdep
+     assertions when setting memory regions and add a dedicated API for
+     setting KVM-internal memory regions. The API can then explicitly
+     disallow all flags for KVM-internal memory regions
+
+   - Explicitly verify the target vCPU is online in kvm_get_vcpu() to
+     fix a bug where KVM would return a pointer to a vCPU prior to it
+     being fully online, and give kvm_for_each_vcpu() similar treatment
+     to fix a similar flaw
+
+   - Wait for a vCPU to come online prior to executing a vCPU ioctl, to
+     fix a bug where userspace could coerce KVM into handling the ioctl
+     on a vCPU that isn't yet onlined
+
+   - Gracefully handle xarray insertion failures; even though such
+     failures are impossible in practice after xa_reserve(), reserving
+     an entry is always followed by xa_store() which does not know (or
+     differentiate) whether there was an xa_reserve() before or not
+
+  RISC-V:
+
+   - Zabha, Svvptc, and Ziccrse extension support for guests. None of
+     them require anything in KVM except for detecting them and marking
+     them as supported; Zabha adds byte and halfword atomic operations,
+     while the others are markers for specific operation of the TLB and
+     of LL/SC instructions respectively
+
+   - Virtualize SBI system suspend extension for Guest/VM
+
+   - Support firmware counters which can be used by the guests to
+     collect statistics about traps that occur in the host
+
+  Selftests:
+
+   - Rework vcpu_get_reg() to return a value instead of using an
+     out-param, and update all affected arch code accordingly
+
+   - Convert the max_guest_memory_test into a more generic
+     mmu_stress_test. The basic gist of the "conversion" is to have the
+     test do mprotect() on guest memory while vCPUs are accessing said
+     memory, e.g. to verify KVM and mmu_notifiers are working as
+     intended
+
+   - Play nice with treewrite builds of unsupported architectures, e.g.
+     arm (32-bit), as KVM selftests' Makefile doesn't do anything to
+     ensure the target architecture is actually one KVM selftests
+     supports
+
+   - Use the kernel's $(ARCH) definition instead of the target triple
+     for arch specific directories, e.g. arm64 instead of aarch64,
+     mainly so as not to be different from the rest of the kernel
+
+   - Ensure that format strings for logging statements are checked by
+     the compiler even when the logging statement itself is disabled
+
+   - Attempt to whack the last LLC references/misses mole in the Intel
+     PMU counters test by adding a data load and doing CLFLUSH{OPT} on
+     the data instead of the code being executed. It seems that modern
+     Intel CPUs have learned new code prefetching tricks that bypass the
+     PMU counters
+
+   - Fix a flaw in the Intel PMU counters test where it asserts that
+     events are counting correctly without actually knowing what the
+     events count given the underlying hardware; this can happen if
+     Intel reuses a formerly microarchitecture-specific event encoding
+     as an architectural event, as was the case for Top-Down Slots"
+
+* tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm: (151 commits)
+  kvm: defer huge page recovery vhost task to later
+  KVM: x86/mmu: Return RET_PF* instead of 1 in kvm_mmu_page_fault()
+  KVM: Disallow all flags for KVM-internal memslots
+  KVM: x86: Drop double-underscores from __kvm_set_memory_region()
+  KVM: Add a dedicated API for setting KVM-internal memslots
+  KVM: Assert slots_lock is held when setting memory regions
+  KVM: Open code kvm_set_memory_region() into its sole caller (ioctl() API)
+  LoongArch: KVM: Add hypercall service support for usermode VMM
+  LoongArch: KVM: Clear LLBCTL if secondary mmu mapping is changed
+  KVM: SVM: Use str_enabled_disabled() helper in svm_hardware_setup()
+  KVM: VMX: read the PML log in the same order as it was written
+  KVM: VMX: refactor PML terminology
+  KVM: VMX: Fix comment of handle_vmx_instruction()
+  KVM: VMX: Reinstate __exit attribute for vmx_exit()
+  KVM: SVM: Use str_enabled_disabled() helper in sev_hardware_setup()
+  KVM: x86: Avoid double RDPKRU when loading host/guest PKRU
+  KVM: x86: Use LVT_TIMER instead of an open coded literal
+  RISC-V: KVM: Add new exit statstics for redirected traps
+  RISC-V: KVM: Update firmware counters for various events
+  RISC-V: KVM: Redirect instruction access fault trap to guest
+  ...
+
+Metadata:
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Author Date: Sat Jan 25 09:55:09 2025 -0800
+Committer: Linus Torvalds <torvalds@linux-foundation.org>
+Commit Date: Sat Jan 25 09:55:09 2025 -0800
+
+Files Changed: 5
+Lines Added: 2893
+Lines Removed: 1530
+Total Changes: 4423

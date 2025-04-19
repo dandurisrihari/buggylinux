@@ -1,0 +1,150 @@
+{
+  "hash": "93da6af3ae563b7dbc60d97b5872109822d7bf0a",
+  "hash_short": "93da6af3",
+  "subject": "KVM: x86: Defer runtime updates of dynamic CPUID bits until CPUID emulation",
+  "body": "Defer runtime CPUID updates until the next non-faulting CPUID emulation\nor KVM_GET_CPUID2, which are the only paths in KVM that consume the\ndynamic entries.  Deferring the updates is especially beneficial to\nnested VM-Enter/VM-Exit, as KVM will almost always detect multiple state\nchanges, not to mention the updates don't need to be realized while L2 is\nactive if CPUID is being intercepted by L1 (CPUID is a mandatory intercept\non Intel, but not AMD).\n\nDeferring CPUID updates shaves several hundred cycles from nested VMX\nroundtrips, as measured from L2 executing CPUID in a tight loop:\n\n  SKX 6850 => 6450\n  ICX 9000 => 8800\n  EMR 7900 => 7700\n\nAlternatively, KVM could update only the CPUID leaves that are affected\nby the state change, e.g. update XSAVE info only if XCR0 or XSS changes,\nbut that adds non-trivial complexity and doesn't solve the underlying\nproblem of nested transitions potentially changing both XCR0 and XSS, on\nboth nested VM-Enter and VM-Exit.\n\nSkipping updates entirely if L2 is active and CPUID is being intercepted\nby L1 could work for the common case.  However, simply skipping updates if\nL2 is active is *very* subtly dangerous and complex.  Most KVM updates are\ntriggered by changes to the current vCPU state, which may be L2 state,\nwhereas performing updates only for L1 would requiring detecting changes\nto L1 state.  KVM would need to either track relevant L1 state, or defer\nruntime CPUID updates until the next nested VM-Exit.  The former is ugly\nand complex, while the latter comes with similar dangers to deferring all\nCPUID updates, and would only address the nested VM-Enter path.\n\nTo guard against using stale data, disallow querying dynamic CPUID feature\nbits, i.e. features that KVM updates at runtime, via a compile-time\nassertion in guest_cpu_cap_has().  Exempt MWAIT from the rule, as the\nMISC_ENABLE_NO_MWAIT means that MWAIT is _conditionally_ a dynamic CPUID\nfeature.\n\nNote, the rule could be enforced for MWAIT as well, e.g. by querying guest\nCPUID in kvm_emulate_monitor_mwait, but there's no obvious advtantage to\ndoing so, and allowing MWAIT for guest_cpuid_has() opens up a different can\nof worms.  MONITOR/MWAIT can't be virtualized (for a reasonable definition),\nand the nature of the MWAIT_NEVER_UD_FAULTS and MISC_ENABLE_NO_MWAIT quirks\nmeans checking X86_FEATURE_MWAIT outside of kvm_emulate_monitor_mwait() is\nwrong for other reasons.\n\nBeyond the aforementioned feature bits, the only other dynamic CPUID\n(sub)leaves are the XSAVE sizes, and similar to MWAIT, consuming those\nCPUID entries in KVM is all but guaranteed to be a bug.  The layout for an\nactual XSAVE buffer depends on the format (compacted or not) and\npotentially the features that are actually enabled.  E.g. see the logic in\nfpstate_clear_xstate_component() needed to poke into the guest's effective\nXSAVE state to clear MPX state on INIT.  KVM does consume\nCPUID.0xD.0.{EAX,EDX} in kvm_check_cpuid() and cpuid_get_supported_xcr0(),\nbut not EBX, which is the only dynamic output register in the leaf.\n\nLink: https://lore.kernel.org/r/20241211013302.1347853-6-seanjc@google.com\nSigned-off-by: Sean Christopherson <seanjc@google.com>",
+  "full_message": "KVM: x86: Defer runtime updates of dynamic CPUID bits until CPUID emulation\n\nDefer runtime CPUID updates until the next non-faulting CPUID emulation\nor KVM_GET_CPUID2, which are the only paths in KVM that consume the\ndynamic entries.  Deferring the updates is especially beneficial to\nnested VM-Enter/VM-Exit, as KVM will almost always detect multiple state\nchanges, not to mention the updates don't need to be realized while L2 is\nactive if CPUID is being intercepted by L1 (CPUID is a mandatory intercept\non Intel, but not AMD).\n\nDeferring CPUID updates shaves several hundred cycles from nested VMX\nroundtrips, as measured from L2 executing CPUID in a tight loop:\n\n  SKX 6850 => 6450\n  ICX 9000 => 8800\n  EMR 7900 => 7700\n\nAlternatively, KVM could update only the CPUID leaves that are affected\nby the state change, e.g. update XSAVE info only if XCR0 or XSS changes,\nbut that adds non-trivial complexity and doesn't solve the underlying\nproblem of nested transitions potentially changing both XCR0 and XSS, on\nboth nested VM-Enter and VM-Exit.\n\nSkipping updates entirely if L2 is active and CPUID is being intercepted\nby L1 could work for the common case.  However, simply skipping updates if\nL2 is active is *very* subtly dangerous and complex.  Most KVM updates are\ntriggered by changes to the current vCPU state, which may be L2 state,\nwhereas performing updates only for L1 would requiring detecting changes\nto L1 state.  KVM would need to either track relevant L1 state, or defer\nruntime CPUID updates until the next nested VM-Exit.  The former is ugly\nand complex, while the latter comes with similar dangers to deferring all\nCPUID updates, and would only address the nested VM-Enter path.\n\nTo guard against using stale data, disallow querying dynamic CPUID feature\nbits, i.e. features that KVM updates at runtime, via a compile-time\nassertion in guest_cpu_cap_has().  Exempt MWAIT from the rule, as the\nMISC_ENABLE_NO_MWAIT means that MWAIT is _conditionally_ a dynamic CPUID\nfeature.\n\nNote, the rule could be enforced for MWAIT as well, e.g. by querying guest\nCPUID in kvm_emulate_monitor_mwait, but there's no obvious advtantage to\ndoing so, and allowing MWAIT for guest_cpuid_has() opens up a different can\nof worms.  MONITOR/MWAIT can't be virtualized (for a reasonable definition),\nand the nature of the MWAIT_NEVER_UD_FAULTS and MISC_ENABLE_NO_MWAIT quirks\nmeans checking X86_FEATURE_MWAIT outside of kvm_emulate_monitor_mwait() is\nwrong for other reasons.\n\nBeyond the aforementioned feature bits, the only other dynamic CPUID\n(sub)leaves are the XSAVE sizes, and similar to MWAIT, consuming those\nCPUID entries in KVM is all but guaranteed to be a bug.  The layout for an\nactual XSAVE buffer depends on the format (compacted or not) and\npotentially the features that are actually enabled.  E.g. see the logic in\nfpstate_clear_xstate_component() needed to poke into the guest's effective\nXSAVE state to clear MPX state on INIT.  KVM does consume\nCPUID.0xD.0.{EAX,EDX} in kvm_check_cpuid() and cpuid_get_supported_xcr0(),\nbut not EBX, which is the only dynamic output register in the leaf.\n\nLink: https://lore.kernel.org/r/20241211013302.1347853-6-seanjc@google.com\nSigned-off-by: Sean Christopherson <seanjc@google.com>",
+  "author_name": "Sean Christopherson",
+  "author_email": "seanjc@google.com",
+  "author_date": "Tue Dec 10 17:33:02 2024 -0800",
+  "author_date_iso": "2024-12-10T17:33:02-08:00",
+  "committer_name": "Sean Christopherson",
+  "committer_email": "seanjc@google.com",
+  "committer_date": "Wed Feb 12 10:16:33 2025 -0800",
+  "committer_date_iso": "2025-02-12T10:16:33-08:00",
+  "files_changed": [
+    "arch/x86/include/asm/kvm_host.h",
+    "arch/x86/kvm/cpuid.c",
+    "arch/x86/kvm/cpuid.h",
+    "arch/x86/kvm/lapic.c",
+    "arch/x86/kvm/smm.c",
+    "arch/x86/kvm/svm/sev.c",
+    "arch/x86/kvm/svm/svm.c",
+    "arch/x86/kvm/vmx/vmx.c",
+    "arch/x86/kvm/x86.c"
+  ],
+  "files_changed_count": 9,
+  "stats": [
+    {
+      "file": "arch/x86/include/asm/kvm_host.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/kvm/cpuid.c",
+      "insertions": 10,
+      "deletions": 2
+    },
+    {
+      "file": "arch/x86/kvm/cpuid.h",
+      "insertions": 8,
+      "deletions": 1
+    },
+    {
+      "file": "arch/x86/kvm/lapic.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/x86/kvm/smm.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/x86/kvm/svm/sev.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/x86/kvm/svm/svm.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/x86/kvm/vmx/vmx.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/x86/kvm/x86.c",
+      "insertions": 3,
+      "deletions": 3
+    }
+  ],
+  "total_insertions": 27,
+  "total_deletions": 11,
+  "total_changes": 38,
+  "parents": [
+    "a487f6797c881460024ab45f2fea562bc377f02a"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "XSS"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/x86/kvm/cpuid.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kvm/svm/sev.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kvm/cpuid.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kvm/lapic.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/include/asm/kvm_host.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kvm/smm.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kvm/svm/svm.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kvm/vmx/vmx.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kvm/x86.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

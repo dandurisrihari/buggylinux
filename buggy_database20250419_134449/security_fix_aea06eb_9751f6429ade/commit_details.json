@@ -1,0 +1,178 @@
+{
+  "hash": "aea06eb276d99590f400c877ca2bd74b4db91330",
+  "hash_short": "aea06eb2",
+  "subject": "Merge branch 'TLS-offload-rx-netdev-and-mlx5'",
+  "body": "Boris Pismenny says:\n\n====================\nTLS offload rx, netdev & mlx5\n\nThe following series provides TLS RX inline crypto offload.\n\nv5->v4:\n    - Remove the Kconfig to mutually exclude both IPsec and TLS\n\nv4->v3:\n    - Remove the iov revert for zero copy send flow\n\nv2->v3:\n    - Fix typo\n    - Adjust cover letter\n    - Fix bug in zero copy flows\n    - Use network byte order for the record number in resync\n    - Adjust the sequence provided in resync\n\nv1->v2:\n    - Fix bisectability problems due to variable name changes\n    - Fix potential uninitialized return value\n\nThis series completes the generic infrastructure to offload TLS crypto to\na network devices. It enables the kernel TLS socket to skip decryption and\nauthentication operations for SKBs marked as decrypted on the receive\nside of the data path. Leaving those computationally expensive operations\nto the NIC.\n\nThis infrastructure doesn't require a TCP offload engine. Instead, the\nNIC decrypts a packet's payload if the packet contains the expected TCP\nsequence number. The TLS record authentication tag remains unmodified\nregardless of decryption. If the packet is decrypted successfully and it\ncontains an authentication tag, then the authentication check has passed.\nOtherwise, if the authentication fails, then the packet is provided\nunmodified and the KTLS layer is responsible for handling it.\nOut-Of-Order TCP packets are provided unmodified. As a result,\nin the slow path some of the SKBs are decrypted while others remain as\nciphertext.\n\nThe GRO and TCP layers must not coalesce decrypted and non-decrypted SKBs.\nAt the worst case a received TLS record consists of both plaintext\nand ciphertext packets. These partially decrypted records must be\nreencrypted, only to be decrypted.\n\nThe notable differences between SW KTLS and NIC offloaded TLS\nimplementations are as follows:\n1. Partial decryption - Software must handle the case of a TLS record\nthat was only partially decrypted by HW. This can happen due to packet\nreordering.\n2. Resynchronization - tls_read_size calls the device driver to\nresynchronize HW whenever it lost track of the TLS record framing in\nthe TCP stream.\n\nThe infrastructure should be extendable to support various NIC offload\nimplementations.  However it is currently written with the\nimplementation below in mind:\nThe NIC identifies packets that should be offloaded according to\nthe 5-tuple and the TCP sequence number. If these match and the\npacket is decrypted and authenticated successfully, then a syndrome\nis provided to software. Otherwise, the packet is unmodified.\nDecrypted and non-decrypted packets aren't coalesced by the network stack,\nand the KTLS layer decrypts and authenticates partially decrypted records.\nThe NIC provides an indication whenever a resync is required. The resync\noperation is triggered by the KTLS layer while parsing TLS record headers.\n\nFinally, we measure the performance obtained by running single stream\niperf with two Intel(R) Xeon(R) CPU E5-2620 v3 @ 2.40GHz machines connected\nback-to-back with Innova TLS (40Gbps) NICs. We compare TCP (upper bound)\nand KTLS-Offload running both in Tx and Rx. The results show that the\nperformance of offload is comparable to TCP.\n\n                          | Bandwidth (Gbps) | CPU Tx (%) | CPU rx (%)\nTCP                       | 28.8             | 5          | 12\nKTLS-Offload-Tx-Rx \t  | 28.6\t     | 7          | 14\n\nPaper: https://netdevconf.org/2.2/papers/pismenny-tlscrypto-talk.pdf\n====================\n\nSigned-off-by: David S. Miller <davem@davemloft.net>",
+  "full_message": "Merge branch 'TLS-offload-rx-netdev-and-mlx5'\n\nBoris Pismenny says:\n\n====================\nTLS offload rx, netdev & mlx5\n\nThe following series provides TLS RX inline crypto offload.\n\nv5->v4:\n    - Remove the Kconfig to mutually exclude both IPsec and TLS\n\nv4->v3:\n    - Remove the iov revert for zero copy send flow\n\nv2->v3:\n    - Fix typo\n    - Adjust cover letter\n    - Fix bug in zero copy flows\n    - Use network byte order for the record number in resync\n    - Adjust the sequence provided in resync\n\nv1->v2:\n    - Fix bisectability problems due to variable name changes\n    - Fix potential uninitialized return value\n\nThis series completes the generic infrastructure to offload TLS crypto to\na network devices. It enables the kernel TLS socket to skip decryption and\nauthentication operations for SKBs marked as decrypted on the receive\nside of the data path. Leaving those computationally expensive operations\nto the NIC.\n\nThis infrastructure doesn't require a TCP offload engine. Instead, the\nNIC decrypts a packet's payload if the packet contains the expected TCP\nsequence number. The TLS record authentication tag remains unmodified\nregardless of decryption. If the packet is decrypted successfully and it\ncontains an authentication tag, then the authentication check has passed.\nOtherwise, if the authentication fails, then the packet is provided\nunmodified and the KTLS layer is responsible for handling it.\nOut-Of-Order TCP packets are provided unmodified. As a result,\nin the slow path some of the SKBs are decrypted while others remain as\nciphertext.\n\nThe GRO and TCP layers must not coalesce decrypted and non-decrypted SKBs.\nAt the worst case a received TLS record consists of both plaintext\nand ciphertext packets. These partially decrypted records must be\nreencrypted, only to be decrypted.\n\nThe notable differences between SW KTLS and NIC offloaded TLS\nimplementations are as follows:\n1. Partial decryption - Software must handle the case of a TLS record\nthat was only partially decrypted by HW. This can happen due to packet\nreordering.\n2. Resynchronization - tls_read_size calls the device driver to\nresynchronize HW whenever it lost track of the TLS record framing in\nthe TCP stream.\n\nThe infrastructure should be extendable to support various NIC offload\nimplementations.  However it is currently written with the\nimplementation below in mind:\nThe NIC identifies packets that should be offloaded according to\nthe 5-tuple and the TCP sequence number. If these match and the\npacket is decrypted and authenticated successfully, then a syndrome\nis provided to software. Otherwise, the packet is unmodified.\nDecrypted and non-decrypted packets aren't coalesced by the network stack,\nand the KTLS layer decrypts and authenticates partially decrypted records.\nThe NIC provides an indication whenever a resync is required. The resync\noperation is triggered by the KTLS layer while parsing TLS record headers.\n\nFinally, we measure the performance obtained by running single stream\niperf with two Intel(R) Xeon(R) CPU E5-2620 v3 @ 2.40GHz machines connected\nback-to-back with Innova TLS (40Gbps) NICs. We compare TCP (upper bound)\nand KTLS-Offload running both in Tx and Rx. The results show that the\nperformance of offload is comparable to TCP.\n\n                          | Bandwidth (Gbps) | CPU Tx (%) | CPU rx (%)\nTCP                       | 28.8             | 5          | 12\nKTLS-Offload-Tx-Rx \t  | 28.6\t     | 7          | 14\n\nPaper: https://netdevconf.org/2.2/papers/pismenny-tlscrypto-talk.pdf\n====================\n\nSigned-off-by: David S. Miller <davem@davemloft.net>",
+  "author_name": "David S. Miller",
+  "author_email": "davem@davemloft.net",
+  "author_date": "Mon Jul 16 00:13:40 2018 -0700",
+  "author_date_iso": "2018-07-16T00:13:40-07:00",
+  "committer_name": "David S. Miller",
+  "committer_email": "davem@davemloft.net",
+  "committer_date": "Mon Jul 16 00:13:40 2018 -0700",
+  "committer_date_iso": "2018-07-16T00:13:40-07:00",
+  "files_changed": [],
+  "files_changed_count": 0,
+  "stats": [
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/accel/accel.h",
+      "insertions": 37,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/accel/tls.c",
+      "insertions": 16,
+      "deletions": 7
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/accel/tls.h",
+      "insertions": 17,
+      "deletions": 9
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/en_accel/ipsec_rxtx.c",
+      "insertions": 5,
+      "deletions": 15
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/en_accel/ipsec_rxtx.h",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/en_accel/tls.c",
+      "insertions": 51,
+      "deletions": 18
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/en_accel/tls.h",
+      "insertions": 26,
+      "deletions": 7
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/en_accel/tls_rxtx.c",
+      "insertions": 111,
+      "deletions": 6
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/en_accel/tls_rxtx.h",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/en_rx.c",
+      "insertions": 7,
+      "deletions": 1
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/fpga/tls.c",
+      "insertions": 89,
+      "deletions": 24
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlx5/core/fpga/tls.h",
+      "insertions": 12,
+      "deletions": 6
+    },
+    {
+      "file": "include/linux/mlx5/mlx5_ifc_fpga.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/netdev_features.h",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/netdevice.h",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/skbuff.h",
+      "insertions": 6,
+      "deletions": 1
+    },
+    {
+      "file": "include/net/tls.h",
+      "insertions": 70,
+      "deletions": 12
+    },
+    {
+      "file": "net/core/ethtool.c",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "net/core/skbuff.c",
+      "insertions": 6,
+      "deletions": 0
+    },
+    {
+      "file": "net/ipv4/tcp_input.c",
+      "insertions": 12,
+      "deletions": 0
+    },
+    {
+      "file": "net/ipv4/tcp_offload.c",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "net/tls/tls_device.c",
+      "insertions": 267,
+      "deletions": 34
+    },
+    {
+      "file": "net/tls/tls_device_fallback.c",
+      "insertions": 5,
+      "deletions": 4
+    },
+    {
+      "file": "net/tls/tls_main.c",
+      "insertions": 20,
+      "deletions": 12
+    },
+    {
+      "file": "net/tls/tls_sw.c",
+      "insertions": 76,
+      "deletions": 34
+    }
+  ],
+  "total_insertions": 846,
+  "total_deletions": 191,
+  "total_changes": 1037,
+  "parents": [
+    "cc98419a572ccf625bbf6e6fdb8d5ce31f2a9470",
+    "b3ccf978132ed7d0add45ca56e810a36ce7febf3"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v4.19",
+    "v4.19-rc1",
+    "v4.19-rc2",
+    "v4.19-rc3",
+    "v4.19-rc4",
+    "v4.19-rc5",
+    "v4.19-rc6",
+    "v4.19-rc7",
+    "v4.19-rc8",
+    "v4.20"
+  ],
+  "is_merge": true,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "authentication"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": []
+}

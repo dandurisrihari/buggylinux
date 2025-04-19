@@ -1,0 +1,43 @@
+commit 9e3ca33b62d4878f6ae39776abb6deebb37db597
+Author: Chuck Lever <chuck.lever@oracle.com>
+Date:   Mon Apr 19 14:02:35 2021 -0400
+
+    xprtrdma: Improve locking around rpcrdma_rep creation
+    
+    Defensive clean up: Protect the rb_all_reps list during rep
+    creation.
+    
+    Signed-off-by: Chuck Lever <chuck.lever@oracle.com>
+    Signed-off-by: Trond Myklebust <trond.myklebust@hammerspace.com>
+
+diff --git a/net/sunrpc/xprtrdma/verbs.c b/net/sunrpc/xprtrdma/verbs.c
+index baf4b8c99d4c..95ce9328e5d2 100644
+--- a/net/sunrpc/xprtrdma/verbs.c
++++ b/net/sunrpc/xprtrdma/verbs.c
+@@ -963,13 +963,11 @@ static void rpcrdma_reqs_reset(struct rpcrdma_xprt *r_xprt)
+ 		rpcrdma_req_reset(req);
+ }
+ 
+-/* No locking needed here. This function is called only by the
+- * Receive completion handler.
+- */
+ static noinline
+ struct rpcrdma_rep *rpcrdma_rep_create(struct rpcrdma_xprt *r_xprt,
+ 				       bool temp)
+ {
++	struct rpcrdma_buffer *buf = &r_xprt->rx_buf;
+ 	struct rpcrdma_rep *rep;
+ 
+ 	rep = kzalloc(sizeof(*rep), GFP_KERNEL);
+@@ -996,7 +994,10 @@ struct rpcrdma_rep *rpcrdma_rep_create(struct rpcrdma_xprt *r_xprt,
+ 	rep->rr_recv_wr.sg_list = &rep->rr_rdmabuf->rg_iov;
+ 	rep->rr_recv_wr.num_sge = 1;
+ 	rep->rr_temp = temp;
+-	list_add(&rep->rr_all, &r_xprt->rx_buf.rb_all_reps);
++
++	spin_lock(&buf->rb_lock);
++	list_add(&rep->rr_all, &buf->rb_all_reps);
++	spin_unlock(&buf->rb_lock);
+ 	return rep;
+ 
+ out_free_regbuf:

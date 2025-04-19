@@ -1,0 +1,90 @@
+{
+  "hash": "98694166c27d473c36b434bd3572934c2f2a16ab",
+  "hash_short": "98694166",
+  "subject": "powerpc/interrupt: Fix OOPS by not calling do_IRQ() from timer_interrupt()",
+  "body": "An interrupt handler shall not be called from another interrupt\nhandler otherwise this leads to problems like the following:\n\n  Kernel attempted to write user page (afd4fa84) - exploit attempt? (uid: 1000)\n  ------------[ cut here ]------------\n  Bug: Write fault blocked by KUAP!\n  WARNING: CPU: 0 PID: 1617 at arch/powerpc/mm/fault.c:230 do_page_fault+0x484/0x720\n  Modules linked in:\n  CPU: 0 PID: 1617 Comm: sshd Tainted: G        W         5.13.0-pmac-00010-g8393422eb77 #7\n  NIP:  c001b77c LR: c001b77c CTR: 00000000\n  REGS: cb9e5bc0 TRAP: 0700   Tainted: G        W          (5.13.0-pmac-00010-g8393422eb77)\n  MSR:  00021032 <ME,IR,DR,RI>  CR: 24942424  XER: 00000000\n\n  GPR00: c001b77c cb9e5c80 c1582c00 00000021 3ffffbff 085b0000 00000027 c8eb644c\n  GPR08: 00000023 00000000 00000000 00000000 24942424 0063f8c8 00000000 000186a0\n  GPR16: afd52dd4 afd52dd0 afd52dcc afd52dc8 0065a990 c07640c4 cb9e5e98 cb9e5e90\n  GPR24: 00000040 afd4fa96 00000040 02000000 c1fda6c0 afd4fa84 00000300 cb9e5cc0\n  NIP [c001b77c] do_page_fault+0x484/0x720\n  LR [c001b77c] do_page_fault+0x484/0x720\n  Call Trace:\n  [cb9e5c80] [c001b77c] do_page_fault+0x484/0x720 (unreliable)\n  [cb9e5cb0] [c000424c] DataAccess_virt+0xd4/0xe4\n  --- interrupt: 300 at __copy_tofrom_user+0x110/0x20c\n  NIP:  c001f9b4 LR: c03250a0 CTR: 00000004\n  REGS: cb9e5cc0 TRAP: 0300   Tainted: G        W          (5.13.0-pmac-00010-g8393422eb77)\n  MSR:  00009032 <EE,ME,IR,DR,RI>  CR: 48028468  XER: 20000000\n  DAR: afd4fa84 DSISR: 0a000000\n  GPR00: 20726f6f cb9e5d80 c1582c00 00000004 cb9e5e3a 00000016 afd4fa80 00000000\n  GPR08: 3835202d 72777872 2d78722d 00000004 28028464 0063f8c8 00000000 000186a0\n  GPR16: afd52dd4 afd52dd0 afd52dcc afd52dc8 0065a990 c07640c4 cb9e5e98 cb9e5e90\n  GPR24: 00000040 afd4fa96 00000040 cb9e5e0c 00000daa a0000000 cb9e5e98 afd4fa56\n  NIP [c001f9b4] __copy_tofrom_user+0x110/0x20c\n  LR [c03250a0] _copy_to_iter+0x144/0x990\n  --- interrupt: 300\n  [cb9e5d80] [c03e89c0] n_tty_read+0xa4/0x598 (unreliable)\n  [cb9e5df0] [c03e2a0c] tty_read+0xdc/0x2b4\n  [cb9e5e80] [c0156bf8] vfs_read+0x274/0x340\n  [cb9e5f00] [c01571ac] ksys_read+0x70/0x118\n  [cb9e5f30] [c0016048] ret_from_syscall+0x0/0x28\n  --- interrupt: c00 at 0xa7855c88\n  NIP:  a7855c88 LR: a7855c5c CTR: 00000000\n  REGS: cb9e5f40 TRAP: 0c00   Tainted: G        W          (5.13.0-pmac-00010-g8393422eb77)\n  MSR:  0000d032 <EE,PR,ME,IR,DR,RI>  CR: 2402446c  XER: 00000000\n\n  GPR00: 00000003 afd4ec70 a72137d0 0000000b afd4ecac 00004000 0065a990 00000800\n  GPR08: 00000000 a7947930 00000000 00000004 c15831b0 0063f8c8 00000000 000186a0\n  GPR16: afd52dd4 afd52dd0 afd52dcc afd52dc8 0065a990 0065a9e0 00000001 0065fac0\n  GPR24: 00000000 00000089 00664050 00000000 00668e30 a720c8dc a7943ff4 0065f9b0\n  NIP [a7855c88] 0xa7855c88\n  LR [a7855c5c] 0xa7855c5c\n  --- interrupt: c00\n  Instruction dump:\n  3884aa88 38630178 48076861 807f0080 48042e45 2f830000 419e0148 3c80c079\n  3c60c076 38841be4 386301c0 4801f705 <0fe00000> 3860000b 4bfffe30 3c80c06b\n  ---[ end trace fd69b91a8046c2e5 ]---\n\nHere the problem is that by re-enterring an exception handler,\nkuap_save_and_lock() is called a second time with this time KUAP\naccess locked, leading to regs->kuap being overwritten hence\nKUAP not being unlocked at exception exit as expected.\n\nDo not call do_IRQ() from timer_interrupt() directly. Instead,\nredefine do_IRQ() as a standard function named __do_IRQ(), and\ncall it from both do_IRQ() and time_interrupt() handlers.\n\nFixes: 3a96570ffceb (\"powerpc: convert interrupt handlers to use wrappers\")\nCc: stable@vger.kernel.org # v5.12+\nReported-by: Stan Johnson <userm57@yahoo.com>\nSigned-off-by: Christophe Leroy <christophe.leroy@csgroup.eu>\nReviewed-by: Nicholas Piggin <npiggin@gmail.com>\nSigned-off-by: Michael Ellerman <mpe@ellerman.id.au>\nLink: https://lore.kernel.org/r/c17d234f4927d39a1d7100864a8e1145323d33a0.1628611927.git.christophe.leroy@csgroup.eu",
+  "full_message": "powerpc/interrupt: Fix OOPS by not calling do_IRQ() from timer_interrupt()\n\nAn interrupt handler shall not be called from another interrupt\nhandler otherwise this leads to problems like the following:\n\n  Kernel attempted to write user page (afd4fa84) - exploit attempt? (uid: 1000)\n  ------------[ cut here ]------------\n  Bug: Write fault blocked by KUAP!\n  WARNING: CPU: 0 PID: 1617 at arch/powerpc/mm/fault.c:230 do_page_fault+0x484/0x720\n  Modules linked in:\n  CPU: 0 PID: 1617 Comm: sshd Tainted: G        W         5.13.0-pmac-00010-g8393422eb77 #7\n  NIP:  c001b77c LR: c001b77c CTR: 00000000\n  REGS: cb9e5bc0 TRAP: 0700   Tainted: G        W          (5.13.0-pmac-00010-g8393422eb77)\n  MSR:  00021032 <ME,IR,DR,RI>  CR: 24942424  XER: 00000000\n\n  GPR00: c001b77c cb9e5c80 c1582c00 00000021 3ffffbff 085b0000 00000027 c8eb644c\n  GPR08: 00000023 00000000 00000000 00000000 24942424 0063f8c8 00000000 000186a0\n  GPR16: afd52dd4 afd52dd0 afd52dcc afd52dc8 0065a990 c07640c4 cb9e5e98 cb9e5e90\n  GPR24: 00000040 afd4fa96 00000040 02000000 c1fda6c0 afd4fa84 00000300 cb9e5cc0\n  NIP [c001b77c] do_page_fault+0x484/0x720\n  LR [c001b77c] do_page_fault+0x484/0x720\n  Call Trace:\n  [cb9e5c80] [c001b77c] do_page_fault+0x484/0x720 (unreliable)\n  [cb9e5cb0] [c000424c] DataAccess_virt+0xd4/0xe4\n  --- interrupt: 300 at __copy_tofrom_user+0x110/0x20c\n  NIP:  c001f9b4 LR: c03250a0 CTR: 00000004\n  REGS: cb9e5cc0 TRAP: 0300   Tainted: G        W          (5.13.0-pmac-00010-g8393422eb77)\n  MSR:  00009032 <EE,ME,IR,DR,RI>  CR: 48028468  XER: 20000000\n  DAR: afd4fa84 DSISR: 0a000000\n  GPR00: 20726f6f cb9e5d80 c1582c00 00000004 cb9e5e3a 00000016 afd4fa80 00000000\n  GPR08: 3835202d 72777872 2d78722d 00000004 28028464 0063f8c8 00000000 000186a0\n  GPR16: afd52dd4 afd52dd0 afd52dcc afd52dc8 0065a990 c07640c4 cb9e5e98 cb9e5e90\n  GPR24: 00000040 afd4fa96 00000040 cb9e5e0c 00000daa a0000000 cb9e5e98 afd4fa56\n  NIP [c001f9b4] __copy_tofrom_user+0x110/0x20c\n  LR [c03250a0] _copy_to_iter+0x144/0x990\n  --- interrupt: 300\n  [cb9e5d80] [c03e89c0] n_tty_read+0xa4/0x598 (unreliable)\n  [cb9e5df0] [c03e2a0c] tty_read+0xdc/0x2b4\n  [cb9e5e80] [c0156bf8] vfs_read+0x274/0x340\n  [cb9e5f00] [c01571ac] ksys_read+0x70/0x118\n  [cb9e5f30] [c0016048] ret_from_syscall+0x0/0x28\n  --- interrupt: c00 at 0xa7855c88\n  NIP:  a7855c88 LR: a7855c5c CTR: 00000000\n  REGS: cb9e5f40 TRAP: 0c00   Tainted: G        W          (5.13.0-pmac-00010-g8393422eb77)\n  MSR:  0000d032 <EE,PR,ME,IR,DR,RI>  CR: 2402446c  XER: 00000000\n\n  GPR00: 00000003 afd4ec70 a72137d0 0000000b afd4ecac 00004000 0065a990 00000800\n  GPR08: 00000000 a7947930 00000000 00000004 c15831b0 0063f8c8 00000000 000186a0\n  GPR16: afd52dd4 afd52dd0 afd52dcc afd52dc8 0065a990 0065a9e0 00000001 0065fac0\n  GPR24: 00000000 00000089 00664050 00000000 00668e30 a720c8dc a7943ff4 0065f9b0\n  NIP [a7855c88] 0xa7855c88\n  LR [a7855c5c] 0xa7855c5c\n  --- interrupt: c00\n  Instruction dump:\n  3884aa88 38630178 48076861 807f0080 48042e45 2f830000 419e0148 3c80c079\n  3c60c076 38841be4 386301c0 4801f705 <0fe00000> 3860000b 4bfffe30 3c80c06b\n  ---[ end trace fd69b91a8046c2e5 ]---\n\nHere the problem is that by re-enterring an exception handler,\nkuap_save_and_lock() is called a second time with this time KUAP\naccess locked, leading to regs->kuap being overwritten hence\nKUAP not being unlocked at exception exit as expected.\n\nDo not call do_IRQ() from timer_interrupt() directly. Instead,\nredefine do_IRQ() as a standard function named __do_IRQ(), and\ncall it from both do_IRQ() and time_interrupt() handlers.\n\nFixes: 3a96570ffceb (\"powerpc: convert interrupt handlers to use wrappers\")\nCc: stable@vger.kernel.org # v5.12+\nReported-by: Stan Johnson <userm57@yahoo.com>\nSigned-off-by: Christophe Leroy <christophe.leroy@csgroup.eu>\nReviewed-by: Nicholas Piggin <npiggin@gmail.com>\nSigned-off-by: Michael Ellerman <mpe@ellerman.id.au>\nLink: https://lore.kernel.org/r/c17d234f4927d39a1d7100864a8e1145323d33a0.1628611927.git.christophe.leroy@csgroup.eu",
+  "author_name": "Christophe Leroy",
+  "author_email": "christophe.leroy@csgroup.eu",
+  "author_date": "Tue Aug 10 16:13:16 2021 +0000",
+  "author_date_iso": "2021-08-10T16:13:16+00:00",
+  "committer_name": "Michael Ellerman",
+  "committer_email": "mpe@ellerman.id.au",
+  "committer_date": "Thu Aug 12 22:21:57 2021 +1000",
+  "committer_date_iso": "2021-08-12T22:21:57+10:00",
+  "files_changed": [
+    "arch/powerpc/include/asm/interrupt.h",
+    "arch/powerpc/include/asm/irq.h",
+    "arch/powerpc/kernel/irq.c",
+    "arch/powerpc/kernel/time.c"
+  ],
+  "files_changed_count": 4,
+  "stats": [
+    {
+      "file": "arch/powerpc/include/asm/interrupt.h",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "arch/powerpc/include/asm/irq.h",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "arch/powerpc/kernel/irq.c",
+      "insertions": 6,
+      "deletions": 1
+    },
+    {
+      "file": "arch/powerpc/kernel/time.c",
+      "insertions": 1,
+      "deletions": 1
+    }
+  ],
+  "total_insertions": 11,
+  "total_deletions": 3,
+  "total_changes": 14,
+  "parents": [
+    "43e8f76006592cb1573a959aa287c45421066f9c"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "exploit"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/powerpc/include/asm/interrupt.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/powerpc/include/asm/irq.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/powerpc/kernel/irq.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/powerpc/kernel/time.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

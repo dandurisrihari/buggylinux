@@ -1,0 +1,78 @@
+{
+  "hash": "8adddf349fda0d3de2f6bb41ddf838cbf36a8ad2",
+  "hash_short": "8adddf34",
+  "subject": "powerpc/mm/radix: Make Radix require HUGETLB_PAGE",
+  "body": "Joel reported weird crashes using skiroot_defconfig, in his case we\njumped into an NX page:\n\n  kernel tried to execute exec-protected page (c000000002bff4f0) - exploit attempt? (uid: 0)\n  BUG: Unable to handle kernel instruction fetch\n  Faulting instruction address: 0xc000000002bff4f0\n\nLooking at the disassembly, we had simply branched to that address:\n\n  c000000000c001bc  49fff335    bl     c000000002bff4f0\n\nBut that didn't match the original kernel image:\n\n  c000000000c001bc  4bfff335    bl     c000000000bff4f0 <kobject_get+0x8>\n\nWhen STRICT_KERNEL_RWX is enabled, and we're using the radix MMU, we\ncall radix__change_memory_range() late in boot to change page\nprotections. We do that both to mark rodata read only and also to mark\ninit text no-execute. That involves walking the kernel page tables,\nand clearing _PAGE_WRITE or _PAGE_EXEC respectively.\n\nWith radix we may use hugepages for the linear mapping, so the code in\nradix__change_memory_range() uses eg. pmd_huge() to test if it has\nfound a huge mapping, and if so it stops the page table walk and\nchanges the PMD permissions.\n\nHowever if the kernel is built without HUGETLBFS support, pmd_huge()\nis just a #define that always returns 0. That causes the code in\nradix__change_memory_range() to incorrectly interpret the PMD value as\na pointer to a PTE page rather than as a PTE at the PMD level.\n\nWe can see this using `dv` in xmon which also uses pmd_huge():\n\n  0:mon> dv c000000000000000\n  pgd  @ 0xc000000001740000\n  pgdp @ 0xc000000001740000 = 0x80000000ffffb009\n  pudp @ 0xc0000000ffffb000 = 0x80000000ffffa009\n  pmdp @ 0xc0000000ffffa000 = 0xc00000000000018f   <- this is a PTE\n  ptep @ 0xc000000000000100 = 0xa64bb17da64ab07d   <- kernel text\n\nThe end result is we treat the value at 0xc000000000000100 as a PTE\nand clear _PAGE_WRITE or _PAGE_EXEC, potentially corrupting the code\nat that address.\n\nIn Joel's specific case we cleared the sign bit in the offset of the\nbranch, causing a backward branch to turn into a forward branch which\ncaused us to branch into a non-executable page. However the exact\nnature of the crash depends on kernel version, compiler version, and\nother factors.\n\nWe need to fix radix__change_memory_range() to not use accessors that\ndepend on HUGETLBFS, but we also have radix memory hotplug code that\nuses pmd_huge() etc that will also need fixing. So for now just\ndisallow the broken combination of Radix with HUGETLBFS disabled.\n\nThe only defconfig we have that is affected is skiroot_defconfig, so\nturn on HUGETLBFS there so that it still gets Radix.\n\nFixes: 566ca99af026 (\"powerpc/mm/radix: Add dummy radix_enabled()\")\nCc: stable@vger.kernel.org # v4.7+\nReported-by: Joel Stanley <joel@jms.id.au>\nSigned-off-by: Michael Ellerman <mpe@ellerman.id.au>",
+  "full_message": "powerpc/mm/radix: Make Radix require HUGETLB_PAGE\n\nJoel reported weird crashes using skiroot_defconfig, in his case we\njumped into an NX page:\n\n  kernel tried to execute exec-protected page (c000000002bff4f0) - exploit attempt? (uid: 0)\n  BUG: Unable to handle kernel instruction fetch\n  Faulting instruction address: 0xc000000002bff4f0\n\nLooking at the disassembly, we had simply branched to that address:\n\n  c000000000c001bc  49fff335    bl     c000000002bff4f0\n\nBut that didn't match the original kernel image:\n\n  c000000000c001bc  4bfff335    bl     c000000000bff4f0 <kobject_get+0x8>\n\nWhen STRICT_KERNEL_RWX is enabled, and we're using the radix MMU, we\ncall radix__change_memory_range() late in boot to change page\nprotections. We do that both to mark rodata read only and also to mark\ninit text no-execute. That involves walking the kernel page tables,\nand clearing _PAGE_WRITE or _PAGE_EXEC respectively.\n\nWith radix we may use hugepages for the linear mapping, so the code in\nradix__change_memory_range() uses eg. pmd_huge() to test if it has\nfound a huge mapping, and if so it stops the page table walk and\nchanges the PMD permissions.\n\nHowever if the kernel is built without HUGETLBFS support, pmd_huge()\nis just a #define that always returns 0. That causes the code in\nradix__change_memory_range() to incorrectly interpret the PMD value as\na pointer to a PTE page rather than as a PTE at the PMD level.\n\nWe can see this using `dv` in xmon which also uses pmd_huge():\n\n  0:mon> dv c000000000000000\n  pgd  @ 0xc000000001740000\n  pgdp @ 0xc000000001740000 = 0x80000000ffffb009\n  pudp @ 0xc0000000ffffb000 = 0x80000000ffffa009\n  pmdp @ 0xc0000000ffffa000 = 0xc00000000000018f   <- this is a PTE\n  ptep @ 0xc000000000000100 = 0xa64bb17da64ab07d   <- kernel text\n\nThe end result is we treat the value at 0xc000000000000100 as a PTE\nand clear _PAGE_WRITE or _PAGE_EXEC, potentially corrupting the code\nat that address.\n\nIn Joel's specific case we cleared the sign bit in the offset of the\nbranch, causing a backward branch to turn into a forward branch which\ncaused us to branch into a non-executable page. However the exact\nnature of the crash depends on kernel version, compiler version, and\nother factors.\n\nWe need to fix radix__change_memory_range() to not use accessors that\ndepend on HUGETLBFS, but we also have radix memory hotplug code that\nuses pmd_huge() etc that will also need fixing. So for now just\ndisallow the broken combination of Radix with HUGETLBFS disabled.\n\nThe only defconfig we have that is affected is skiroot_defconfig, so\nturn on HUGETLBFS there so that it still gets Radix.\n\nFixes: 566ca99af026 (\"powerpc/mm/radix: Add dummy radix_enabled()\")\nCc: stable@vger.kernel.org # v4.7+\nReported-by: Joel Stanley <joel@jms.id.au>\nSigned-off-by: Michael Ellerman <mpe@ellerman.id.au>",
+  "author_name": "Michael Ellerman",
+  "author_email": "mpe@ellerman.id.au",
+  "author_date": "Tue Apr 16 23:59:02 2019 +1000",
+  "author_date_iso": "2019-04-16T23:59:02+10:00",
+  "committer_name": "Michael Ellerman",
+  "committer_email": "mpe@ellerman.id.au",
+  "committer_date": "Wed Apr 17 18:50:26 2019 +1000",
+  "committer_date_iso": "2019-04-17T18:50:26+10:00",
+  "files_changed": [
+    "arch/powerpc/configs/skiroot_defconfig",
+    "arch/powerpc/platforms/Kconfig.cputype"
+  ],
+  "files_changed_count": 2,
+  "stats": [
+    {
+      "file": "arch/powerpc/configs/skiroot_defconfig",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/powerpc/platforms/Kconfig.cputype",
+      "insertions": 1,
+      "deletions": 1
+    }
+  ],
+  "total_insertions": 2,
+  "total_deletions": 1,
+  "total_changes": 3,
+  "parents": [
+    "cf7cf6977f531acd5dfe55250d0ee8cbbb6f1ae8"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v5.1",
+    "v5.1-rc7",
+    "v5.2",
+    "v5.2-rc1",
+    "v5.2-rc2",
+    "v5.2-rc3",
+    "v5.2-rc4",
+    "v5.2-rc5",
+    "v5.2-rc6",
+    "v5.2-rc7"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "exploit"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/powerpc/configs/skiroot_defconfig",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/powerpc/platforms/Kconfig.cputype",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

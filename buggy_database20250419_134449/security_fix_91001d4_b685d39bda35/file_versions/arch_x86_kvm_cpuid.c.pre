@@ -1,0 +1,41 @@
+commit 1893c9415ae8cad20da863c41bdf308e56a2dd67
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Mon Mar 2 15:56:10 2020 -0800
+
+    KVM: x86: Check for CPUID 0xD.N support before validating array size
+    
+    Now that sub-leaf 1 is handled separately, verify the next sub-leaf is
+    needed before rejecting KVM_GET_SUPPORTED_CPUID due to an insufficiently
+    sized userspace array.
+    
+    Note, although this is technically a bug, it's not visible to userspace
+    as KVM_GET_SUPPORTED_CPUID is guaranteed to fail on KVM_CPUID_SIGNATURE,
+    which is hardcoded to be added after leaf 0xD.  The real motivation for
+    the change is to tightly couple the nent/maxnent and do_host_cpuid()
+    sequences in preparation for future cleanup.
+    
+    Reviewed-by: Vitaly Kuznetsov <vkuznets@redhat.com>
+    Signed-off-by: Sean Christopherson <sean.j.christopherson@intel.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/cpuid.c b/arch/x86/kvm/cpuid.c
+index fc8540596386..fd9b29aa7abc 100644
+--- a/arch/x86/kvm/cpuid.c
++++ b/arch/x86/kvm/cpuid.c
+@@ -670,13 +670,14 @@ static inline int __do_cpuid_func(struct kvm_cpuid_entry2 *entry, u32 function,
+ 		entry[1].edx = 0;
+ 
+ 		for (idx = 2, i = 2; idx < 64; ++idx) {
+-			u64 mask = ((u64)1 << idx);
++			if (!(supported & BIT_ULL(idx)))
++				continue;
+ 
+ 			if (*nent >= maxnent)
+ 				goto out;
+ 
+ 			do_host_cpuid(&entry[i], function, idx);
+-			if (entry[i].eax == 0 || !(supported & mask))
++			if (entry[i].eax == 0)
+ 				continue;
+ 			if (WARN_ON_ONCE(entry[i].ecx & 1))
+ 				continue;

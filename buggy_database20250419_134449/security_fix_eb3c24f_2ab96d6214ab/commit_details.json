@@ -1,0 +1,66 @@
+{
+  "hash": "eb3c24f305e56caaf5c4bd34d2923839688d470e",
+  "hash_short": "eb3c24f3",
+  "subject": "mm, memcg: Try charging a page before setting page up to date",
+  "body": "Historically memcg overhead was high even if memcg was unused.  This has\nimproved a lot but it still showed up in a profile summary as being a\nproblem.\n\n/usr/src/linux-4.0-vanilla/mm/memcontrol.c                           6.6441   395842\n  mem_cgroup_try_charge                                                        2.950%   175781\n  __mem_cgroup_count_vm_event                                                  1.431%    85239\n  mem_cgroup_page_lruvec                                                       0.456%    27156\n  mem_cgroup_commit_charge                                                     0.392%    23342\n  uncharge_list                                                                0.323%    19256\n  mem_cgroup_update_lru_size                                                   0.278%    16538\n  memcg_check_events                                                           0.216%    12858\n  mem_cgroup_charge_statistics.isra.22                                         0.188%    11172\n  try_charge                                                                   0.150%     8928\n  commit_charge                                                                0.141%     8388\n  get_mem_cgroup_from_mm                                                       0.121%     7184\n\nThat is showing that 6.64% of system CPU cycles were in memcontrol.c and\ndominated by mem_cgroup_try_charge.  The annotation shows that the bulk\nof the cost was checking PageSwapCache which is expected to be cache hot\nbut is very expensive.  The problem appears to be that __SetPageUptodate\nis called just before the check which is a write barrier.  It is\nrequired to make sure struct page and page data is written before the\nPTE is updated and the data visible to userspace.  memcg charging does\nnot require or need the barrier but gets unfairly hit with the cost so\nthis patch attempts the charging before the barrier.  Aside from the\naccidental cost to memcg there is the added benefit that the barrier is\navoided if the page cannot be charged.  When applied the relevant\nprofile summary is as follows.\n\n/usr/src/linux-4.0-chargefirst-v2r1/mm/memcontrol.c                  3.7907   223277\n  __mem_cgroup_count_vm_event                                                  1.143%    67312\n  mem_cgroup_page_lruvec                                                       0.465%    27403\n  mem_cgroup_commit_charge                                                     0.381%    22452\n  uncharge_list                                                                0.332%    19543\n  mem_cgroup_update_lru_size                                                   0.284%    16704\n  get_mem_cgroup_from_mm                                                       0.271%    15952\n  mem_cgroup_try_charge                                                        0.237%    13982\n  memcg_check_events                                                           0.222%    13058\n  mem_cgroup_charge_statistics.isra.22                                         0.185%    10920\n  commit_charge                                                                0.140%     8235\n  try_charge                                                                   0.131%     7716\n\nThat brings the overhead down to 3.79% and leaves the memcg fault\naccounting to the root cgroup but it's an improvement.  The difference\nin headline performance of the page fault microbench is marginal as\nmemcg is such a small component of it.\n\npft faults\n                                       4.0.0                  4.0.0\n                                     vanilla            chargefirst\nHmean    faults/cpu-1 1443258.1051 (  0.00%) 1509075.7561 (  4.56%)\nHmean    faults/cpu-3 1340385.9270 (  0.00%) 1339160.7113 ( -0.09%)\nHmean    faults/cpu-5  875599.0222 (  0.00%)  874174.1255 ( -0.16%)\nHmean    faults/cpu-7  601146.6726 (  0.00%)  601370.9977 (  0.04%)\nHmean    faults/cpu-8  510728.2754 (  0.00%)  510598.8214 ( -0.03%)\nHmean    faults/sec-1 1432084.7845 (  0.00%) 1497935.5274 (  4.60%)\nHmean    faults/sec-3 3943818.1437 (  0.00%) 3941920.1520 ( -0.05%)\nHmean    faults/sec-5 3877573.5867 (  0.00%) 3869385.7553 ( -0.21%)\nHmean    faults/sec-7 3991832.0418 (  0.00%) 3992181.4189 (  0.01%)\nHmean    faults/sec-8 3987189.8167 (  0.00%) 3986452.2204 ( -0.02%)\n\nIt's only visible at single threaded. The overhead is there for higher\nthreads but other factors dominate.\n\nSigned-off-by: Mel Gorman <mgorman@suse.de>\nAcked-by: Michal Hocko <mhocko@suse.cz>\nAcked-by: Johannes Weiner <hannes@cmpxchg.org>\nCc: Tejun Heo <tj@kernel.org>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>\nSigned-off-by: Linus Torvalds <torvalds@linux-foundation.org>",
+  "full_message": "mm, memcg: Try charging a page before setting page up to date\n\nHistorically memcg overhead was high even if memcg was unused.  This has\nimproved a lot but it still showed up in a profile summary as being a\nproblem.\n\n/usr/src/linux-4.0-vanilla/mm/memcontrol.c                           6.6441   395842\n  mem_cgroup_try_charge                                                        2.950%   175781\n  __mem_cgroup_count_vm_event                                                  1.431%    85239\n  mem_cgroup_page_lruvec                                                       0.456%    27156\n  mem_cgroup_commit_charge                                                     0.392%    23342\n  uncharge_list                                                                0.323%    19256\n  mem_cgroup_update_lru_size                                                   0.278%    16538\n  memcg_check_events                                                           0.216%    12858\n  mem_cgroup_charge_statistics.isra.22                                         0.188%    11172\n  try_charge                                                                   0.150%     8928\n  commit_charge                                                                0.141%     8388\n  get_mem_cgroup_from_mm                                                       0.121%     7184\n\nThat is showing that 6.64% of system CPU cycles were in memcontrol.c and\ndominated by mem_cgroup_try_charge.  The annotation shows that the bulk\nof the cost was checking PageSwapCache which is expected to be cache hot\nbut is very expensive.  The problem appears to be that __SetPageUptodate\nis called just before the check which is a write barrier.  It is\nrequired to make sure struct page and page data is written before the\nPTE is updated and the data visible to userspace.  memcg charging does\nnot require or need the barrier but gets unfairly hit with the cost so\nthis patch attempts the charging before the barrier.  Aside from the\naccidental cost to memcg there is the added benefit that the barrier is\navoided if the page cannot be charged.  When applied the relevant\nprofile summary is as follows.\n\n/usr/src/linux-4.0-chargefirst-v2r1/mm/memcontrol.c                  3.7907   223277\n  __mem_cgroup_count_vm_event                                                  1.143%    67312\n  mem_cgroup_page_lruvec                                                       0.465%    27403\n  mem_cgroup_commit_charge                                                     0.381%    22452\n  uncharge_list                                                                0.332%    19543\n  mem_cgroup_update_lru_size                                                   0.284%    16704\n  get_mem_cgroup_from_mm                                                       0.271%    15952\n  mem_cgroup_try_charge                                                        0.237%    13982\n  memcg_check_events                                                           0.222%    13058\n  mem_cgroup_charge_statistics.isra.22                                         0.185%    10920\n  commit_charge                                                                0.140%     8235\n  try_charge                                                                   0.131%     7716\n\nThat brings the overhead down to 3.79% and leaves the memcg fault\naccounting to the root cgroup but it's an improvement.  The difference\nin headline performance of the page fault microbench is marginal as\nmemcg is such a small component of it.\n\npft faults\n                                       4.0.0                  4.0.0\n                                     vanilla            chargefirst\nHmean    faults/cpu-1 1443258.1051 (  0.00%) 1509075.7561 (  4.56%)\nHmean    faults/cpu-3 1340385.9270 (  0.00%) 1339160.7113 ( -0.09%)\nHmean    faults/cpu-5  875599.0222 (  0.00%)  874174.1255 ( -0.16%)\nHmean    faults/cpu-7  601146.6726 (  0.00%)  601370.9977 (  0.04%)\nHmean    faults/cpu-8  510728.2754 (  0.00%)  510598.8214 ( -0.03%)\nHmean    faults/sec-1 1432084.7845 (  0.00%) 1497935.5274 (  4.60%)\nHmean    faults/sec-3 3943818.1437 (  0.00%) 3941920.1520 ( -0.05%)\nHmean    faults/sec-5 3877573.5867 (  0.00%) 3869385.7553 ( -0.21%)\nHmean    faults/sec-7 3991832.0418 (  0.00%) 3992181.4189 (  0.01%)\nHmean    faults/sec-8 3987189.8167 (  0.00%) 3986452.2204 ( -0.02%)\n\nIt's only visible at single threaded. The overhead is there for higher\nthreads but other factors dominate.\n\nSigned-off-by: Mel Gorman <mgorman@suse.de>\nAcked-by: Michal Hocko <mhocko@suse.cz>\nAcked-by: Johannes Weiner <hannes@cmpxchg.org>\nCc: Tejun Heo <tj@kernel.org>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>\nSigned-off-by: Linus Torvalds <torvalds@linux-foundation.org>",
+  "author_name": "Mel Gorman",
+  "author_email": "mgorman@suse.de",
+  "author_date": "Wed Jun 24 16:57:27 2015 -0700",
+  "author_date_iso": "2015-06-24T16:57:27-07:00",
+  "committer_name": "Linus Torvalds",
+  "committer_email": "torvalds@linux-foundation.org",
+  "committer_date": "Wed Jun 24 17:49:43 2015 -0700",
+  "committer_date_iso": "2015-06-24T17:49:43-07:00",
+  "files_changed": [
+    "mm/memory.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "mm/memory.c",
+      "insertions": 6,
+      "deletions": 4
+    }
+  ],
+  "total_insertions": 6,
+  "total_deletions": 4,
+  "total_changes": 10,
+  "parents": [
+    "4165b9b46181290d7e6ac276080c89b65623c633"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v4.10",
+    "v4.10-rc1",
+    "v4.10-rc2",
+    "v4.10-rc3",
+    "v4.10-rc4",
+    "v4.10-rc5",
+    "v4.10-rc6",
+    "v4.10-rc7",
+    "v4.10-rc8",
+    "v4.11"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "sec-1"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "mm/memory.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

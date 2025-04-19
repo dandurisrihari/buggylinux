@@ -1,0 +1,66 @@
+{
+  "hash": "30bac164aca750892b93eef350439a0562a68647",
+  "hash_short": "30bac164",
+  "subject": "Revert \"Change mincore() to count \"mapped\" pages rather than \"cached\" pages\"",
+  "body": "This reverts commit 574823bfab82d9d8fa47f422778043fbb4b4f50e.\n\nIt turns out that my hope that we could just remove the code that\nexposes the cache residency status from mincore() was too optimistic.\n\nThere are various random users that want it, and one example would be\nthe Netflix database cluster maintenance. To quote Josh Snyder:\n\n \"For Netflix, losing accurate information from the mincore syscall\n  would lengthen database cluster maintenance operations from days to\n  months. We rely on cross-process mincore to migrate the contents of a\n  page cache from machine to machine, and across reboots.\n\n  To do this, I wrote and maintain happycache [1], a page cache\n  dumper/loader tool. It is quite similar in architecture to pgfincore,\n  except that it is agnostic to workload. The gist of happycache's\n  operation is \"produce a dump of residence status for each page, do\n  some operation, then reload exactly the same pages which were present\n  before.\" happycache is entirely dependent on accurate reporting of the\n  in-core status of file-backed pages, as accessed by another process.\n\n  We primarily use happycache with Cassandra, which (like Postgres +\n  pgfincore) relies heavily on OS page cache to reduce disk accesses.\n  Because our workloads never experience a cold page cache, we are able\n  to provision hardware for a peak utilization level that is far lower\n  than the hypothetical \"every query is a cache miss\" peak.\n\n  A database warmed by happycache can be ready for service in seconds\n  (bounded only by the performance of the drives and the I/O subsystem),\n  with no period of in-service degradation. By contrast, putting a\n  database in service without a page cache entails a potentially\n  unbounded period of degradation (at Netflix, the time to populate a\n  single node's cache via natural cache misses varies by workload from\n  hours to weeks). If a single node upgrade were to take weeks, then\n  upgrading an entire cluster would take months. Since we want to apply\n  security upgrades (and other things) on a somewhat tighter schedule,\n  we would have to develop more complex solutions to provide the same\n  functionality already provided by mincore.\n\n  At the bottom line, happycache is designed to benignly exploit the\n  same information leak documented in the paper [2]. I think it makes\n  perfect sense to remove cross-process mincore functionality from\n  unprivileged users, but not to remove it entirely\"\n\nWe do have an alternate approach that limits the cache residency\nreporting only to processes that have write permissions to the file, so\nwe can fix the original information leak issue that way.  It involves\n_adding_ code rather than removing it, which is sad, but hey, at least\nwe haven't found any users that would find the restrictions\nunacceptable.\n\nSo revert the optimistic first approach to make room for that alternate\nfix instead.\n\nReported-by: Josh Snyder <joshs@netflix.com>\nCc: Jiri Kosina <jikos@kernel.org>\nCc: Dominique Martinet <asmadeus@codewreck.org>\nCc: Andy Lutomirski <luto@amacapital.net>\nCc: Dave Chinner <david@fromorbit.com>\nCc: Kevin Easton <kevin@guarana.org>\nCc: Matthew Wilcox <willy@infradead.org>\nCc: Cyril Hrubis <chrubis@suse.cz>\nCc: Vlastimil Babka <vbabka@suse.cz>\nCc: Tejun Heo <tj@kernel.org>\nCc: Kirill A. Shutemov <kirill@shutemov.name>\nCc: Daniel Gruss <daniel@gruss.cc>\nSigned-off-by: Linus Torvalds <torvalds@linux-foundation.org>",
+  "full_message": "Revert \"Change mincore() to count \"mapped\" pages rather than \"cached\" pages\"\n\nThis reverts commit 574823bfab82d9d8fa47f422778043fbb4b4f50e.\n\nIt turns out that my hope that we could just remove the code that\nexposes the cache residency status from mincore() was too optimistic.\n\nThere are various random users that want it, and one example would be\nthe Netflix database cluster maintenance. To quote Josh Snyder:\n\n \"For Netflix, losing accurate information from the mincore syscall\n  would lengthen database cluster maintenance operations from days to\n  months. We rely on cross-process mincore to migrate the contents of a\n  page cache from machine to machine, and across reboots.\n\n  To do this, I wrote and maintain happycache [1], a page cache\n  dumper/loader tool. It is quite similar in architecture to pgfincore,\n  except that it is agnostic to workload. The gist of happycache's\n  operation is \"produce a dump of residence status for each page, do\n  some operation, then reload exactly the same pages which were present\n  before.\" happycache is entirely dependent on accurate reporting of the\n  in-core status of file-backed pages, as accessed by another process.\n\n  We primarily use happycache with Cassandra, which (like Postgres +\n  pgfincore) relies heavily on OS page cache to reduce disk accesses.\n  Because our workloads never experience a cold page cache, we are able\n  to provision hardware for a peak utilization level that is far lower\n  than the hypothetical \"every query is a cache miss\" peak.\n\n  A database warmed by happycache can be ready for service in seconds\n  (bounded only by the performance of the drives and the I/O subsystem),\n  with no period of in-service degradation. By contrast, putting a\n  database in service without a page cache entails a potentially\n  unbounded period of degradation (at Netflix, the time to populate a\n  single node's cache via natural cache misses varies by workload from\n  hours to weeks). If a single node upgrade were to take weeks, then\n  upgrading an entire cluster would take months. Since we want to apply\n  security upgrades (and other things) on a somewhat tighter schedule,\n  we would have to develop more complex solutions to provide the same\n  functionality already provided by mincore.\n\n  At the bottom line, happycache is designed to benignly exploit the\n  same information leak documented in the paper [2]. I think it makes\n  perfect sense to remove cross-process mincore functionality from\n  unprivileged users, but not to remove it entirely\"\n\nWe do have an alternate approach that limits the cache residency\nreporting only to processes that have write permissions to the file, so\nwe can fix the original information leak issue that way.  It involves\n_adding_ code rather than removing it, which is sad, but hey, at least\nwe haven't found any users that would find the restrictions\nunacceptable.\n\nSo revert the optimistic first approach to make room for that alternate\nfix instead.\n\nReported-by: Josh Snyder <joshs@netflix.com>\nCc: Jiri Kosina <jikos@kernel.org>\nCc: Dominique Martinet <asmadeus@codewreck.org>\nCc: Andy Lutomirski <luto@amacapital.net>\nCc: Dave Chinner <david@fromorbit.com>\nCc: Kevin Easton <kevin@guarana.org>\nCc: Matthew Wilcox <willy@infradead.org>\nCc: Cyril Hrubis <chrubis@suse.cz>\nCc: Vlastimil Babka <vbabka@suse.cz>\nCc: Tejun Heo <tj@kernel.org>\nCc: Kirill A. Shutemov <kirill@shutemov.name>\nCc: Daniel Gruss <daniel@gruss.cc>\nSigned-off-by: Linus Torvalds <torvalds@linux-foundation.org>",
+  "author_name": "Linus Torvalds",
+  "author_email": "torvalds@linux-foundation.org",
+  "author_date": "Thu Jan 24 09:04:37 2019 +1300",
+  "author_date_iso": "2019-01-24T09:04:37+13:00",
+  "committer_name": "Linus Torvalds",
+  "committer_email": "torvalds@linux-foundation.org",
+  "committer_date": "Thu Jan 24 09:04:37 2019 +1300",
+  "committer_date_iso": "2019-01-24T09:04:37+13:00",
+  "files_changed": [
+    "mm/mincore.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "mm/mincore.c",
+      "insertions": 81,
+      "deletions": 13
+    }
+  ],
+  "total_insertions": 81,
+  "total_deletions": 13,
+  "total_changes": 94,
+  "parents": [
+    "db781446312314fb11a860ece9a757db2c2d69f1"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v5.0",
+    "v5.0-rc4",
+    "v5.0-rc5",
+    "v5.0-rc6",
+    "v5.0-rc7",
+    "v5.0-rc8",
+    "v5.1",
+    "v5.1-rc1",
+    "v5.1-rc2",
+    "v5.1-rc3"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "exploit"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "mm/mincore.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

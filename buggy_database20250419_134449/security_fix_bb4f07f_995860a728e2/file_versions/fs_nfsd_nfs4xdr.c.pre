@@ -1,0 +1,64 @@
+commit 600020927b004f027e737e6bf57c450d48f2405e
+Author: Pali Rohár <pali@kernel.org>
+Date:   Sat Oct 5 20:33:49 2024 +0200
+
+    nfsd: Fill NFSv4.1 server implementation fields in OP_EXCHANGE_ID response
+    
+    NFSv4.1 OP_EXCHANGE_ID response from server may contain server
+    implementation details (domain, name and build time) in optional
+    nfs_impl_id4 field. Currently nfsd does not fill this field.
+    
+    Send these information in NFSv4.1 OP_EXCHANGE_ID response. Fill them with
+    the same values as what is Linux NFSv4.1 client doing. Domain is hardcoded
+    to "kernel.org", name is composed in the same way as "uname -srvm" output
+    and build time is hardcoded to zeros.
+    
+    NFSv4.1 client and server implementation fields are useful for statistic
+    purposes or for identifying type of clients and servers.
+    
+    Signed-off-by: Pali Rohár <pali@kernel.org>
+    Signed-off-by: Chuck Lever <chuck.lever@oracle.com>
+
+diff --git a/fs/nfsd/nfs4xdr.c b/fs/nfsd/nfs4xdr.c
+index abbfd2b58c82..37f8301cfb8a 100644
+--- a/fs/nfsd/nfs4xdr.c
++++ b/fs/nfsd/nfs4xdr.c
+@@ -4825,6 +4825,25 @@ nfsd4_encode_server_owner4(struct xdr_stream *xdr, struct svc_rqst *rqstp)
+ 	return nfsd4_encode_opaque(xdr, nn->nfsd_name, strlen(nn->nfsd_name));
+ }
+ 
++static __be32
++nfsd4_encode_nfs_impl_id4(struct xdr_stream *xdr, struct nfsd4_exchange_id *exid)
++{
++	__be32 status;
++
++	/* nii_domain */
++	status = nfsd4_encode_opaque(xdr, exid->nii_domain.data,
++				     exid->nii_domain.len);
++	if (status != nfs_ok)
++		return status;
++	/* nii_name */
++	status = nfsd4_encode_opaque(xdr, exid->nii_name.data,
++				     exid->nii_name.len);
++	if (status != nfs_ok)
++		return status;
++	/* nii_time */
++	return nfsd4_encode_nfstime4(xdr, &exid->nii_time);
++}
++
+ static __be32
+ nfsd4_encode_exchange_id(struct nfsd4_compoundres *resp, __be32 nfserr,
+ 			 union nfsd4_op_u *u)
+@@ -4859,8 +4878,11 @@ nfsd4_encode_exchange_id(struct nfsd4_compoundres *resp, __be32 nfserr,
+ 	if (nfserr != nfs_ok)
+ 		return nfserr;
+ 	/* eir_server_impl_id<1> */
+-	if (xdr_stream_encode_u32(xdr, 0) != XDR_UNIT)
++	if (xdr_stream_encode_u32(xdr, 1) != XDR_UNIT)
+ 		return nfserr_resource;
++	nfserr = nfsd4_encode_nfs_impl_id4(xdr, exid);
++	if (nfserr != nfs_ok)
++		return nfserr;
+ 
+ 	return nfs_ok;
+ }

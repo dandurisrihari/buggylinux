@@ -1,0 +1,66 @@
+{
+  "hash": "dbf2576e37da0fcc7aacbfbb9fd5d3de7888a3c1",
+  "hash_short": "dbf2576e",
+  "subject": "workqueue: make all workqueues non-reentrant",
+  "body": "By default, each per-cpu part of a bound workqueue operates separately\nand a work item may be executing concurrently on different CPUs.  The\nbehavior avoids some cross-cpu traffic but leads to subtle weirdities\nand not-so-subtle contortions in the API.\n\n* There's no sane usefulness in allowing a single work item to be\n  executed concurrently on multiple CPUs.  People just get the\n  behavior unintentionally and get surprised after learning about it.\n  Most either explicitly synchronize or use non-reentrant/ordered\n  workqueue but this is error-prone.\n\n* flush_work() can't wait for multiple instances of the same work item\n  on different CPUs.  If a work item is executing on cpu0 and then\n  queued on cpu1, flush_work() can only wait for the one on cpu1.\n\n  Unfortunately, work items can easily cross CPU boundaries\n  unintentionally when the queueing thread gets migrated.  This means\n  that if multiple queuers compete, flush_work() can't even guarantee\n  that the instance queued right before it is finished before\n  returning.\n\n* flush_work_sync() was added to work around some of the deficiencies\n  of flush_work().  In addition to the usual flushing, it ensures that\n  all currently executing instances are finished before returning.\n  This operation is expensive as it has to walk all CPUs and at the\n  same time fails to address competing queuer case.\n\n  Incorrectly using flush_work() when flush_work_sync() is necessary\n  is an easy error to make and can lead to bugs which are difficult to\n  reproduce.\n\n* Similar problems exist for flush_delayed_work[_sync]().\n\nOther than the cross-cpu access concern, there's no benefit in\nallowing parallel execution and it's plain silly to have this level of\ncontortion for workqueue which is widely used from core code to\nextremely obscure drivers.\n\nThis patch makes all workqueues non-reentrant.  If a work item is\nexecuting on a different CPU when queueing is requested, it is always\nqueued to that CPU.  This guarantees that any given work item can be\nexecuting on one CPU at maximum and if a work item is queued and\nexecuting, both are on the same CPU.\n\nThe only behavior change which may affect workqueue users negatively\nis that non-reentrancy overrides the affinity specified by\nqueue_work_on().  On a reentrant workqueue, the affinity specified by\nqueue_work_on() is always followed.  Now, if the work item is\nexecuting on one of the CPUs, the work item will be queued there\nregardless of the requested affinity.  I've reviewed all workqueue\nusers which request explicit affinity, and, fortunately, none seems to\nbe crazy enough to exploit parallel execution of the same work item.\n\nThis adds an additional busy_hash lookup if the work item was\npreviously queued on a different CPU.  This shouldn't be noticeable\nunder any sane workload.  Work item queueing isn't a very\nhigh-frequency operation and they don't jump across CPUs all the time.\nIn a micro benchmark to exaggerate this difference - measuring the\ntime it takes for two work items to repeatedly jump between two CPUs a\nnumber (10M) of times with busy_hash table densely populated, the\ndifference was around 3%.\n\nWhile the overhead is measureable, it is only visible in pathological\ncases and the difference isn't huge.  This change brings much needed\nsanity to workqueue and makes its behavior consistent with timer.  I\nthink this is the right tradeoff to make.\n\nThis enables significant simplification of workqueue API.\nSimplification patches will follow.\n\nSigned-off-by: Tejun Heo <tj@kernel.org>",
+  "full_message": "workqueue: make all workqueues non-reentrant\n\nBy default, each per-cpu part of a bound workqueue operates separately\nand a work item may be executing concurrently on different CPUs.  The\nbehavior avoids some cross-cpu traffic but leads to subtle weirdities\nand not-so-subtle contortions in the API.\n\n* There's no sane usefulness in allowing a single work item to be\n  executed concurrently on multiple CPUs.  People just get the\n  behavior unintentionally and get surprised after learning about it.\n  Most either explicitly synchronize or use non-reentrant/ordered\n  workqueue but this is error-prone.\n\n* flush_work() can't wait for multiple instances of the same work item\n  on different CPUs.  If a work item is executing on cpu0 and then\n  queued on cpu1, flush_work() can only wait for the one on cpu1.\n\n  Unfortunately, work items can easily cross CPU boundaries\n  unintentionally when the queueing thread gets migrated.  This means\n  that if multiple queuers compete, flush_work() can't even guarantee\n  that the instance queued right before it is finished before\n  returning.\n\n* flush_work_sync() was added to work around some of the deficiencies\n  of flush_work().  In addition to the usual flushing, it ensures that\n  all currently executing instances are finished before returning.\n  This operation is expensive as it has to walk all CPUs and at the\n  same time fails to address competing queuer case.\n\n  Incorrectly using flush_work() when flush_work_sync() is necessary\n  is an easy error to make and can lead to bugs which are difficult to\n  reproduce.\n\n* Similar problems exist for flush_delayed_work[_sync]().\n\nOther than the cross-cpu access concern, there's no benefit in\nallowing parallel execution and it's plain silly to have this level of\ncontortion for workqueue which is widely used from core code to\nextremely obscure drivers.\n\nThis patch makes all workqueues non-reentrant.  If a work item is\nexecuting on a different CPU when queueing is requested, it is always\nqueued to that CPU.  This guarantees that any given work item can be\nexecuting on one CPU at maximum and if a work item is queued and\nexecuting, both are on the same CPU.\n\nThe only behavior change which may affect workqueue users negatively\nis that non-reentrancy overrides the affinity specified by\nqueue_work_on().  On a reentrant workqueue, the affinity specified by\nqueue_work_on() is always followed.  Now, if the work item is\nexecuting on one of the CPUs, the work item will be queued there\nregardless of the requested affinity.  I've reviewed all workqueue\nusers which request explicit affinity, and, fortunately, none seems to\nbe crazy enough to exploit parallel execution of the same work item.\n\nThis adds an additional busy_hash lookup if the work item was\npreviously queued on a different CPU.  This shouldn't be noticeable\nunder any sane workload.  Work item queueing isn't a very\nhigh-frequency operation and they don't jump across CPUs all the time.\nIn a micro benchmark to exaggerate this difference - measuring the\ntime it takes for two work items to repeatedly jump between two CPUs a\nnumber (10M) of times with busy_hash table densely populated, the\ndifference was around 3%.\n\nWhile the overhead is measureable, it is only visible in pathological\ncases and the difference isn't huge.  This change brings much needed\nsanity to workqueue and makes its behavior consistent with timer.  I\nthink this is the right tradeoff to make.\n\nThis enables significant simplification of workqueue API.\nSimplification patches will follow.\n\nSigned-off-by: Tejun Heo <tj@kernel.org>",
+  "author_name": "Tejun Heo",
+  "author_email": "tj@kernel.org",
+  "author_date": "Mon Aug 20 14:51:23 2012 -0700",
+  "author_date_iso": "2012-08-20T14:51:23-07:00",
+  "committer_name": "Tejun Heo",
+  "committer_email": "tj@kernel.org",
+  "committer_date": "Mon Aug 20 14:51:23 2012 -0700",
+  "committer_date_iso": "2012-08-20T14:51:23-07:00",
+  "files_changed": [
+    "kernel/workqueue.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "kernel/workqueue.c",
+      "insertions": 7,
+      "deletions": 6
+    }
+  ],
+  "total_insertions": 7,
+  "total_deletions": 6,
+  "total_changes": 13,
+  "parents": [
+    "044c782ce3a901fbd17cbe701c592f582381174d"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v3.10",
+    "v3.10-rc1",
+    "v3.10-rc2",
+    "v3.10-rc3",
+    "v3.10-rc4",
+    "v3.10-rc5",
+    "v3.10-rc6",
+    "v3.10-rc7",
+    "v3.11",
+    "v3.11-rc1"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "exploit"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "kernel/workqueue.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

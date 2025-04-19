@@ -1,0 +1,67 @@
+{
+  "hash": "a1dfb4c48cc1e64eeb7800a27c66a6f7e88d075a",
+  "hash_short": "a1dfb4c4",
+  "subject": "media: v4l2-compat-ioctl32.c: refactor compat ioctl32 logic",
+  "body": "The 32-bit compat v4l2 ioctl handling is implemented based on its 64-bit\nequivalent. It converts 32-bit data structures into its 64-bit\nequivalents and needs to provide the data to the 64-bit ioctl in user\nspace memory which is commonly allocated using\ncompat_alloc_user_space().\n\nHowever, due to how that function is implemented, it can only be called\na single time for every syscall invocation.\n\nSupposedly to avoid this limitation, the existing code uses a mix of\nmemory from the kernel stack and memory allocated through\ncompat_alloc_user_space().\n\nUnder normal circumstances, this would not work, because the 64-bit\nioctl expects all pointers to point to user space memory. As a\nworkaround, set_fs(KERNEL_DS) is called to temporarily disable this\nextra safety check and allow kernel pointers. However, this might\nintroduce a security vulnerability: The result of the 32-bit to 64-bit\nconversion is writeable by user space because the output buffer has been\nallocated via compat_alloc_user_space(). A malicious user space process\ncould then manipulate pointers inside this output buffer, and due to the\nprevious set_fs(KERNEL_DS) call, functions like get_user() or put_user()\nno longer prevent kernel memory access.\n\nThe new approach is to pre-calculate the total amount of user space\nmemory that is needed, allocate it using compat_alloc_user_space() and\nthen divide up the allocated memory to accommodate all data structures\nthat need to be converted.\n\nAn alternative approach would have been to retain the union type karg\nthat they allocated on the kernel stack in do_video_ioctl(), copy all\ndata from user space into karg and then back to user space. However, we\ndecided against this approach because it does not align with other\ncompat syscall implementations. Instead, we tried to replicate the\nget_user/put_user pairs as found in other places in the kernel:\n\n    if (get_user(clipcount, &up->clipcount) ||\n        put_user(clipcount, &kp->clipcount)) return -EFAULT;\n\nNotes from hans.verkuil@cisco.com:\n\nThis patch was taken from:\n    https://github.com/LineageOS/android_kernel_samsung_apq8084/commit/97b733953c06e4f0398ade18850f0817778255f7\n\nClearly nobody could be bothered to upstream this patch or at minimum\ntell us :-( We only heard about this a week ago.\n\nThis patch was rebased and cleaned up. Compared to the original I\nalso swapped the order of the convert_in_user arguments so that they\nmatched copy_in_user. It was hard to review otherwise. I also replaced\nthe ALLOC_USER_SPACE/ALLOC_AND_GET by a normal function.\n\nFixes: 6b5a9492ca (\"v4l: introduce string control support.\")\n\nSigned-off-by: Daniel Mentz <danielmentz@google.com>\nCo-developed-by: Hans Verkuil <hans.verkuil@cisco.com>\nAcked-by: Sakari Ailus <sakari.ailus@linux.intel.com>\nSigned-off-by: Hans Verkuil <hans.verkuil@cisco.com>\nCc: <stable@vger.kernel.org>      # for v4.15 and up\nSigned-off-by: Mauro Carvalho Chehab <mchehab@s-opensource.com>",
+  "full_message": "media: v4l2-compat-ioctl32.c: refactor compat ioctl32 logic\n\nThe 32-bit compat v4l2 ioctl handling is implemented based on its 64-bit\nequivalent. It converts 32-bit data structures into its 64-bit\nequivalents and needs to provide the data to the 64-bit ioctl in user\nspace memory which is commonly allocated using\ncompat_alloc_user_space().\n\nHowever, due to how that function is implemented, it can only be called\na single time for every syscall invocation.\n\nSupposedly to avoid this limitation, the existing code uses a mix of\nmemory from the kernel stack and memory allocated through\ncompat_alloc_user_space().\n\nUnder normal circumstances, this would not work, because the 64-bit\nioctl expects all pointers to point to user space memory. As a\nworkaround, set_fs(KERNEL_DS) is called to temporarily disable this\nextra safety check and allow kernel pointers. However, this might\nintroduce a security vulnerability: The result of the 32-bit to 64-bit\nconversion is writeable by user space because the output buffer has been\nallocated via compat_alloc_user_space(). A malicious user space process\ncould then manipulate pointers inside this output buffer, and due to the\nprevious set_fs(KERNEL_DS) call, functions like get_user() or put_user()\nno longer prevent kernel memory access.\n\nThe new approach is to pre-calculate the total amount of user space\nmemory that is needed, allocate it using compat_alloc_user_space() and\nthen divide up the allocated memory to accommodate all data structures\nthat need to be converted.\n\nAn alternative approach would have been to retain the union type karg\nthat they allocated on the kernel stack in do_video_ioctl(), copy all\ndata from user space into karg and then back to user space. However, we\ndecided against this approach because it does not align with other\ncompat syscall implementations. Instead, we tried to replicate the\nget_user/put_user pairs as found in other places in the kernel:\n\n    if (get_user(clipcount, &up->clipcount) ||\n        put_user(clipcount, &kp->clipcount)) return -EFAULT;\n\nNotes from hans.verkuil@cisco.com:\n\nThis patch was taken from:\n    https://github.com/LineageOS/android_kernel_samsung_apq8084/commit/97b733953c06e4f0398ade18850f0817778255f7\n\nClearly nobody could be bothered to upstream this patch or at minimum\ntell us :-( We only heard about this a week ago.\n\nThis patch was rebased and cleaned up. Compared to the original I\nalso swapped the order of the convert_in_user arguments so that they\nmatched copy_in_user. It was hard to review otherwise. I also replaced\nthe ALLOC_USER_SPACE/ALLOC_AND_GET by a normal function.\n\nFixes: 6b5a9492ca (\"v4l: introduce string control support.\")\n\nSigned-off-by: Daniel Mentz <danielmentz@google.com>\nCo-developed-by: Hans Verkuil <hans.verkuil@cisco.com>\nAcked-by: Sakari Ailus <sakari.ailus@linux.intel.com>\nSigned-off-by: Hans Verkuil <hans.verkuil@cisco.com>\nCc: <stable@vger.kernel.org>      # for v4.15 and up\nSigned-off-by: Mauro Carvalho Chehab <mchehab@s-opensource.com>",
+  "author_name": "Daniel Mentz",
+  "author_email": "danielmentz@google.com",
+  "author_date": "Wed Jul 19 19:03:19 2017 -0400",
+  "author_date_iso": "2017-07-19T19:03:19-04:00",
+  "committer_name": "Mauro Carvalho Chehab",
+  "committer_email": "mchehab@s-opensource.com",
+  "committer_date": "Tue Jan 30 07:40:41 2018 -0500",
+  "committer_date_iso": "2018-01-30T07:40:41-05:00",
+  "files_changed": [
+    "drivers/media/v4l2-core/v4l2-compat-ioctl32.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "drivers/media/v4l2-core/v4l2-compat-ioctl32.c",
+      "insertions": 477,
+      "deletions": 263
+    }
+  ],
+  "total_insertions": 477,
+  "total_deletions": 263,
+  "total_changes": 740,
+  "parents": [
+    "d83a8243aaefe62ace433e4384a4f077bed86acb"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v4.16",
+    "v4.16-rc1",
+    "v4.16-rc2",
+    "v4.16-rc3",
+    "v4.16-rc4",
+    "v4.16-rc5",
+    "v4.16-rc6",
+    "v4.16-rc7",
+    "v4.17",
+    "v4.17-rc1"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "security vulnerability",
+      "vulnerability"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "drivers/media/v4l2-core/v4l2-compat-ioctl32.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

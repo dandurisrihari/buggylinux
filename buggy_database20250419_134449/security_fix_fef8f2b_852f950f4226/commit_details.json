@@ -1,0 +1,78 @@
+{
+  "hash": "fef8f2b90edbd7089a4278021314f11f056b0cbb",
+  "hash_short": "fef8f2b9",
+  "subject": "KVM: x86/ioapic: Resample the pending state of an IRQ when unmasking",
+  "body": "KVM irqfd based emulation of level-triggered interrupts doesn't work\nquite correctly in some cases, particularly in the case of interrupts\nthat are handled in a Linux guest as oneshot interrupts (IRQF_ONESHOT).\nSuch an interrupt is acked to the device in its threaded irq handler,\ni.e. later than it is acked to the interrupt controller (EOI at the end\nof hardirq), not earlier.\n\nLinux keeps such interrupt masked until its threaded handler finishes,\nto prevent the EOI from re-asserting an unacknowledged interrupt.\nHowever, with KVM + vfio (or whatever is listening on the resamplefd)\nwe always notify resamplefd at the EOI, so vfio prematurely unmasks the\nhost physical IRQ, thus a new physical interrupt is fired in the host.\nThis extra interrupt in the host is not a problem per se. The problem is\nthat it is unconditionally queued for injection into the guest, so the\nguest sees an extra bogus interrupt. [*]\n\nThere are observed at least 2 user-visible issues caused by those\nextra erroneous interrupts for a oneshot irq in the guest:\n\n1. System suspend aborted due to a pending wakeup interrupt from\n   ChromeOS EC (drivers/platform/chrome/cros_ec.c).\n2. Annoying \"invalid report id data\" errors from ELAN0000 touchpad\n   (drivers/input/mouse/elan_i2c_core.c), flooding the guest dmesg\n   every time the touchpad is touched.\n\nThe core issue here is that by the time when the guest unmasks the IRQ,\nthe physical IRQ line is no longer asserted (since the guest has\nacked the interrupt to the device in the meantime), yet we\nunconditionally inject the interrupt queued into the guest by the\nprevious resampling. So to fix the issue, we need a way to detect that\nthe IRQ is no longer pending, and cancel the queued interrupt in this\ncase.\n\nWith IOAPIC we are not able to probe the physical IRQ line state\ndirectly (at least not if the underlying physical interrupt controller\nis an IOAPIC too), so in this patch we use irqfd resampler for that.\nNamely, instead of injecting the queued interrupt, we just notify the\nresampler that this interrupt is done. If the IRQ line is actually\nalready deasserted, we are done. If it is still asserted, a new\ninterrupt will be shortly triggered through irqfd and injected into the\nguest.\n\nIn the case if there is no irqfd resampler registered for this IRQ, we\ncannot fix the issue, so we keep the existing behavior: immediately\nunconditionally inject the queued interrupt.\n\nThis patch fixes the issue for x86 IOAPIC only. In the long run, we can\nfix it for other irqchips and other architectures too, possibly taking\nadvantage of reading the physical state of the IRQ line, which is\npossible with some other irqchips (e.g. with arm64 GIC, maybe even with\nthe legacy x86 PIC).\n\n[*] In this description we assume that the interrupt is a physical host\n    interrupt forwarded to the guest e.g. by vfio. Potentially the same\n    issue may occur also with a purely virtual interrupt from an\n    emulated device, e.g. if the guest handles this interrupt, again, as\n    a oneshot interrupt.\n\nSigned-off-by: Dmytro Maluka <dmy@semihalf.com>\nLink: https://lore.kernel.org/kvm/31420943-8c5f-125c-a5ee-d2fde2700083@semihalf.com/\nLink: https://lore.kernel.org/lkml/87o7wrug0w.wl-maz@kernel.org/\nMessage-Id: <20230322204344.50138-3-dmy@semihalf.com>\nSigned-off-by: Paolo Bonzini <pbonzini@redhat.com>",
+  "full_message": "KVM: x86/ioapic: Resample the pending state of an IRQ when unmasking\n\nKVM irqfd based emulation of level-triggered interrupts doesn't work\nquite correctly in some cases, particularly in the case of interrupts\nthat are handled in a Linux guest as oneshot interrupts (IRQF_ONESHOT).\nSuch an interrupt is acked to the device in its threaded irq handler,\ni.e. later than it is acked to the interrupt controller (EOI at the end\nof hardirq), not earlier.\n\nLinux keeps such interrupt masked until its threaded handler finishes,\nto prevent the EOI from re-asserting an unacknowledged interrupt.\nHowever, with KVM + vfio (or whatever is listening on the resamplefd)\nwe always notify resamplefd at the EOI, so vfio prematurely unmasks the\nhost physical IRQ, thus a new physical interrupt is fired in the host.\nThis extra interrupt in the host is not a problem per se. The problem is\nthat it is unconditionally queued for injection into the guest, so the\nguest sees an extra bogus interrupt. [*]\n\nThere are observed at least 2 user-visible issues caused by those\nextra erroneous interrupts for a oneshot irq in the guest:\n\n1. System suspend aborted due to a pending wakeup interrupt from\n   ChromeOS EC (drivers/platform/chrome/cros_ec.c).\n2. Annoying \"invalid report id data\" errors from ELAN0000 touchpad\n   (drivers/input/mouse/elan_i2c_core.c), flooding the guest dmesg\n   every time the touchpad is touched.\n\nThe core issue here is that by the time when the guest unmasks the IRQ,\nthe physical IRQ line is no longer asserted (since the guest has\nacked the interrupt to the device in the meantime), yet we\nunconditionally inject the interrupt queued into the guest by the\nprevious resampling. So to fix the issue, we need a way to detect that\nthe IRQ is no longer pending, and cancel the queued interrupt in this\ncase.\n\nWith IOAPIC we are not able to probe the physical IRQ line state\ndirectly (at least not if the underlying physical interrupt controller\nis an IOAPIC too), so in this patch we use irqfd resampler for that.\nNamely, instead of injecting the queued interrupt, we just notify the\nresampler that this interrupt is done. If the IRQ line is actually\nalready deasserted, we are done. If it is still asserted, a new\ninterrupt will be shortly triggered through irqfd and injected into the\nguest.\n\nIn the case if there is no irqfd resampler registered for this IRQ, we\ncannot fix the issue, so we keep the existing behavior: immediately\nunconditionally inject the queued interrupt.\n\nThis patch fixes the issue for x86 IOAPIC only. In the long run, we can\nfix it for other irqchips and other architectures too, possibly taking\nadvantage of reading the physical state of the IRQ line, which is\npossible with some other irqchips (e.g. with arm64 GIC, maybe even with\nthe legacy x86 PIC).\n\n[*] In this description we assume that the interrupt is a physical host\n    interrupt forwarded to the guest e.g. by vfio. Potentially the same\n    issue may occur also with a purely virtual interrupt from an\n    emulated device, e.g. if the guest handles this interrupt, again, as\n    a oneshot interrupt.\n\nSigned-off-by: Dmytro Maluka <dmy@semihalf.com>\nLink: https://lore.kernel.org/kvm/31420943-8c5f-125c-a5ee-d2fde2700083@semihalf.com/\nLink: https://lore.kernel.org/lkml/87o7wrug0w.wl-maz@kernel.org/\nMessage-Id: <20230322204344.50138-3-dmy@semihalf.com>\nSigned-off-by: Paolo Bonzini <pbonzini@redhat.com>",
+  "author_name": "Dmytro Maluka",
+  "author_email": "dmy@semihalf.com",
+  "author_date": "Wed Mar 22 21:43:44 2023 +0100",
+  "author_date_iso": "2023-03-22T21:43:44+01:00",
+  "committer_name": "Paolo Bonzini",
+  "committer_email": "pbonzini@redhat.com",
+  "committer_date": "Mon Mar 27 10:13:28 2023 -0400",
+  "committer_date_iso": "2023-03-27T10:13:28-04:00",
+  "files_changed": [
+    "arch/x86/kvm/ioapic.c",
+    "include/linux/kvm_host.h",
+    "virt/kvm/eventfd.c"
+  ],
+  "files_changed_count": 3,
+  "stats": [
+    {
+      "file": "arch/x86/kvm/ioapic.c",
+      "insertions": 33,
+      "deletions": 3
+    },
+    {
+      "file": "include/linux/kvm_host.h",
+      "insertions": 10,
+      "deletions": 0
+    },
+    {
+      "file": "virt/kvm/eventfd.c",
+      "insertions": 35,
+      "deletions": 6
+    }
+  ],
+  "total_insertions": 78,
+  "total_deletions": 9,
+  "total_changes": 87,
+  "parents": [
+    "d583fbd7066a2dea43050521a95d9770f7d7593e"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "injection"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/x86/kvm/ioapic.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/kvm_host.h",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "virt/kvm/eventfd.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

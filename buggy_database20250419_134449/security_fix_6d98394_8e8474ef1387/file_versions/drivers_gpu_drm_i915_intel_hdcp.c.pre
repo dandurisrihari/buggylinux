@@ -1,0 +1,62 @@
+commit 791a98dd9bcfd214d8ef51d248f377354a9ea683
+Author: Ramalingam C <ramalingam.c@intel.com>
+Date:   Sat Feb 3 03:39:08 2018 +0530
+
+    drm/i915: Detect panel's hdcp capability
+    
+    DP HDCP1.4 spec mandates that An can be written to panel only after
+    detecting the panel's hdcp capability.
+    
+    For DP 0th Bit of Bcaps register indicates the panel's hdcp capability
+    For HDMI valid BKSV indicates the panel's hdcp capability.
+    
+    For HDMI it is optional to detect the panel's hdcp capability before
+    An Write.
+    
+    v2:
+      Added comments explaining the need for action [Seanpaul].
+      Made panel's hdcp capability detection optional for hdmi [Seanpaul].
+      Defined a func for reading bcaps for DP [Seanpaul].
+    
+    v3:
+      Removed the NULL initialization [Seanpaul].
+    
+    Signed-off-by: Ramalingam C <ramalingam.c@intel.com>
+    Reviewed-by: Sean Paul <seanpaul@chromium.org>
+    Signed-off-by: Sean Paul <seanpaul@chromium.org>
+    Link: https://patchwork.freedesktop.org/patch/msgid/1517609350-10698-7-git-send-email-ramalingam.c@intel.com
+
+diff --git a/drivers/gpu/drm/i915/intel_hdcp.c b/drivers/gpu/drm/i915/intel_hdcp.c
+index 5c8e6d1829ef..d8c0202cf0c0 100644
+--- a/drivers/gpu/drm/i915/intel_hdcp.c
++++ b/drivers/gpu/drm/i915/intel_hdcp.c
+@@ -414,12 +414,28 @@ static int intel_hdcp_auth(struct intel_digital_port *intel_dig_port,
+ 		u32 reg;
+ 		u8 shim[DRM_HDCP_RI_LEN];
+ 	} ri;
+-	bool repeater_present;
++	bool repeater_present, hdcp_capable;
+ 
+ 	dev_priv = intel_dig_port->base.base.dev->dev_private;
+ 
+ 	port = intel_dig_port->base.port;
+ 
++	/*
++	 * Detects whether the display is HDCP capable. Although we check for
++	 * valid Bksv below, the HDCP over DP spec requires that we check
++	 * whether the display supports HDCP before we write An. For HDMI
++	 * displays, this is not necessary.
++	 */
++	if (shim->hdcp_capable) {
++		ret = shim->hdcp_capable(intel_dig_port, &hdcp_capable);
++		if (ret)
++			return ret;
++		if (!hdcp_capable) {
++			DRM_ERROR("Panel is not HDCP capable\n");
++			return -EINVAL;
++		}
++	}
++
+ 	/* Initialize An with 2 random values and acquire it */
+ 	for (i = 0; i < 2; i++)
+ 		I915_WRITE(PORT_HDCP_ANINIT(port), get_random_u32());

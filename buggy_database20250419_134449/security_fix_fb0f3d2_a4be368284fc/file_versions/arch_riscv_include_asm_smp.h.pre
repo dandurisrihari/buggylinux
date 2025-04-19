@@ -1,0 +1,97 @@
+commit 832f15f42646812b096bc67c0eac439291a0db1f
+Author: Anup Patel <apatel@ventanamicro.com>
+Date:   Tue Mar 28 09:22:19 2023 +0530
+
+    RISC-V: Treat IPIs as normal Linux IRQs
+    
+    Currently, the RISC-V kernel provides arch specific hooks (i.e.
+    struct riscv_ipi_ops) to register IPI handling methods. The stats
+    gathering of IPIs is also arch specific in the RISC-V kernel.
+    
+    Other architectures (such as ARM, ARM64, and MIPS) have moved away
+    from custom arch specific IPI handling methods. Currently, these
+    architectures have Linux irqchip drivers providing a range of Linux
+    IRQ numbers to be used as IPIs and IPI triggering is done using
+    generic IPI APIs. This approach allows architectures to treat IPIs
+    as normal Linux IRQs and IPI stats gathering is done by the generic
+    Linux IRQ subsystem.
+    
+    We extend the RISC-V IPI handling as-per above approach so that arch
+    specific IPI handling methods (struct riscv_ipi_ops) can be removed
+    and the IPI handling is done through the Linux IRQ subsystem.
+    
+    Signed-off-by: Anup Patel <apatel@ventanamicro.com>
+    Acked-by: Palmer Dabbelt <palmer@rivosinc.com>
+    Signed-off-by: Marc Zyngier <maz@kernel.org>
+    Link: https://lore.kernel.org/r/20230328035223.1480939-4-apatel@ventanamicro.com
+
+diff --git a/arch/riscv/include/asm/smp.h b/arch/riscv/include/asm/smp.h
+index 3831b638ecab..4fe7a8854c2e 100644
+--- a/arch/riscv/include/asm/smp.h
++++ b/arch/riscv/include/asm/smp.h
+@@ -15,11 +15,6 @@
+ struct seq_file;
+ extern unsigned long boot_cpu_hartid;
+ 
+-struct riscv_ipi_ops {
+-	void (*ipi_inject)(const struct cpumask *target);
+-	void (*ipi_clear)(void);
+-};
+-
+ #ifdef CONFIG_SMP
+ /*
+  * Mapping between linux logical cpu index and hartid.
+@@ -33,9 +28,6 @@ void show_ipi_stats(struct seq_file *p, int prec);
+ /* SMP initialization hook for setup_arch */
+ void __init setup_smp(void);
+ 
+-/* Called from C code, this handles an IPI. */
+-void handle_IPI(struct pt_regs *regs);
+-
+ /* Hook for the generic smp_call_function_many() routine. */
+ void arch_send_call_function_ipi_mask(struct cpumask *mask);
+ 
+@@ -44,11 +36,17 @@ void arch_send_call_function_single_ipi(int cpu);
+ 
+ int riscv_hartid_to_cpuid(unsigned long hartid);
+ 
+-/* Set custom IPI operations */
+-void riscv_set_ipi_ops(const struct riscv_ipi_ops *ops);
++/* Enable IPI for CPU hotplug */
++void riscv_ipi_enable(void);
++
++/* Disable IPI for CPU hotplug */
++void riscv_ipi_disable(void);
+ 
+-/* Clear IPI for current CPU */
+-void riscv_clear_ipi(void);
++/* Check if IPI interrupt numbers are available */
++bool riscv_ipi_have_virq_range(void);
++
++/* Set the IPI interrupt numbers for arch (called by irqchip drivers) */
++void riscv_ipi_set_virq_range(int virq, int nr);
+ 
+ /* Check other CPUs stop or not */
+ bool smp_crash_stop_failed(void);
+@@ -85,11 +83,20 @@ static inline unsigned long cpuid_to_hartid_map(int cpu)
+ 	return boot_cpu_hartid;
+ }
+ 
+-static inline void riscv_set_ipi_ops(const struct riscv_ipi_ops *ops)
++static inline void riscv_ipi_enable(void)
+ {
+ }
+ 
+-static inline void riscv_clear_ipi(void)
++static inline void riscv_ipi_disable(void)
++{
++}
++
++static inline bool riscv_ipi_have_virq_range(void)
++{
++	return false;
++}
++
++static inline void riscv_ipi_set_virq_range(int virq, int nr)
+ {
+ }

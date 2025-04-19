@@ -1,0 +1,191 @@
+{
+  "hash": "22d5a8e52de6b8545271933fe3a275cb7715cdab",
+  "hash_short": "22d5a8e5",
+  "subject": "Merge tag 'atomic-file-updates-6.10_2024-04-15' of https://git.kernel.org/pub/scm/linux/kernel/git/djwong/xfs-linux into xfs-6.10-mergeA",
+  "body": "xfs: atomic file content exchanges\n\nThis series creates a new XFS_IOC_EXCHANGE_RANGE ioctl to exchange\nranges of bytes between two files atomically.\n\nThis new functionality enables data storage programs to stage and commit\nfile updates such that reader programs will see either the old contents\nor the new contents in their entirety, with no chance of torn writes.  A\nsuccessful call completion guarantees that the new contents will be seen\neven if the system fails.\n\nThe ability to exchange file fork mappings between files in this manner\nis critical to supporting online filesystem repair, which is built upon\nthe strategy of constructing a clean copy of a damaged structure and\ncommitting the new structure into the metadata file atomically.  The\nioctls exist to facilitate testing of the new functionality and to\nenable future application program designs.\n\nUser programs will be able to update files atomically by opening an\nO_TMPFILE, reflinking the source file to it, making whatever updates\nthey want to make, and exchange the relevant ranges of the temp file\nwith the original file.  If the updates are aligned with the file block\nsize, a new (since v2) flag provides for exchanging only the written\nareas.  Note that application software must quiesce writes to the file\nwhile it stages an atomic update.  This will be addressed by a\nsubsequent series.\n\nThis mechanism solves the clunkiness of two existing atomic file update\nmechanisms: for O_TRUNC + rewrite, this eliminates the brief period\nwhere other programs can see an empty file.  For create tempfile +\nrename, the need to copy file attributes and extended attributes for\neach file update is eliminated.\n\nHowever, this method introduces its own awkwardness -- any program\ninitiating an exchange now needs to have a way to signal to other\nprograms that the file contents have changed.  For file access mediated\nvia read and write, fanotify or inotify are probably sufficient.  For\nmmaped files, that may not be fast enough.\n\nHere is the proposed manual page:\n\nIOCTL-XFS-EXCHANGE-RANGE(2System Calls ManuIOCTL-XFS-EXCHANGE-RANGE(2)\n\nNAME\n       ioctl_xfs_exchange_range  -  exchange  the contents of parts of\n       two files\n\nSYNOPSIS\n       #include <sys/ioctl.h>\n       #include <xfs/xfs_fs.h>\n\n       int ioctl(int file2_fd, XFS_IOC_EXCHANGE_RANGE, struct  xfs_ex\u2010\n       change_range *arg);\n\nDESCRIPTION\n       Given  a  range  of bytes in a first file file1_fd and a second\n       range of bytes in a second file  file2_fd,  this  ioctl(2)  ex\u2010\n       changes the contents of the two ranges.\n\n       Exchanges  are  atomic  with  regards to concurrent file opera\u2010\n       tions.  Implementations must guarantee that readers see  either\n       the old contents or the new contents in their entirety, even if\n       the system fails.\n\n       The system call parameters are conveyed in  structures  of  the\n       following form:\n\n           struct xfs_exchange_range {\n               __s32    file1_fd;\n               __u32    pad;\n               __u64    file1_offset;\n               __u64    file2_offset;\n               __u64    length;\n               __u64    flags;\n           };\n\n       The field pad must be zero.\n\n       The  fields file1_fd, file1_offset, and length define the first\n       range of bytes to be exchanged.\n\n       The fields file2_fd, file2_offset, and length define the second\n       range of bytes to be exchanged.\n\n       Both  files must be from the same filesystem mount.  If the two\n       file descriptors represent the same file, the byte ranges  must\n       not  overlap.   Most  disk-based  filesystems  require that the\n       starts of both ranges must be aligned to the file  block  size.\n       If  this  is  the  case, the ends of the ranges must also be so\n       aligned unless the XFS_EXCHANGE_RANGE_TO_EOF flag is set.\n\n       The field flags control the behavior of the exchange operation.\n\n           XFS_EXCHANGE_RANGE_TO_EOF\n                  Ignore the length parameter.  All bytes in  file1_fd\n                  from  file1_offset to EOF are moved to file2_fd, and\n                  file2's size is set to  (file2_offset+(file1_length-\n                  file1_offset)).   Meanwhile, all bytes in file2 from\n                  file2_offset to EOF are moved to file1  and  file1's\n                  size    is   set   to   (file1_offset+(file2_length-\n                  file2_offset)).\n\n           XFS_EXCHANGE_RANGE_DSYNC\n                  Ensure that all modified in-core data in  both  file\n                  ranges  and  all  metadata updates pertaining to the\n                  exchange operation are flushed to persistent storage\n                  before  the  call  returns.  Opening either file de\u2010\n                  scriptor with O_SYNC or O_DSYNC will have  the  same\n                  effect.\n\n           XFS_EXCHANGE_RANGE_FILE1_WRITTEN\n                  Only  exchange sub-ranges of file1_fd that are known\n                  to contain data  written  by  application  software.\n                  Each  sub-range  may  be  expanded (both upwards and\n                  downwards) to align with the file  allocation  unit.\n                  For files on the data device, this is one filesystem\n                  block.  For files on the realtime  device,  this  is\n                  the realtime extent size.  This facility can be used\n                  to implement fast atomic  scatter-gather  writes  of\n                  any  complexity for software-defined storage targets\n                  if all writes are aligned  to  the  file  allocation\n                  unit.\n\n           XFS_EXCHANGE_RANGE_DRY_RUN\n                  Check  the parameters and the feasibility of the op\u2010\n                  eration, but do not change anything.\n\nRETURN VALUE\n       On error, -1 is returned, and errno is set to indicate the  er\u2010\n       ror.\n\nERRORS\n       Error  codes can be one of, but are not limited to, the follow\u2010\n       ing:\n\n       EBADF  file1_fd is not open for reading and writing or is  open\n              for  append-only  writes;  or  file2_fd  is not open for\n              reading and writing or is open for append-only writes.\n\n       EINVAL The parameters are not correct for  these  files.   This\n              error  can  also appear if either file descriptor repre\u2010\n              sents a device, FIFO, or socket.  Disk filesystems  gen\u2010\n              erally  require  the  offset  and length arguments to be\n              aligned to the fundamental block sizes of both files.\n\n       EIO    An I/O error occurred.\n\n       EISDIR One of the files is a directory.\n\n       ENOMEM The kernel was unable to allocate sufficient  memory  to\n              perform the operation.\n\n       ENOSPC There  is  not  enough  free space in the filesystem ex\u2010\n              change the contents safely.\n\n       EOPNOTSUPP\n              The filesystem does not support exchanging bytes between\n              the two files.\n\n       EPERM  file1_fd or file2_fd are immutable.\n\n       ETXTBSY\n              One of the files is a swap file.\n\n       EUCLEAN\n              The filesystem is corrupt.\n\n       EXDEV  file1_fd  and  file2_fd  are  not  on  the  same mounted\n              filesystem.\n\nCONFORMING TO\n       This API is XFS-specific.\n\nUSE CASES\n       Several use cases are imagined for this system  call.   In  all\n       cases, application software must coordinate updates to the file\n       because the exchange is performed unconditionally.\n\n       The first is a data storage program that wants to  commit  non-\n       contiguous  updates  to a file atomically and coordinates write\n       access to that file.  This can be done by creating a  temporary\n       file, calling FICLONE(2) to share the contents, and staging the\n       updates into the temporary file.  The FULL_FILES flag is recom\u2010\n       mended  for this purpose.  The temporary file can be deleted or\n       punched out afterwards.\n\n       An example program might look like this:\n\n           int fd = open(\"/some/file\", O_RDWR);\n           int temp_fd = open(\"/some\", O_TMPFILE | O_RDWR);\n\n           ioctl(temp_fd, FICLONE, fd);\n\n           /* append 1MB of records */\n           lseek(temp_fd, 0, SEEK_END);\n           write(temp_fd, data1, 1000000);\n\n           /* update record index */\n           pwrite(temp_fd, data1, 600, 98765);\n           pwrite(temp_fd, data2, 320, 54321);\n           pwrite(temp_fd, data2, 15, 0);\n\n           /* commit the entire update */\n           struct xfs_exchange_range args = {\n               .file1_fd = temp_fd,\n               .flags = XFS_EXCHANGE_RANGE_TO_EOF,\n           };\n\n           ioctl(fd, XFS_IOC_EXCHANGE_RANGE, &args);\n\n       The second is a software-defined  storage  host  (e.g.  a  disk\n       jukebox)  which  implements an atomic scatter-gather write com\u2010\n       mand.  Provided the exported disk's logical block size  matches\n       the file's allocation unit size, this can be done by creating a\n       temporary file and writing the data at the appropriate offsets.\n       It  is  recommended that the temporary file be truncated to the\n       size of the regular file before any writes are  staged  to  the\n       temporary  file  to avoid issues with zeroing during EOF exten\u2010\n       sion.  Use this call with the FILE1_WRITTEN  flag  to  exchange\n       only  the  file  allocation  units involved in the emulated de\u2010\n       vice's write command.  The temporary file should  be  truncated\n       or  punched out completely before being reused to stage another\n       write.\n\n       An example program might look like this:\n\n           int fd = open(\"/some/file\", O_RDWR);\n           int temp_fd = open(\"/some\", O_TMPFILE | O_RDWR);\n           struct stat sb;\n           int blksz;\n\n           fstat(fd, &sb);\n           blksz = sb.st_blksize;\n\n           /* land scatter gather writes between 100fsb and 500fsb */\n           pwrite(temp_fd, data1, blksz * 2, blksz * 100);\n           pwrite(temp_fd, data2, blksz * 20, blksz * 480);\n           pwrite(temp_fd, data3, blksz * 7, blksz * 257);\n\n           /* commit the entire update */\n           struct xfs_exchange_range args = {\n               .file1_fd = temp_fd,\n               .file1_offset = blksz * 100,\n               .file2_offset = blksz * 100,\n               .length       = blksz * 400,\n               .flags        = XFS_EXCHANGE_RANGE_FILE1_WRITTEN |\n                               XFS_EXCHANGE_RANGE_FILE1_DSYNC,\n           };\n\n           ioctl(fd, XFS_IOC_EXCHANGE_RANGE, &args);\n\nNOTES\n       Some filesystems may limit the amount of data or the number  of\n       extents that can be exchanged in a single call.\n\nSEE ALSO\n       ioctl(2)\n\nXFS                           2024-02-10   IOCTL-XFS-EXCHANGE-RANGE(2)\n\nThe reference implementation in XFS creates a new log incompat feature\nand log intent items to track high level progress of swapping ranges of\ntwo files and finish interrupted work if the system goes down.  Sample\ncode can be found in the corresponding changes to xfs_io to exercise the\nuse case mentioned above.\n\nNote that this function is /not/ the O_DIRECT atomic untorn file writes\nconcept that has also been floating around for years.  It is also not\nthe RWF_ATOMIC patchset that has been shared.  This RFC is constructed\nentirely in software, which means that there are no limitations other\nthan the general filesystem limits.\n\nAs a side note, the original motivation behind the kernel functionality\nis online repair of file-based metadata.  The atomic file content\nexchange is implemented as an atomic exchange of file fork mappings,\nwhich means that we can implement online reconstruction of extended\nattributes and directories by building a new one in another inode and\nexchanging the contents.\n\nSubsequent patchsets adapt the online filesystem repair code to use\natomic file exchanges.  This enables repair functions to construct a\nclean copy of a directory, xattr information, symbolic links, realtime\nbitmaps, and realtime summary information in a temporary inode.  If this\ncompletes successfully, the new contents can be committed atomically\ninto the inode being repaired.  This is essential to avoid making\ncorruption problems worse if the system goes down in the middle of\nrunning repair.\n\nFor userspace, this series also includes the userspace pieces needed to\ntest the new functionality, and a sample implementation of atomic file\nupdates.\n\nSigned-off-by: Darrick J. Wong <djwong@kernel.org>\nSigned-off-by: Chandan Babu R <chandanbabu@kernel.org>\n\n* tag 'atomic-file-updates-6.10_2024-04-15' of https://git.kernel.org/pub/scm/linux/kernel/git/djwong/xfs-linux:\n  xfs: enable logged file mapping exchange feature\n  docs: update swapext -> exchmaps language\n  xfs: capture inode generation numbers in the ondisk exchmaps log item\n  xfs: support non-power-of-two rtextsize with exchange-range\n  xfs: make file range exchange support realtime files\n  xfs: condense symbolic links after a mapping exchange operation\n  xfs: condense directories after a mapping exchange operation\n  xfs: condense extended attributes after a mapping exchange operation\n  xfs: add error injection to test file mapping exchange recovery\n  xfs: bind together the front and back ends of the file range exchange code\n  xfs: create deferred log items for file mapping exchanges\n  xfs: introduce a file mapping exchange log intent item\n  xfs: create a incompat flag for atomic file mapping exchanges\n  xfs: introduce new file range exchange ioctl\n  vfs: export remap and write check helpers",
+  "full_message": "Merge tag 'atomic-file-updates-6.10_2024-04-15' of https://git.kernel.org/pub/scm/linux/kernel/git/djwong/xfs-linux into xfs-6.10-mergeA\n\nxfs: atomic file content exchanges\n\nThis series creates a new XFS_IOC_EXCHANGE_RANGE ioctl to exchange\nranges of bytes between two files atomically.\n\nThis new functionality enables data storage programs to stage and commit\nfile updates such that reader programs will see either the old contents\nor the new contents in their entirety, with no chance of torn writes.  A\nsuccessful call completion guarantees that the new contents will be seen\neven if the system fails.\n\nThe ability to exchange file fork mappings between files in this manner\nis critical to supporting online filesystem repair, which is built upon\nthe strategy of constructing a clean copy of a damaged structure and\ncommitting the new structure into the metadata file atomically.  The\nioctls exist to facilitate testing of the new functionality and to\nenable future application program designs.\n\nUser programs will be able to update files atomically by opening an\nO_TMPFILE, reflinking the source file to it, making whatever updates\nthey want to make, and exchange the relevant ranges of the temp file\nwith the original file.  If the updates are aligned with the file block\nsize, a new (since v2) flag provides for exchanging only the written\nareas.  Note that application software must quiesce writes to the file\nwhile it stages an atomic update.  This will be addressed by a\nsubsequent series.\n\nThis mechanism solves the clunkiness of two existing atomic file update\nmechanisms: for O_TRUNC + rewrite, this eliminates the brief period\nwhere other programs can see an empty file.  For create tempfile +\nrename, the need to copy file attributes and extended attributes for\neach file update is eliminated.\n\nHowever, this method introduces its own awkwardness -- any program\ninitiating an exchange now needs to have a way to signal to other\nprograms that the file contents have changed.  For file access mediated\nvia read and write, fanotify or inotify are probably sufficient.  For\nmmaped files, that may not be fast enough.\n\nHere is the proposed manual page:\n\nIOCTL-XFS-EXCHANGE-RANGE(2System Calls ManuIOCTL-XFS-EXCHANGE-RANGE(2)\n\nNAME\n       ioctl_xfs_exchange_range  -  exchange  the contents of parts of\n       two files\n\nSYNOPSIS\n       #include <sys/ioctl.h>\n       #include <xfs/xfs_fs.h>\n\n       int ioctl(int file2_fd, XFS_IOC_EXCHANGE_RANGE, struct  xfs_ex\u2010\n       change_range *arg);\n\nDESCRIPTION\n       Given  a  range  of bytes in a first file file1_fd and a second\n       range of bytes in a second file  file2_fd,  this  ioctl(2)  ex\u2010\n       changes the contents of the two ranges.\n\n       Exchanges  are  atomic  with  regards to concurrent file opera\u2010\n       tions.  Implementations must guarantee that readers see  either\n       the old contents or the new contents in their entirety, even if\n       the system fails.\n\n       The system call parameters are conveyed in  structures  of  the\n       following form:\n\n           struct xfs_exchange_range {\n               __s32    file1_fd;\n               __u32    pad;\n               __u64    file1_offset;\n               __u64    file2_offset;\n               __u64    length;\n               __u64    flags;\n           };\n\n       The field pad must be zero.\n\n       The  fields file1_fd, file1_offset, and length define the first\n       range of bytes to be exchanged.\n\n       The fields file2_fd, file2_offset, and length define the second\n       range of bytes to be exchanged.\n\n       Both  files must be from the same filesystem mount.  If the two\n       file descriptors represent the same file, the byte ranges  must\n       not  overlap.   Most  disk-based  filesystems  require that the\n       starts of both ranges must be aligned to the file  block  size.\n       If  this  is  the  case, the ends of the ranges must also be so\n       aligned unless the XFS_EXCHANGE_RANGE_TO_EOF flag is set.\n\n       The field flags control the behavior of the exchange operation.\n\n           XFS_EXCHANGE_RANGE_TO_EOF\n                  Ignore the length parameter.  All bytes in  file1_fd\n                  from  file1_offset to EOF are moved to file2_fd, and\n                  file2's size is set to  (file2_offset+(file1_length-\n                  file1_offset)).   Meanwhile, all bytes in file2 from\n                  file2_offset to EOF are moved to file1  and  file1's\n                  size    is   set   to   (file1_offset+(file2_length-\n                  file2_offset)).\n\n           XFS_EXCHANGE_RANGE_DSYNC\n                  Ensure that all modified in-core data in  both  file\n                  ranges  and  all  metadata updates pertaining to the\n                  exchange operation are flushed to persistent storage\n                  before  the  call  returns.  Opening either file de\u2010\n                  scriptor with O_SYNC or O_DSYNC will have  the  same\n                  effect.\n\n           XFS_EXCHANGE_RANGE_FILE1_WRITTEN\n                  Only  exchange sub-ranges of file1_fd that are known\n                  to contain data  written  by  application  software.\n                  Each  sub-range  may  be  expanded (both upwards and\n                  downwards) to align with the file  allocation  unit.\n                  For files on the data device, this is one filesystem\n                  block.  For files on the realtime  device,  this  is\n                  the realtime extent size.  This facility can be used\n                  to implement fast atomic  scatter-gather  writes  of\n                  any  complexity for software-defined storage targets\n                  if all writes are aligned  to  the  file  allocation\n                  unit.\n\n           XFS_EXCHANGE_RANGE_DRY_RUN\n                  Check  the parameters and the feasibility of the op\u2010\n                  eration, but do not change anything.\n\nRETURN VALUE\n       On error, -1 is returned, and errno is set to indicate the  er\u2010\n       ror.\n\nERRORS\n       Error  codes can be one of, but are not limited to, the follow\u2010\n       ing:\n\n       EBADF  file1_fd is not open for reading and writing or is  open\n              for  append-only  writes;  or  file2_fd  is not open for\n              reading and writing or is open for append-only writes.\n\n       EINVAL The parameters are not correct for  these  files.   This\n              error  can  also appear if either file descriptor repre\u2010\n              sents a device, FIFO, or socket.  Disk filesystems  gen\u2010\n              erally  require  the  offset  and length arguments to be\n              aligned to the fundamental block sizes of both files.\n\n       EIO    An I/O error occurred.\n\n       EISDIR One of the files is a directory.\n\n       ENOMEM The kernel was unable to allocate sufficient  memory  to\n              perform the operation.\n\n       ENOSPC There  is  not  enough  free space in the filesystem ex\u2010\n              change the contents safely.\n\n       EOPNOTSUPP\n              The filesystem does not support exchanging bytes between\n              the two files.\n\n       EPERM  file1_fd or file2_fd are immutable.\n\n       ETXTBSY\n              One of the files is a swap file.\n\n       EUCLEAN\n              The filesystem is corrupt.\n\n       EXDEV  file1_fd  and  file2_fd  are  not  on  the  same mounted\n              filesystem.\n\nCONFORMING TO\n       This API is XFS-specific.\n\nUSE CASES\n       Several use cases are imagined for this system  call.   In  all\n       cases, application software must coordinate updates to the file\n       because the exchange is performed unconditionally.\n\n       The first is a data storage program that wants to  commit  non-\n       contiguous  updates  to a file atomically and coordinates write\n       access to that file.  This can be done by creating a  temporary\n       file, calling FICLONE(2) to share the contents, and staging the\n       updates into the temporary file.  The FULL_FILES flag is recom\u2010\n       mended  for this purpose.  The temporary file can be deleted or\n       punched out afterwards.\n\n       An example program might look like this:\n\n           int fd = open(\"/some/file\", O_RDWR);\n           int temp_fd = open(\"/some\", O_TMPFILE | O_RDWR);\n\n           ioctl(temp_fd, FICLONE, fd);\n\n           /* append 1MB of records */\n           lseek(temp_fd, 0, SEEK_END);\n           write(temp_fd, data1, 1000000);\n\n           /* update record index */\n           pwrite(temp_fd, data1, 600, 98765);\n           pwrite(temp_fd, data2, 320, 54321);\n           pwrite(temp_fd, data2, 15, 0);\n\n           /* commit the entire update */\n           struct xfs_exchange_range args = {\n               .file1_fd = temp_fd,\n               .flags = XFS_EXCHANGE_RANGE_TO_EOF,\n           };\n\n           ioctl(fd, XFS_IOC_EXCHANGE_RANGE, &args);\n\n       The second is a software-defined  storage  host  (e.g.  a  disk\n       jukebox)  which  implements an atomic scatter-gather write com\u2010\n       mand.  Provided the exported disk's logical block size  matches\n       the file's allocation unit size, this can be done by creating a\n       temporary file and writing the data at the appropriate offsets.\n       It  is  recommended that the temporary file be truncated to the\n       size of the regular file before any writes are  staged  to  the\n       temporary  file  to avoid issues with zeroing during EOF exten\u2010\n       sion.  Use this call with the FILE1_WRITTEN  flag  to  exchange\n       only  the  file  allocation  units involved in the emulated de\u2010\n       vice's write command.  The temporary file should  be  truncated\n       or  punched out completely before being reused to stage another\n       write.\n\n       An example program might look like this:\n\n           int fd = open(\"/some/file\", O_RDWR);\n           int temp_fd = open(\"/some\", O_TMPFILE | O_RDWR);\n           struct stat sb;\n           int blksz;\n\n           fstat(fd, &sb);\n           blksz = sb.st_blksize;\n\n           /* land scatter gather writes between 100fsb and 500fsb */\n           pwrite(temp_fd, data1, blksz * 2, blksz * 100);\n           pwrite(temp_fd, data2, blksz * 20, blksz * 480);\n           pwrite(temp_fd, data3, blksz * 7, blksz * 257);\n\n           /* commit the entire update */\n           struct xfs_exchange_range args = {\n               .file1_fd = temp_fd,\n               .file1_offset = blksz * 100,\n               .file2_offset = blksz * 100,\n               .length       = blksz * 400,\n               .flags        = XFS_EXCHANGE_RANGE_FILE1_WRITTEN |\n                               XFS_EXCHANGE_RANGE_FILE1_DSYNC,\n           };\n\n           ioctl(fd, XFS_IOC_EXCHANGE_RANGE, &args);\n\nNOTES\n       Some filesystems may limit the amount of data or the number  of\n       extents that can be exchanged in a single call.\n\nSEE ALSO\n       ioctl(2)\n\nXFS                           2024-02-10   IOCTL-XFS-EXCHANGE-RANGE(2)\n\nThe reference implementation in XFS creates a new log incompat feature\nand log intent items to track high level progress of swapping ranges of\ntwo files and finish interrupted work if the system goes down.  Sample\ncode can be found in the corresponding changes to xfs_io to exercise the\nuse case mentioned above.\n\nNote that this function is /not/ the O_DIRECT atomic untorn file writes\nconcept that has also been floating around for years.  It is also not\nthe RWF_ATOMIC patchset that has been shared.  This RFC is constructed\nentirely in software, which means that there are no limitations other\nthan the general filesystem limits.\n\nAs a side note, the original motivation behind the kernel functionality\nis online repair of file-based metadata.  The atomic file content\nexchange is implemented as an atomic exchange of file fork mappings,\nwhich means that we can implement online reconstruction of extended\nattributes and directories by building a new one in another inode and\nexchanging the contents.\n\nSubsequent patchsets adapt the online filesystem repair code to use\natomic file exchanges.  This enables repair functions to construct a\nclean copy of a directory, xattr information, symbolic links, realtime\nbitmaps, and realtime summary information in a temporary inode.  If this\ncompletes successfully, the new contents can be committed atomically\ninto the inode being repaired.  This is essential to avoid making\ncorruption problems worse if the system goes down in the middle of\nrunning repair.\n\nFor userspace, this series also includes the userspace pieces needed to\ntest the new functionality, and a sample implementation of atomic file\nupdates.\n\nSigned-off-by: Darrick J. Wong <djwong@kernel.org>\nSigned-off-by: Chandan Babu R <chandanbabu@kernel.org>\n\n* tag 'atomic-file-updates-6.10_2024-04-15' of https://git.kernel.org/pub/scm/linux/kernel/git/djwong/xfs-linux:\n  xfs: enable logged file mapping exchange feature\n  docs: update swapext -> exchmaps language\n  xfs: capture inode generation numbers in the ondisk exchmaps log item\n  xfs: support non-power-of-two rtextsize with exchange-range\n  xfs: make file range exchange support realtime files\n  xfs: condense symbolic links after a mapping exchange operation\n  xfs: condense directories after a mapping exchange operation\n  xfs: condense extended attributes after a mapping exchange operation\n  xfs: add error injection to test file mapping exchange recovery\n  xfs: bind together the front and back ends of the file range exchange code\n  xfs: create deferred log items for file mapping exchanges\n  xfs: introduce a file mapping exchange log intent item\n  xfs: create a incompat flag for atomic file mapping exchanges\n  xfs: introduce new file range exchange ioctl\n  vfs: export remap and write check helpers",
+  "author_name": "Chandan Babu R",
+  "author_email": "chandanbabu@kernel.org",
+  "author_date": "Tue Apr 16 11:25:09 2024 +0530",
+  "author_date_iso": "2024-04-16T11:25:09+05:30",
+  "committer_name": "Chandan Babu R",
+  "committer_email": "chandanbabu@kernel.org",
+  "committer_date": "Tue Apr 16 11:25:09 2024 +0530",
+  "committer_date_iso": "2024-04-16T11:25:09+05:30",
+  "files_changed": [],
+  "files_changed_count": 0,
+  "stats": [
+    {
+      "file": "Documentation/filesystems/xfs/xfs-online-fsck-design.rst",
+      "insertions": 138,
+      "deletions": 125
+    },
+    {
+      "file": "fs/read_write.c",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "fs/remap_range.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "fs/xfs/Makefile",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "fs/xfs/libxfs/xfs_defer.c",
+      "insertions": 6,
+      "deletions": 0
+    },
+    {
+      "file": "fs/xfs/libxfs/xfs_defer.h",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "fs/xfs/libxfs/xfs_errortag.h",
+      "insertions": 3,
+      "deletions": 1
+    },
+    {
+      "file": "fs/xfs/libxfs/xfs_exchmaps.c",
+      "insertions": 1237,
+      "deletions": 0
+    },
+    {
+      "file": "fs/xfs/libxfs/xfs_exchmaps.h",
+      "insertions": 123,
+      "deletions": 0
+    },
+    {
+      "file": "fs/xfs/libxfs/xfs_format.h",
+      "insertions": 14,
+      "deletions": 12
+    },
+    {
+      "file": "fs/xfs/libxfs/xfs_fs.h",
+      "insertions": 42,
+      "deletions": 0
+    },
+    {
+      "file": "fs/xfs/libxfs/xfs_log_format.h",
+      "insertions": 63,
+      "deletions": 3
+    },
+    {
+      "file": "fs/xfs/libxfs/xfs_log_recover.h",
+      "insertions": 4,
+      "deletions": 0
+    },
+    {
+      "file": "fs/xfs/libxfs/xfs_sb.c",
+      "insertions": 5,
+      "deletions": 0
+    },
+    {
+      "file": "fs/xfs/libxfs/xfs_symlink_remote.c",
+      "insertions": 47,
+      "deletions": 0
+    },
+    {
+      "file": "fs/xfs/libxfs/xfs_symlink_remote.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "fs/xfs/libxfs/xfs_trans_space.h",
+      "insertions": 4,
+      "deletions": 0
+    },
+    {
+      "file": "fs/xfs/xfs_error.c",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "fs/xfs/xfs_exchmaps_item.c",
+      "insertions": 614,
+      "deletions": 0
+    },
+    {
+      "file": "fs/xfs/xfs_exchmaps_item.h",
+      "insertions": 64,
+      "deletions": 0
+    },
+    {
+      "file": "fs/xfs/xfs_exchrange.c",
+      "insertions": 804,
+      "deletions": 0
+    },
+    {
+      "file": "fs/xfs/xfs_exchrange.h",
+      "insertions": 38,
+      "deletions": 0
+    },
+    {
+      "file": "fs/xfs/xfs_ioctl.c",
+      "insertions": 4,
+      "deletions": 0
+    },
+    {
+      "file": "fs/xfs/xfs_log_recover.c",
+      "insertions": 33,
+      "deletions": 0
+    },
+    {
+      "file": "fs/xfs/xfs_mount.h",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "fs/xfs/xfs_super.c",
+      "insertions": 23,
+      "deletions": 0
+    },
+    {
+      "file": "fs/xfs/xfs_symlink.c",
+      "insertions": 7,
+      "deletions": 44
+    },
+    {
+      "file": "fs/xfs/xfs_trace.c",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "fs/xfs/xfs_trace.h",
+      "insertions": 327,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/fs.h",
+      "insertions": 1,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 3616,
+  "total_deletions": 188,
+  "total_changes": 3804,
+  "parents": [
+    "4ec2e3c16746ee9f5442c1d48f71cae75bff23d1",
+    "0730e8d8ba1d1507f1d7fd719e1f835ce69961fe"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": true,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "injection"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": []
+}

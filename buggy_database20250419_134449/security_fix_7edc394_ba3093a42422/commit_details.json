@@ -1,0 +1,54 @@
+{
+  "hash": "7edc3945bdce9c39198a10d6129377a5c53559c2",
+  "hash_short": "7edc3945",
+  "subject": "tracing/histograms: Fix memory leak problem",
+  "body": "This reverts commit 46bbe5c671e06f070428b9be142cc4ee5cedebac.\n\nAs commit 46bbe5c671e0 (\"tracing: fix double free\") said, the\n\"double free\" problem reported by clang static analyzer is:\n  > In parse_var_defs() if there is a problem allocating\n  > var_defs.expr, the earlier var_defs.name is freed.\n  > This free is duplicated by free_var_defs() which frees\n  > the rest of the list.\n\nHowever, if there is a problem allocating N-th var_defs.expr:\n  + in parse_var_defs(), the freed 'earlier var_defs.name' is\n    actually the N-th var_defs.name;\n  + then in free_var_defs(), the names from 0th to (N-1)-th are freed;\n\n                        IF ALLOCATING PROBLEM HAPPENED HERE!!! -+\n                                                                 \\\n                                                                  |\n          0th           1th                 (N-1)-th      N-th    V\n          +-------------+-------------+-----+-------------+-----------\nvar_defs: | name | expr | name | expr | ... | name | expr | name | ///\n          +-------------+-------------+-----+-------------+-----------\n\nThese two frees don't act on same name, so there was no \"double free\"\nproblem before. Conversely, after that commit, we get a \"memory leak\"\nproblem because the above \"N-th var_defs.name\" is not freed.\n\nIf enable CONFIG_DEBUG_KMEMLEAK and inject a fault at where the N-th\nvar_defs.expr allocated, then execute on shell like:\n  $ echo 'hist:key=call_site:val=$v1,$v2:v1=bytes_req,v2=bytes_alloc' > \\\n/sys/kernel/debug/tracing/events/kmem/kmalloc/trigger\n\nThen kmemleak reports:\n  unreferenced object 0xffff8fb100ef3518 (size 8):\n    comm \"bash\", pid 196, jiffies 4295681690 (age 28.538s)\n    hex dump (first 8 bytes):\n      76 31 00 00 b1 8f ff ff                          v1......\n    backtrace:\n      [<0000000038fe4895>] kstrdup+0x2d/0x60\n      [<00000000c99c049a>] event_hist_trigger_parse+0x206f/0x20e0\n      [<00000000ae70d2cc>] trigger_process_regex+0xc0/0x110\n      [<0000000066737a4c>] event_trigger_write+0x75/0xd0\n      [<000000007341e40c>] vfs_write+0xbb/0x2a0\n      [<0000000087fde4c2>] ksys_write+0x59/0xd0\n      [<00000000581e9cdf>] do_syscall_64+0x3a/0x80\n      [<00000000cf3b065c>] entry_SYSCALL_64_after_hwframe+0x46/0xb0\n\nLink: https://lkml.kernel.org/r/20220711014731.69520-1-zhengyejian1@huawei.com\n\nCc: stable@vger.kernel.org\nFixes: 46bbe5c671e0 (\"tracing: fix double free\")\nReported-by: Hulk Robot <hulkci@huawei.com>\nSuggested-by: Steven Rostedt <rostedt@goodmis.org>\nReviewed-by: Tom Zanussi <tom.zanussi@linux.intel.com>\nSigned-off-by: Zheng Yejian <zhengyejian1@huawei.com>\nSigned-off-by: Steven Rostedt (Google) <rostedt@goodmis.org>",
+  "full_message": "tracing/histograms: Fix memory leak problem\n\nThis reverts commit 46bbe5c671e06f070428b9be142cc4ee5cedebac.\n\nAs commit 46bbe5c671e0 (\"tracing: fix double free\") said, the\n\"double free\" problem reported by clang static analyzer is:\n  > In parse_var_defs() if there is a problem allocating\n  > var_defs.expr, the earlier var_defs.name is freed.\n  > This free is duplicated by free_var_defs() which frees\n  > the rest of the list.\n\nHowever, if there is a problem allocating N-th var_defs.expr:\n  + in parse_var_defs(), the freed 'earlier var_defs.name' is\n    actually the N-th var_defs.name;\n  + then in free_var_defs(), the names from 0th to (N-1)-th are freed;\n\n                        IF ALLOCATING PROBLEM HAPPENED HERE!!! -+\n                                                                 \\\n                                                                  |\n          0th           1th                 (N-1)-th      N-th    V\n          +-------------+-------------+-----+-------------+-----------\nvar_defs: | name | expr | name | expr | ... | name | expr | name | ///\n          +-------------+-------------+-----+-------------+-----------\n\nThese two frees don't act on same name, so there was no \"double free\"\nproblem before. Conversely, after that commit, we get a \"memory leak\"\nproblem because the above \"N-th var_defs.name\" is not freed.\n\nIf enable CONFIG_DEBUG_KMEMLEAK and inject a fault at where the N-th\nvar_defs.expr allocated, then execute on shell like:\n  $ echo 'hist:key=call_site:val=$v1,$v2:v1=bytes_req,v2=bytes_alloc' > \\\n/sys/kernel/debug/tracing/events/kmem/kmalloc/trigger\n\nThen kmemleak reports:\n  unreferenced object 0xffff8fb100ef3518 (size 8):\n    comm \"bash\", pid 196, jiffies 4295681690 (age 28.538s)\n    hex dump (first 8 bytes):\n      76 31 00 00 b1 8f ff ff                          v1......\n    backtrace:\n      [<0000000038fe4895>] kstrdup+0x2d/0x60\n      [<00000000c99c049a>] event_hist_trigger_parse+0x206f/0x20e0\n      [<00000000ae70d2cc>] trigger_process_regex+0xc0/0x110\n      [<0000000066737a4c>] event_trigger_write+0x75/0xd0\n      [<000000007341e40c>] vfs_write+0xbb/0x2a0\n      [<0000000087fde4c2>] ksys_write+0x59/0xd0\n      [<00000000581e9cdf>] do_syscall_64+0x3a/0x80\n      [<00000000cf3b065c>] entry_SYSCALL_64_after_hwframe+0x46/0xb0\n\nLink: https://lkml.kernel.org/r/20220711014731.69520-1-zhengyejian1@huawei.com\n\nCc: stable@vger.kernel.org\nFixes: 46bbe5c671e0 (\"tracing: fix double free\")\nReported-by: Hulk Robot <hulkci@huawei.com>\nSuggested-by: Steven Rostedt <rostedt@goodmis.org>\nReviewed-by: Tom Zanussi <tom.zanussi@linux.intel.com>\nSigned-off-by: Zheng Yejian <zhengyejian1@huawei.com>\nSigned-off-by: Steven Rostedt (Google) <rostedt@goodmis.org>",
+  "author_name": "Zheng Yejian",
+  "author_email": "zhengyejian1@huawei.com",
+  "author_date": "Mon Jul 11 09:47:31 2022 +0800",
+  "author_date_iso": "2022-07-11T09:47:31+08:00",
+  "committer_name": "Steven Rostedt (Google)",
+  "committer_email": "rostedt@goodmis.org",
+  "committer_date": "Tue Jul 12 16:35:42 2022 -0400",
+  "committer_date_iso": "2022-07-12T16:35:42-04:00",
+  "files_changed": [
+    "kernel/trace/trace_events_hist.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "kernel/trace/trace_events_hist.c",
+      "insertions": 2,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 2,
+  "total_deletions": 0,
+  "total_changes": 2,
+  "parents": [
+    "88084a3df1672e131ddc1b4e39eeacfd39864acf"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "inject"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "kernel/trace/trace_events_hist.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

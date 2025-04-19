@@ -1,0 +1,54 @@
+{
+  "hash": "7f0387cf76b1d026a5f0e0386a05c4cdac3a99af",
+  "hash_short": "7f0387cf",
+  "subject": "arm64: Avoid cpus_have_const_cap() for ARM64_HAS_{ADDRESS,GENERIC}_AUTH",
+  "body": "In system_supports_address_auth() and system_supports_generic_auth() we\nuse cpus_have_const_cap to check for ARM64_HAS_ADDRESS_AUTH and\nARM64_HAS_GENERIC_AUTH respectively, but this is not necessary and\nalternative_has_cap_*() would bre preferable.\n\nFor historical reasons, cpus_have_const_cap() is more complicated than\nit needs to be. Before cpucaps are finalized, it will perform a bitmap\ntest of the system_cpucaps bitmap, and once cpucaps are finalized it\nwill use an alternative branch. This used to be necessary to handle some\nrace conditions in the window between cpucap detection and the\nsubsequent patching of alternatives and static branches, where different\nbranches could be out-of-sync with one another (or w.r.t. alternative\nsequences). Now that we use alternative branches instead of static\nbranches, these are all patched atomically w.r.t. one another, and there\nare only a handful of cases that need special care in the window between\ncpucap detection and alternative patching.\n\nDue to the above, it would be nice to remove cpus_have_const_cap(), and\nmigrate callers over to alternative_has_cap_*(), cpus_have_final_cap(),\nor cpus_have_cap() depending on when their requirements. This will\nremove redundant instructions and improve code generation, and will make\nit easier to determine how each callsite will behave before, during, and\nafter alternative patching.\n\nThe ARM64_HAS_ADDRESS_AUTH cpucap is a boot cpu feature which is\ndetected and patched early on the boot CPU before any pointer\nauthentication keys are enabled via their respective SCTLR_ELx.EN* bits.\nNothing which uses system_supports_address_auth() is called before the\nboot alternatives are patched. Thus it is safe for\nsystem_supports_address_auth() to use cpus_have_final_boot_cap() to\ncheck for ARM64_HAS_ADDRESS_AUTH.\n\nThe ARM64_HAS_GENERIC_AUTH cpucap is a system feature which is detected\non all CPUs, then finalized and patched under\nsetup_system_capabilities(). We use system_supports_generic_auth() in a\nfew places:\n\n* The pac_generic_keys_get() and pac_generic_keys_set() functions are\n  only reachable from system calls once userspace is up and running. As\n  cpucaps are finalzied long before userspace runs, these can safely use\n  alternative_has_cap_*() or cpus_have_final_cap().\n\n* The ptrauth_prctl_reset_keys() function is only reachable from system\n  calls once userspace is up and running. As cpucaps are finalized long\n  before userspace runs, this can safely use alternative_has_cap_*() or\n  cpus_have_final_cap().\n\n* The ptrauth_keys_install_user() function is used during\n  context-switch. This is called prior to alternatives being applied,\n  and so cannot use cpus_have_final_cap(), but as this only needs to\n  switch the APGA key for userspace tasks, it's safe to use\n  alternative_has_cap_*().\n\n* The ptrauth_keys_init_user() function is used to initialize userspace\n  keys, and is only reachable after system cpucaps have been finalized\n  and patched. Thus this can safely use alternative_has_cap_*() or\n  cpus_have_final_cap().\n\n* The system_has_full_ptr_auth() helper function is only used by KVM\n  code, which is only reachable after system cpucaps have been finalized\n  and patched. Thus this can safely use alternative_has_cap_*() or\n  cpus_have_final_cap().\n\nThis patch modifies system_supports_address_auth() to use\ncpus_have_final_boot_cap() to check ARM64_HAS_ADDRESS_AUTH, and modifies\nsystem_supports_generic_auth() to use alternative_has_cap_unlikely() to\ncheck ARM64_HAS_GENERIC_AUTH. In either case this will avoid generating\ncode to test the system_cpucaps bitmap and should be better for all\nsubsequent calls at runtime. The use of cpus_have_final_boot_cap() will\nmake it easier to spot if code is chaanged such that these run before\nthe relevant cpucap is guaranteed to have been finalized.\n\nSigned-off-by: Mark Rutland <mark.rutland@arm.com>\nCc: Ard Biesheuvel <ardb@kernel.org>\nCc: Suzuki K Poulose <suzuki.poulose@arm.com>\nCc: Will Deacon <will@kernel.org>\nSigned-off-by: Catalin Marinas <catalin.marinas@arm.com>",
+  "full_message": "arm64: Avoid cpus_have_const_cap() for ARM64_HAS_{ADDRESS,GENERIC}_AUTH\n\nIn system_supports_address_auth() and system_supports_generic_auth() we\nuse cpus_have_const_cap to check for ARM64_HAS_ADDRESS_AUTH and\nARM64_HAS_GENERIC_AUTH respectively, but this is not necessary and\nalternative_has_cap_*() would bre preferable.\n\nFor historical reasons, cpus_have_const_cap() is more complicated than\nit needs to be. Before cpucaps are finalized, it will perform a bitmap\ntest of the system_cpucaps bitmap, and once cpucaps are finalized it\nwill use an alternative branch. This used to be necessary to handle some\nrace conditions in the window between cpucap detection and the\nsubsequent patching of alternatives and static branches, where different\nbranches could be out-of-sync with one another (or w.r.t. alternative\nsequences). Now that we use alternative branches instead of static\nbranches, these are all patched atomically w.r.t. one another, and there\nare only a handful of cases that need special care in the window between\ncpucap detection and alternative patching.\n\nDue to the above, it would be nice to remove cpus_have_const_cap(), and\nmigrate callers over to alternative_has_cap_*(), cpus_have_final_cap(),\nor cpus_have_cap() depending on when their requirements. This will\nremove redundant instructions and improve code generation, and will make\nit easier to determine how each callsite will behave before, during, and\nafter alternative patching.\n\nThe ARM64_HAS_ADDRESS_AUTH cpucap is a boot cpu feature which is\ndetected and patched early on the boot CPU before any pointer\nauthentication keys are enabled via their respective SCTLR_ELx.EN* bits.\nNothing which uses system_supports_address_auth() is called before the\nboot alternatives are patched. Thus it is safe for\nsystem_supports_address_auth() to use cpus_have_final_boot_cap() to\ncheck for ARM64_HAS_ADDRESS_AUTH.\n\nThe ARM64_HAS_GENERIC_AUTH cpucap is a system feature which is detected\non all CPUs, then finalized and patched under\nsetup_system_capabilities(). We use system_supports_generic_auth() in a\nfew places:\n\n* The pac_generic_keys_get() and pac_generic_keys_set() functions are\n  only reachable from system calls once userspace is up and running. As\n  cpucaps are finalzied long before userspace runs, these can safely use\n  alternative_has_cap_*() or cpus_have_final_cap().\n\n* The ptrauth_prctl_reset_keys() function is only reachable from system\n  calls once userspace is up and running. As cpucaps are finalized long\n  before userspace runs, this can safely use alternative_has_cap_*() or\n  cpus_have_final_cap().\n\n* The ptrauth_keys_install_user() function is used during\n  context-switch. This is called prior to alternatives being applied,\n  and so cannot use cpus_have_final_cap(), but as this only needs to\n  switch the APGA key for userspace tasks, it's safe to use\n  alternative_has_cap_*().\n\n* The ptrauth_keys_init_user() function is used to initialize userspace\n  keys, and is only reachable after system cpucaps have been finalized\n  and patched. Thus this can safely use alternative_has_cap_*() or\n  cpus_have_final_cap().\n\n* The system_has_full_ptr_auth() helper function is only used by KVM\n  code, which is only reachable after system cpucaps have been finalized\n  and patched. Thus this can safely use alternative_has_cap_*() or\n  cpus_have_final_cap().\n\nThis patch modifies system_supports_address_auth() to use\ncpus_have_final_boot_cap() to check ARM64_HAS_ADDRESS_AUTH, and modifies\nsystem_supports_generic_auth() to use alternative_has_cap_unlikely() to\ncheck ARM64_HAS_GENERIC_AUTH. In either case this will avoid generating\ncode to test the system_cpucaps bitmap and should be better for all\nsubsequent calls at runtime. The use of cpus_have_final_boot_cap() will\nmake it easier to spot if code is chaanged such that these run before\nthe relevant cpucap is guaranteed to have been finalized.\n\nSigned-off-by: Mark Rutland <mark.rutland@arm.com>\nCc: Ard Biesheuvel <ardb@kernel.org>\nCc: Suzuki K Poulose <suzuki.poulose@arm.com>\nCc: Will Deacon <will@kernel.org>\nSigned-off-by: Catalin Marinas <catalin.marinas@arm.com>",
+  "author_name": "Mark Rutland",
+  "author_email": "mark.rutland@arm.com",
+  "author_date": "Mon Oct 16 11:24:37 2023 +0100",
+  "author_date_iso": "2023-10-16T11:24:37+01:00",
+  "committer_name": "Catalin Marinas",
+  "committer_email": "catalin.marinas@arm.com",
+  "committer_date": "Mon Oct 16 14:17:03 2023 +0100",
+  "committer_date_iso": "2023-10-16T14:17:03+01:00",
+  "files_changed": [
+    "arch/arm64/include/asm/cpufeature.h"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "arch/arm64/include/asm/cpufeature.h",
+      "insertions": 2,
+      "deletions": 2
+    }
+  ],
+  "total_insertions": 2,
+  "total_deletions": 2,
+  "total_changes": 4,
+  "parents": [
+    "34f66c4c4d5518c11bfb7d10defff8f814c9f28a"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "authentication"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/arm64/include/asm/cpufeature.h",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

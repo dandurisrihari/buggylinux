@@ -1,0 +1,104 @@
+{
+  "hash": "0c92385dc05ee9637c04372ea95a11bbf6e010ff",
+  "hash_short": "0c92385d",
+  "subject": "x86/ibt: Implement FineIBT-BHI mitigation",
+  "body": "While WAIT_FOR_ENDBR is specified to be a full speculation stop; it\nhas been shown that some implementations are 'leaky' to such an extend\nthat speculation can escape even the FineIBT preamble.\n\nTo deal with this, add additional hardening to the FineIBT preamble.\n\nNotably, using a new LLVM feature:\n\n  https://github.com/llvm/llvm-project/commit/e223485c9b38a5579991b8cebb6a200153eee245\n\nwhich encodes the number of arguments in the kCFI preamble's register.\n\nUsing this register<->arity mapping, have the FineIBT preamble CALL\ninto a stub clobbering the relevant argument registers in the\nspeculative case.\n\nScott sayeth thusly:\n\nMicroarchitectural attacks such as Branch History Injection (BHI) and\nIntra-mode Branch Target Injection (IMBTI) [1] can cause an indirect\ncall to mispredict to an adversary-influenced target within the same\nhardware domain (e.g., within the kernel). Instructions at the\nmispredicted target may execute speculatively and potentially expose\nkernel data (e.g., to a user-mode adversary) through a\nmicroarchitectural covert channel such as CPU cache state.\n\nCET-IBT [2] is a coarse-grained control-flow integrity (CFI) ISA\nextension that enforces that each indirect call (or indirect jump)\nmust land on an ENDBR (end branch) instruction, even speculatively*.\nFineIBT is a software technique that refines CET-IBT by associating\neach function type with a 32-bit hash and enforcing (at the callee)\nthat the hash of the caller's function pointer type matches the hash\nof the callee's function type. However, recent research [3] has\ndemonstrated that the conditional branch that enforces FineIBT's hash\ncheck can be coerced to mispredict, potentially allowing an adversary\nto speculatively bypass the hash check:\n\n__cfi_foo:\n  ENDBR64\n  SUB R10d, 0x01234567\n  JZ foo    # Even if the hash check fails and ZF=0, this branch could still mispredict as taken\n  UD2\nfoo:\n  ...\n\nThe techniques demonstrated in [3] require the attacker to be able to\ncontrol the contents of at least one live register at the mispredicted\ntarget. Therefore, this patch set introduces a sequence of CMOV\ninstructions at each indirect-callable target that poisons every live\nregister with data that the attacker cannot control whenever the\nFineIBT hash check fails, thus mitigating any potential attack.\n\nThe security provided by this scheme has been discussed in detail on\nan earlier thread [4].\n\n [1] https://www.intel.com/content/www/us/en/developer/articles/technical/software-security-guidance/technical-documentation/branch-history-injection.html\n [2] Intel Software Developer's Manual, Volume 1, Chapter 18\n [3] https://www.vusec.net/projects/native-bhi/\n [4] https://lore.kernel.org/lkml/20240927194925.707462984@infradead.org/\n *There are some caveats for certain processors, see [1] for more info\n\nSuggested-by: Scott Constable <scott.d.constable@intel.com>\nSigned-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>\nSigned-off-by: Ingo Molnar <mingo@kernel.org>\nReviewed-by: Kees Cook <kees@kernel.org>\nLink: https://lore.kernel.org/r/20250224124200.820402212@infradead.org",
+  "full_message": "x86/ibt: Implement FineIBT-BHI mitigation\n\nWhile WAIT_FOR_ENDBR is specified to be a full speculation stop; it\nhas been shown that some implementations are 'leaky' to such an extend\nthat speculation can escape even the FineIBT preamble.\n\nTo deal with this, add additional hardening to the FineIBT preamble.\n\nNotably, using a new LLVM feature:\n\n  https://github.com/llvm/llvm-project/commit/e223485c9b38a5579991b8cebb6a200153eee245\n\nwhich encodes the number of arguments in the kCFI preamble's register.\n\nUsing this register<->arity mapping, have the FineIBT preamble CALL\ninto a stub clobbering the relevant argument registers in the\nspeculative case.\n\nScott sayeth thusly:\n\nMicroarchitectural attacks such as Branch History Injection (BHI) and\nIntra-mode Branch Target Injection (IMBTI) [1] can cause an indirect\ncall to mispredict to an adversary-influenced target within the same\nhardware domain (e.g., within the kernel). Instructions at the\nmispredicted target may execute speculatively and potentially expose\nkernel data (e.g., to a user-mode adversary) through a\nmicroarchitectural covert channel such as CPU cache state.\n\nCET-IBT [2] is a coarse-grained control-flow integrity (CFI) ISA\nextension that enforces that each indirect call (or indirect jump)\nmust land on an ENDBR (end branch) instruction, even speculatively*.\nFineIBT is a software technique that refines CET-IBT by associating\neach function type with a 32-bit hash and enforcing (at the callee)\nthat the hash of the caller's function pointer type matches the hash\nof the callee's function type. However, recent research [3] has\ndemonstrated that the conditional branch that enforces FineIBT's hash\ncheck can be coerced to mispredict, potentially allowing an adversary\nto speculatively bypass the hash check:\n\n__cfi_foo:\n  ENDBR64\n  SUB R10d, 0x01234567\n  JZ foo    # Even if the hash check fails and ZF=0, this branch could still mispredict as taken\n  UD2\nfoo:\n  ...\n\nThe techniques demonstrated in [3] require the attacker to be able to\ncontrol the contents of at least one live register at the mispredicted\ntarget. Therefore, this patch set introduces a sequence of CMOV\ninstructions at each indirect-callable target that poisons every live\nregister with data that the attacker cannot control whenever the\nFineIBT hash check fails, thus mitigating any potential attack.\n\nThe security provided by this scheme has been discussed in detail on\nan earlier thread [4].\n\n [1] https://www.intel.com/content/www/us/en/developer/articles/technical/software-security-guidance/technical-documentation/branch-history-injection.html\n [2] Intel Software Developer's Manual, Volume 1, Chapter 18\n [3] https://www.vusec.net/projects/native-bhi/\n [4] https://lore.kernel.org/lkml/20240927194925.707462984@infradead.org/\n *There are some caveats for certain processors, see [1] for more info\n\nSuggested-by: Scott Constable <scott.d.constable@intel.com>\nSigned-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>\nSigned-off-by: Ingo Molnar <mingo@kernel.org>\nReviewed-by: Kees Cook <kees@kernel.org>\nLink: https://lore.kernel.org/r/20250224124200.820402212@infradead.org",
+  "author_name": "Peter Zijlstra",
+  "author_email": "peterz@infradead.org",
+  "author_date": "Mon Feb 24 13:37:12 2025 +0100",
+  "author_date_iso": "2025-02-24T13:37:12+01:00",
+  "committer_name": "Ingo Molnar",
+  "committer_email": "mingo@kernel.org",
+  "committer_date": "Wed Feb 26 13:49:11 2025 +0100",
+  "committer_date_iso": "2025-02-26T13:49:11+01:00",
+  "files_changed": [
+    "Makefile",
+    "arch/x86/Kconfig",
+    "arch/x86/include/asm/cfi.h",
+    "arch/x86/kernel/alternative.c",
+    "arch/x86/net/bpf_jit_comp.c"
+  ],
+  "files_changed_count": 5,
+  "stats": [
+    {
+      "file": "Makefile",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/Kconfig",
+      "insertions": 8,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/include/asm/cfi.h",
+      "insertions": 6,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/kernel/alternative.c",
+      "insertions": 97,
+      "deletions": 10
+    },
+    {
+      "file": "arch/x86/net/bpf_jit_comp.c",
+      "insertions": 20,
+      "deletions": 9
+    }
+  ],
+  "total_insertions": 134,
+  "total_deletions": 19,
+  "total_changes": 153,
+  "parents": [
+    "b815f6877d8063482fe745f098eeef632679aa8a"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "hardening",
+      "Injection",
+      "bypass"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "Makefile",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/Kconfig",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/include/asm/cfi.h",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/kernel/alternative.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/net/bpf_jit_comp.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

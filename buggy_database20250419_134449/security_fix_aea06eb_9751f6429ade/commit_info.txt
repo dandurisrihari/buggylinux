@@ -1,0 +1,102 @@
+Commit Hash: aea06eb276d99590f400c877ca2bd74b4db91330
+Subject: Merge branch 'TLS-offload-rx-netdev-and-mlx5'
+
+
+Security Keywords:
+- authentication
+
+Full commit message:
+Merge branch 'TLS-offload-rx-netdev-and-mlx5'
+
+Boris Pismenny says:
+
+====================
+TLS offload rx, netdev & mlx5
+
+The following series provides TLS RX inline crypto offload.
+
+v5->v4:
+    - Remove the Kconfig to mutually exclude both IPsec and TLS
+
+v4->v3:
+    - Remove the iov revert for zero copy send flow
+
+v2->v3:
+    - Fix typo
+    - Adjust cover letter
+    - Fix bug in zero copy flows
+    - Use network byte order for the record number in resync
+    - Adjust the sequence provided in resync
+
+v1->v2:
+    - Fix bisectability problems due to variable name changes
+    - Fix potential uninitialized return value
+
+This series completes the generic infrastructure to offload TLS crypto to
+a network devices. It enables the kernel TLS socket to skip decryption and
+authentication operations for SKBs marked as decrypted on the receive
+side of the data path. Leaving those computationally expensive operations
+to the NIC.
+
+This infrastructure doesn't require a TCP offload engine. Instead, the
+NIC decrypts a packet's payload if the packet contains the expected TCP
+sequence number. The TLS record authentication tag remains unmodified
+regardless of decryption. If the packet is decrypted successfully and it
+contains an authentication tag, then the authentication check has passed.
+Otherwise, if the authentication fails, then the packet is provided
+unmodified and the KTLS layer is responsible for handling it.
+Out-Of-Order TCP packets are provided unmodified. As a result,
+in the slow path some of the SKBs are decrypted while others remain as
+ciphertext.
+
+The GRO and TCP layers must not coalesce decrypted and non-decrypted SKBs.
+At the worst case a received TLS record consists of both plaintext
+and ciphertext packets. These partially decrypted records must be
+reencrypted, only to be decrypted.
+
+The notable differences between SW KTLS and NIC offloaded TLS
+implementations are as follows:
+1. Partial decryption - Software must handle the case of a TLS record
+that was only partially decrypted by HW. This can happen due to packet
+reordering.
+2. Resynchronization - tls_read_size calls the device driver to
+resynchronize HW whenever it lost track of the TLS record framing in
+the TCP stream.
+
+The infrastructure should be extendable to support various NIC offload
+implementations.  However it is currently written with the
+implementation below in mind:
+The NIC identifies packets that should be offloaded according to
+the 5-tuple and the TCP sequence number. If these match and the
+packet is decrypted and authenticated successfully, then a syndrome
+is provided to software. Otherwise, the packet is unmodified.
+Decrypted and non-decrypted packets aren't coalesced by the network stack,
+and the KTLS layer decrypts and authenticates partially decrypted records.
+The NIC provides an indication whenever a resync is required. The resync
+operation is triggered by the KTLS layer while parsing TLS record headers.
+
+Finally, we measure the performance obtained by running single stream
+iperf with two Intel(R) Xeon(R) CPU E5-2620 v3 @ 2.40GHz machines connected
+back-to-back with Innova TLS (40Gbps) NICs. We compare TCP (upper bound)
+and KTLS-Offload running both in Tx and Rx. The results show that the
+performance of offload is comparable to TCP.
+
+                          | Bandwidth (Gbps) | CPU Tx (%) | CPU rx (%)
+TCP                       | 28.8             | 5          | 12
+KTLS-Offload-Tx-Rx 	  | 28.6	     | 7          | 14
+
+Paper: https://netdevconf.org/2.2/papers/pismenny-tlscrypto-talk.pdf
+====================
+
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+Metadata:
+Author: David S. Miller <davem@davemloft.net>
+Author Date: Mon Jul 16 00:13:40 2018 -0700
+Committer: David S. Miller <davem@davemloft.net>
+Commit Date: Mon Jul 16 00:13:40 2018 -0700
+
+Files Changed: 0
+Lines Added: 846
+Lines Removed: 191
+Total Changes: 1037

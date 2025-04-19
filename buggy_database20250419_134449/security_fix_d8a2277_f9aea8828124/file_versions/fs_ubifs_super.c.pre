@@ -1,0 +1,99 @@
+commit 1e76592f2c3208ac635c2758aa8326d82fa64a72
+Author: Sascha Hauer <s.hauer@pengutronix.de>
+Date:   Fri Sep 7 14:36:44 2018 +0200
+
+    ubifs: Do not update inode size in-place in authenticated mode
+    
+    In authenticated mode we cannot fixup the inode sizes in-place
+    during recovery as this would invalidate the hashes and HMACs
+    we stored for this inode.
+    
+    Instead, we just write the updated inodes to the journal. We can
+    only do this after ubifs_rcvry_gc_commit() is done though, so for
+    authenticated mode call ubifs_recover_size() after
+    ubifs_rcvry_gc_commit() and not vice versa as normally done.
+    
+    Calling ubifs_recover_size() after ubifs_rcvry_gc_commit() has the
+    drawback that after a commit the size fixup information is gone, so
+    when a powercut happens while recovering from another powercut
+    we may lose some data written right before the first powercut.
+    This is why we only do this in authenticated mode and leave the
+    behaviour for unauthenticated mode untouched.
+    
+    Signed-off-by: Sascha Hauer <s.hauer@pengutronix.de>
+    Signed-off-by: Richard Weinberger <richard@nod.at>
+
+diff --git a/fs/ubifs/super.c b/fs/ubifs/super.c
+index 2722ca077d23..e2964ce81dee 100644
+--- a/fs/ubifs/super.c
++++ b/fs/ubifs/super.c
+@@ -1378,12 +1378,21 @@ static int mount_ubifs(struct ubifs_info *c)
+ 		}
+ 
+ 		if (c->need_recovery) {
+-			err = ubifs_recover_size(c);
+-			if (err)
+-				goto out_orphans;
++			if (!ubifs_authenticated(c)) {
++				err = ubifs_recover_size(c, true);
++				if (err)
++					goto out_orphans;
++			}
++
+ 			err = ubifs_rcvry_gc_commit(c);
+ 			if (err)
+ 				goto out_orphans;
++
++			if (ubifs_authenticated(c)) {
++				err = ubifs_recover_size(c, false);
++				if (err)
++					goto out_orphans;
++			}
+ 		} else {
+ 			err = take_gc_lnum(c);
+ 			if (err)
+@@ -1402,7 +1411,7 @@ static int mount_ubifs(struct ubifs_info *c)
+ 		if (err)
+ 			goto out_orphans;
+ 	} else if (c->need_recovery) {
+-		err = ubifs_recover_size(c);
++		err = ubifs_recover_size(c, false);
+ 		if (err)
+ 			goto out_orphans;
+ 	} else {
+@@ -1629,9 +1638,11 @@ static int ubifs_remount_rw(struct ubifs_info *c)
+ 		err = ubifs_write_rcvrd_mst_node(c);
+ 		if (err)
+ 			goto out;
+-		err = ubifs_recover_size(c);
+-		if (err)
+-			goto out;
++		if (!ubifs_authenticated(c)) {
++			err = ubifs_recover_size(c, true);
++			if (err)
++				goto out;
++		}
+ 		err = ubifs_clean_lebs(c, c->sbuf);
+ 		if (err)
+ 			goto out;
+@@ -1697,10 +1708,19 @@ static int ubifs_remount_rw(struct ubifs_info *c)
+ 			goto out;
+ 	}
+ 
+-	if (c->need_recovery)
++	if (c->need_recovery) {
+ 		err = ubifs_rcvry_gc_commit(c);
+-	else
++		if (err)
++			goto out;
++
++		if (ubifs_authenticated(c)) {
++			err = ubifs_recover_size(c, false);
++			if (err)
++				goto out;
++		}
++	} else {
+ 		err = ubifs_leb_unmap(c, c->gc_lnum);
++	}
+ 	if (err)
+ 		goto out;

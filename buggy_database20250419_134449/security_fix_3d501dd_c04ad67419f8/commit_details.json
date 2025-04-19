@@ -1,0 +1,54 @@
+{
+  "hash": "3d501dd326fb1c73f1b8206d4c6e1d7b15c07e27",
+  "hash_short": "3d501dd3",
+  "subject": "tcp: do not accept ACK of bytes we never sent",
+  "body": "This patch is based on a detailed report and ideas from Yepeng Pan\nand Christian Rossow.\n\nACK seq validation is currently following RFC 5961 5.2 guidelines:\n\n   The ACK value is considered acceptable only if\n   it is in the range of ((SND.UNA - MAX.SND.WND) <= SEG.ACK <=\n   SND.NXT).  All incoming segments whose ACK value doesn't satisfy the\n   above condition MUST be discarded and an ACK sent back.  It needs to\n   be noted that RFC 793 on page 72 (fifth check) says: \"If the ACK is a\n   duplicate (SEG.ACK < SND.UNA), it can be ignored.  If the ACK\n   acknowledges something not yet sent (SEG.ACK > SND.NXT) then send an\n   ACK, drop the segment, and return\".  The \"ignored\" above implies that\n   the processing of the incoming data segment continues, which means\n   the ACK value is treated as acceptable.  This mitigation makes the\n   ACK check more stringent since any ACK < SND.UNA wouldn't be\n   accepted, instead only ACKs that are in the range ((SND.UNA -\n   MAX.SND.WND) <= SEG.ACK <= SND.NXT) get through.\n\nThis can be refined for new (and possibly spoofed) flows,\nby not accepting ACK for bytes that were never sent.\n\nThis greatly improves TCP security at a little cost.\n\nI added a Fixes: tag to make sure this patch will reach stable trees,\neven if the 'blamed' patch was adhering to the RFC.\n\ntp->bytes_acked was added in linux-4.2\n\nFollowing packetdrill test (courtesy of Yepeng Pan) shows\nthe issue at hand:\n\n0 socket(..., SOCK_STREAM, IPPROTO_TCP) = 3\n+0 setsockopt(3, SOL_SOCKET, SO_REUSEADDR, [1], 4) = 0\n+0 bind(3, ..., ...) = 0\n+0 listen(3, 1024) = 0\n\n// ---------------- Handshake ------------------- //\n\n// when window scale is set to 14 the window size can be extended to\n// 65535 * (2^14) = 1073725440. Linux would accept an ACK packet\n// with ack number in (Server_ISN+1-1073725440. Server_ISN+1)\n// ,though this ack number acknowledges some data never\n// sent by the server.\n\n+0 < S 0:0(0) win 65535 <mss 1400,nop,wscale 14>\n+0 > S. 0:0(0) ack 1 <...>\n+0 < . 1:1(0) ack 1 win 65535\n+0 accept(3, ..., ...) = 4\n\n// For the established connection, we send an ACK packet,\n// the ack packet uses ack number 1 - 1073725300 + 2^32,\n// where 2^32 is used to wrap around.\n// Note: we used 1073725300 instead of 1073725440 to avoid possible\n// edge cases.\n// 1 - 1073725300 + 2^32 = 3221241997\n\n// Oops, old kernels happily accept this packet.\n+0 < . 1:1001(1000) ack 3221241997 win 65535\n\n// After the kernel fix the following will be replaced by a challenge ACK,\n// and prior malicious frame would be dropped.\n+0 > . 1:1(0) ack 1001\n\nFixes: 354e4aa391ed (\"tcp: RFC 5961 5.2 Blind Data Injection Attack Mitigation\")\nSigned-off-by: Eric Dumazet <edumazet@google.com>\nReported-by: Yepeng Pan <yepeng.pan@cispa.de>\nReported-by: Christian Rossow <rossow@cispa.de>\nAcked-by: Neal Cardwell <ncardwell@google.com>\nLink: https://lore.kernel.org/r/20231205161841.2702925-1-edumazet@google.com\nSigned-off-by: Jakub Kicinski <kuba@kernel.org>",
+  "full_message": "tcp: do not accept ACK of bytes we never sent\n\nThis patch is based on a detailed report and ideas from Yepeng Pan\nand Christian Rossow.\n\nACK seq validation is currently following RFC 5961 5.2 guidelines:\n\n   The ACK value is considered acceptable only if\n   it is in the range of ((SND.UNA - MAX.SND.WND) <= SEG.ACK <=\n   SND.NXT).  All incoming segments whose ACK value doesn't satisfy the\n   above condition MUST be discarded and an ACK sent back.  It needs to\n   be noted that RFC 793 on page 72 (fifth check) says: \"If the ACK is a\n   duplicate (SEG.ACK < SND.UNA), it can be ignored.  If the ACK\n   acknowledges something not yet sent (SEG.ACK > SND.NXT) then send an\n   ACK, drop the segment, and return\".  The \"ignored\" above implies that\n   the processing of the incoming data segment continues, which means\n   the ACK value is treated as acceptable.  This mitigation makes the\n   ACK check more stringent since any ACK < SND.UNA wouldn't be\n   accepted, instead only ACKs that are in the range ((SND.UNA -\n   MAX.SND.WND) <= SEG.ACK <= SND.NXT) get through.\n\nThis can be refined for new (and possibly spoofed) flows,\nby not accepting ACK for bytes that were never sent.\n\nThis greatly improves TCP security at a little cost.\n\nI added a Fixes: tag to make sure this patch will reach stable trees,\neven if the 'blamed' patch was adhering to the RFC.\n\ntp->bytes_acked was added in linux-4.2\n\nFollowing packetdrill test (courtesy of Yepeng Pan) shows\nthe issue at hand:\n\n0 socket(..., SOCK_STREAM, IPPROTO_TCP) = 3\n+0 setsockopt(3, SOL_SOCKET, SO_REUSEADDR, [1], 4) = 0\n+0 bind(3, ..., ...) = 0\n+0 listen(3, 1024) = 0\n\n// ---------------- Handshake ------------------- //\n\n// when window scale is set to 14 the window size can be extended to\n// 65535 * (2^14) = 1073725440. Linux would accept an ACK packet\n// with ack number in (Server_ISN+1-1073725440. Server_ISN+1)\n// ,though this ack number acknowledges some data never\n// sent by the server.\n\n+0 < S 0:0(0) win 65535 <mss 1400,nop,wscale 14>\n+0 > S. 0:0(0) ack 1 <...>\n+0 < . 1:1(0) ack 1 win 65535\n+0 accept(3, ..., ...) = 4\n\n// For the established connection, we send an ACK packet,\n// the ack packet uses ack number 1 - 1073725300 + 2^32,\n// where 2^32 is used to wrap around.\n// Note: we used 1073725300 instead of 1073725440 to avoid possible\n// edge cases.\n// 1 - 1073725300 + 2^32 = 3221241997\n\n// Oops, old kernels happily accept this packet.\n+0 < . 1:1001(1000) ack 3221241997 win 65535\n\n// After the kernel fix the following will be replaced by a challenge ACK,\n// and prior malicious frame would be dropped.\n+0 > . 1:1(0) ack 1001\n\nFixes: 354e4aa391ed (\"tcp: RFC 5961 5.2 Blind Data Injection Attack Mitigation\")\nSigned-off-by: Eric Dumazet <edumazet@google.com>\nReported-by: Yepeng Pan <yepeng.pan@cispa.de>\nReported-by: Christian Rossow <rossow@cispa.de>\nAcked-by: Neal Cardwell <ncardwell@google.com>\nLink: https://lore.kernel.org/r/20231205161841.2702925-1-edumazet@google.com\nSigned-off-by: Jakub Kicinski <kuba@kernel.org>",
+  "author_name": "Eric Dumazet",
+  "author_email": "edumazet@google.com",
+  "author_date": "Tue Dec 5 16:18:41 2023 +0000",
+  "author_date_iso": "2023-12-05T16:18:41+00:00",
+  "committer_name": "Jakub Kicinski",
+  "committer_email": "kuba@kernel.org",
+  "committer_date": "Wed Dec 6 19:00:42 2023 -0800",
+  "committer_date_iso": "2023-12-06T19:00:42-08:00",
+  "files_changed": [
+    "net/ipv4/tcp_input.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "net/ipv4/tcp_input.c",
+      "insertions": 5,
+      "deletions": 1
+    }
+  ],
+  "total_insertions": 5,
+  "total_deletions": 1,
+  "total_changes": 6,
+  "parents": [
+    "fe2b1226656afae56702d1d84c6900f6b67df297"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "Injection"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "net/ipv4/tcp_input.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

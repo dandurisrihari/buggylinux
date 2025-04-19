@@ -1,0 +1,117 @@
+{
+  "hash": "7400b063969bdca4a06cd97f1294d765c8eecbe1",
+  "hash_short": "7400b063",
+  "subject": "nft_set_pipapo: Introduce AVX2-based lookup implementation",
+  "body": "If the AVX2 set is available, we can exploit the repetitive\ncharacteristic of this algorithm to provide a fast, vectorised\nversion by using 256-bit wide AVX2 operations for bucket loads and\nbitwise intersections.\n\nIn most cases, this implementation consistently outperforms rbtree\nset instances despite the fact they are configured to use a given,\nsingle, ranged data type out of the ones used for performance\nmeasurements by the nft_concat_range.sh kselftest.\n\nThat script, injecting packets directly on the ingoing device path\nwith pktgen, reports, averaged over five runs on a single AMD Epyc\n7402 thread (3.35GHz, 768 KiB L1D$, 12 MiB L2$), the figures below.\nCONFIG_RETPOLINE was not set here.\n\nNote that this is not a fair comparison over hash and rbtree set\ntypes: non-ranged entries (used to have a reference for hash types)\nwould be matched faster than this, and matching on a single field\nonly (which is the case for rbtree) is also significantly faster.\n\nHowever, it's not possible at the moment to choose this set type\nfor non-ranged entries, and the current implementation also needs\na few minor adjustments in order to match on less than two fields.\n\n ---------------.-----------------------------------.------------.\n AMD Epyc 7402  |          baselines, Mpps          | this patch |\n  1 thread      |___________________________________|____________|\n  3.35GHz       |        |        |        |        |            |\n  768KiB L1D$   | netdev |  hash  | rbtree |        |            |\n ---------------|  hook  |   no   | single |        |   pipapo   |\n type   entries |  drop  | ranges | field  | pipapo |    AVX2    |\n ---------------|--------|--------|--------|--------|------------|\n net,port       |        |        |        |        |            |\n          1000  |   19.0 |   10.4 |    3.8 |    4.0 | 7.5   +87% |\n ---------------|--------|--------|--------|--------|------------|\n port,net       |        |        |        |        |            |\n           100  |   18.8 |   10.3 |    5.8 |    6.3 | 8.1   +29% |\n ---------------|--------|--------|--------|--------|------------|\n net6,port      |        |        |        |        |            |\n          1000  |   16.4 |    7.6 |    1.8 |    2.1 | 4.8  +128% |\n ---------------|--------|--------|--------|--------|------------|\n port,proto     |        |        |        |        |            |\n         30000  |   19.6 |   11.6 |    3.9 |    0.5 | 2.6  +420% |\n ---------------|--------|--------|--------|--------|------------|\n net6,port,mac  |        |        |        |        |            |\n            10  |   16.5 |    5.4 |    4.3 |    3.4 | 4.7   +38% |\n ---------------|--------|--------|--------|--------|------------|\n net6,port,mac, |        |        |        |        |            |\n proto    1000  |   16.5 |    5.7 |    1.9 |    1.4 | 3.6   +26% |\n ---------------|--------|--------|--------|--------|------------|\n net,mac        |        |        |        |        |            |\n          1000  |   19.0 |    8.4 |    3.9 |    2.5 | 6.4  +156% |\n ---------------'--------'--------'--------'--------'------------'\n\nA similar strategy could be easily reused to implement specialised\nversions for other SIMD sets, and I plan to post at least a NEON\nversion at a later time.\n\nSigned-off-by: Stefano Brivio <sbrivio@redhat.com>\nSigned-off-by: Pablo Neira Ayuso <pablo@netfilter.org>",
+  "full_message": "nft_set_pipapo: Introduce AVX2-based lookup implementation\n\nIf the AVX2 set is available, we can exploit the repetitive\ncharacteristic of this algorithm to provide a fast, vectorised\nversion by using 256-bit wide AVX2 operations for bucket loads and\nbitwise intersections.\n\nIn most cases, this implementation consistently outperforms rbtree\nset instances despite the fact they are configured to use a given,\nsingle, ranged data type out of the ones used for performance\nmeasurements by the nft_concat_range.sh kselftest.\n\nThat script, injecting packets directly on the ingoing device path\nwith pktgen, reports, averaged over five runs on a single AMD Epyc\n7402 thread (3.35GHz, 768 KiB L1D$, 12 MiB L2$), the figures below.\nCONFIG_RETPOLINE was not set here.\n\nNote that this is not a fair comparison over hash and rbtree set\ntypes: non-ranged entries (used to have a reference for hash types)\nwould be matched faster than this, and matching on a single field\nonly (which is the case for rbtree) is also significantly faster.\n\nHowever, it's not possible at the moment to choose this set type\nfor non-ranged entries, and the current implementation also needs\na few minor adjustments in order to match on less than two fields.\n\n ---------------.-----------------------------------.------------.\n AMD Epyc 7402  |          baselines, Mpps          | this patch |\n  1 thread      |___________________________________|____________|\n  3.35GHz       |        |        |        |        |            |\n  768KiB L1D$   | netdev |  hash  | rbtree |        |            |\n ---------------|  hook  |   no   | single |        |   pipapo   |\n type   entries |  drop  | ranges | field  | pipapo |    AVX2    |\n ---------------|--------|--------|--------|--------|------------|\n net,port       |        |        |        |        |            |\n          1000  |   19.0 |   10.4 |    3.8 |    4.0 | 7.5   +87% |\n ---------------|--------|--------|--------|--------|------------|\n port,net       |        |        |        |        |            |\n           100  |   18.8 |   10.3 |    5.8 |    6.3 | 8.1   +29% |\n ---------------|--------|--------|--------|--------|------------|\n net6,port      |        |        |        |        |            |\n          1000  |   16.4 |    7.6 |    1.8 |    2.1 | 4.8  +128% |\n ---------------|--------|--------|--------|--------|------------|\n port,proto     |        |        |        |        |            |\n         30000  |   19.6 |   11.6 |    3.9 |    0.5 | 2.6  +420% |\n ---------------|--------|--------|--------|--------|------------|\n net6,port,mac  |        |        |        |        |            |\n            10  |   16.5 |    5.4 |    4.3 |    3.4 | 4.7   +38% |\n ---------------|--------|--------|--------|--------|------------|\n net6,port,mac, |        |        |        |        |            |\n proto    1000  |   16.5 |    5.7 |    1.9 |    1.4 | 3.6   +26% |\n ---------------|--------|--------|--------|--------|------------|\n net,mac        |        |        |        |        |            |\n          1000  |   19.0 |    8.4 |    3.9 |    2.5 | 6.4  +156% |\n ---------------'--------'--------'--------'--------'------------'\n\nA similar strategy could be easily reused to implement specialised\nversions for other SIMD sets, and I plan to post at least a NEON\nversion at a later time.\n\nSigned-off-by: Stefano Brivio <sbrivio@redhat.com>\nSigned-off-by: Pablo Neira Ayuso <pablo@netfilter.org>",
+  "author_name": "Stefano Brivio",
+  "author_email": "sbrivio@redhat.com",
+  "author_date": "Sat Mar 7 17:52:36 2020 +0100",
+  "author_date_iso": "2020-03-07T17:52:36+01:00",
+  "committer_name": "Pablo Neira Ayuso",
+  "committer_email": "pablo@netfilter.org",
+  "committer_date": "Sun Mar 15 15:27:45 2020 +0100",
+  "committer_date_iso": "2020-03-15T15:27:45+01:00",
+  "files_changed": [
+    "include/net/netfilter/nf_tables_core.h",
+    "net/netfilter/Makefile",
+    "net/netfilter/nf_tables_api.c",
+    "net/netfilter/nft_set_pipapo.c",
+    "net/netfilter/nft_set_pipapo_avx2.c",
+    "net/netfilter/nft_set_pipapo_avx2.h"
+  ],
+  "files_changed_count": 6,
+  "stats": [
+    {
+      "file": "include/net/netfilter/nf_tables_core.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "net/netfilter/Makefile",
+      "insertions": 6,
+      "deletions": 0
+    },
+    {
+      "file": "net/netfilter/nf_tables_api.c",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "net/netfilter/nft_set_pipapo.c",
+      "insertions": 24,
+      "deletions": 0
+    },
+    {
+      "file": "net/netfilter/nft_set_pipapo_avx2.c",
+      "insertions": 1222,
+      "deletions": 0
+    },
+    {
+      "file": "net/netfilter/nft_set_pipapo_avx2.h",
+      "insertions": 14,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 1270,
+  "total_deletions": 0,
+  "total_changes": 1270,
+  "parents": [
+    "8683f4b9950d308079be74f9a32d6c3eee9c3f1b"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v5.7-rc1"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "exploit"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "net/netfilter/Makefile",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/net/netfilter/nf_tables_core.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "net/netfilter/nft_set_pipapo.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "net/netfilter/nft_set_pipapo_avx2.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "net/netfilter/nft_set_pipapo_avx2.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "net/netfilter/nf_tables_api.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

@@ -1,0 +1,89 @@
+Commit Hash: 0c92385dc05ee9637c04372ea95a11bbf6e010ff
+Subject: x86/ibt: Implement FineIBT-BHI mitigation
+
+
+Security Keywords:
+- hardening
+- Injection
+- bypass
+
+Full commit message:
+x86/ibt: Implement FineIBT-BHI mitigation
+
+While WAIT_FOR_ENDBR is specified to be a full speculation stop; it
+has been shown that some implementations are 'leaky' to such an extend
+that speculation can escape even the FineIBT preamble.
+
+To deal with this, add additional hardening to the FineIBT preamble.
+
+Notably, using a new LLVM feature:
+
+  https://github.com/llvm/llvm-project/commit/e223485c9b38a5579991b8cebb6a200153eee245
+
+which encodes the number of arguments in the kCFI preamble's register.
+
+Using this register<->arity mapping, have the FineIBT preamble CALL
+into a stub clobbering the relevant argument registers in the
+speculative case.
+
+Scott sayeth thusly:
+
+Microarchitectural attacks such as Branch History Injection (BHI) and
+Intra-mode Branch Target Injection (IMBTI) [1] can cause an indirect
+call to mispredict to an adversary-influenced target within the same
+hardware domain (e.g., within the kernel). Instructions at the
+mispredicted target may execute speculatively and potentially expose
+kernel data (e.g., to a user-mode adversary) through a
+microarchitectural covert channel such as CPU cache state.
+
+CET-IBT [2] is a coarse-grained control-flow integrity (CFI) ISA
+extension that enforces that each indirect call (or indirect jump)
+must land on an ENDBR (end branch) instruction, even speculatively*.
+FineIBT is a software technique that refines CET-IBT by associating
+each function type with a 32-bit hash and enforcing (at the callee)
+that the hash of the caller's function pointer type matches the hash
+of the callee's function type. However, recent research [3] has
+demonstrated that the conditional branch that enforces FineIBT's hash
+check can be coerced to mispredict, potentially allowing an adversary
+to speculatively bypass the hash check:
+
+__cfi_foo:
+  ENDBR64
+  SUB R10d, 0x01234567
+  JZ foo    # Even if the hash check fails and ZF=0, this branch could still mispredict as taken
+  UD2
+foo:
+  ...
+
+The techniques demonstrated in [3] require the attacker to be able to
+control the contents of at least one live register at the mispredicted
+target. Therefore, this patch set introduces a sequence of CMOV
+instructions at each indirect-callable target that poisons every live
+register with data that the attacker cannot control whenever the
+FineIBT hash check fails, thus mitigating any potential attack.
+
+The security provided by this scheme has been discussed in detail on
+an earlier thread [4].
+
+ [1] https://www.intel.com/content/www/us/en/developer/articles/technical/software-security-guidance/technical-documentation/branch-history-injection.html
+ [2] Intel Software Developer's Manual, Volume 1, Chapter 18
+ [3] https://www.vusec.net/projects/native-bhi/
+ [4] https://lore.kernel.org/lkml/20240927194925.707462984@infradead.org/
+ *There are some caveats for certain processors, see [1] for more info
+
+Suggested-by: Scott Constable <scott.d.constable@intel.com>
+Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+Reviewed-by: Kees Cook <kees@kernel.org>
+Link: https://lore.kernel.org/r/20250224124200.820402212@infradead.org
+
+Metadata:
+Author: Peter Zijlstra <peterz@infradead.org>
+Author Date: Mon Feb 24 13:37:12 2025 +0100
+Committer: Ingo Molnar <mingo@kernel.org>
+Commit Date: Wed Feb 26 13:49:11 2025 +0100
+
+Files Changed: 5
+Lines Added: 134
+Lines Removed: 19
+Total Changes: 153

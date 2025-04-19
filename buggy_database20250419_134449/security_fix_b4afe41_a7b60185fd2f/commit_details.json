@@ -1,0 +1,54 @@
+{
+  "hash": "b4afe4183ec77f230851ea139d91e5cf2644c68b",
+  "hash_short": "b4afe418",
+  "subject": "resource: fix region_intersects() vs add_memory_driver_managed()",
+  "body": "On a system with CXL memory, the resource tree (/proc/iomem) related to\nCXL memory may look like something as follows.\n\n490000000-50fffffff : CXL Window 0\n  490000000-50fffffff : region0\n    490000000-50fffffff : dax0.0\n      490000000-50fffffff : System RAM (kmem)\n\nBecause drivers/dax/kmem.c calls add_memory_driver_managed() during\nonlining CXL memory, which makes \"System RAM (kmem)\" a descendant of \"CXL\nWindow X\".  This confuses region_intersects(), which expects all \"System\nRAM\" resources to be at the top level of iomem_resource.  This can lead to\nbugs.\n\nFor example, when the following command line is executed to write some\nmemory in CXL memory range via /dev/mem,\n\n $ dd if=data of=/dev/mem bs=$((1 << 10)) seek=$((0x490000000 >> 10)) count=1\n dd: error writing '/dev/mem': Bad address\n 1+0 records in\n 0+0 records out\n 0 bytes copied, 0.0283507 s, 0.0 kB/s\n\nthe command fails as expected.  However, the error code is wrong.  It\nshould be \"Operation not permitted\" instead of \"Bad address\".  More\nseriously, the /dev/mem permission checking in devmem_is_allowed() passes\nincorrectly.  Although the accessing is prevented later because ioremap()\nisn't allowed to map system RAM, it is a potential security issue.  During\ncommand executing, the following warning is reported in the kernel log for\ncalling ioremap() on system RAM.\n\n ioremap on RAM at 0x0000000490000000 - 0x0000000490000fff\n WARNING: CPU: 2 PID: 416 at arch/x86/mm/ioremap.c:216 __ioremap_caller.constprop.0+0x131/0x35d\n Call Trace:\n  memremap+0xcb/0x184\n  xlate_dev_mem_ptr+0x25/0x2f\n  write_mem+0x94/0xfb\n  vfs_write+0x128/0x26d\n  ksys_write+0xac/0xfe\n  do_syscall_64+0x9a/0xfd\n  entry_SYSCALL_64_after_hwframe+0x4b/0x53\n\nThe details of command execution process are as follows.  In the above\nresource tree, \"System RAM\" is a descendant of \"CXL Window 0\" instead of a\ntop level resource.  So, region_intersects() will report no System RAM\nresources in the CXL memory region incorrectly, because it only checks the\ntop level resources.  Consequently, devmem_is_allowed() will return 1\n(allow access via /dev/mem) for CXL memory region incorrectly. \nFortunately, ioremap() doesn't allow to map System RAM and reject the\naccess.\n\nSo, region_intersects() needs to be fixed to work correctly with the\nresource tree with \"System RAM\" not at top level as above.  To fix it, if\nwe found a unmatched resource in the top level, we will continue to search\nmatched resources in its descendant resources.  So, we will not miss any\nmatched resources in resource tree anymore.\n\nIn the new implementation, an example resource tree\n\n|------------- \"CXL Window 0\" ------------|\n|-- \"System RAM\" --|\n\nwill behave similar as the following fake resource tree for\nregion_intersects(, IORESOURCE_SYSTEM_RAM, ),\n\n|-- \"System RAM\" --||-- \"CXL Window 0a\" --|\n\nWhere \"CXL Window 0a\" is part of the original \"CXL Window 0\" that\nisn't covered by \"System RAM\".\n\nLink: https://lkml.kernel.org/r/20240906030713.204292-2-ying.huang@intel.com\nFixes: c221c0b0308f (\"device-dax: \"Hotplug\" persistent memory for use like normal RAM\")\nSigned-off-by: \"Huang, Ying\" <ying.huang@intel.com>\nCc: Dan Williams <dan.j.williams@intel.com>\nCc: David Hildenbrand <david@redhat.com>\nCc: Davidlohr Bueso <dave@stgolabs.net>\nCc: Jonathan Cameron <jonathan.cameron@huawei.com>\nCc: Dave Jiang <dave.jiang@intel.com>\nCc: Alison Schofield <alison.schofield@intel.com>\nCc: Vishal Verma <vishal.l.verma@intel.com>\nCc: Ira Weiny <ira.weiny@intel.com>\nCc: Alistair Popple <apopple@nvidia.com>\nCc: Andy Shevchenko <andriy.shevchenko@linux.intel.com>\nCc: Bjorn Helgaas <bhelgaas@google.com>\nCc: Baoquan He <bhe@redhat.com>\nCc: <stable@vger.kernel.org>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>",
+  "full_message": "resource: fix region_intersects() vs add_memory_driver_managed()\n\nOn a system with CXL memory, the resource tree (/proc/iomem) related to\nCXL memory may look like something as follows.\n\n490000000-50fffffff : CXL Window 0\n  490000000-50fffffff : region0\n    490000000-50fffffff : dax0.0\n      490000000-50fffffff : System RAM (kmem)\n\nBecause drivers/dax/kmem.c calls add_memory_driver_managed() during\nonlining CXL memory, which makes \"System RAM (kmem)\" a descendant of \"CXL\nWindow X\".  This confuses region_intersects(), which expects all \"System\nRAM\" resources to be at the top level of iomem_resource.  This can lead to\nbugs.\n\nFor example, when the following command line is executed to write some\nmemory in CXL memory range via /dev/mem,\n\n $ dd if=data of=/dev/mem bs=$((1 << 10)) seek=$((0x490000000 >> 10)) count=1\n dd: error writing '/dev/mem': Bad address\n 1+0 records in\n 0+0 records out\n 0 bytes copied, 0.0283507 s, 0.0 kB/s\n\nthe command fails as expected.  However, the error code is wrong.  It\nshould be \"Operation not permitted\" instead of \"Bad address\".  More\nseriously, the /dev/mem permission checking in devmem_is_allowed() passes\nincorrectly.  Although the accessing is prevented later because ioremap()\nisn't allowed to map system RAM, it is a potential security issue.  During\ncommand executing, the following warning is reported in the kernel log for\ncalling ioremap() on system RAM.\n\n ioremap on RAM at 0x0000000490000000 - 0x0000000490000fff\n WARNING: CPU: 2 PID: 416 at arch/x86/mm/ioremap.c:216 __ioremap_caller.constprop.0+0x131/0x35d\n Call Trace:\n  memremap+0xcb/0x184\n  xlate_dev_mem_ptr+0x25/0x2f\n  write_mem+0x94/0xfb\n  vfs_write+0x128/0x26d\n  ksys_write+0xac/0xfe\n  do_syscall_64+0x9a/0xfd\n  entry_SYSCALL_64_after_hwframe+0x4b/0x53\n\nThe details of command execution process are as follows.  In the above\nresource tree, \"System RAM\" is a descendant of \"CXL Window 0\" instead of a\ntop level resource.  So, region_intersects() will report no System RAM\nresources in the CXL memory region incorrectly, because it only checks the\ntop level resources.  Consequently, devmem_is_allowed() will return 1\n(allow access via /dev/mem) for CXL memory region incorrectly. \nFortunately, ioremap() doesn't allow to map System RAM and reject the\naccess.\n\nSo, region_intersects() needs to be fixed to work correctly with the\nresource tree with \"System RAM\" not at top level as above.  To fix it, if\nwe found a unmatched resource in the top level, we will continue to search\nmatched resources in its descendant resources.  So, we will not miss any\nmatched resources in resource tree anymore.\n\nIn the new implementation, an example resource tree\n\n|------------- \"CXL Window 0\" ------------|\n|-- \"System RAM\" --|\n\nwill behave similar as the following fake resource tree for\nregion_intersects(, IORESOURCE_SYSTEM_RAM, ),\n\n|-- \"System RAM\" --||-- \"CXL Window 0a\" --|\n\nWhere \"CXL Window 0a\" is part of the original \"CXL Window 0\" that\nisn't covered by \"System RAM\".\n\nLink: https://lkml.kernel.org/r/20240906030713.204292-2-ying.huang@intel.com\nFixes: c221c0b0308f (\"device-dax: \"Hotplug\" persistent memory for use like normal RAM\")\nSigned-off-by: \"Huang, Ying\" <ying.huang@intel.com>\nCc: Dan Williams <dan.j.williams@intel.com>\nCc: David Hildenbrand <david@redhat.com>\nCc: Davidlohr Bueso <dave@stgolabs.net>\nCc: Jonathan Cameron <jonathan.cameron@huawei.com>\nCc: Dave Jiang <dave.jiang@intel.com>\nCc: Alison Schofield <alison.schofield@intel.com>\nCc: Vishal Verma <vishal.l.verma@intel.com>\nCc: Ira Weiny <ira.weiny@intel.com>\nCc: Alistair Popple <apopple@nvidia.com>\nCc: Andy Shevchenko <andriy.shevchenko@linux.intel.com>\nCc: Bjorn Helgaas <bhelgaas@google.com>\nCc: Baoquan He <bhe@redhat.com>\nCc: <stable@vger.kernel.org>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>",
+  "author_name": "Huang Ying",
+  "author_email": "ying.huang@intel.com",
+  "author_date": "Fri Sep 6 11:07:11 2024 +0800",
+  "author_date_iso": "2024-09-06T11:07:11+08:00",
+  "committer_name": "Andrew Morton",
+  "committer_email": "akpm@linux-foundation.org",
+  "committer_date": "Tue Sep 17 00:58:04 2024 -0700",
+  "committer_date_iso": "2024-09-17T00:58:04-07:00",
+  "files_changed": [
+    "kernel/resource.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "kernel/resource.c",
+      "insertions": 50,
+      "deletions": 8
+    }
+  ],
+  "total_insertions": 50,
+  "total_deletions": 8,
+  "total_changes": 58,
+  "parents": [
+    "6040f650c56862a4ac40b00c37ef6ab1ddfcebb5"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "security issue"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "kernel/resource.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

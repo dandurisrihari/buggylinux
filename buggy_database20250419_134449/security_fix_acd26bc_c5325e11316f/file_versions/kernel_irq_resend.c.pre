@@ -1,0 +1,53 @@
+commit da90921acc62c71d27729ae211ccfda5370bf75b
+Author: Thomas Gleixner <tglx@linutronix.de>
+Date:   Fri Mar 6 14:03:46 2020 +0100
+
+    genirq: Sanitize state handling in check_irq_resend()
+    
+    The code sets IRQS_REPLAY unconditionally whether the resend happens or
+    not. That doesn't have bad side effects right now, but inconsistent state
+    is always a latent source of problems.
+    
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Acked-by: Marc Zyngier <maz@kernel.org>
+    Link: https://lkml.kernel.org/r/20200306130623.882129117@linutronix.de
+
+diff --git a/kernel/irq/resend.c b/kernel/irq/resend.c
+index a21fc4eeedc7..bef72dcfb79b 100644
+--- a/kernel/irq/resend.c
++++ b/kernel/irq/resend.c
+@@ -93,6 +93,8 @@ static int irq_sw_resend(struct irq_desc *desc)
+  */
+ int check_irq_resend(struct irq_desc *desc)
+ {
++	int err = 0;
++
+ 	/*
+ 	 * We do not resend level type interrupts. Level type interrupts
+ 	 * are resent by hardware when they are still active. Clear the
+@@ -106,13 +108,17 @@ int check_irq_resend(struct irq_desc *desc)
+ 	if (desc->istate & IRQS_REPLAY)
+ 		return -EBUSY;
+ 
+-	if (desc->istate & IRQS_PENDING) {
+-		desc->istate &= ~IRQS_PENDING;
+-		desc->istate |= IRQS_REPLAY;
++	if (!(desc->istate & IRQS_PENDING))
++		return 0;
+ 
+-		if (!desc->irq_data.chip->irq_retrigger ||
+-		    !desc->irq_data.chip->irq_retrigger(&desc->irq_data))
+-		    return irq_sw_resend(desc);
+-	}
+-	return 0;
++	desc->istate &= ~IRQS_PENDING;
++
++	if (!desc->irq_data.chip->irq_retrigger ||
++	    !desc->irq_data.chip->irq_retrigger(&desc->irq_data))
++		err = irq_sw_resend(desc);
++
++	/* If the retrigger was successfull, mark it with the REPLAY bit */
++	if (!err)
++		desc->istate |= IRQS_REPLAY;
++	return err;
+ }

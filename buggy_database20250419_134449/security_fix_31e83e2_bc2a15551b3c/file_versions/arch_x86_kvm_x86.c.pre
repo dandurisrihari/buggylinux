@@ -1,0 +1,85 @@
+commit 4b8e1b32013da2495244dbdee70f2456e6bc7aca
+Author: Paolo Bonzini <pbonzini@redhat.com>
+Date:   Thu Sep 29 13:20:13 2022 -0400
+
+    KVM: allow compiling out SMM support
+    
+    Some users of KVM implement the UEFI variable store through a paravirtual device
+    that does not require the "SMM lockbox" component of edk2; allow them to
+    compile out system management mode, which is not a full implementation
+    especially in how it interacts with nested virtualization.
+    
+    Suggested-by: Sean Christopherson <seanjc@google.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+    Reviewed-by: Maxim Levitsky <mlevitsk@redhat.com>
+    Message-Id: <20220929172016.319443-6-pbonzini@redhat.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 019ba8725412..0a80cd1d91c8 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -3642,7 +3642,7 @@ int kvm_set_msr_common(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
+ 		break;
+ 	}
+ 	case MSR_IA32_SMBASE:
+-		if (!msr_info->host_initiated)
++		if (!IS_ENABLED(CONFIG_KVM_SMM) || !msr_info->host_initiated)
+ 			return 1;
+ 		vcpu->arch.smbase = data;
+ 		break;
+@@ -4058,7 +4058,7 @@ int kvm_get_msr_common(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
+ 		msr_info->data = vcpu->arch.ia32_misc_enable_msr;
+ 		break;
+ 	case MSR_IA32_SMBASE:
+-		if (!msr_info->host_initiated)
++		if (!IS_ENABLED(CONFIG_KVM_SMM) || !msr_info->host_initiated)
+ 			return 1;
+ 		msr_info->data = vcpu->arch.smbase;
+ 		break;
+@@ -4432,6 +4432,9 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
+ 			r |= KVM_X86_DISABLE_EXITS_MWAIT;
+ 		break;
+ 	case KVM_CAP_X86_SMM:
++		if (!IS_ENABLED(CONFIG_KVM_SMM))
++			break;
++
+ 		/* SMBASE is usually relocated above 1M on modern chipsets,
+ 		 * and SMM handlers might indeed rely on 4G segment limits,
+ 		 * so do not report SMM to be available if real mode is
+@@ -5182,6 +5185,7 @@ static int kvm_vcpu_ioctl_x86_set_vcpu_events(struct kvm_vcpu *vcpu,
+ 		vcpu->arch.apic->sipi_vector = events->sipi_vector;
+ 
+ 	if (events->flags & KVM_VCPUEVENT_VALID_SMM) {
++#ifdef CONFIG_KVM_SMM
+ 		if (!!(vcpu->arch.hflags & HF_SMM_MASK) != events->smi.smm) {
+ 			kvm_x86_ops.nested_ops->leave_nested(vcpu);
+ 			kvm_smm_changed(vcpu, events->smi.smm);
+@@ -5196,6 +5200,12 @@ static int kvm_vcpu_ioctl_x86_set_vcpu_events(struct kvm_vcpu *vcpu,
+ 				vcpu->arch.hflags &= ~HF_SMM_INSIDE_NMI_MASK;
+ 		}
+ 
++#else
++		if (events->smi.smm || events->smi.pending ||
++		    events->smi.smm_inside_nmi)
++			return -EINVAL;
++#endif
++
+ 		if (lapic_in_kernel(vcpu)) {
+ 			if (events->smi.latched_init)
+ 				set_bit(KVM_APIC_INIT, &vcpu->arch.apic->pending_events);
+@@ -8121,6 +8131,14 @@ static unsigned emulator_get_hflags(struct x86_emulate_ctxt *ctxt)
+ 	return emul_to_vcpu(ctxt)->arch.hflags;
+ }
+ 
++#ifndef CONFIG_KVM_SMM
++static int emulator_leave_smm(struct x86_emulate_ctxt *ctxt)
++{
++	WARN_ON_ONCE(1);
++	return X86EMUL_UNHANDLEABLE;
++}
++#endif
++
+ static void emulator_triple_fault(struct x86_emulate_ctxt *ctxt)
+ {
+ 	kvm_make_request(KVM_REQ_TRIPLE_FAULT, emul_to_vcpu(ctxt));

@@ -1,0 +1,80 @@
+Commit Hash: 7ecdadf7f8c659524f6b2aebf6be7bf619764d90
+Subject: riscv: stacktrace: Make walk_stackframe cross pt_regs frame
+
+
+Security Keywords:
+- injection
+
+Full commit message:
+riscv: stacktrace: Make walk_stackframe cross pt_regs frame
+
+The current walk_stackframe with FRAME_POINTER would stop unwinding at
+ret_from_exception:
+  BUG: sleeping function called from invalid context at kernel/locking/rwsem.c:1518
+  in_atomic(): 0, irqs_disabled(): 1, non_block: 0, pid: 1, name: init
+  CPU: 0 PID: 1 Comm: init Not tainted 5.10.113-00021-g15c15974895c-dirty #192
+  Call Trace:
+  [<ffffffe0002038c8>] walk_stackframe+0x0/0xee
+  [<ffffffe000aecf48>] show_stack+0x32/0x4a
+  [<ffffffe000af1618>] dump_stack_lvl+0x72/0x8e
+  [<ffffffe000af1648>] dump_stack+0x14/0x1c
+  [<ffffffe000239ad2>] ___might_sleep+0x12e/0x138
+  [<ffffffe000239aec>] __might_sleep+0x10/0x18
+  [<ffffffe000afe3fe>] down_read+0x22/0xa4
+  [<ffffffe000207588>] do_page_fault+0xb0/0x2fe
+  [<ffffffe000201b80>] ret_from_exception+0x0/0xc
+
+The optimization would help walk_stackframe cross the pt_regs frame and
+get more backtrace of debug info:
+  BUG: sleeping function called from invalid context at kernel/locking/rwsem.c:1518
+  in_atomic(): 0, irqs_disabled(): 1, non_block: 0, pid: 1, name: init
+  CPU: 0 PID: 1 Comm: init Not tainted 5.10.113-00021-g15c15974895c-dirty #192
+  Call Trace:
+  [<ffffffe0002038c8>] walk_stackframe+0x0/0xee
+  [<ffffffe000aecf48>] show_stack+0x32/0x4a
+  [<ffffffe000af1618>] dump_stack_lvl+0x72/0x8e
+  [<ffffffe000af1648>] dump_stack+0x14/0x1c
+  [<ffffffe000239ad2>] ___might_sleep+0x12e/0x138
+  [<ffffffe000239aec>] __might_sleep+0x10/0x18
+  [<ffffffe000afe3fe>] down_read+0x22/0xa4
+  [<ffffffe000207588>] do_page_fault+0xb0/0x2fe
+  [<ffffffe000201b80>] ret_from_exception+0x0/0xc
+  [<ffffffe000613c06>] riscv_intc_irq+0x1a/0x72
+  [<ffffffe000201b80>] ret_from_exception+0x0/0xc
+  [<ffffffe00033f44a>] vma_link+0x54/0x160
+  [<ffffffe000341d7a>] mmap_region+0x2cc/0x4d0
+  [<ffffffe000342256>] do_mmap+0x2d8/0x3ac
+  [<ffffffe000326318>] vm_mmap_pgoff+0x70/0xb8
+  [<ffffffe00032638a>] vm_mmap+0x2a/0x36
+  [<ffffffe0003cfdde>] elf_map+0x72/0x84
+  [<ffffffe0003d05f8>] load_elf_binary+0x69a/0xec8
+  [<ffffffe000376240>] bprm_execve+0x246/0x53a
+  [<ffffffe00037786c>] kernel_execve+0xe8/0x124
+  [<ffffffe000aecdf2>] run_init_process+0xfa/0x10c
+  [<ffffffe000aece16>] try_to_run_init_process+0x12/0x3c
+  [<ffffffe000afa920>] kernel_init+0xb4/0xf8
+  [<ffffffe000201b80>] ret_from_exception+0x0/0xc
+
+Here is the error injection test code for the above output:
+ drivers/irqchip/irq-riscv-intc.c:
+ static asmlinkage void riscv_intc_irq(struct pt_regs *regs)
+ {
+        unsigned long cause = regs->cause & ~CAUSE_IRQ_FLAG;
++       u32 tmp; __get_user(tmp, (u32 *)0);
+
+Signed-off-by: Guo Ren <guoren@linux.alibaba.com>
+Signed-off-by: Guo Ren <guoren@kernel.org>
+Link: https://lore.kernel.org/r/20221109064937.3643993-3-guoren@kernel.org
+[Palmer: use SYM_CODE_*]
+Signed-off-by: Palmer Dabbelt <palmer@rivosinc.com>
+
+Metadata:
+Author: Guo Ren <guoren@linux.alibaba.com>
+Author Date: Wed Nov 9 01:49:37 2022 -0500
+Committer: Palmer Dabbelt <palmer@rivosinc.com>
+Commit Date: Mon Dec 5 18:13:34 2022 -0800
+
+Files Changed: 2
+Lines Added: 11
+Lines Removed: 1
+Total Changes: 12

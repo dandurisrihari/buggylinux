@@ -1,0 +1,139 @@
+Commit Hash: 88b4a07e6610f4c93b08b0bb103318218db1e9f6
+Subject: [PATCH] eCryptfs: Public key transport mechanism
+
+
+Security Keywords:
+- authentication
+
+Full commit message:
+[PATCH] eCryptfs: Public key transport mechanism
+
+This is the transport code for public key functionality in eCryptfs.  It
+manages encryption/decryption request queues with a transport mechanism.
+Currently, netlink is the only implemented transport.
+
+Each inode has a unique File Encryption Key (FEK).  Under passphrase, a File
+Encryption Key Encryption Key (FEKEK) is generated from a salt/passphrase
+combo on mount.  This FEKEK encrypts each FEK and writes it into the header of
+each file using the packet format specified in RFC 2440.  This is all
+symmetric key encryption, so it can all be done via the kernel crypto API.
+
+These new patches introduce public key encryption of the FEK.  There is no
+asymmetric key encryption support in the kernel crypto API, so eCryptfs pushes
+the FEK encryption and decryption out to a userspace daemon.  After
+considering our requirements and determining the complexity of using various
+transport mechanisms, we settled on netlink for this communication.
+
+eCryptfs stores authentication tokens into the kernel keyring.  These tokens
+correlate with individual keys.  For passphrase mode of operation, the
+authentication token contains the symmetric FEKEK.  For public key, the
+authentication token contains a PKI type and an opaque data blob managed by
+individual PKI modules in userspace.
+
+Each user who opens a file under an eCryptfs partition mounted in public key
+mode must be running a daemon.  That daemon has the user's credentials and has
+access to all of the keys to which the user should have access.  The daemon,
+when started, initializes the pluggable PKI modules available on the system
+and registers itself with the eCryptfs kernel module.  Userspace utilities
+register public key authentication tokens into the user session keyring.
+These authentication tokens correlate key signatures with PKI modules and PKI
+blobs.  The PKI blobs contain PKI-specific information necessary for the PKI
+module to carry out asymmetric key encryption and decryption.
+
+When the eCryptfs module parses the header of an existing file and finds a Tag
+1 (Public Key) packet (see RFC 2440), it reads in the public key identifier
+(signature).  The asymmetrically encrypted FEK is in the Tag 1 packet;
+eCryptfs puts together a decrypt request packet containing the signature and
+the encrypted FEK, then it passes it to the daemon registered for the
+current->euid via a netlink unicast to the PID of the daemon, which was
+registered at the time the daemon was started by the user.
+
+The daemon actually just makes calls to libecryptfs, which implements request
+packet parsing and manages PKI modules.  libecryptfs grabs the public key
+authentication token for the given signature from the user session keyring.
+This auth tok tells libecryptfs which PKI module should receive the request.
+libecryptfs then makes a decrypt() call to the PKI module, and it passes along
+the PKI block from the auth tok.  The PKI uses the blob to figure out how it
+should decrypt the data passed to it; it performs the decryption and passes
+the decrypted data back to libecryptfs.  libecryptfs then puts together a
+reply packet with the decrypted FEK and passes that back to the eCryptfs
+module.
+
+The eCryptfs module manages these request callouts to userspace code via
+message context structs.  The module maintains an array of message context
+structs and places the elements of the array on two lists: a free and an
+allocated list.  When eCryptfs wants to make a request, it moves a msg ctx
+from the free list to the allocated list, sets its state to pending, and fires
+off the message to the user's registered daemon.
+
+When eCryptfs receives a netlink message (via the callback), it correlates the
+msg ctx struct in the alloc list with the data in the message itself.  The
+msg->index contains the offset of the array of msg ctx structs.  It verifies
+that the registered daemon PID is the same as the PID of the process that sent
+the message.  It also validates a sequence number between the received packet
+and the msg ctx.  Then, it copies the contents of the message (the reply
+packet) into the msg ctx struct, sets the state in the msg ctx to done, and
+wakes up the process that was sleeping while waiting for the reply.
+
+The sleeping process was whatever was performing the sys_open().  This process
+originally called ecryptfs_send_message(); it is now in
+ecryptfs_wait_for_response().  When it wakes up and sees that the msg ctx
+state was set to done, it returns a pointer to the message contents (the reply
+packet) and returns.  If all went well, this packet contains the decrypted
+FEK, which is then copied into the crypt_stat struct, and life continues as
+normal.
+
+The case for creation of a new file is very similar, only instead of a decrypt
+request, eCryptfs sends out an encrypt request.
+
+> - We have a great clod of key mangement code in-kernel.  Why is that
+>   not suitable (or growable) for public key management?
+
+eCryptfs uses Howells' keyring to store persistent key data and PKI state
+information.  It defers public key cryptographic transformations to userspace
+code.  The userspace data manipulation request really is orthogonal to key
+management in and of itself.  What eCryptfs basically needs is a secure way to
+communicate with a particular daemon for a particular task doing a syscall,
+based on the UID.  Nothing running under another UID should be able to access
+that channel of communication.
+
+> - Is it appropriate that new infrastructure for public key
+> management be private to a particular fs?
+
+The messaging.c file contains a lot of code that, perhaps, could be extracted
+into a separate kernel service.  In essence, this would be a sort of
+request/reply mechanism that would involve a userspace daemon.  I am not aware
+of anything that does quite what eCryptfs does, so I was not aware of any
+existing tools to do just what we wanted.
+
+>   What happens if one of these daemons exits without sending a quit
+>   message?
+
+There is a stale uid<->pid association in the hash table for that user.  When
+the user registers a new daemon, eCryptfs cleans up the old association and
+generates a new one.  See ecryptfs_process_helo().
+
+> - _why_ does it use netlink?
+
+Netlink provides the transport mechanism that would minimize the complexity of
+the implementation, given that we can have multiple daemons (one per user).  I
+explored the possibility of using relayfs, but that would involve having to
+introduce control channels and a protocol for creating and tearing down
+channels for the daemons.  We do not have to worry about any of that with
+netlink.
+
+Signed-off-by: Michael Halcrow <mhalcrow@us.ibm.com>
+Cc: David Howells <dhowells@redhat.com>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+Metadata:
+Author: Michael Halcrow <mhalcrow@us.ibm.com>
+Author Date: Mon Feb 12 00:53:43 2007 -0800
+Committer: Linus Torvalds <torvalds@woody.linux-foundation.org>
+Commit Date: Mon Feb 12 09:48:36 2007 -0800
+
+Files Changed: 5
+Lines Added: 860
+Lines Removed: 4
+Total Changes: 864

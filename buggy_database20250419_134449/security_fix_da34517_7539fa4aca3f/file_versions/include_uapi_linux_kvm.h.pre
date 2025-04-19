@@ -1,0 +1,81 @@
+commit c726200dd106d4c58a281eea7159b8ba28a4ab34
+Author: Christoffer Dall <christoffer.dall@arm.com>
+Date:   Fri Oct 11 13:07:05 2019 +0200
+
+    KVM: arm/arm64: Allow reporting non-ISV data aborts to userspace
+    
+    For a long time, if a guest accessed memory outside of a memslot using
+    any of the load/store instructions in the architecture which doesn't
+    supply decoding information in the ESR_EL2 (the ISV bit is not set), the
+    kernel would print the following message and terminate the VM as a
+    result of returning -ENOSYS to userspace:
+    
+      load/store instruction decoding not implemented
+    
+    The reason behind this message is that KVM assumes that all accesses
+    outside a memslot is an MMIO access which should be handled by
+    userspace, and we originally expected to eventually implement some sort
+    of decoding of load/store instructions where the ISV bit was not set.
+    
+    However, it turns out that many of the instructions which don't provide
+    decoding information on abort are not safe to use for MMIO accesses, and
+    the remaining few that would potentially make sense to use on MMIO
+    accesses, such as those with register writeback, are not used in
+    practice.  It also turns out that fetching an instruction from guest
+    memory can be a pretty horrible affair, involving stopping all CPUs on
+    SMP systems, handling multiple corner cases of address translation in
+    software, and more.  It doesn't appear likely that we'll ever implement
+    this in the kernel.
+    
+    What is much more common is that a user has misconfigured his/her guest
+    and is actually not accessing an MMIO region, but just hitting some
+    random hole in the IPA space.  In this scenario, the error message above
+    is almost misleading and has led to a great deal of confusion over the
+    years.
+    
+    It is, nevertheless, ABI to userspace, and we therefore need to
+    introduce a new capability that userspace explicitly enables to change
+    behavior.
+    
+    This patch introduces KVM_CAP_ARM_NISV_TO_USER (NISV meaning Non-ISV)
+    which does exactly that, and introduces a new exit reason to report the
+    event to userspace.  User space can then emulate an exception to the
+    guest, restart the guest, suspend the guest, or take any other
+    appropriate action as per the policy of the running system.
+    
+    Reported-by: Heinrich Schuchardt <xypron.glpk@gmx.de>
+    Signed-off-by: Christoffer Dall <christoffer.dall@arm.com>
+    Reviewed-by: Alexander Graf <graf@amazon.com>
+    Signed-off-by: Marc Zyngier <maz@kernel.org>
+
+diff --git a/include/uapi/linux/kvm.h b/include/uapi/linux/kvm.h
+index 52641d8ca9e8..7336ee8d98d7 100644
+--- a/include/uapi/linux/kvm.h
++++ b/include/uapi/linux/kvm.h
+@@ -235,6 +235,7 @@ struct kvm_hyperv_exit {
+ #define KVM_EXIT_S390_STSI        25
+ #define KVM_EXIT_IOAPIC_EOI       26
+ #define KVM_EXIT_HYPERV           27
++#define KVM_EXIT_ARM_NISV         28
+ 
+ /* For KVM_EXIT_INTERNAL_ERROR */
+ /* Emulate instruction failed. */
+@@ -394,6 +395,11 @@ struct kvm_run {
+ 		} eoi;
+ 		/* KVM_EXIT_HYPERV */
+ 		struct kvm_hyperv_exit hyperv;
++		/* KVM_EXIT_ARM_NISV */
++		struct {
++			__u64 esr_iss;
++			__u64 fault_ipa;
++		} arm_nisv;
+ 		/* Fix the size of the union. */
+ 		char padding[256];
+ 	};
+@@ -1000,6 +1006,7 @@ struct kvm_ppc_resize_hpt {
+ #define KVM_CAP_PMU_EVENT_FILTER 173
+ #define KVM_CAP_ARM_IRQ_LINE_LAYOUT_2 174
+ #define KVM_CAP_HYPERV_DIRECT_TLBFLUSH 175
++#define KVM_CAP_ARM_NISV_TO_USER 176
+ 
+ #ifdef KVM_CAP_IRQ_ROUTING

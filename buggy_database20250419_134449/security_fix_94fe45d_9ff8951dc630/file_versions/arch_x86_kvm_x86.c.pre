@@ -1,0 +1,110 @@
+commit ffde22ac53b6d6b1d7206f1172176a667eead778
+Author: Ed Swierk <eswierk@aristanetworks.com>
+Date:   Thu Oct 15 15:21:43 2009 -0700
+
+    KVM: Xen PV-on-HVM guest support
+    
+    Support for Xen PV-on-HVM guests can be implemented almost entirely in
+    userspace, except for handling one annoying MSR that maps a Xen
+    hypercall blob into guest address space.
+    
+    A generic mechanism to delegate MSR writes to userspace seems overkill
+    and risks encouraging similar MSR abuse in the future.  Thus this patch
+    adds special support for the Xen HVM MSR.
+    
+    I implemented a new ioctl, KVM_XEN_HVM_CONFIG, that lets userspace tell
+    KVM which MSR the guest will write to, as well as the starting address
+    and size of the hypercall blobs (one each for 32-bit and 64-bit) that
+    userspace has loaded from files.  When the guest writes to the MSR, KVM
+    copies one page of the blob from userspace to the guest.
+    
+    I've tested this patch with a hacked-up version of Gerd's userspace
+    code, booting a number of guests (CentOS 5.3 i386 and x86_64, and
+    FreeBSD 8.0-RC1 amd64) and exercising PV network and block devices.
+    
+    [jan: fix i386 build warning]
+    [avi: future proof abi with a flags field]
+    
+    Signed-off-by: Ed Swierk <eswierk@aristanetworks.com>
+    Signed-off-by: Jan Kiszka <jan.kiszka@siemens.com>
+    Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
+    Signed-off-by: Avi Kivity <avi@redhat.com>
+
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 5d450cc6f841..bb842db3ee7c 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -857,6 +857,38 @@ static int set_msr_mce(struct kvm_vcpu *vcpu, u32 msr, u64 data)
+ 	return 0;
+ }
+ 
++static int xen_hvm_config(struct kvm_vcpu *vcpu, u64 data)
++{
++	struct kvm *kvm = vcpu->kvm;
++	int lm = is_long_mode(vcpu);
++	u8 *blob_addr = lm ? (u8 *)(long)kvm->arch.xen_hvm_config.blob_addr_64
++		: (u8 *)(long)kvm->arch.xen_hvm_config.blob_addr_32;
++	u8 blob_size = lm ? kvm->arch.xen_hvm_config.blob_size_64
++		: kvm->arch.xen_hvm_config.blob_size_32;
++	u32 page_num = data & ~PAGE_MASK;
++	u64 page_addr = data & PAGE_MASK;
++	u8 *page;
++	int r;
++
++	r = -E2BIG;
++	if (page_num >= blob_size)
++		goto out;
++	r = -ENOMEM;
++	page = kzalloc(PAGE_SIZE, GFP_KERNEL);
++	if (!page)
++		goto out;
++	r = -EFAULT;
++	if (copy_from_user(page, blob_addr + (page_num * PAGE_SIZE), PAGE_SIZE))
++		goto out_free;
++	if (kvm_write_guest(kvm, page_addr, page, PAGE_SIZE))
++		goto out_free;
++	r = 0;
++out_free:
++	kfree(page);
++out:
++	return r;
++}
++
+ int kvm_set_msr_common(struct kvm_vcpu *vcpu, u32 msr, u64 data)
+ {
+ 	switch (msr) {
+@@ -972,6 +1004,8 @@ int kvm_set_msr_common(struct kvm_vcpu *vcpu, u32 msr, u64 data)
+ 			"0x%x data 0x%llx\n", msr, data);
+ 		break;
+ 	default:
++		if (msr && (msr == vcpu->kvm->arch.xen_hvm_config.msr))
++			return xen_hvm_config(vcpu, data);
+ 		if (!ignore_msrs) {
+ 			pr_unimpl(vcpu, "unhandled wrmsr: 0x%x data %llx\n",
+ 				msr, data);
+@@ -1246,6 +1280,7 @@ int kvm_dev_ioctl_check_extension(long ext)
+ 	case KVM_CAP_PIT2:
+ 	case KVM_CAP_PIT_STATE2:
+ 	case KVM_CAP_SET_IDENTITY_MAP_ADDR:
++	case KVM_CAP_XEN_HVM:
+ 		r = 1;
+ 		break;
+ 	case KVM_CAP_COALESCED_MMIO:
+@@ -2441,6 +2476,17 @@ long kvm_arch_vm_ioctl(struct file *filp,
+ 		r = 0;
+ 		break;
+ 	}
++	case KVM_XEN_HVM_CONFIG: {
++		r = -EFAULT;
++		if (copy_from_user(&kvm->arch.xen_hvm_config, argp,
++				   sizeof(struct kvm_xen_hvm_config)))
++			goto out;
++		r = -EINVAL;
++		if (kvm->arch.xen_hvm_config.flags)
++			goto out;
++		r = 0;
++		break;
++	}
+ 	default:
+ 		;
+ 	}

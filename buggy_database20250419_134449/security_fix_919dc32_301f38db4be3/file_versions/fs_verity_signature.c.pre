@@ -1,0 +1,81 @@
+commit 456ae5fe9b448f44ebe98b391a3bae9c75df465e
+Author: Eric Biggers <ebiggers@google.com>
+Date:   Wed Jul 5 14:27:43 2023 -0700
+
+    fsverity: move sysctl registration out of signature.c
+    
+    Currently the registration of the fsverity sysctls happens in
+    signature.c, which couples it to CONFIG_FS_VERITY_BUILTIN_SIGNATURES.
+    
+    This makes it hard to add new sysctls unrelated to builtin signatures.
+    
+    Also, some users have started checking whether the directory
+    /proc/sys/fs/verity exists as a way to tell whether fsverity is
+    supported.  This isn't the intended method; instead, the existence of
+    /sys/fs/$fstype/features/verity should be checked, or users should just
+    try to use the fsverity ioctls.  Regardless, it should be made to work
+    as expected without a dependency on CONFIG_FS_VERITY_BUILTIN_SIGNATURES.
+    
+    Therefore, move the sysctl registration into init.c.  With
+    CONFIG_FS_VERITY_BUILTIN_SIGNATURES, nothing changes.  Without it, but
+    with CONFIG_FS_VERITY, an empty list of sysctls is now registered.
+    
+    Link: https://lore.kernel.org/r/20230705212743.42180-3-ebiggers@kernel.org
+    Signed-off-by: Eric Biggers <ebiggers@google.com>
+
+diff --git a/fs/verity/signature.c b/fs/verity/signature.c
+index ec75ffec069e..b95acae64eac 100644
+--- a/fs/verity/signature.c
++++ b/fs/verity/signature.c
+@@ -24,7 +24,7 @@
+  * /proc/sys/fs/verity/require_signatures
+  * If 1, all verity files must have a valid builtin signature.
+  */
+-static int fsverity_require_signatures;
++int fsverity_require_signatures;
+ 
+ /*
+  * Keyring that contains the trusted X.509 certificates.
+@@ -93,35 +93,6 @@ int fsverity_verify_signature(const struct fsverity_info *vi,
+ 	return 0;
+ }
+ 
+-#ifdef CONFIG_SYSCTL
+-static struct ctl_table_header *fsverity_sysctl_header;
+-
+-static struct ctl_table fsverity_sysctl_table[] = {
+-	{
+-		.procname       = "require_signatures",
+-		.data           = &fsverity_require_signatures,
+-		.maxlen         = sizeof(int),
+-		.mode           = 0644,
+-		.proc_handler   = proc_dointvec_minmax,
+-		.extra1         = SYSCTL_ZERO,
+-		.extra2         = SYSCTL_ONE,
+-	},
+-	{ }
+-};
+-
+-static void __init fsverity_sysctl_init(void)
+-{
+-	fsverity_sysctl_header = register_sysctl("fs/verity",
+-						 fsverity_sysctl_table);
+-	if (!fsverity_sysctl_header)
+-		panic("fsverity sysctl registration failed");
+-}
+-#else /* !CONFIG_SYSCTL */
+-static inline void fsverity_sysctl_init(void)
+-{
+-}
+-#endif /* !CONFIG_SYSCTL */
+-
+ void __init fsverity_init_signature(void)
+ {
+ 	fsverity_keyring =
+@@ -132,6 +103,4 @@ void __init fsverity_init_signature(void)
+ 			      KEY_ALLOC_NOT_IN_QUOTA, NULL, NULL);
+ 	if (IS_ERR(fsverity_keyring))
+ 		panic("failed to allocate \".fs-verity\" keyring");
+-
+-	fsverity_sysctl_init();
+ }

@@ -1,0 +1,91 @@
+commit 376c6d285017419e35c7177bc60abe7915fb7497
+Author: Tom Lendacky <thomas.lendacky@amd.com>
+Date:   Thu Dec 10 11:10:06 2020 -0600
+
+    KVM: SVM: Provide support for SEV-ES vCPU creation/loading
+    
+    An SEV-ES vCPU requires additional VMCB initialization requirements for
+    vCPU creation and vCPU load/put requirements. This includes:
+    
+    General VMCB initialization changes:
+      - Set a VMCB control bit to enable SEV-ES support on the vCPU.
+      - Set the VMCB encrypted VM save area address.
+      - CRx registers are part of the encrypted register state and cannot be
+        updated. Remove the CRx register read and write intercepts and replace
+        them with CRx register write traps to track the CRx register values.
+      - Certain MSR values are part of the encrypted register state and cannot
+        be updated. Remove certain MSR intercepts (EFER, CR_PAT, etc.).
+      - Remove the #GP intercept (no support for "enable_vmware_backdoor").
+      - Remove the XSETBV intercept since the hypervisor cannot modify XCR0.
+    
+    General vCPU creation changes:
+      - Set the initial GHCB gpa value as per the GHCB specification.
+    
+    Signed-off-by: Tom Lendacky <thomas.lendacky@amd.com>
+    Message-Id: <3a8aef366416eddd5556dfa3fdc212aafa1ad0a2.1607620209.git.thomas.lendacky@amd.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/svm/sev.c b/arch/x86/kvm/svm/sev.c
+index b81d12f1bd37..584fede0b733 100644
+--- a/arch/x86/kvm/svm/sev.c
++++ b/arch/x86/kvm/svm/sev.c
+@@ -1796,3 +1796,59 @@ int sev_es_string_io(struct vcpu_svm *svm, int size, unsigned int port, int in)
+ 	return kvm_sev_es_string_io(&svm->vcpu, size, port,
+ 				    svm->ghcb_sa, svm->ghcb_sa_len, in);
+ }
++
++void sev_es_init_vmcb(struct vcpu_svm *svm)
++{
++	struct kvm_vcpu *vcpu = &svm->vcpu;
++
++	svm->vmcb->control.nested_ctl |= SVM_NESTED_CTL_SEV_ES_ENABLE;
++	svm->vmcb->control.virt_ext |= LBR_CTL_ENABLE_MASK;
++
++	/*
++	 * An SEV-ES guest requires a VMSA area that is a separate from the
++	 * VMCB page. Do not include the encryption mask on the VMSA physical
++	 * address since hardware will access it using the guest key.
++	 */
++	svm->vmcb->control.vmsa_pa = __pa(svm->vmsa);
++
++	/* Can't intercept CR register access, HV can't modify CR registers */
++	svm_clr_intercept(svm, INTERCEPT_CR0_READ);
++	svm_clr_intercept(svm, INTERCEPT_CR4_READ);
++	svm_clr_intercept(svm, INTERCEPT_CR8_READ);
++	svm_clr_intercept(svm, INTERCEPT_CR0_WRITE);
++	svm_clr_intercept(svm, INTERCEPT_CR4_WRITE);
++	svm_clr_intercept(svm, INTERCEPT_CR8_WRITE);
++
++	svm_clr_intercept(svm, INTERCEPT_SELECTIVE_CR0);
++
++	/* Track EFER/CR register changes */
++	svm_set_intercept(svm, TRAP_EFER_WRITE);
++	svm_set_intercept(svm, TRAP_CR0_WRITE);
++	svm_set_intercept(svm, TRAP_CR4_WRITE);
++	svm_set_intercept(svm, TRAP_CR8_WRITE);
++
++	/* No support for enable_vmware_backdoor */
++	clr_exception_intercept(svm, GP_VECTOR);
++
++	/* Can't intercept XSETBV, HV can't modify XCR0 directly */
++	svm_clr_intercept(svm, INTERCEPT_XSETBV);
++
++	/* Clear intercepts on selected MSRs */
++	set_msr_interception(vcpu, svm->msrpm, MSR_EFER, 1, 1);
++	set_msr_interception(vcpu, svm->msrpm, MSR_IA32_CR_PAT, 1, 1);
++	set_msr_interception(vcpu, svm->msrpm, MSR_IA32_LASTBRANCHFROMIP, 1, 1);
++	set_msr_interception(vcpu, svm->msrpm, MSR_IA32_LASTBRANCHTOIP, 1, 1);
++	set_msr_interception(vcpu, svm->msrpm, MSR_IA32_LASTINTFROMIP, 1, 1);
++	set_msr_interception(vcpu, svm->msrpm, MSR_IA32_LASTINTTOIP, 1, 1);
++}
++
++void sev_es_create_vcpu(struct vcpu_svm *svm)
++{
++	/*
++	 * Set the GHCB MSR value as per the GHCB specification when creating
++	 * a vCPU for an SEV-ES guest.
++	 */
++	set_ghcb_msr(svm, GHCB_MSR_SEV_INFO(GHCB_VERSION_MAX,
++					    GHCB_VERSION_MIN,
++					    sev_enc_bit));
++}

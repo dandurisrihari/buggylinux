@@ -1,0 +1,246 @@
+{
+  "hash": "9651fcedf7b92d3f7f1ab179e8ab55b85ee10fc1",
+  "hash_short": "9651fced",
+  "subject": "mm: add MAP_DROPPABLE for designating always lazily freeable mappings",
+  "body": "The vDSO getrandom() implementation works with a buffer allocated with a\nnew system call that has certain requirements:\n\n- It shouldn't be written to core dumps.\n  * Easy: VM_DONTDUMP.\n- It should be zeroed on fork.\n  * Easy: VM_WIPEONFORK.\n\n- It shouldn't be written to swap.\n  * Uh-oh: mlock is rlimited.\n  * Uh-oh: mlock isn't inherited by forks.\n\n- It shouldn't reserve actual memory, but it also shouldn't crash when\n  page faulting in memory if none is available\n  * Uh-oh: VM_NORESERVE means segfaults.\n\nIt turns out that the vDSO getrandom() function has three really nice\ncharacteristics that we can exploit to solve this problem:\n\n1) Due to being wiped during fork(), the vDSO code is already robust to\n   having the contents of the pages it reads zeroed out midway through\n   the function's execution.\n\n2) In the absolute worst case of whatever contingency we're coding for,\n   we have the option to fallback to the getrandom() syscall, and\n   everything is fine.\n\n3) The buffers the function uses are only ever useful for a maximum of\n   60 seconds -- a sort of cache, rather than a long term allocation.\n\nThese characteristics mean that we can introduce VM_DROPPABLE, which\nhas the following semantics:\n\na) It never is written out to swap.\nb) Under memory pressure, mm can just drop the pages (so that they're\n   zero when read back again).\nc) It is inherited by fork.\nd) It doesn't count against the mlock budget, since nothing is locked.\ne) If there's not enough memory to service a page fault, it's not fatal,\n   and no signal is sent.\n\nThis way, allocations used by vDSO getrandom() can use:\n\n    VM_DROPPABLE | VM_DONTDUMP | VM_WIPEONFORK | VM_NORESERVE\n\nAnd there will be no problem with OOMing, crashing on overcommitment,\nusing memory when not in use, not wiping on fork(), coredumps, or\nwriting out to swap.\n\nIn order to let vDSO getrandom() use this, expose these via mmap(2) as\nMAP_DROPPABLE.\n\nNote that this involves removing the MADV_FREE special case from\nsort_folio(), which according to Yu Zhao is unnecessary and will simply\nresult in an extra call to shrink_folio_list() in the worst case. The\nchunk removed reenables the swapbacked flag, which we don't want for\nVM_DROPPABLE, and we can't conditionalize it here because there isn't a\nvma reference available.\n\nFinally, the provided self test ensures that this is working as desired.\n\nCc: linux-mm@kvack.org\nAcked-by: David Hildenbrand <david@redhat.com>\nSigned-off-by: Jason A. Donenfeld <Jason@zx2c4.com>",
+  "full_message": "mm: add MAP_DROPPABLE for designating always lazily freeable mappings\n\nThe vDSO getrandom() implementation works with a buffer allocated with a\nnew system call that has certain requirements:\n\n- It shouldn't be written to core dumps.\n  * Easy: VM_DONTDUMP.\n- It should be zeroed on fork.\n  * Easy: VM_WIPEONFORK.\n\n- It shouldn't be written to swap.\n  * Uh-oh: mlock is rlimited.\n  * Uh-oh: mlock isn't inherited by forks.\n\n- It shouldn't reserve actual memory, but it also shouldn't crash when\n  page faulting in memory if none is available\n  * Uh-oh: VM_NORESERVE means segfaults.\n\nIt turns out that the vDSO getrandom() function has three really nice\ncharacteristics that we can exploit to solve this problem:\n\n1) Due to being wiped during fork(), the vDSO code is already robust to\n   having the contents of the pages it reads zeroed out midway through\n   the function's execution.\n\n2) In the absolute worst case of whatever contingency we're coding for,\n   we have the option to fallback to the getrandom() syscall, and\n   everything is fine.\n\n3) The buffers the function uses are only ever useful for a maximum of\n   60 seconds -- a sort of cache, rather than a long term allocation.\n\nThese characteristics mean that we can introduce VM_DROPPABLE, which\nhas the following semantics:\n\na) It never is written out to swap.\nb) Under memory pressure, mm can just drop the pages (so that they're\n   zero when read back again).\nc) It is inherited by fork.\nd) It doesn't count against the mlock budget, since nothing is locked.\ne) If there's not enough memory to service a page fault, it's not fatal,\n   and no signal is sent.\n\nThis way, allocations used by vDSO getrandom() can use:\n\n    VM_DROPPABLE | VM_DONTDUMP | VM_WIPEONFORK | VM_NORESERVE\n\nAnd there will be no problem with OOMing, crashing on overcommitment,\nusing memory when not in use, not wiping on fork(), coredumps, or\nwriting out to swap.\n\nIn order to let vDSO getrandom() use this, expose these via mmap(2) as\nMAP_DROPPABLE.\n\nNote that this involves removing the MADV_FREE special case from\nsort_folio(), which according to Yu Zhao is unnecessary and will simply\nresult in an extra call to shrink_folio_list() in the worst case. The\nchunk removed reenables the swapbacked flag, which we don't want for\nVM_DROPPABLE, and we can't conditionalize it here because there isn't a\nvma reference available.\n\nFinally, the provided self test ensures that this is working as desired.\n\nCc: linux-mm@kvack.org\nAcked-by: David Hildenbrand <david@redhat.com>\nSigned-off-by: Jason A. Donenfeld <Jason@zx2c4.com>",
+  "author_name": "Jason A. Donenfeld",
+  "author_email": "Jason@zx2c4.com",
+  "author_date": "Thu Dec 8 17:55:04 2022 +0100",
+  "author_date_iso": "2022-12-08T17:55:04+01:00",
+  "committer_name": "Jason A. Donenfeld",
+  "committer_email": "Jason@zx2c4.com",
+  "committer_date": "Fri Jul 19 20:22:12 2024 +0200",
+  "committer_date_iso": "2024-07-19T20:22:12+02:00",
+  "files_changed": [
+    "fs/proc/task_mmu.c",
+    "include/linux/mm.h",
+    "include/linux/userfaultfd_k.h",
+    "include/trace/events/mmflags.h",
+    "include/uapi/linux/mman.h",
+    "mm/ksm.c",
+    "mm/madvise.c",
+    "mm/memory.c",
+    "mm/mempolicy.c",
+    "mm/mlock.c",
+    "mm/mmap.c",
+    "mm/rmap.c",
+    "mm/vmscan.c",
+    "tools/include/uapi/linux/mman.h",
+    "tools/testing/selftests/mm/.gitignore",
+    "tools/testing/selftests/mm/Makefile",
+    "tools/testing/selftests/mm/droppable.c"
+  ],
+  "files_changed_count": 17,
+  "stats": [
+    {
+      "file": "fs/proc/task_mmu.c",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/mm.h",
+      "insertions": 7,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/userfaultfd_k.h",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "include/trace/events/mmflags.h",
+      "insertions": 7,
+      "deletions": 0
+    },
+    {
+      "file": "include/uapi/linux/mman.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "mm/ksm.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "mm/madvise.c",
+      "insertions": 4,
+      "deletions": 1
+    },
+    {
+      "file": "mm/memory.c",
+      "insertions": 13,
+      "deletions": 0
+    },
+    {
+      "file": "mm/mempolicy.c",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "mm/mlock.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "mm/mmap.c",
+      "insertions": 30,
+      "deletions": 0
+    },
+    {
+      "file": "mm/rmap.c",
+      "insertions": 19,
+      "deletions": 3
+    },
+    {
+      "file": "mm/vmscan.c",
+      "insertions": 0,
+      "deletions": 9
+    },
+    {
+      "file": "tools/include/uapi/linux/mman.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/mm/.gitignore",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/mm/Makefile",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "tools/testing/selftests/mm/droppable.c",
+      "insertions": 53,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 146,
+  "total_deletions": 15,
+  "total_changes": 161,
+  "parents": [
+    "8a18fda0febb7790de20ec1c3b4522ce026be1c6"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "exploit"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "include/trace/events/mmflags.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/madvise.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/ksm.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/uapi/linux/mman.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/proc/task_mmu.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/userfaultfd_k.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/mm.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/memory.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/mempolicy.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/mlock.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/rmap.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/mmap.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/vmscan.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "tools/include/uapi/linux/mman.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "tools/testing/selftests/mm/.gitignore",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "tools/testing/selftests/mm/Makefile",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "tools/testing/selftests/mm/droppable.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

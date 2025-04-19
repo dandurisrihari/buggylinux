@@ -1,0 +1,78 @@
+commit 32d1b3ab588c1231dbfa9eb08819c50529ce77d7
+Author: Vitaly Kuznetsov <vkuznets@redhat.com>
+Date:   Wed May 5 17:18:21 2021 +0200
+
+    KVM: selftests: evmcs_test: Check that VMLAUNCH with bogus EVMPTR is causing #UD
+    
+    'run->exit_reason == KVM_EXIT_SHUTDOWN' check is not ideal as we may be
+    getting some unexpected exception. Directly check for #UD instead.
+    
+    Signed-off-by: Vitaly Kuznetsov <vkuznets@redhat.com>
+    Message-Id: <20210505151823.1341678-2-vkuznets@redhat.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/tools/testing/selftests/kvm/x86_64/evmcs_test.c b/tools/testing/selftests/kvm/x86_64/evmcs_test.c
+index ca22ee6d19cb..b01f64ac6ce3 100644
+--- a/tools/testing/selftests/kvm/x86_64/evmcs_test.c
++++ b/tools/testing/selftests/kvm/x86_64/evmcs_test.c
+@@ -19,6 +19,14 @@
+ 
+ #define VCPU_ID		5
+ 
++static int ud_count;
++
++static void guest_ud_handler(struct ex_regs *regs)
++{
++	ud_count++;
++	regs->rip += 3; /* VMLAUNCH */
++}
++
+ void l2_guest_code(void)
+ {
+ 	GUEST_SYNC(7);
+@@ -71,11 +79,11 @@ void guest_code(struct vmx_pages *vmx_pages)
+ 	if (vmx_pages)
+ 		l1_guest_code(vmx_pages);
+ 
+-	GUEST_DONE();
+-
+ 	/* Try enlightened vmptrld with an incorrect GPA */
+ 	evmcs_vmptrld(0xdeadbeef, vmx_pages->enlightened_vmcs);
+ 	GUEST_ASSERT(vmlaunch());
++	GUEST_ASSERT(ud_count == 1);
++	GUEST_DONE();
+ }
+ 
+ int main(int argc, char *argv[])
+@@ -109,6 +117,10 @@ int main(int argc, char *argv[])
+ 	vcpu_alloc_vmx(vm, &vmx_pages_gva);
+ 	vcpu_args_set(vm, VCPU_ID, 1, vmx_pages_gva);
+ 
++	vm_init_descriptor_tables(vm);
++	vcpu_init_descriptor_tables(vm, VCPU_ID);
++	vm_handle_exception(vm, UD_VECTOR, guest_ud_handler);
++
+ 	for (stage = 1;; stage++) {
+ 		_vcpu_run(vm, VCPU_ID);
+ 		TEST_ASSERT(run->exit_reason == KVM_EXIT_IO,
+@@ -124,7 +136,7 @@ int main(int argc, char *argv[])
+ 		case UCALL_SYNC:
+ 			break;
+ 		case UCALL_DONE:
+-			goto part1_done;
++			goto done;
+ 		default:
+ 			TEST_FAIL("Unknown ucall %lu", uc.cmd);
+ 		}
+@@ -156,10 +168,6 @@ int main(int argc, char *argv[])
+ 			    (ulong) regs2.rdi, (ulong) regs2.rsi);
+ 	}
+ 
+-part1_done:
+-	_vcpu_run(vm, VCPU_ID);
+-	TEST_ASSERT(run->exit_reason == KVM_EXIT_SHUTDOWN,
+-		    "Unexpected successful VMEnter with invalid eVMCS pointer!");
+-
++done:
+ 	kvm_vm_free(vm);
+ }

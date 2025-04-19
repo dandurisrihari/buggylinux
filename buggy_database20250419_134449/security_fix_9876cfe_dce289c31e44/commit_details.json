@@ -1,0 +1,102 @@
+{
+  "hash": "9876cfe8ec1cb3c88de31f4d58d57b0e7e22bcc4",
+  "hash_short": "9876cfe8",
+  "subject": "memfd: replace ratcheting feature from vm.memfd_noexec with hierarchy",
+  "body": "This sysctl has the very unusual behaviour of not allowing any user (even\nCAP_SYS_ADMIN) to reduce the restriction setting, meaning that if you were\nto set this sysctl to a more restrictive option in the host pidns you\nwould need to reboot your machine in order to reset it.\n\nThe justification given in [1] is that this is a security feature and thus\nit should not be possible to disable.  Aside from the fact that we have\nplenty of security-related sysctls that can be disabled after being\nenabled (fs.protected_symlinks for instance), the protection provided by\nthe sysctl is to stop users from being able to create a binary and then\nexecute it.  A user with CAP_SYS_ADMIN can trivially do this without\nmemfd_create(2):\n\n  % cat mount-memfd.c\n  #include <fcntl.h>\n  #include <string.h>\n  #include <stdio.h>\n  #include <stdlib.h>\n  #include <unistd.h>\n  #include <linux/mount.h>\n\n  #define SHELLCODE \"#!/bin/echo this file was executed from this totally private tmpfs:\"\n\n  int main(void)\n  {\n  \tint fsfd = fsopen(\"tmpfs\", FSOPEN_CLOEXEC);\n  \tassert(fsfd >= 0);\n  \tassert(!fsconfig(fsfd, FSCONFIG_CMD_CREATE, NULL, NULL, 2));\n\n  \tint dfd = fsmount(fsfd, FSMOUNT_CLOEXEC, 0);\n  \tassert(dfd >= 0);\n\n  \tint execfd = openat(dfd, \"exe\", O_CREAT | O_RDWR | O_CLOEXEC, 0782);\n  \tassert(execfd >= 0);\n  \tassert(write(execfd, SHELLCODE, strlen(SHELLCODE)) == strlen(SHELLCODE));\n  \tassert(!close(execfd));\n\n  \tchar *execpath = NULL;\n  \tchar *argv[] = { \"bad-exe\", NULL }, *envp[] = { NULL };\n  \texecfd = openat(dfd, \"exe\", O_PATH | O_CLOEXEC);\n  \tassert(execfd >= 0);\n  \tassert(asprintf(&execpath, \"/proc/self/fd/%d\", execfd) > 0);\n  \tassert(!execve(execpath, argv, envp));\n  }\n  % ./mount-memfd\n  this file was executed from this totally private tmpfs: /proc/self/fd/5\n  %\n\nGiven that it is possible for CAP_SYS_ADMIN users to create executable\nbinaries without memfd_create(2) and without touching the host filesystem\n(not to mention the many other things a CAP_SYS_ADMIN process would be\nable to do that would be equivalent or worse), it seems strange to cause a\nfair amount of headache to admins when there doesn't appear to be an\nactual security benefit to blocking this.  There appear to be concerns\nabout confused-deputy-esque attacks[2] but a confused deputy that can\nwrite to arbitrary sysctls is a bigger security issue than executable\nmemfds.\n\n/* New API */\n\nThe primary requirement from the original author appears to be more based\non the need to be able to restrict an entire system in a hierarchical\nmanner[3], such that child namespaces cannot re-enable executable memfds.\n\nSo, implement that behaviour explicitly -- the vm.memfd_noexec scope is\nevaluated up the pidns tree to &init_pid_ns and you have the most\nrestrictive value applied to you.  The new lower limit you can set\nvm.memfd_noexec is whatever limit applies to your parent.\n\nNote that a pidns will inherit a copy of the parent pidns's effective\nvm.memfd_noexec setting at unshare() time.  This matches the existing\nbehaviour, and it also ensures that a pidns will never have its\nvm.memfd_noexec setting *lowered* behind its back (but it will be raised\nif the parent raises theirs).\n\n/* Backwards Compatibility */\n\nAs the previous version of the sysctl didn't allow you to lower the\nsetting at all, there are no backwards compatibility issues with this\naspect of the change.\n\nHowever it should be noted that now that the setting is completely\nhierarchical.  Previously, a cloned pidns would just copy the current\npidns setting, meaning that if the parent's vm.memfd_noexec was changed it\nwouldn't propoagate to existing pid namespaces.  Now, the restriction\napplies recursively.  This is a uAPI change, however:\n\n * The sysctl is very new, having been merged in 6.3.\n * Several aspects of the sysctl were broken up until this patchset and\n   the other patchset by Jeff Xu last month.\n\nAnd thus it seems incredibly unlikely that any real users would run into\nthis issue. In the worst case, if this causes userspace isues we could\nmake it so that modifying the setting follows the hierarchical rules but\nthe restriction checking uses the cached copy.\n\n[1]: https://lore.kernel.org/CABi2SkWnAgHK1i6iqSqPMYuNEhtHBkO8jUuCvmG3RmUB5TKHJw@mail.gmail.com/\n[2]: https://lore.kernel.org/CALmYWFs_dNCzw_pW1yRAo4bGCPEtykroEQaowNULp7svwMLjOg@mail.gmail.com/\n[3]: https://lore.kernel.org/CALmYWFuahdUF7cT4cm7_TGLqPanuHXJ-hVSfZt7vpTnc18DPrw@mail.gmail.com/\n\nLink: https://lkml.kernel.org/r/20230814-memfd-vm-noexec-uapi-fixes-v2-4-7ff9e3e10ba6@cyphar.com\nFixes: 105ff5339f49 (\"mm/memfd: add MFD_NOEXEC_SEAL and MFD_EXEC\")\nSigned-off-by: Aleksa Sarai <cyphar@cyphar.com>\nCc: Dominique Martinet <asmadeus@codewreck.org>\nCc: Christian Brauner <brauner@kernel.org>\nCc: Daniel Verkamp <dverkamp@chromium.org>\nCc: Jeff Xu <jeffxu@google.com>\nCc: Kees Cook <keescook@chromium.org>\nCc: Shuah Khan <shuah@kernel.org>\nCc: <stable@vger.kernel.org>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>",
+  "full_message": "memfd: replace ratcheting feature from vm.memfd_noexec with hierarchy\n\nThis sysctl has the very unusual behaviour of not allowing any user (even\nCAP_SYS_ADMIN) to reduce the restriction setting, meaning that if you were\nto set this sysctl to a more restrictive option in the host pidns you\nwould need to reboot your machine in order to reset it.\n\nThe justification given in [1] is that this is a security feature and thus\nit should not be possible to disable.  Aside from the fact that we have\nplenty of security-related sysctls that can be disabled after being\nenabled (fs.protected_symlinks for instance), the protection provided by\nthe sysctl is to stop users from being able to create a binary and then\nexecute it.  A user with CAP_SYS_ADMIN can trivially do this without\nmemfd_create(2):\n\n  % cat mount-memfd.c\n  #include <fcntl.h>\n  #include <string.h>\n  #include <stdio.h>\n  #include <stdlib.h>\n  #include <unistd.h>\n  #include <linux/mount.h>\n\n  #define SHELLCODE \"#!/bin/echo this file was executed from this totally private tmpfs:\"\n\n  int main(void)\n  {\n  \tint fsfd = fsopen(\"tmpfs\", FSOPEN_CLOEXEC);\n  \tassert(fsfd >= 0);\n  \tassert(!fsconfig(fsfd, FSCONFIG_CMD_CREATE, NULL, NULL, 2));\n\n  \tint dfd = fsmount(fsfd, FSMOUNT_CLOEXEC, 0);\n  \tassert(dfd >= 0);\n\n  \tint execfd = openat(dfd, \"exe\", O_CREAT | O_RDWR | O_CLOEXEC, 0782);\n  \tassert(execfd >= 0);\n  \tassert(write(execfd, SHELLCODE, strlen(SHELLCODE)) == strlen(SHELLCODE));\n  \tassert(!close(execfd));\n\n  \tchar *execpath = NULL;\n  \tchar *argv[] = { \"bad-exe\", NULL }, *envp[] = { NULL };\n  \texecfd = openat(dfd, \"exe\", O_PATH | O_CLOEXEC);\n  \tassert(execfd >= 0);\n  \tassert(asprintf(&execpath, \"/proc/self/fd/%d\", execfd) > 0);\n  \tassert(!execve(execpath, argv, envp));\n  }\n  % ./mount-memfd\n  this file was executed from this totally private tmpfs: /proc/self/fd/5\n  %\n\nGiven that it is possible for CAP_SYS_ADMIN users to create executable\nbinaries without memfd_create(2) and without touching the host filesystem\n(not to mention the many other things a CAP_SYS_ADMIN process would be\nable to do that would be equivalent or worse), it seems strange to cause a\nfair amount of headache to admins when there doesn't appear to be an\nactual security benefit to blocking this.  There appear to be concerns\nabout confused-deputy-esque attacks[2] but a confused deputy that can\nwrite to arbitrary sysctls is a bigger security issue than executable\nmemfds.\n\n/* New API */\n\nThe primary requirement from the original author appears to be more based\non the need to be able to restrict an entire system in a hierarchical\nmanner[3], such that child namespaces cannot re-enable executable memfds.\n\nSo, implement that behaviour explicitly -- the vm.memfd_noexec scope is\nevaluated up the pidns tree to &init_pid_ns and you have the most\nrestrictive value applied to you.  The new lower limit you can set\nvm.memfd_noexec is whatever limit applies to your parent.\n\nNote that a pidns will inherit a copy of the parent pidns's effective\nvm.memfd_noexec setting at unshare() time.  This matches the existing\nbehaviour, and it also ensures that a pidns will never have its\nvm.memfd_noexec setting *lowered* behind its back (but it will be raised\nif the parent raises theirs).\n\n/* Backwards Compatibility */\n\nAs the previous version of the sysctl didn't allow you to lower the\nsetting at all, there are no backwards compatibility issues with this\naspect of the change.\n\nHowever it should be noted that now that the setting is completely\nhierarchical.  Previously, a cloned pidns would just copy the current\npidns setting, meaning that if the parent's vm.memfd_noexec was changed it\nwouldn't propoagate to existing pid namespaces.  Now, the restriction\napplies recursively.  This is a uAPI change, however:\n\n * The sysctl is very new, having been merged in 6.3.\n * Several aspects of the sysctl were broken up until this patchset and\n   the other patchset by Jeff Xu last month.\n\nAnd thus it seems incredibly unlikely that any real users would run into\nthis issue. In the worst case, if this causes userspace isues we could\nmake it so that modifying the setting follows the hierarchical rules but\nthe restriction checking uses the cached copy.\n\n[1]: https://lore.kernel.org/CABi2SkWnAgHK1i6iqSqPMYuNEhtHBkO8jUuCvmG3RmUB5TKHJw@mail.gmail.com/\n[2]: https://lore.kernel.org/CALmYWFs_dNCzw_pW1yRAo4bGCPEtykroEQaowNULp7svwMLjOg@mail.gmail.com/\n[3]: https://lore.kernel.org/CALmYWFuahdUF7cT4cm7_TGLqPanuHXJ-hVSfZt7vpTnc18DPrw@mail.gmail.com/\n\nLink: https://lkml.kernel.org/r/20230814-memfd-vm-noexec-uapi-fixes-v2-4-7ff9e3e10ba6@cyphar.com\nFixes: 105ff5339f49 (\"mm/memfd: add MFD_NOEXEC_SEAL and MFD_EXEC\")\nSigned-off-by: Aleksa Sarai <cyphar@cyphar.com>\nCc: Dominique Martinet <asmadeus@codewreck.org>\nCc: Christian Brauner <brauner@kernel.org>\nCc: Daniel Verkamp <dverkamp@chromium.org>\nCc: Jeff Xu <jeffxu@google.com>\nCc: Kees Cook <keescook@chromium.org>\nCc: Shuah Khan <shuah@kernel.org>\nCc: <stable@vger.kernel.org>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>",
+  "author_name": "Aleksa Sarai",
+  "author_email": "cyphar@cyphar.com",
+  "author_date": "Mon Aug 14 18:41:00 2023 +1000",
+  "author_date_iso": "2023-08-14T18:41:00+10:00",
+  "committer_name": "Andrew Morton",
+  "committer_email": "akpm@linux-foundation.org",
+  "committer_date": "Mon Aug 21 13:37:59 2023 -0700",
+  "committer_date_iso": "2023-08-21T13:37:59-07:00",
+  "files_changed": [
+    "include/linux/pid_namespace.h",
+    "kernel/pid.c",
+    "kernel/pid_namespace.c",
+    "kernel/pid_sysctl.h",
+    "mm/memfd.c"
+  ],
+  "files_changed_count": 5,
+  "stats": [
+    {
+      "file": "include/linux/pid_namespace.h",
+      "insertions": 22,
+      "deletions": 1
+    },
+    {
+      "file": "kernel/pid.c",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "kernel/pid_namespace.c",
+      "insertions": 3,
+      "deletions": 3
+    },
+    {
+      "file": "kernel/pid_sysctl.h",
+      "insertions": 12,
+      "deletions": 16
+    },
+    {
+      "file": "mm/memfd.c",
+      "insertions": 2,
+      "deletions": 1
+    }
+  ],
+  "total_insertions": 42,
+  "total_deletions": 21,
+  "total_changes": 63,
+  "parents": [
+    "434ed3350f57c03a9654fe0619755cc137a58935"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "security issue"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "include/linux/pid_namespace.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "kernel/pid.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "kernel/pid_namespace.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "kernel/pid_sysctl.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/memfd.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

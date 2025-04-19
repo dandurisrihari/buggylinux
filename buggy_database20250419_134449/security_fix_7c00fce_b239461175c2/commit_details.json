@@ -1,0 +1,102 @@
+{
+  "hash": "7c00fce98c3e15334a603925b41aa49f76e83227",
+  "hash_short": "7c00fce9",
+  "subject": "mm: reorganize SLAB freelist randomization",
+  "body": "The kernel heap allocators are using a sequential freelist making their\nallocation predictable.  This predictability makes kernel heap overflow\neasier to exploit.  An attacker can careful prepare the kernel heap to\ncontrol the following chunk overflowed.\n\nFor example these attacks exploit the predictability of the heap:\n - Linux Kernel CAN SLUB overflow (https://goo.gl/oMNWkU)\n - Exploiting Linux Kernel Heap corruptions (http://goo.gl/EXLn95)\n\n***Problems that needed solving:\n - Randomize the Freelist (singled linked) used in the SLUB allocator.\n - Ensure good performance to encourage usage.\n - Get best entropy in early boot stage.\n\n***Parts:\n - 01/02 Reorganize the SLAB Freelist randomization to share elements\n   with the SLUB implementation.\n - 02/02 The SLUB Freelist randomization implementation. Similar approach\n   than the SLAB but tailored to the singled freelist used in SLUB.\n\n***Performance data:\n\nslab_test impact is between 3% to 4% on average for 100000 attempts\nwithout smp.  It is a very focused testing, kernbench show the overall\nimpact on the system is way lower.\n\nBefore:\n\n  Single thread testing\n  =====================\n  1. Kmalloc: Repeatedly allocate then free test\n  100000 times kmalloc(8) -> 49 cycles kfree -> 77 cycles\n  100000 times kmalloc(16) -> 51 cycles kfree -> 79 cycles\n  100000 times kmalloc(32) -> 53 cycles kfree -> 83 cycles\n  100000 times kmalloc(64) -> 62 cycles kfree -> 90 cycles\n  100000 times kmalloc(128) -> 81 cycles kfree -> 97 cycles\n  100000 times kmalloc(256) -> 98 cycles kfree -> 121 cycles\n  100000 times kmalloc(512) -> 95 cycles kfree -> 122 cycles\n  100000 times kmalloc(1024) -> 96 cycles kfree -> 126 cycles\n  100000 times kmalloc(2048) -> 115 cycles kfree -> 140 cycles\n  100000 times kmalloc(4096) -> 149 cycles kfree -> 171 cycles\n  2. Kmalloc: alloc/free test\n  100000 times kmalloc(8)/kfree -> 70 cycles\n  100000 times kmalloc(16)/kfree -> 70 cycles\n  100000 times kmalloc(32)/kfree -> 70 cycles\n  100000 times kmalloc(64)/kfree -> 70 cycles\n  100000 times kmalloc(128)/kfree -> 70 cycles\n  100000 times kmalloc(256)/kfree -> 69 cycles\n  100000 times kmalloc(512)/kfree -> 70 cycles\n  100000 times kmalloc(1024)/kfree -> 73 cycles\n  100000 times kmalloc(2048)/kfree -> 72 cycles\n  100000 times kmalloc(4096)/kfree -> 71 cycles\n\nAfter:\n\n  Single thread testing\n  =====================\n  1. Kmalloc: Repeatedly allocate then free test\n  100000 times kmalloc(8) -> 57 cycles kfree -> 78 cycles\n  100000 times kmalloc(16) -> 61 cycles kfree -> 81 cycles\n  100000 times kmalloc(32) -> 76 cycles kfree -> 93 cycles\n  100000 times kmalloc(64) -> 83 cycles kfree -> 94 cycles\n  100000 times kmalloc(128) -> 106 cycles kfree -> 107 cycles\n  100000 times kmalloc(256) -> 118 cycles kfree -> 117 cycles\n  100000 times kmalloc(512) -> 114 cycles kfree -> 116 cycles\n  100000 times kmalloc(1024) -> 115 cycles kfree -> 118 cycles\n  100000 times kmalloc(2048) -> 147 cycles kfree -> 131 cycles\n  100000 times kmalloc(4096) -> 214 cycles kfree -> 161 cycles\n  2. Kmalloc: alloc/free test\n  100000 times kmalloc(8)/kfree -> 66 cycles\n  100000 times kmalloc(16)/kfree -> 66 cycles\n  100000 times kmalloc(32)/kfree -> 66 cycles\n  100000 times kmalloc(64)/kfree -> 66 cycles\n  100000 times kmalloc(128)/kfree -> 65 cycles\n  100000 times kmalloc(256)/kfree -> 67 cycles\n  100000 times kmalloc(512)/kfree -> 67 cycles\n  100000 times kmalloc(1024)/kfree -> 64 cycles\n  100000 times kmalloc(2048)/kfree -> 67 cycles\n  100000 times kmalloc(4096)/kfree -> 67 cycles\n\nKernbench, before:\n\n  Average Optimal load -j 12 Run (std deviation):\n  Elapsed Time 101.873 (1.16069)\n  User Time 1045.22 (1.60447)\n  System Time 88.969 (0.559195)\n  Percent CPU 1112.9 (13.8279)\n  Context Switches 189140 (2282.15)\n  Sleeps 99008.6 (768.091)\n\nAfter:\n\n  Average Optimal load -j 12 Run (std deviation):\n  Elapsed Time 102.47 (0.562732)\n  User Time 1045.3 (1.34263)\n  System Time 88.311 (0.342554)\n  Percent CPU 1105.8 (6.49444)\n  Context Switches 189081 (2355.78)\n  Sleeps 99231.5 (800.358)\n\nThis patch (of 2):\n\nThis commit reorganizes the previous SLAB freelist randomization to\nprepare for the SLUB implementation.  It moves functions that will be\nshared to slab_common.\n\nThe entropy functions are changed to align with the SLUB implementation,\nnow using get_random_(int|long) functions.  These functions were chosen\nbecause they provide a bit more entropy early on boot and better\nperformance when specific arch instructions are not available.\n\n[akpm@linux-foundation.org: fix build]\nLink: http://lkml.kernel.org/r/1464295031-26375-2-git-send-email-thgarnie@google.com\nSigned-off-by: Thomas Garnier <thgarnie@google.com>\nReviewed-by: Kees Cook <keescook@chromium.org>\nCc: Christoph Lameter <cl@linux.com>\nCc: Pekka Enberg <penberg@kernel.org>\nCc: David Rientjes <rientjes@google.com>\nCc: Joonsoo Kim <iamjoonsoo.kim@lge.com>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>\nSigned-off-by: Linus Torvalds <torvalds@linux-foundation.org>",
+  "full_message": "mm: reorganize SLAB freelist randomization\n\nThe kernel heap allocators are using a sequential freelist making their\nallocation predictable.  This predictability makes kernel heap overflow\neasier to exploit.  An attacker can careful prepare the kernel heap to\ncontrol the following chunk overflowed.\n\nFor example these attacks exploit the predictability of the heap:\n - Linux Kernel CAN SLUB overflow (https://goo.gl/oMNWkU)\n - Exploiting Linux Kernel Heap corruptions (http://goo.gl/EXLn95)\n\n***Problems that needed solving:\n - Randomize the Freelist (singled linked) used in the SLUB allocator.\n - Ensure good performance to encourage usage.\n - Get best entropy in early boot stage.\n\n***Parts:\n - 01/02 Reorganize the SLAB Freelist randomization to share elements\n   with the SLUB implementation.\n - 02/02 The SLUB Freelist randomization implementation. Similar approach\n   than the SLAB but tailored to the singled freelist used in SLUB.\n\n***Performance data:\n\nslab_test impact is between 3% to 4% on average for 100000 attempts\nwithout smp.  It is a very focused testing, kernbench show the overall\nimpact on the system is way lower.\n\nBefore:\n\n  Single thread testing\n  =====================\n  1. Kmalloc: Repeatedly allocate then free test\n  100000 times kmalloc(8) -> 49 cycles kfree -> 77 cycles\n  100000 times kmalloc(16) -> 51 cycles kfree -> 79 cycles\n  100000 times kmalloc(32) -> 53 cycles kfree -> 83 cycles\n  100000 times kmalloc(64) -> 62 cycles kfree -> 90 cycles\n  100000 times kmalloc(128) -> 81 cycles kfree -> 97 cycles\n  100000 times kmalloc(256) -> 98 cycles kfree -> 121 cycles\n  100000 times kmalloc(512) -> 95 cycles kfree -> 122 cycles\n  100000 times kmalloc(1024) -> 96 cycles kfree -> 126 cycles\n  100000 times kmalloc(2048) -> 115 cycles kfree -> 140 cycles\n  100000 times kmalloc(4096) -> 149 cycles kfree -> 171 cycles\n  2. Kmalloc: alloc/free test\n  100000 times kmalloc(8)/kfree -> 70 cycles\n  100000 times kmalloc(16)/kfree -> 70 cycles\n  100000 times kmalloc(32)/kfree -> 70 cycles\n  100000 times kmalloc(64)/kfree -> 70 cycles\n  100000 times kmalloc(128)/kfree -> 70 cycles\n  100000 times kmalloc(256)/kfree -> 69 cycles\n  100000 times kmalloc(512)/kfree -> 70 cycles\n  100000 times kmalloc(1024)/kfree -> 73 cycles\n  100000 times kmalloc(2048)/kfree -> 72 cycles\n  100000 times kmalloc(4096)/kfree -> 71 cycles\n\nAfter:\n\n  Single thread testing\n  =====================\n  1. Kmalloc: Repeatedly allocate then free test\n  100000 times kmalloc(8) -> 57 cycles kfree -> 78 cycles\n  100000 times kmalloc(16) -> 61 cycles kfree -> 81 cycles\n  100000 times kmalloc(32) -> 76 cycles kfree -> 93 cycles\n  100000 times kmalloc(64) -> 83 cycles kfree -> 94 cycles\n  100000 times kmalloc(128) -> 106 cycles kfree -> 107 cycles\n  100000 times kmalloc(256) -> 118 cycles kfree -> 117 cycles\n  100000 times kmalloc(512) -> 114 cycles kfree -> 116 cycles\n  100000 times kmalloc(1024) -> 115 cycles kfree -> 118 cycles\n  100000 times kmalloc(2048) -> 147 cycles kfree -> 131 cycles\n  100000 times kmalloc(4096) -> 214 cycles kfree -> 161 cycles\n  2. Kmalloc: alloc/free test\n  100000 times kmalloc(8)/kfree -> 66 cycles\n  100000 times kmalloc(16)/kfree -> 66 cycles\n  100000 times kmalloc(32)/kfree -> 66 cycles\n  100000 times kmalloc(64)/kfree -> 66 cycles\n  100000 times kmalloc(128)/kfree -> 65 cycles\n  100000 times kmalloc(256)/kfree -> 67 cycles\n  100000 times kmalloc(512)/kfree -> 67 cycles\n  100000 times kmalloc(1024)/kfree -> 64 cycles\n  100000 times kmalloc(2048)/kfree -> 67 cycles\n  100000 times kmalloc(4096)/kfree -> 67 cycles\n\nKernbench, before:\n\n  Average Optimal load -j 12 Run (std deviation):\n  Elapsed Time 101.873 (1.16069)\n  User Time 1045.22 (1.60447)\n  System Time 88.969 (0.559195)\n  Percent CPU 1112.9 (13.8279)\n  Context Switches 189140 (2282.15)\n  Sleeps 99008.6 (768.091)\n\nAfter:\n\n  Average Optimal load -j 12 Run (std deviation):\n  Elapsed Time 102.47 (0.562732)\n  User Time 1045.3 (1.34263)\n  System Time 88.311 (0.342554)\n  Percent CPU 1105.8 (6.49444)\n  Context Switches 189081 (2355.78)\n  Sleeps 99231.5 (800.358)\n\nThis patch (of 2):\n\nThis commit reorganizes the previous SLAB freelist randomization to\nprepare for the SLUB implementation.  It moves functions that will be\nshared to slab_common.\n\nThe entropy functions are changed to align with the SLUB implementation,\nnow using get_random_(int|long) functions.  These functions were chosen\nbecause they provide a bit more entropy early on boot and better\nperformance when specific arch instructions are not available.\n\n[akpm@linux-foundation.org: fix build]\nLink: http://lkml.kernel.org/r/1464295031-26375-2-git-send-email-thgarnie@google.com\nSigned-off-by: Thomas Garnier <thgarnie@google.com>\nReviewed-by: Kees Cook <keescook@chromium.org>\nCc: Christoph Lameter <cl@linux.com>\nCc: Pekka Enberg <penberg@kernel.org>\nCc: David Rientjes <rientjes@google.com>\nCc: Joonsoo Kim <iamjoonsoo.kim@lge.com>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>\nSigned-off-by: Linus Torvalds <torvalds@linux-foundation.org>",
+  "author_name": "Thomas Garnier",
+  "author_email": "thgarnie@google.com",
+  "author_date": "Tue Jul 26 15:21:56 2016 -0700",
+  "author_date_iso": "2016-07-26T15:21:56-07:00",
+  "committer_name": "Linus Torvalds",
+  "committer_email": "torvalds@linux-foundation.org",
+  "committer_date": "Tue Jul 26 16:19:19 2016 -0700",
+  "committer_date_iso": "2016-07-26T16:19:19-07:00",
+  "files_changed": [
+    "include/linux/slab_def.h",
+    "mm/slab.c",
+    "mm/slab.h",
+    "mm/slab_common.c"
+  ],
+  "files_changed_count": 4,
+  "stats": [
+    {
+      "file": "include/linux/slab_def.h",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "mm/slab.c",
+      "insertions": 20,
+      "deletions": 60
+    },
+    {
+      "file": "mm/slab.h",
+      "insertions": 14,
+      "deletions": 0
+    },
+    {
+      "file": "mm/slab_common.c",
+      "insertions": 47,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 82,
+  "total_deletions": 61,
+  "total_changes": 143,
+  "parents": [
+    "9a46b04f16a032c26bbf0ece61d6cd1e7ba9f627"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v4.10",
+    "v4.10-rc1",
+    "v4.10-rc2",
+    "v4.10-rc3",
+    "v4.10-rc4",
+    "v4.10-rc5",
+    "v4.10-rc6",
+    "v4.10-rc7",
+    "v4.10-rc8",
+    "v4.11"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "exploit"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "include/linux/slab_def.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/slab.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/slab.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/slab_common.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

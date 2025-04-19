@@ -1,0 +1,91 @@
+commit 0181ce31b26021f7c2f9506112a05c847a36f0f2
+Author: Don Hiatt <don.hiatt@intel.com>
+Date:   Mon Mar 20 17:26:14 2017 -0700
+
+    IB/hfi1: Add receive fault injection feature
+    
+    Add fault injection capability:
+      - Drop packets unconditionally (fault_by_packet)
+      - Drop packets based on opcode (fault_by_opcode)
+    
+    This feature reacts to the global FAULT_INJECTION
+    config flag.
+    
+    The faulting traces have been added:
+      - misc/fault_opcode
+      - misc/fault_packet
+    
+    See 'Documentation/fault-injection/fault-injection.txt'
+    for details.
+    
+    Examples:
+      - Dropping packets by opcode:
+        /sys/kernel/debug/hfi1/hfi1_X/fault_opcode
+            # Enable fault
+            echo Y > fault_by_opcode
+            # Setprobability of dropping (0-100%)
+            # echo 25 > probability
+            # Set opcode
+            echo 0x64 > opcode
+            # Number of times to fault
+            echo 3 > times
+            # An optional mask allows you to fault
+            # a range of opcodes
+            echo 0xf0 > mask
+        /sys/kernel/debug/hfi1/hfi1_X/fault_stats
+        contains a value in parentheses to indicate
+        number of each opcode dropped.
+    
+      - Dropping packets unconditionally
+        /sys/kernel/debug/hfi1/hfi1_X/fault_packet
+            # Enable fault
+            echo Y > fault_by_packet
+        /sys/kernel/debug/hfi1/hfi1_X/fault_packet/fault_stats
+        contains the number of packets dropped.
+    
+    Reviewed-by: Dennis Dalessandro <dennis.dalessandro@intel.com>
+    Signed-off-by: Mike Marciniszyn <mike.marciniszyn@intel.com>
+    Signed-off-by: Don Hiatt <don.hiatt@intel.com>
+    Signed-off-by: Dennis Dalessandro <dennis.dalessandro@intel.com>
+    Signed-off-by: Doug Ledford <dledford@redhat.com>
+
+diff --git a/drivers/infiniband/hw/hfi1/driver.c b/drivers/infiniband/hw/hfi1/driver.c
+index 3881c951f6af..c0b012f6e11c 100644
+--- a/drivers/infiniband/hw/hfi1/driver.c
++++ b/drivers/infiniband/hw/hfi1/driver.c
+@@ -59,6 +59,7 @@
+ #include "trace.h"
+ #include "qp.h"
+ #include "sdma.h"
++#include "debugfs.h"
+ 
+ #undef pr_fmt
+ #define pr_fmt(fmt) DRIVER_NAME ": " fmt
+@@ -1354,6 +1355,9 @@ void handle_eflags(struct hfi1_packet *packet)
+  */
+ int process_receive_ib(struct hfi1_packet *packet)
+ {
++	if (unlikely(hfi1_dbg_fault_packet(packet)))
++		return RHF_RCV_CONTINUE;
++
+ 	trace_hfi1_rcvhdr(packet->rcd->ppd->dd,
+ 			  packet->rcd->ctxt,
+ 			  rhf_err_flags(packet->rhf),
+@@ -1409,6 +1413,8 @@ int process_receive_error(struct hfi1_packet *packet)
+ 
+ int kdeth_process_expected(struct hfi1_packet *packet)
+ {
++	if (unlikely(hfi1_dbg_fault_packet(packet)))
++		return RHF_RCV_CONTINUE;
+ 	if (unlikely(rhf_err_flags(packet->rhf)))
+ 		handle_eflags(packet);
+ 
+@@ -1421,6 +1427,8 @@ int kdeth_process_eager(struct hfi1_packet *packet)
+ {
+ 	if (unlikely(rhf_err_flags(packet->rhf)))
+ 		handle_eflags(packet);
++	if (unlikely(hfi1_dbg_fault_packet(packet)))
++		return RHF_RCV_CONTINUE;
+ 
+ 	dd_dev_err(packet->rcd->dd,
+ 		   "Unhandled eager packet received. Dropping.\n");

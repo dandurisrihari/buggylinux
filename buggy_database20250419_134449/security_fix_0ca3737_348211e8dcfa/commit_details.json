@@ -1,0 +1,128 @@
+{
+  "hash": "0ca3737526576d41e6a9e599428c7d44896f1c95",
+  "hash_short": "0ca37375",
+  "subject": "Merge branch 'mlxsw-Improve-extensibility'",
+  "body": "Jiri Pirko says:\n\n====================\nmlxsw: Improve extensibility\n\nIdo says:\n\nSince the initial introduction of the bridge offload in commit\n56ade8fe3fe1 (\"mlxsw: spectrum: Add initial support for Spectrum ASIC\")\nthe per-port struct was used to store both physical properties of the\nport as well as logical bridge properties such as learning and active\nVLANs in the VLAN-aware bridge.\n\nThe above resulted in a bloated struct and code that is getting\nincreasingly difficult to extend when stacked devices are taken into\naccount as well as more advanced use cases such as IGMP snooping.\n\nDue to the incremental development nature of this driver as well as the\ncomplexity of the underlying hardware, subsequent design decisions failed\nto generalize the FID and RIF resources, which could've benefited from\na more generic design, resulting in consolidated code paths and better\nextensibility with regards to future ASICs and use cases.\n\nThis patchset tries to solve both of these design problems, as they're\ntightly coupled. To ease the code review, the changes are done in a\nbottom-up manner, in which the port struct is the first to be patched,\nthen the FIDs the ports are mapped to and finally the RIFs configured on\ntop.\n\nThe first half of the patchset gradually moves away from the previous\ndesign to a design that is more in sync with the underlying hardware and\nwhich clearly separates between hardware-specific structs and logical\nones such as a bridge port.\n\nAll the bridge-specific information is removed from the port struct, as\nwell as the list of VLAN devices (\"vPorts\") configured on top of it.\nInstead, a linked list of VLANs is introduced, which allows each VLAN\nto hold a state, such as mapping to a particular FID and membership in\na bridge. The data structures are depicted in the following figure:\n\n                                  mlxsw_sp_bridge_device\n                                       +----------+\n                                       |          |\n                                  +----+          |\n                                  |    |          |\n                                  |    +----------+\n                                  |\n             mlxsw_sp_bridge_port |\n                 +----------+     |\n                 |          |     |\n              +-->          +-----+--> ..\n              |  |          |\n              |  +----+-----+\n              |       |\n              |       v\n              | mlxsw_sp_bridge_vlan\n              |  +----------+\n              |  | vid X    |\n              |  |          +--> ..\n              |  |          |\n              |  +----+-----+\n              |       |\n              +--+----v-----+\n                 | vid X    |\n              +--+          +--> ..\n              |  |          |\nmlxsw_sp_port |  +----------+\n+----------+  | mlxsw_sp_port_vlan\n|          |  |\n|          +--+\n|          |\n+----------+\n\nThis model allows us to consolidate many of the code paths relating to\nVLAN-aware and VLAN-unaware bridges, as the latter is simply represented\nusing a bridge port with a VLAN list size of one. Another advantage of\nthe model is that it's easy to extend it with future per-VLAN\nattributes - such as mrouter indication - by merely pushing these down\nfrom the bridge port struct to the bridge VLAN one.\n\nThe second half of the patchset builds on top of previous work and\nprepares the driver for the common FID and RIF cores, which are finally\nimplemented in the last two patches. These exploit the fact that despite\nthe different kinds of FIDs and RIFs, they do share a common object on\nwhich the core operations can operate on.\n\nBy hiding both objects from the rest of the driver and modeling their\noperations using a VFT, it'll be easier to extend the driver for future\nuse cases such as VXLAN.\n\nTested using following LNST recipes:\nhttps://github.com/jpirko/lnst/tree/master/recipes/switchdev\n====================\n\nSigned-off-by: David S. Miller <davem@davemloft.net>",
+  "full_message": "Merge branch 'mlxsw-Improve-extensibility'\n\nJiri Pirko says:\n\n====================\nmlxsw: Improve extensibility\n\nIdo says:\n\nSince the initial introduction of the bridge offload in commit\n56ade8fe3fe1 (\"mlxsw: spectrum: Add initial support for Spectrum ASIC\")\nthe per-port struct was used to store both physical properties of the\nport as well as logical bridge properties such as learning and active\nVLANs in the VLAN-aware bridge.\n\nThe above resulted in a bloated struct and code that is getting\nincreasingly difficult to extend when stacked devices are taken into\naccount as well as more advanced use cases such as IGMP snooping.\n\nDue to the incremental development nature of this driver as well as the\ncomplexity of the underlying hardware, subsequent design decisions failed\nto generalize the FID and RIF resources, which could've benefited from\na more generic design, resulting in consolidated code paths and better\nextensibility with regards to future ASICs and use cases.\n\nThis patchset tries to solve both of these design problems, as they're\ntightly coupled. To ease the code review, the changes are done in a\nbottom-up manner, in which the port struct is the first to be patched,\nthen the FIDs the ports are mapped to and finally the RIFs configured on\ntop.\n\nThe first half of the patchset gradually moves away from the previous\ndesign to a design that is more in sync with the underlying hardware and\nwhich clearly separates between hardware-specific structs and logical\nones such as a bridge port.\n\nAll the bridge-specific information is removed from the port struct, as\nwell as the list of VLAN devices (\"vPorts\") configured on top of it.\nInstead, a linked list of VLANs is introduced, which allows each VLAN\nto hold a state, such as mapping to a particular FID and membership in\na bridge. The data structures are depicted in the following figure:\n\n                                  mlxsw_sp_bridge_device\n                                       +----------+\n                                       |          |\n                                  +----+          |\n                                  |    |          |\n                                  |    +----------+\n                                  |\n             mlxsw_sp_bridge_port |\n                 +----------+     |\n                 |          |     |\n              +-->          +-----+--> ..\n              |  |          |\n              |  +----+-----+\n              |       |\n              |       v\n              | mlxsw_sp_bridge_vlan\n              |  +----------+\n              |  | vid X    |\n              |  |          +--> ..\n              |  |          |\n              |  +----+-----+\n              |       |\n              +--+----v-----+\n                 | vid X    |\n              +--+          +--> ..\n              |  |          |\nmlxsw_sp_port |  +----------+\n+----------+  | mlxsw_sp_port_vlan\n|          |  |\n|          +--+\n|          |\n+----------+\n\nThis model allows us to consolidate many of the code paths relating to\nVLAN-aware and VLAN-unaware bridges, as the latter is simply represented\nusing a bridge port with a VLAN list size of one. Another advantage of\nthe model is that it's easy to extend it with future per-VLAN\nattributes - such as mrouter indication - by merely pushing these down\nfrom the bridge port struct to the bridge VLAN one.\n\nThe second half of the patchset builds on top of previous work and\nprepares the driver for the common FID and RIF cores, which are finally\nimplemented in the last two patches. These exploit the fact that despite\nthe different kinds of FIDs and RIFs, they do share a common object on\nwhich the core operations can operate on.\n\nBy hiding both objects from the rest of the driver and modeling their\noperations using a VFT, it'll be easier to extend the driver for future\nuse cases such as VXLAN.\n\nTested using following LNST recipes:\nhttps://github.com/jpirko/lnst/tree/master/recipes/switchdev\n====================\n\nSigned-off-by: David S. Miller <davem@davemloft.net>",
+  "author_name": "David S. Miller",
+  "author_email": "davem@davemloft.net",
+  "author_date": "Fri May 26 15:18:50 2017 -0400",
+  "author_date_iso": "2017-05-26T15:18:50-04:00",
+  "committer_name": "David S. Miller",
+  "committer_email": "davem@davemloft.net",
+  "committer_date": "Fri May 26 15:18:50 2017 -0400",
+  "committer_date_iso": "2017-05-26T15:18:50-04:00",
+  "files_changed": [],
+  "files_changed_count": 0,
+  "stats": [
+    {
+      "file": "drivers/net/ethernet/mellanox/mlxsw/Makefile",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlxsw/spectrum.c",
+      "insertions": 137,
+      "deletions": 837
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlxsw/spectrum.h",
+      "insertions": 88,
+      "deletions": 152
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlxsw/spectrum_acl.c",
+      "insertions": 17,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlxsw/spectrum_fid.c",
+      "insertions": 992,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlxsw/spectrum_flower.c",
+      "insertions": 5,
+      "deletions": 1
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlxsw/spectrum_router.c",
+      "insertions": 408,
+      "deletions": 338
+    },
+    {
+      "file": "drivers/net/ethernet/mellanox/mlxsw/spectrum_switchdev.c",
+      "insertions": 1104,
+      "deletions": 558
+    },
+    {
+      "file": "include/linux/if_bridge.h",
+      "insertions": 14,
+      "deletions": 0
+    },
+    {
+      "file": "net/bridge/br_if.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "net/bridge/br_mdb.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "net/bridge/br_multicast.c",
+      "insertions": 8,
+      "deletions": 0
+    },
+    {
+      "file": "net/bridge/br_netlink.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "net/bridge/br_private.h",
+      "insertions": 0,
+      "deletions": 9
+    },
+    {
+      "file": "net/bridge/br_vlan.c",
+      "insertions": 8,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 2787,
+  "total_deletions": 1900,
+  "total_changes": 4687,
+  "parents": [
+    "5f9e27e60ed961fe28183d8fe600789f676b460d",
+    "e4f3c1c17b6d101af5474e8c72b38aa0baaf719d"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v4.13",
+    "v4.13-rc1",
+    "v4.13-rc2",
+    "v4.13-rc3",
+    "v4.13-rc4",
+    "v4.13-rc5",
+    "v4.13-rc6",
+    "v4.13-rc7",
+    "v4.14",
+    "v4.14-rc1"
+  ],
+  "is_merge": true,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "exploit"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": []
+}

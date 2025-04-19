@@ -1,0 +1,151 @@
+{
+  "hash": "7a46ec0e2f4850407de5e1d19a44edee6efa58ec",
+  "hash_short": "7a46ec0e",
+  "subject": "locking/refcounts, x86/asm: Implement fast refcount overflow protection",
+  "body": "This implements refcount_t overflow protection on x86 without a noticeable\nperformance impact, though without the fuller checking of REFCOUNT_FULL.\n\nThis is done by duplicating the existing atomic_t refcount implementation\nbut with normally a single instruction added to detect if the refcount\nhas gone negative (e.g. wrapped past INT_MAX or below zero). When detected,\nthe handler saturates the refcount_t to INT_MIN / 2. With this overflow\nprotection, the erroneous reference release that would follow a wrap back\nto zero is blocked from happening, avoiding the class of refcount-overflow\nuse-after-free vulnerabilities entirely.\n\nOnly the overflow case of refcounting can be perfectly protected, since\nit can be detected and stopped before the reference is freed and left to\nbe abused by an attacker. There isn't a way to block early decrements,\nand while REFCOUNT_FULL stops increment-from-zero cases (which would\nbe the state _after_ an early decrement and stops potential double-free\nconditions), this fast implementation does not, since it would require\nthe more expensive cmpxchg loops. Since the overflow case is much more\ncommon (e.g. missing a \"put\" during an error path), this protection\nprovides real-world protection. For example, the two public refcount\noverflow use-after-free exploits published in 2016 would have been\nrendered unexploitable:\n\n  http://perception-point.io/2016/01/14/analysis-and-exploitation-of-a-linux-kernel-vulnerability-cve-2016-0728/\n\n  http://cyseclabs.com/page?n=02012016\n\nThis implementation does, however, notice an unchecked decrement to zero\n(i.e. caller used refcount_dec() instead of refcount_dec_and_test() and it\nresulted in a zero). Decrements under zero are noticed (since they will\nhave resulted in a negative value), though this only indicates that a\nuse-after-free may have already happened. Such notifications are likely\navoidable by an attacker that has already exploited a use-after-free\nvulnerability, but it's better to have them reported than allow such\nconditions to remain universally silent.\n\nOn first overflow detection, the refcount value is reset to INT_MIN / 2\n(which serves as a saturation value) and a report and stack trace are\nproduced. When operations detect only negative value results (such as\nchanging an already saturated value), saturation still happens but no\nnotification is performed (since the value was already saturated).\n\nOn the matter of races, since the entire range beyond INT_MAX but before\n0 is negative, every operation at INT_MIN / 2 will trap, leaving no\noverflow-only race condition.\n\nAs for performance, this implementation adds a single \"js\" instruction\nto the regular execution flow of a copy of the standard atomic_t refcount\noperations. (The non-\"and_test\" refcount_dec() function, which is uncommon\nin regular refcount design patterns, has an additional \"jz\" instruction\nto detect reaching exactly zero.) Since this is a forward jump, it is by\ndefault the non-predicted path, which will be reinforced by dynamic branch\nprediction. The result is this protection having virtually no measurable\nchange in performance over standard atomic_t operations. The error path,\nlocated in .text.unlikely, saves the refcount location and then uses UD0\nto fire a refcount exception handler, which resets the refcount, handles\nreporting, and returns to regular execution. This keeps the changes to\n.text size minimal, avoiding return jumps and open-coded calls to the\nerror reporting routine.\n\nExample assembly comparison:\n\nrefcount_inc() before:\n\n  .text:\n  ffffffff81546149:       f0 ff 45 f4             lock incl -0xc(%rbp)\n\nrefcount_inc() after:\n\n  .text:\n  ffffffff81546149:       f0 ff 45 f4             lock incl -0xc(%rbp)\n  ffffffff8154614d:       0f 88 80 d5 17 00       js     ffffffff816c36d3\n  ...\n  .text.unlikely:\n  ffffffff816c36d3:       48 8d 4d f4             lea    -0xc(%rbp),%rcx\n  ffffffff816c36d7:       0f ff                   (bad)\n\nThese are the cycle counts comparing a loop of refcount_inc() from 1\nto INT_MAX and back down to 0 (via refcount_dec_and_test()), between\nunprotected refcount_t (atomic_t), fully protected REFCOUNT_FULL\n(refcount_t-full), and this overflow-protected refcount (refcount_t-fast):\n\n  2147483646 refcount_inc()s and 2147483647 refcount_dec_and_test()s:\n\t\t    cycles\t\tprotections\n  atomic_t           82249267387\tnone\n  refcount_t-fast    82211446892\toverflow, untested dec-to-zero\n  refcount_t-full   144814735193\toverflow, untested dec-to-zero, inc-from-zero\n\nThis code is a modified version of the x86 PAX_REFCOUNT atomic_t\noverflow defense from the last public patch of PaX/grsecurity, based\non my understanding of the code. Changes or omissions from the original\ncode are mine and don't reflect the original grsecurity/PaX code. Thanks\nto PaX Team for various suggestions for improvement for repurposing this\ncode to be a refcount-only protection.\n\nSigned-off-by: Kees Cook <keescook@chromium.org>\nReviewed-by: Josh Poimboeuf <jpoimboe@redhat.com>\nCc: Alexey Dobriyan <adobriyan@gmail.com>\nCc: Andrew Morton <akpm@linux-foundation.org>\nCc: Arnd Bergmann <arnd@arndb.de>\nCc: Christoph Hellwig <hch@infradead.org>\nCc: David S. Miller <davem@davemloft.net>\nCc: Davidlohr Bueso <dave@stgolabs.net>\nCc: Elena Reshetova <elena.reshetova@intel.com>\nCc: Eric Biggers <ebiggers3@gmail.com>\nCc: Eric W. Biederman <ebiederm@xmission.com>\nCc: Greg KH <gregkh@linuxfoundation.org>\nCc: Hans Liljestrand <ishkamiel@gmail.com>\nCc: James Bottomley <James.Bottomley@hansenpartnership.com>\nCc: Jann Horn <jannh@google.com>\nCc: Linus Torvalds <torvalds@linux-foundation.org>\nCc: Manfred Spraul <manfred@colorfullife.com>\nCc: Peter Zijlstra <peterz@infradead.org>\nCc: Rik van Riel <riel@redhat.com>\nCc: Serge E. Hallyn <serge@hallyn.com>\nCc: Thomas Gleixner <tglx@linutronix.de>\nCc: arozansk@redhat.com\nCc: axboe@kernel.dk\nCc: kernel-hardening@lists.openwall.com\nCc: linux-arch <linux-arch@vger.kernel.org>\nLink: http://lkml.kernel.org/r/20170815161924.GA133115@beast\nSigned-off-by: Ingo Molnar <mingo@kernel.org>",
+  "full_message": "locking/refcounts, x86/asm: Implement fast refcount overflow protection\n\nThis implements refcount_t overflow protection on x86 without a noticeable\nperformance impact, though without the fuller checking of REFCOUNT_FULL.\n\nThis is done by duplicating the existing atomic_t refcount implementation\nbut with normally a single instruction added to detect if the refcount\nhas gone negative (e.g. wrapped past INT_MAX or below zero). When detected,\nthe handler saturates the refcount_t to INT_MIN / 2. With this overflow\nprotection, the erroneous reference release that would follow a wrap back\nto zero is blocked from happening, avoiding the class of refcount-overflow\nuse-after-free vulnerabilities entirely.\n\nOnly the overflow case of refcounting can be perfectly protected, since\nit can be detected and stopped before the reference is freed and left to\nbe abused by an attacker. There isn't a way to block early decrements,\nand while REFCOUNT_FULL stops increment-from-zero cases (which would\nbe the state _after_ an early decrement and stops potential double-free\nconditions), this fast implementation does not, since it would require\nthe more expensive cmpxchg loops. Since the overflow case is much more\ncommon (e.g. missing a \"put\" during an error path), this protection\nprovides real-world protection. For example, the two public refcount\noverflow use-after-free exploits published in 2016 would have been\nrendered unexploitable:\n\n  http://perception-point.io/2016/01/14/analysis-and-exploitation-of-a-linux-kernel-vulnerability-cve-2016-0728/\n\n  http://cyseclabs.com/page?n=02012016\n\nThis implementation does, however, notice an unchecked decrement to zero\n(i.e. caller used refcount_dec() instead of refcount_dec_and_test() and it\nresulted in a zero). Decrements under zero are noticed (since they will\nhave resulted in a negative value), though this only indicates that a\nuse-after-free may have already happened. Such notifications are likely\navoidable by an attacker that has already exploited a use-after-free\nvulnerability, but it's better to have them reported than allow such\nconditions to remain universally silent.\n\nOn first overflow detection, the refcount value is reset to INT_MIN / 2\n(which serves as a saturation value) and a report and stack trace are\nproduced. When operations detect only negative value results (such as\nchanging an already saturated value), saturation still happens but no\nnotification is performed (since the value was already saturated).\n\nOn the matter of races, since the entire range beyond INT_MAX but before\n0 is negative, every operation at INT_MIN / 2 will trap, leaving no\noverflow-only race condition.\n\nAs for performance, this implementation adds a single \"js\" instruction\nto the regular execution flow of a copy of the standard atomic_t refcount\noperations. (The non-\"and_test\" refcount_dec() function, which is uncommon\nin regular refcount design patterns, has an additional \"jz\" instruction\nto detect reaching exactly zero.) Since this is a forward jump, it is by\ndefault the non-predicted path, which will be reinforced by dynamic branch\nprediction. The result is this protection having virtually no measurable\nchange in performance over standard atomic_t operations. The error path,\nlocated in .text.unlikely, saves the refcount location and then uses UD0\nto fire a refcount exception handler, which resets the refcount, handles\nreporting, and returns to regular execution. This keeps the changes to\n.text size minimal, avoiding return jumps and open-coded calls to the\nerror reporting routine.\n\nExample assembly comparison:\n\nrefcount_inc() before:\n\n  .text:\n  ffffffff81546149:       f0 ff 45 f4             lock incl -0xc(%rbp)\n\nrefcount_inc() after:\n\n  .text:\n  ffffffff81546149:       f0 ff 45 f4             lock incl -0xc(%rbp)\n  ffffffff8154614d:       0f 88 80 d5 17 00       js     ffffffff816c36d3\n  ...\n  .text.unlikely:\n  ffffffff816c36d3:       48 8d 4d f4             lea    -0xc(%rbp),%rcx\n  ffffffff816c36d7:       0f ff                   (bad)\n\nThese are the cycle counts comparing a loop of refcount_inc() from 1\nto INT_MAX and back down to 0 (via refcount_dec_and_test()), between\nunprotected refcount_t (atomic_t), fully protected REFCOUNT_FULL\n(refcount_t-full), and this overflow-protected refcount (refcount_t-fast):\n\n  2147483646 refcount_inc()s and 2147483647 refcount_dec_and_test()s:\n\t\t    cycles\t\tprotections\n  atomic_t           82249267387\tnone\n  refcount_t-fast    82211446892\toverflow, untested dec-to-zero\n  refcount_t-full   144814735193\toverflow, untested dec-to-zero, inc-from-zero\n\nThis code is a modified version of the x86 PAX_REFCOUNT atomic_t\noverflow defense from the last public patch of PaX/grsecurity, based\non my understanding of the code. Changes or omissions from the original\ncode are mine and don't reflect the original grsecurity/PaX code. Thanks\nto PaX Team for various suggestions for improvement for repurposing this\ncode to be a refcount-only protection.\n\nSigned-off-by: Kees Cook <keescook@chromium.org>\nReviewed-by: Josh Poimboeuf <jpoimboe@redhat.com>\nCc: Alexey Dobriyan <adobriyan@gmail.com>\nCc: Andrew Morton <akpm@linux-foundation.org>\nCc: Arnd Bergmann <arnd@arndb.de>\nCc: Christoph Hellwig <hch@infradead.org>\nCc: David S. Miller <davem@davemloft.net>\nCc: Davidlohr Bueso <dave@stgolabs.net>\nCc: Elena Reshetova <elena.reshetova@intel.com>\nCc: Eric Biggers <ebiggers3@gmail.com>\nCc: Eric W. Biederman <ebiederm@xmission.com>\nCc: Greg KH <gregkh@linuxfoundation.org>\nCc: Hans Liljestrand <ishkamiel@gmail.com>\nCc: James Bottomley <James.Bottomley@hansenpartnership.com>\nCc: Jann Horn <jannh@google.com>\nCc: Linus Torvalds <torvalds@linux-foundation.org>\nCc: Manfred Spraul <manfred@colorfullife.com>\nCc: Peter Zijlstra <peterz@infradead.org>\nCc: Rik van Riel <riel@redhat.com>\nCc: Serge E. Hallyn <serge@hallyn.com>\nCc: Thomas Gleixner <tglx@linutronix.de>\nCc: arozansk@redhat.com\nCc: axboe@kernel.dk\nCc: kernel-hardening@lists.openwall.com\nCc: linux-arch <linux-arch@vger.kernel.org>\nLink: http://lkml.kernel.org/r/20170815161924.GA133115@beast\nSigned-off-by: Ingo Molnar <mingo@kernel.org>",
+  "author_name": "Kees Cook",
+  "author_email": "keescook@chromium.org",
+  "author_date": "Tue Aug 15 09:19:24 2017 -0700",
+  "author_date_iso": "2017-08-15T09:19:24-07:00",
+  "committer_name": "Ingo Molnar",
+  "committer_email": "mingo@kernel.org",
+  "committer_date": "Thu Aug 17 10:40:26 2017 +0200",
+  "committer_date_iso": "2017-08-17T10:40:26+02:00",
+  "files_changed": [
+    "arch/Kconfig",
+    "arch/x86/Kconfig",
+    "arch/x86/include/asm/asm.h",
+    "arch/x86/include/asm/refcount.h",
+    "arch/x86/mm/extable.c",
+    "include/linux/kernel.h",
+    "include/linux/refcount.h",
+    "kernel/panic.c"
+  ],
+  "files_changed_count": 8,
+  "stats": [
+    {
+      "file": "arch/Kconfig",
+      "insertions": 12,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/Kconfig",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/include/asm/asm.h",
+      "insertions": 6,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/include/asm/refcount.h",
+      "insertions": 109,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/mm/extable.c",
+      "insertions": 42,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/kernel.h",
+      "insertions": 7,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/refcount.h",
+      "insertions": 4,
+      "deletions": 0
+    },
+    {
+      "file": "kernel/panic.c",
+      "insertions": 12,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 193,
+  "total_deletions": 0,
+  "total_changes": 193,
+  "parents": [
+    "907dc16d7e23ec81a126c9585435494fa1b3a4b7"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v4.14",
+    "v4.14-rc1",
+    "v4.14-rc2",
+    "v4.14-rc3",
+    "v4.14-rc4",
+    "v4.14-rc5",
+    "v4.14-rc6",
+    "v4.14-rc7",
+    "v4.14-rc8",
+    "v4.15"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "hardening",
+      "vulnerability"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/x86/include/asm/asm.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/Kconfig",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/include/asm/refcount.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/Kconfig",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/mm/extable.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/refcount.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "kernel/panic.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/kernel.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

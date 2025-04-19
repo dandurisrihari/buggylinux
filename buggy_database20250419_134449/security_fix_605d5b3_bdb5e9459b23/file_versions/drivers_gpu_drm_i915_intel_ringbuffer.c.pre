@@ -1,0 +1,95 @@
+commit 266a240bf0abf1e00e72e571f3724ec753a35f19
+Author: Chris Wilson <chris@chris-wilson.co.uk>
+Date:   Thu May 4 10:33:08 2017 +0100
+
+    drm/i915: Use engine->context_pin() to report the intel_ring
+    
+    Since unifying ringbuffer/execlist submission to use
+    engine->pin_context, we ensure that the intel_ring is available before
+    we start constructing the request. We can therefore move the assignment
+    of the request->ring to the central i915_gem_request_alloc() and not
+    require it in every engine->request_alloc() callback. Another small step
+    towards simplification (of the core, but at a cost of handling error
+    pointers in less important callers of engine->pin_context).
+    
+    v2: Rearrange a few branches to reduce impact of PTR_ERR() on gcc's code
+    generation.
+    
+    Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Cc: Oscar Mateo <oscar.mateo@intel.com>
+    Cc: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+    Reviewed-by: Oscar Mateo <oscar.mateo@intel.com>
+    Link: http://patchwork.freedesktop.org/patch/msgid/20170504093308.4137-1-chris@chris-wilson.co.uk
+
+diff --git a/drivers/gpu/drm/i915/intel_ringbuffer.c b/drivers/gpu/drm/i915/intel_ringbuffer.c
+index 29b5afac7856..3ce1c87dec46 100644
+--- a/drivers/gpu/drm/i915/intel_ringbuffer.c
++++ b/drivers/gpu/drm/i915/intel_ringbuffer.c
+@@ -1475,16 +1475,17 @@ alloc_context_vma(struct intel_engine_cs *engine)
+ 	return vma;
+ }
+ 
+-static int intel_ring_context_pin(struct intel_engine_cs *engine,
+-				  struct i915_gem_context *ctx)
++static struct intel_ring *
++intel_ring_context_pin(struct intel_engine_cs *engine,
++		       struct i915_gem_context *ctx)
+ {
+ 	struct intel_context *ce = &ctx->engine[engine->id];
+ 	int ret;
+ 
+ 	lockdep_assert_held(&ctx->i915->drm.struct_mutex);
+ 
+-	if (ce->pin_count++)
+-		return 0;
++	if (likely(ce->pin_count++))
++		goto out;
+ 	GEM_BUG_ON(!ce->pin_count); /* no overflow please! */
+ 
+ 	if (!ce->state && engine->context_size) {
+@@ -1493,7 +1494,7 @@ static int intel_ring_context_pin(struct intel_engine_cs *engine,
+ 		vma = alloc_context_vma(engine);
+ 		if (IS_ERR(vma)) {
+ 			ret = PTR_ERR(vma);
+-			goto error;
++			goto err;
+ 		}
+ 
+ 		ce->state = vma;
+@@ -1502,7 +1503,7 @@ static int intel_ring_context_pin(struct intel_engine_cs *engine,
+ 	if (ce->state) {
+ 		ret = context_pin(ctx);
+ 		if (ret)
+-			goto error;
++			goto err;
+ 
+ 		ce->state->obj->mm.dirty = true;
+ 	}
+@@ -1518,11 +1519,14 @@ static int intel_ring_context_pin(struct intel_engine_cs *engine,
+ 		ce->initialised = true;
+ 
+ 	i915_gem_context_get(ctx);
+-	return 0;
+ 
+-error:
++out:
++	/* One ringbuffer to rule them all */
++	return engine->buffer;
++
++err:
+ 	ce->pin_count = 0;
+-	return ret;
++	return ERR_PTR(ret);
+ }
+ 
+ static void intel_ring_context_unpin(struct intel_engine_cs *engine,
+@@ -1634,9 +1638,6 @@ static int ring_request_alloc(struct drm_i915_gem_request *request)
+ 	 */
+ 	request->reserved_space += LEGACY_REQUEST_SIZE;
+ 
+-	GEM_BUG_ON(!request->engine->buffer);
+-	request->ring = request->engine->buffer;
+-
+ 	cs = intel_ring_begin(request, 0);
+ 	if (IS_ERR(cs))
+ 		return PTR_ERR(cs);

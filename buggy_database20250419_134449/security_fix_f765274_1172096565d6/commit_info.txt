@@ -1,0 +1,82 @@
+Commit Hash: f765274d0c9436bc130911abbd97e52b1648d13c
+Subject: Merge branch 'harden-and-extend-elf-build-id-parsing-logic'
+
+
+Security Keywords:
+- hardening
+
+Full commit message:
+Merge branch 'harden-and-extend-elf-build-id-parsing-logic'
+
+Andrii Nakryiko says:
+
+====================
+Harden and extend ELF build ID parsing logic
+
+The goal of this patch set is to extend existing ELF build ID parsing logic,
+currently mostly used by BPF subsystem, with support for working in sleepable
+mode in which memory faults are allowed and can be relied upon to fetch
+relevant parts of ELF file to find and fetch .note.gnu.build-id information.
+
+This is useful and important for BPF subsystem itself, but also for
+PROCMAP_QUERY ioctl(), built atop of /proc/<pid>/maps functionality (see [0]),
+which makes use of the same build_id_parse() functionality. PROCMAP_QUERY is
+always called from sleepable user process context, so it doesn't have to
+suffer from current restrictions of build_id_parse() which are due to the NMI
+context assumption.
+
+Along the way, we harden the logic to avoid TOCTOU, overflow, out-of-bounds
+access problems.  This is the very first patch, which can be backported to
+older releases, if necessary.
+
+We also lift existing limitations of only working as long as ELF program
+headers and build ID note section is contained strictly within the very first
+page of ELF file.
+
+We achieve all of the above without duplication of logic between sleepable and
+non-sleepable modes through freader abstraction that manages underlying folio
+from page cache (on demand) and gives a simple to use direct memory access
+interface. With that, single page restrictions and adding sleepable mode
+support is rather straightforward.
+
+We also extend existing set of BPF selftests with a few tests targeting build
+ID logic across sleepable and non-sleepabe contexts (we utilize sleepable and
+non-sleepable uprobes for that).
+
+   [0] https://lore.kernel.org/linux-mm/20240627170900.1672542-4-andrii@kernel.org/
+
+v6->v7:
+  - added filemap_invalidate_{lock,unlock}_shared() around read_cache_folio
+    and kept Eduard's Reviewed-by (Eduard);
+v5->v6:
+  - use local phnum variable in get_build_id_32() (Jann);
+  - switch memcmp() instead of strcmp() in parse_build_id() (Jann);
+v4->v5:
+  - pass proper file reference to read_cache_folio() (Shakeel);
+  - fix another potential overflow due to two u32 additions (Andi);
+  - add PageUptodate() check to patch #1 (Jann);
+v3->v4:
+  - fix few more potential overflow and out-of-bounds access issues (Andi);
+  - use purely folio-based implementation for freader (Matthew);
+v2->v3:
+  - remove unneeded READ_ONCE()s and force phoff to u64 for 32-bit mode (Andi);
+  - moved hardening fixes to the front for easier backporting (Jann);
+  - call freader_cleanup() from build_id_parse_buf() for consistency (Jiri);
+v1->v2:
+  - ensure MADV_PAGEOUT works reliably by paging data in first (Shakeel);
+  - to fix BPF CI build optionally define MADV_POPULATE_READ in selftest.
+====================
+
+Link: https://lore.kernel.org/r/20240829174232.3133883-1-andrii@kernel.org
+Signed-off-by: Alexei Starovoitov <ast@kernel.org>
+
+Metadata:
+Author: Alexei Starovoitov <ast@kernel.org>
+Author Date: Wed Sep 11 09:58:31 2024 -0700
+Committer: Alexei Starovoitov <ast@kernel.org>
+Commit Date: Wed Sep 11 09:58:32 2024 -0700
+
+Files Changed: 0
+Lines Added: 605
+Lines Removed: 142
+Total Changes: 747

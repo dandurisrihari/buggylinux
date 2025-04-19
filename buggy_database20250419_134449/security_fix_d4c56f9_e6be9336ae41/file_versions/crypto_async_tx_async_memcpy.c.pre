@@ -1,0 +1,69 @@
+commit 0036731c88fdb5bf4f04a796a30b5e445fc57f54
+Author: Dan Williams <dan.j.williams@intel.com>
+Date:   Sat Feb 2 19:49:57 2008 -0700
+
+    async_tx: kill tx_set_src and tx_set_dest methods
+    
+    The tx_set_src and tx_set_dest methods were originally implemented to allow
+    an array of addresses to be passed down from async_xor to the dmaengine
+    driver while minimizing stack overhead.  Removing these methods allows
+    drivers to have all transaction parameters available at 'prep' time, saves
+    two function pointers in struct dma_async_tx_descriptor, and reduces the
+    number of indirect branches..
+    
+    A consequence of moving this data to the 'prep' routine is that
+    multi-source routines like async_xor need temporary storage to convert an
+    array of linear addresses into an array of dma addresses.  In order to keep
+    the same stack footprint of the previous implementation the input array is
+    reused as storage for the dma addresses.  This requires that
+    sizeof(dma_addr_t) be less than or equal to sizeof(void *).  As a
+    consequence CONFIG_DMADEVICES now depends on !CONFIG_HIGHMEM64G.  It also
+    requires that drivers be able to make descriptor resources available when
+    the 'prep' routine is polled.
+    
+    Signed-off-by: Dan Williams <dan.j.williams@intel.com>
+    Acked-by: Shannon Nelson <shannon.nelson@intel.com>
+
+diff --git a/crypto/async_tx/async_memcpy.c b/crypto/async_tx/async_memcpy.c
+index e8c8956ef1dd..faca0bc52068 100644
+--- a/crypto/async_tx/async_memcpy.c
++++ b/crypto/async_tx/async_memcpy.c
+@@ -48,26 +48,25 @@ async_memcpy(struct page *dest, struct page *src, unsigned int dest_offset,
+ {
+ 	struct dma_chan *chan = async_tx_find_channel(depend_tx, DMA_MEMCPY);
+ 	struct dma_device *device = chan ? chan->device : NULL;
+-	int int_en = cb_fn ? 1 : 0;
+-	struct dma_async_tx_descriptor *tx = device ?
+-		device->device_prep_dma_memcpy(chan, len,
+-		int_en) : NULL;
++	struct dma_async_tx_descriptor *tx = NULL;
+ 
+-	if (tx) { /* run the memcpy asynchronously */
+-		dma_addr_t addr;
++	if (device) {
++		dma_addr_t dma_dest, dma_src;
+ 
+-		pr_debug("%s: (async) len: %zu\n", __FUNCTION__, len);
++		dma_dest = dma_map_page(device->dev, dest, dest_offset, len,
++					DMA_FROM_DEVICE);
+ 
+-		addr = dma_map_page(device->dev, dest, dest_offset, len,
+-				    DMA_FROM_DEVICE);
+-		tx->tx_set_dest(addr, tx, 0);
++		dma_src = dma_map_page(device->dev, src, src_offset, len,
++				       DMA_TO_DEVICE);
+ 
+-		addr = dma_map_page(device->dev, src, src_offset, len,
+-				    DMA_TO_DEVICE);
+-		tx->tx_set_src(addr, tx, 0);
++		tx = device->device_prep_dma_memcpy(chan, dma_dest, dma_src,
++						    len, cb_fn != NULL);
++	}
+ 
++	if (tx) {
++		pr_debug("%s: (async) len: %zu\n", __FUNCTION__, len);
+ 		async_tx_submit(chan, tx, flags, depend_tx, cb_fn, cb_param);
+-	} else { /* run the memcpy synchronously */
++	} else {
+ 		void *dest_buf, *src_buf;
+ 		pr_debug("%s: (sync) len: %zu\n", __FUNCTION__, len);

@@ -1,0 +1,90 @@
+{
+  "hash": "5471eea5d3bf850316f1064a6f57b34c444bce67",
+  "hash_short": "5471eea5",
+  "subject": "perf/x86: Reset the dirty counter to prevent the leak for an RDPMC task",
+  "body": "The counter value of a perf task may leak to another RDPMC task.\nFor example, a perf stat task as below is running on CPU 0.\n\n    perf stat -e 'branches,cycles' -- taskset -c 0 ./workload\n\nIn the meantime, an RDPMC task, which is also running on CPU 0, may read\nthe GP counters periodically. (The RDPMC task creates a fixed event,\nbut read four GP counters.)\n\n    $./rdpmc_read_all_counters\n    index 0x0 value 0x8001e5970f99\n    index 0x1 value 0x8005d750edb6\n    index 0x2 value 0x0\n    index 0x3 value 0x0\n\n    index 0x0 value 0x8002358e48a5\n    index 0x1 value 0x8006bd1e3bc9\n    index 0x2 value 0x0\n    index 0x3 value 0x0\n\nIt is a potential security issue. Once the attacker knows what the other\nthread is counting. The PerfMon counter can be used as a side-channel to\nattack cryptosystems.\n\nThe counter value of the perf stat task leaks to the RDPMC task because\nperf never clears the counter when it's stopped.\n\nThree methods were considered to address the issue.\n\n - Unconditionally reset the counter in x86_pmu_del(). It can bring extra\n   overhead even when there is no RDPMC task running.\n\n - Only reset the un-assigned dirty counters when the RDPMC task is\n   scheduled in via sched_task(). It fails for the below case.\n\n\tThread A\t\t\tThread B\n\n\tclone(CLONE_THREAD) --->\n\tset_affine(0)\n\t\t\t\t\tset_affine(1)\n\t\t\t\t\twhile (!event-enabled)\n\t\t\t\t\t\t;\n\tevent = perf_event_open()\n\tmmap(event)\n\tioctl(event, IOC_ENABLE); --->\n\t\t\t\t\tRDPMC\n\n   Counters are still leaked to the thread B.\n\n - Only reset the un-assigned dirty counters before updating the CR4.PCE\n   bit. The method is implemented here.\n\nThe dirty counter is a counter, on which the assigned event has been\ndeleted, but the counter is not reset. To track the dirty counters,\nadd a 'dirty' variable in the struct cpu_hw_events.\n\nThe security issue can only be found with an RDPMC task. To enable the\nRDMPC, the CR4.PCE bit has to be updated. Add a\nperf_clear_dirty_counters() right before updating the CR4.PCE bit to\nclear the existing dirty counters. Only the current un-assigned dirty\ncounters are reset, because the RDPMC assigned dirty counters will be\nupdated soon.\n\nAfter applying the patch,\n\n        $ ./rdpmc_read_all_counters\n        index 0x0 value 0x0\n        index 0x1 value 0x0\n        index 0x2 value 0x0\n        index 0x3 value 0x0\n\n        index 0x0 value 0x0\n        index 0x1 value 0x0\n        index 0x2 value 0x0\n        index 0x3 value 0x0\n\nPerformance\n\nThe performance of a context switch only be impacted when there are two\nor more perf users and one of the users must be an RDPMC user. In other\ncases, there is no performance impact.\n\nThe worst-case occurs when there are two users: the RDPMC user only\nuses one counter; while the other user uses all available counters.\nWhen the RDPMC task is scheduled in, all the counters, other than the\nRDPMC assigned one, have to be reset.\n\nTest results for the worst-case, using a modified lat_ctx as measured\non an Ice Lake platform, which has 8 GP and 3 FP counters (ignoring\nSLOTS).\n\n    lat_ctx -s 128K -N 1000 processes 2\n\nWithout the patch:\n  The context switch time is 4.97 us\n\nWith the patch:\n  The context switch time is 5.16 us\n\nThere is ~4% performance drop for the context switching time in the\nworst-case.\n\nSuggested-by: Peter Zijlstra (Intel) <peterz@infradead.org>\nSigned-off-by: Kan Liang <kan.liang@linux.intel.com>\nSigned-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>\nLink: https://lkml.kernel.org/r/1623693582-187370-1-git-send-email-kan.liang@linux.intel.com",
+  "full_message": "perf/x86: Reset the dirty counter to prevent the leak for an RDPMC task\n\nThe counter value of a perf task may leak to another RDPMC task.\nFor example, a perf stat task as below is running on CPU 0.\n\n    perf stat -e 'branches,cycles' -- taskset -c 0 ./workload\n\nIn the meantime, an RDPMC task, which is also running on CPU 0, may read\nthe GP counters periodically. (The RDPMC task creates a fixed event,\nbut read four GP counters.)\n\n    $./rdpmc_read_all_counters\n    index 0x0 value 0x8001e5970f99\n    index 0x1 value 0x8005d750edb6\n    index 0x2 value 0x0\n    index 0x3 value 0x0\n\n    index 0x0 value 0x8002358e48a5\n    index 0x1 value 0x8006bd1e3bc9\n    index 0x2 value 0x0\n    index 0x3 value 0x0\n\nIt is a potential security issue. Once the attacker knows what the other\nthread is counting. The PerfMon counter can be used as a side-channel to\nattack cryptosystems.\n\nThe counter value of the perf stat task leaks to the RDPMC task because\nperf never clears the counter when it's stopped.\n\nThree methods were considered to address the issue.\n\n - Unconditionally reset the counter in x86_pmu_del(). It can bring extra\n   overhead even when there is no RDPMC task running.\n\n - Only reset the un-assigned dirty counters when the RDPMC task is\n   scheduled in via sched_task(). It fails for the below case.\n\n\tThread A\t\t\tThread B\n\n\tclone(CLONE_THREAD) --->\n\tset_affine(0)\n\t\t\t\t\tset_affine(1)\n\t\t\t\t\twhile (!event-enabled)\n\t\t\t\t\t\t;\n\tevent = perf_event_open()\n\tmmap(event)\n\tioctl(event, IOC_ENABLE); --->\n\t\t\t\t\tRDPMC\n\n   Counters are still leaked to the thread B.\n\n - Only reset the un-assigned dirty counters before updating the CR4.PCE\n   bit. The method is implemented here.\n\nThe dirty counter is a counter, on which the assigned event has been\ndeleted, but the counter is not reset. To track the dirty counters,\nadd a 'dirty' variable in the struct cpu_hw_events.\n\nThe security issue can only be found with an RDPMC task. To enable the\nRDMPC, the CR4.PCE bit has to be updated. Add a\nperf_clear_dirty_counters() right before updating the CR4.PCE bit to\nclear the existing dirty counters. Only the current un-assigned dirty\ncounters are reset, because the RDPMC assigned dirty counters will be\nupdated soon.\n\nAfter applying the patch,\n\n        $ ./rdpmc_read_all_counters\n        index 0x0 value 0x0\n        index 0x1 value 0x0\n        index 0x2 value 0x0\n        index 0x3 value 0x0\n\n        index 0x0 value 0x0\n        index 0x1 value 0x0\n        index 0x2 value 0x0\n        index 0x3 value 0x0\n\nPerformance\n\nThe performance of a context switch only be impacted when there are two\nor more perf users and one of the users must be an RDPMC user. In other\ncases, there is no performance impact.\n\nThe worst-case occurs when there are two users: the RDPMC user only\nuses one counter; while the other user uses all available counters.\nWhen the RDPMC task is scheduled in, all the counters, other than the\nRDPMC assigned one, have to be reset.\n\nTest results for the worst-case, using a modified lat_ctx as measured\non an Ice Lake platform, which has 8 GP and 3 FP counters (ignoring\nSLOTS).\n\n    lat_ctx -s 128K -N 1000 processes 2\n\nWithout the patch:\n  The context switch time is 4.97 us\n\nWith the patch:\n  The context switch time is 5.16 us\n\nThere is ~4% performance drop for the context switching time in the\nworst-case.\n\nSuggested-by: Peter Zijlstra (Intel) <peterz@infradead.org>\nSigned-off-by: Kan Liang <kan.liang@linux.intel.com>\nSigned-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>\nLink: https://lkml.kernel.org/r/1623693582-187370-1-git-send-email-kan.liang@linux.intel.com",
+  "author_name": "Kan Liang",
+  "author_email": "kan.liang@linux.intel.com",
+  "author_date": "Mon Jun 14 10:59:42 2021 -0700",
+  "author_date_iso": "2021-06-14T10:59:42-07:00",
+  "committer_name": "Peter Zijlstra",
+  "committer_email": "peterz@infradead.org",
+  "committer_date": "Thu Jun 17 14:11:47 2021 +0200",
+  "committer_date_iso": "2021-06-17T14:11:47+02:00",
+  "files_changed": [
+    "arch/x86/events/core.c",
+    "arch/x86/events/perf_event.h",
+    "arch/x86/include/asm/perf_event.h",
+    "arch/x86/mm/tlb.c"
+  ],
+  "files_changed_count": 4,
+  "stats": [
+    {
+      "file": "arch/x86/events/core.c",
+      "insertions": 27,
+      "deletions": 1
+    },
+    {
+      "file": "arch/x86/events/perf_event.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/include/asm/perf_event.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "arch/x86/mm/tlb.c",
+      "insertions": 8,
+      "deletions": 2
+    }
+  ],
+  "total_insertions": 37,
+  "total_deletions": 3,
+  "total_changes": 40,
+  "parents": [
+    "2e38eb04c95e5546b71bb86ee699a891c7d212b5"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "security issue"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "arch/x86/events/core.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/events/perf_event.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/include/asm/perf_event.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "arch/x86/mm/tlb.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

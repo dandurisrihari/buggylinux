@@ -1,0 +1,90 @@
+{
+  "hash": "8d99fe92fed019e203f458370129fb28b3fb5740",
+  "hash_short": "8d99fe92",
+  "subject": "xfs: fix efi/efd error handling to avoid fs shutdown hangs",
+  "body": "Freeing an extent in XFS involves logging an EFI (extent free\nintention), freeing the actual extent, and logging an EFD (extent\nfree done). The EFI object is created with a reference count of 2:\none for the current transaction and one for the subsequently created\nEFD. Under normal circumstances, the first reference is dropped when\nthe EFI is unpinned and the second reference is dropped when the EFD\nis committed to the on-disk log.\n\nIn event of errors or filesystem shutdown, there are various\npotential cleanup scenarios depending on the state of the EFI/EFD.\nThe cleanup scenarios are confusing and racy, as demonstrated by the\nfollowing test sequence:\n\n\t# mount $dev $mnt\n\t# fsstress -d $mnt -n 99999 -p 16 -z -f fallocate=1 \\\n\t\t-f punch=1 -f creat=1 -f unlink=1 &\n\t# sleep 5\n\t# killall -9 fsstress; wait\n\t# godown -f $mnt\n\t# umount\n\n... in which the final umount can hang due to the AIL being pinned\nindefinitely by one or more EFI items. This can occur due to several\nconditions. For example, if the shutdown occurs after the EFI is\ncommitted to the on-disk log and the EFD committed to the CIL, but\nbefore the EFD committed to the log, the EFD iop_committed() abort\nhandler does not drop its reference to the EFI. Alternatively,\nmanual error injection in the xfs_bmap_finish() codepath shows that\nif an error occurs after the EFI transaction is committed but before\nthe EFD is constructed and logged, the EFI is never released from\nthe AIL.\n\nUpdate the EFI/EFD item handling code to use a more straightforward\nand reliable approach to error handling. If an error occurs after\nthe EFI transaction is committed and before the EFD is constructed,\nrelease the EFI explicitly from xfs_bmap_finish(). If the EFI\ntransaction is cancelled, release the EFI in the unlock handler.\n\nOnce the EFD is constructed, it is responsible for releasing the EFI\nunder any circumstances (including whether the EFI item aborts due\nto log I/O error). Update the EFD item handlers to release the EFI\nif the transaction is cancelled or aborts due to log I/O error.\nFinally, update xfs_bmap_finish() to log at least one EFD extent to\nthe transaction before xfs_free_extent() errors are handled to\nensure the transaction is dirty and EFD item error handling is\ntriggered.\n\nSigned-off-by: Brian Foster <bfoster@redhat.com>\nReviewed-by: Dave Chinner <dchinner@redhat.com>\nSigned-off-by: Dave Chinner <david@fromorbit.com>",
+  "full_message": "xfs: fix efi/efd error handling to avoid fs shutdown hangs\n\nFreeing an extent in XFS involves logging an EFI (extent free\nintention), freeing the actual extent, and logging an EFD (extent\nfree done). The EFI object is created with a reference count of 2:\none for the current transaction and one for the subsequently created\nEFD. Under normal circumstances, the first reference is dropped when\nthe EFI is unpinned and the second reference is dropped when the EFD\nis committed to the on-disk log.\n\nIn event of errors or filesystem shutdown, there are various\npotential cleanup scenarios depending on the state of the EFI/EFD.\nThe cleanup scenarios are confusing and racy, as demonstrated by the\nfollowing test sequence:\n\n\t# mount $dev $mnt\n\t# fsstress -d $mnt -n 99999 -p 16 -z -f fallocate=1 \\\n\t\t-f punch=1 -f creat=1 -f unlink=1 &\n\t# sleep 5\n\t# killall -9 fsstress; wait\n\t# godown -f $mnt\n\t# umount\n\n... in which the final umount can hang due to the AIL being pinned\nindefinitely by one or more EFI items. This can occur due to several\nconditions. For example, if the shutdown occurs after the EFI is\ncommitted to the on-disk log and the EFD committed to the CIL, but\nbefore the EFD committed to the log, the EFD iop_committed() abort\nhandler does not drop its reference to the EFI. Alternatively,\nmanual error injection in the xfs_bmap_finish() codepath shows that\nif an error occurs after the EFI transaction is committed but before\nthe EFD is constructed and logged, the EFI is never released from\nthe AIL.\n\nUpdate the EFI/EFD item handling code to use a more straightforward\nand reliable approach to error handling. If an error occurs after\nthe EFI transaction is committed and before the EFD is constructed,\nrelease the EFI explicitly from xfs_bmap_finish(). If the EFI\ntransaction is cancelled, release the EFI in the unlock handler.\n\nOnce the EFD is constructed, it is responsible for releasing the EFI\nunder any circumstances (including whether the EFI item aborts due\nto log I/O error). Update the EFD item handlers to release the EFI\nif the transaction is cancelled or aborts due to log I/O error.\nFinally, update xfs_bmap_finish() to log at least one EFD extent to\nthe transaction before xfs_free_extent() errors are handled to\nensure the transaction is dirty and EFD item error handling is\ntriggered.\n\nSigned-off-by: Brian Foster <bfoster@redhat.com>\nReviewed-by: Dave Chinner <dchinner@redhat.com>\nSigned-off-by: Dave Chinner <david@fromorbit.com>",
+  "author_name": "Brian Foster",
+  "author_email": "bfoster@redhat.com",
+  "author_date": "Wed Aug 19 09:51:16 2015 +1000",
+  "author_date_iso": "2015-08-19T09:51:16+10:00",
+  "committer_name": "Dave Chinner",
+  "committer_email": "david@fromorbit.com",
+  "committer_date": "Wed Aug 19 09:51:16 2015 +1000",
+  "committer_date_iso": "2015-08-19T09:51:16+10:00",
+  "files_changed": [
+    "fs/xfs/xfs_bmap_util.c",
+    "fs/xfs/xfs_extfree_item.c",
+    "fs/xfs/xfs_extfree_item.h"
+  ],
+  "files_changed_count": 3,
+  "stats": [
+    {
+      "file": "fs/xfs/xfs_bmap_util.c",
+      "insertions": 49,
+      "deletions": 35
+    },
+    {
+      "file": "fs/xfs/xfs_extfree_item.c",
+      "insertions": 40,
+      "deletions": 29
+    },
+    {
+      "file": "fs/xfs/xfs_extfree_item.h",
+      "insertions": 22,
+      "deletions": 3
+    }
+  ],
+  "total_insertions": 111,
+  "total_deletions": 67,
+  "total_changes": 178,
+  "parents": [
+    "d43ac29be7a174f93a3d26cc1e68668fe86b782f"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v4.10",
+    "v4.10-rc1",
+    "v4.10-rc2",
+    "v4.10-rc3",
+    "v4.10-rc4",
+    "v4.10-rc5",
+    "v4.10-rc6",
+    "v4.10-rc7",
+    "v4.10-rc8",
+    "v4.11"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "injection"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "fs/xfs/xfs_bmap_util.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/xfs/xfs_extfree_item.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/xfs/xfs_extfree_item.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

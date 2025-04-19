@@ -1,0 +1,54 @@
+{
+  "hash": "a50e659b2a1be14784e80f8492aab177e67c53a2",
+  "hash_short": "a50e659b",
+  "subject": "net: mvpp2: fix XDP rx queues registering",
+  "body": "The registration of XDP queue information is incorrect because the\nRX queue id we use is invalid. When port->id == 0 it appears to works\nas expected yet it's no longer the case when port->id != 0.\n\nThe problem arised while using a recent kernel version on the\nMACCHIATOBin. This board has several ports:\n * eth0 and eth1 are 10Gbps interfaces ; both ports has port->id == 0;\n * eth2 is a 1Gbps interface with port->id != 0.\n\nCode from xdp-tutorial (more specifically advanced03-AF_XDP) was used\nto test packet capture and injection on all these interfaces. The XDP\nkernel was simplified to:\n\n\tSEC(\"xdp_sock\")\n\tint xdp_sock_prog(struct xdp_md *ctx)\n\t{\n\t\tint index = ctx->rx_queue_index;\n\n\t\t/* A set entry here means that the correspnding queue_id\n\t\t* has an active AF_XDP socket bound to it. */\n\t\tif (bpf_map_lookup_elem(&xsks_map, &index))\n\t\t\treturn bpf_redirect_map(&xsks_map, index, 0);\n\n\t\treturn XDP_PASS;\n\t}\n\nStarting the program using:\n\n\t./af_xdp_user -d DEV\n\nGives the following result:\n\n * eth0 : ok\n * eth1 : ok\n * eth2 : no capture, no injection\n\nInvestigating the issue shows that XDP rx queues for eth2 are wrong:\nXDP expects their id to be in the range [0..3] but we found them to be\nin the range [32..35].\n\nTrying to force rx queue ids using:\n\n\t./af_xdp_user -d eth2 -Q 32\n\nfails as expected (we shall not have more than 4 queues).\n\nWhen we register the XDP rx queue information (using\nxdp_rxq_info_reg() in function mvpp2_rxq_init()) we tell it to use\nrxq->id as the queue id. This value is computed as:\n\n\trxq->id = port->id * max_rxq_count + queue_id\n\nwhere max_rxq_count depends on the device version. In the MACCHIATOBin\ncase, this value is 32, meaning that rx queues on eth2 are numbered\nfrom 32 to 35 - there are four of them.\n\nClearly, this is not the per-port queue id that XDP is expecting:\nit wants a value in the range [0..3]. It shall directly use queue_id\nwhich is stored in rxq->logic_rxq -- so let's use that value instead.\n\nrxq->id is left untouched ; its value is indeed valid but it should\nnot be used in this context.\n\nThis is consistent with the remaining part of the code in\nmvpp2_rxq_init().\n\nWith this change, packet capture is working as expected on all the\nMACCHIATOBin ports.\n\nFixes: b27db2274ba8 (\"mvpp2: use page_pool allocator\")\nSigned-off-by: Louis Amas <louis.amas@eho.link>\nSigned-off-by: Emmanuel Deloget <emmanuel.deloget@eho.link>\nReviewed-by: Marcin Wojtas <mw@semihalf.com>\nAcked-by: John Fastabend <john.fastabend@gmail.com>\nAcked-by: Jesper Dangaard Brouer <brouer@redhat.com>\nLink: https://lore.kernel.org/r/20211207143423.916334-1-louis.amas@eho.link\nSigned-off-by: Jakub Kicinski <kuba@kernel.org>",
+  "full_message": "net: mvpp2: fix XDP rx queues registering\n\nThe registration of XDP queue information is incorrect because the\nRX queue id we use is invalid. When port->id == 0 it appears to works\nas expected yet it's no longer the case when port->id != 0.\n\nThe problem arised while using a recent kernel version on the\nMACCHIATOBin. This board has several ports:\n * eth0 and eth1 are 10Gbps interfaces ; both ports has port->id == 0;\n * eth2 is a 1Gbps interface with port->id != 0.\n\nCode from xdp-tutorial (more specifically advanced03-AF_XDP) was used\nto test packet capture and injection on all these interfaces. The XDP\nkernel was simplified to:\n\n\tSEC(\"xdp_sock\")\n\tint xdp_sock_prog(struct xdp_md *ctx)\n\t{\n\t\tint index = ctx->rx_queue_index;\n\n\t\t/* A set entry here means that the correspnding queue_id\n\t\t* has an active AF_XDP socket bound to it. */\n\t\tif (bpf_map_lookup_elem(&xsks_map, &index))\n\t\t\treturn bpf_redirect_map(&xsks_map, index, 0);\n\n\t\treturn XDP_PASS;\n\t}\n\nStarting the program using:\n\n\t./af_xdp_user -d DEV\n\nGives the following result:\n\n * eth0 : ok\n * eth1 : ok\n * eth2 : no capture, no injection\n\nInvestigating the issue shows that XDP rx queues for eth2 are wrong:\nXDP expects their id to be in the range [0..3] but we found them to be\nin the range [32..35].\n\nTrying to force rx queue ids using:\n\n\t./af_xdp_user -d eth2 -Q 32\n\nfails as expected (we shall not have more than 4 queues).\n\nWhen we register the XDP rx queue information (using\nxdp_rxq_info_reg() in function mvpp2_rxq_init()) we tell it to use\nrxq->id as the queue id. This value is computed as:\n\n\trxq->id = port->id * max_rxq_count + queue_id\n\nwhere max_rxq_count depends on the device version. In the MACCHIATOBin\ncase, this value is 32, meaning that rx queues on eth2 are numbered\nfrom 32 to 35 - there are four of them.\n\nClearly, this is not the per-port queue id that XDP is expecting:\nit wants a value in the range [0..3]. It shall directly use queue_id\nwhich is stored in rxq->logic_rxq -- so let's use that value instead.\n\nrxq->id is left untouched ; its value is indeed valid but it should\nnot be used in this context.\n\nThis is consistent with the remaining part of the code in\nmvpp2_rxq_init().\n\nWith this change, packet capture is working as expected on all the\nMACCHIATOBin ports.\n\nFixes: b27db2274ba8 (\"mvpp2: use page_pool allocator\")\nSigned-off-by: Louis Amas <louis.amas@eho.link>\nSigned-off-by: Emmanuel Deloget <emmanuel.deloget@eho.link>\nReviewed-by: Marcin Wojtas <mw@semihalf.com>\nAcked-by: John Fastabend <john.fastabend@gmail.com>\nAcked-by: Jesper Dangaard Brouer <brouer@redhat.com>\nLink: https://lore.kernel.org/r/20211207143423.916334-1-louis.amas@eho.link\nSigned-off-by: Jakub Kicinski <kuba@kernel.org>",
+  "author_name": "Louis Amas",
+  "author_email": "louis.amas@eho.link",
+  "author_date": "Tue Dec 7 15:34:22 2021 +0100",
+  "author_date_iso": "2021-12-07T15:34:22+01:00",
+  "committer_name": "Jakub Kicinski",
+  "committer_email": "kuba@kernel.org",
+  "committer_date": "Wed Dec 8 18:29:37 2021 -0800",
+  "committer_date_iso": "2021-12-08T18:29:37-08:00",
+  "files_changed": [
+    "drivers/net/ethernet/marvell/mvpp2/mvpp2_main.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "drivers/net/ethernet/marvell/mvpp2/mvpp2_main.c",
+      "insertions": 2,
+      "deletions": 2
+    }
+  ],
+  "total_insertions": 2,
+  "total_deletions": 2,
+  "total_changes": 4,
+  "parents": [
+    "f71ef02f1a4a3c49962fa341ad8de19071f0f9bf"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "injection"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "drivers/net/ethernet/marvell/mvpp2/mvpp2_main.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

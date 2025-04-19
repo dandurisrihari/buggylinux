@@ -1,0 +1,54 @@
+{
+  "hash": "6e8ec2552c7d13991148e551e3325a624d73fac6",
+  "hash_short": "6e8ec255",
+  "subject": "random: use computational hash for entropy extraction",
+  "body": "The current 4096-bit LFSR used for entropy collection had a few\ndesirable attributes for the context in which it was created. For\nexample, the state was huge, which meant that /dev/random would be able\nto output quite a bit of accumulated entropy before blocking. It was\nalso, in its time, quite fast at accumulating entropy byte-by-byte,\nwhich matters given the varying contexts in which mix_pool_bytes() is\ncalled. And its diffusion was relatively high, which meant that changes\nwould ripple across several words of state rather quickly.\n\nHowever, it also suffers from a few security vulnerabilities. In\nparticular, inputs learned by an attacker can be undone, but moreover,\nif the state of the pool leaks, its contents can be controlled and\nentirely zeroed out. I've demonstrated this attack with this SMT2\nscript, <https://xn--4db.cc/5o9xO8pb>, which Boolector/CaDiCal solves in\na matter of seconds on a single core of my laptop, resulting in little\nproof of concept C demonstrators such as <https://xn--4db.cc/jCkvvIaH/c>.\n\nFor basically all recent formal models of RNGs, these attacks represent\na significant cryptographic flaw. But how does this manifest\npractically? If an attacker has access to the system to such a degree\nthat he can learn the internal state of the RNG, arguably there are\nother lower hanging vulnerabilities -- side-channel, infoleak, or\notherwise -- that might have higher priority. On the other hand, seed\nfiles are frequently used on systems that have a hard time generating\nmuch entropy on their own, and these seed files, being files, often leak\nor are duplicated and distributed accidentally, or are even seeded over\nthe Internet intentionally, where their contents might be recorded or\ntampered with. Seen this way, an otherwise quasi-implausible\nvulnerability is a bit more practical than initially thought.\n\nAnother aspect of the current mix_pool_bytes() function is that, while\nits performance was arguably competitive for the time in which it was\ncreated, it's no longer considered so. This patch improves performance\nsignificantly: on a high-end CPU, an i7-11850H, it improves performance\nof mix_pool_bytes() by 225%, and on a low-end CPU, a Cortex-A7, it\nimproves performance by 103%.\n\nThis commit replaces the LFSR of mix_pool_bytes() with a straight-\nforward cryptographic hash function, BLAKE2s, which is already in use\nfor pool extraction. Universal hashing with a secret seed was considered\ntoo, something along the lines of <https://eprint.iacr.org/2013/338>,\nbut the requirement for a secret seed makes for a chicken & egg problem.\nInstead we go with a formally proven scheme using a computational hash\nfunction, described in sections 5.1, 6.4, and B.1.8 of\n<https://eprint.iacr.org/2019/198>.\n\nBLAKE2s outputs 256 bits, which should give us an appropriate amount of\nmin-entropy accumulation, and a wide enough margin of collision\nresistance against active attacks. mix_pool_bytes() becomes a simple\ncall to blake2s_update(), for accumulation, while the extraction step\nbecomes a blake2s_final() to generate a seed, with which we can then do\na HKDF-like or BLAKE2X-like expansion, the first part of which we fold\nback as an init key for subsequent blake2s_update()s, and the rest we\nproduce to the caller. This then is provided to our CRNG like usual. In\nthat expansion step, we make opportunistic use of 32 bytes of RDRAND\noutput, just as before. We also always reseed the crng with 32 bytes,\nunconditionally, or not at all, rather than sometimes with 16 as before,\nas we don't win anything by limiting beyond the 16 byte threshold.\n\nGoing for a hash function as an entropy collector is a conservative,\nproven approach. The result of all this is a much simpler and much less\nbespoke construction than what's there now, which not only plugs a\nvulnerability but also improves performance considerably.\n\nCc: Theodore Ts'o <tytso@mit.edu>\nCc: Dominik Brodowski <linux@dominikbrodowski.net>\nReviewed-by: Eric Biggers <ebiggers@google.com>\nReviewed-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>\nReviewed-by: Jean-Philippe Aumasson <jeanphilippe.aumasson@gmail.com>\nSigned-off-by: Jason A. Donenfeld <Jason@zx2c4.com>",
+  "full_message": "random: use computational hash for entropy extraction\n\nThe current 4096-bit LFSR used for entropy collection had a few\ndesirable attributes for the context in which it was created. For\nexample, the state was huge, which meant that /dev/random would be able\nto output quite a bit of accumulated entropy before blocking. It was\nalso, in its time, quite fast at accumulating entropy byte-by-byte,\nwhich matters given the varying contexts in which mix_pool_bytes() is\ncalled. And its diffusion was relatively high, which meant that changes\nwould ripple across several words of state rather quickly.\n\nHowever, it also suffers from a few security vulnerabilities. In\nparticular, inputs learned by an attacker can be undone, but moreover,\nif the state of the pool leaks, its contents can be controlled and\nentirely zeroed out. I've demonstrated this attack with this SMT2\nscript, <https://xn--4db.cc/5o9xO8pb>, which Boolector/CaDiCal solves in\na matter of seconds on a single core of my laptop, resulting in little\nproof of concept C demonstrators such as <https://xn--4db.cc/jCkvvIaH/c>.\n\nFor basically all recent formal models of RNGs, these attacks represent\na significant cryptographic flaw. But how does this manifest\npractically? If an attacker has access to the system to such a degree\nthat he can learn the internal state of the RNG, arguably there are\nother lower hanging vulnerabilities -- side-channel, infoleak, or\notherwise -- that might have higher priority. On the other hand, seed\nfiles are frequently used on systems that have a hard time generating\nmuch entropy on their own, and these seed files, being files, often leak\nor are duplicated and distributed accidentally, or are even seeded over\nthe Internet intentionally, where their contents might be recorded or\ntampered with. Seen this way, an otherwise quasi-implausible\nvulnerability is a bit more practical than initially thought.\n\nAnother aspect of the current mix_pool_bytes() function is that, while\nits performance was arguably competitive for the time in which it was\ncreated, it's no longer considered so. This patch improves performance\nsignificantly: on a high-end CPU, an i7-11850H, it improves performance\nof mix_pool_bytes() by 225%, and on a low-end CPU, a Cortex-A7, it\nimproves performance by 103%.\n\nThis commit replaces the LFSR of mix_pool_bytes() with a straight-\nforward cryptographic hash function, BLAKE2s, which is already in use\nfor pool extraction. Universal hashing with a secret seed was considered\ntoo, something along the lines of <https://eprint.iacr.org/2013/338>,\nbut the requirement for a secret seed makes for a chicken & egg problem.\nInstead we go with a formally proven scheme using a computational hash\nfunction, described in sections 5.1, 6.4, and B.1.8 of\n<https://eprint.iacr.org/2019/198>.\n\nBLAKE2s outputs 256 bits, which should give us an appropriate amount of\nmin-entropy accumulation, and a wide enough margin of collision\nresistance against active attacks. mix_pool_bytes() becomes a simple\ncall to blake2s_update(), for accumulation, while the extraction step\nbecomes a blake2s_final() to generate a seed, with which we can then do\na HKDF-like or BLAKE2X-like expansion, the first part of which we fold\nback as an init key for subsequent blake2s_update()s, and the rest we\nproduce to the caller. This then is provided to our CRNG like usual. In\nthat expansion step, we make opportunistic use of 32 bytes of RDRAND\noutput, just as before. We also always reseed the crng with 32 bytes,\nunconditionally, or not at all, rather than sometimes with 16 as before,\nas we don't win anything by limiting beyond the 16 byte threshold.\n\nGoing for a hash function as an entropy collector is a conservative,\nproven approach. The result of all this is a much simpler and much less\nbespoke construction than what's there now, which not only plugs a\nvulnerability but also improves performance considerably.\n\nCc: Theodore Ts'o <tytso@mit.edu>\nCc: Dominik Brodowski <linux@dominikbrodowski.net>\nReviewed-by: Eric Biggers <ebiggers@google.com>\nReviewed-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>\nReviewed-by: Jean-Philippe Aumasson <jeanphilippe.aumasson@gmail.com>\nSigned-off-by: Jason A. Donenfeld <Jason@zx2c4.com>",
+  "author_name": "Jason A. Donenfeld",
+  "author_email": "Jason@zx2c4.com",
+  "author_date": "Sun Jan 16 14:23:10 2022 +0100",
+  "author_date_iso": "2022-01-16T14:23:10+01:00",
+  "committer_name": "Jason A. Donenfeld",
+  "committer_email": "Jason@zx2c4.com",
+  "committer_date": "Mon Feb 21 16:48:06 2022 +0100",
+  "committer_date_iso": "2022-02-21T16:48:06+01:00",
+  "files_changed": [
+    "drivers/char/random.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "drivers/char/random.c",
+      "insertions": 55,
+      "deletions": 249
+    }
+  ],
+  "total_insertions": 55,
+  "total_deletions": 249,
+  "total_changes": 304,
+  "parents": [
+    "cfb92440ee71adcc2105b0890bb01ac3cddb8507"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "vulnerability"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "drivers/char/random.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

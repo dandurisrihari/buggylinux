@@ -1,0 +1,55 @@
+commit 735fec995b215ccafec1a34cb229548978bb7b66
+Author: Horatiu Vultur <horatiu.vultur@microchip.com>
+Date:   Mon Jan 31 11:01:19 2022 +0100
+
+    net: lan966x: Implement SIOCSHWTSTAMP and SIOCGHWTSTAMP
+    
+    Implement the ioctl callbacks SIOCSHWTSTAMP and SIOCGHWTSTAMP to allow
+    to configure the ports to enable/disable timestamping for TX. The RX
+    timestamping is always enabled. The HW is capable to run both 1-step
+    timestamping and 2-step timestamping.
+    
+    Signed-off-by: Horatiu Vultur <horatiu.vultur@microchip.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/microchip/lan966x/lan966x_main.h b/drivers/net/ethernet/microchip/lan966x/lan966x_main.h
+index c77a91aa24e7..55fa5e56b8d1 100644
+--- a/drivers/net/ethernet/microchip/lan966x/lan966x_main.h
++++ b/drivers/net/ethernet/microchip/lan966x/lan966x_main.h
+@@ -54,6 +54,10 @@
+ #define LAN966X_PHC_COUNT		3
+ #define LAN966X_PHC_PORT		0
+ 
++#define IFH_REW_OP_NOOP			0x0
++#define IFH_REW_OP_ONE_STEP_PTP		0x3
++#define IFH_REW_OP_TWO_STEP_PTP		0x4
++
+ /* MAC table entry types.
+  * ENTRYTYPE_NORMAL is subject to aging.
+  * ENTRYTYPE_LOCKED is not subject to aging.
+@@ -130,6 +134,7 @@ struct lan966x {
+ 	bool ptp;
+ 	struct lan966x_phc phc[LAN966X_PHC_COUNT];
+ 	spinlock_t ptp_clock_lock; /* lock for phc */
++	struct mutex ptp_lock; /* lock for ptp interface state */
+ };
+ 
+ struct lan966x_port_config {
+@@ -159,6 +164,8 @@ struct lan966x_port {
+ 	struct phylink *phylink;
+ 	struct phy *serdes;
+ 	struct fwnode_handle *fwnode;
++
++	u8 ptp_cmd;
+ };
+ 
+ extern const struct phylink_mac_ops lan966x_phylink_mac_ops;
+@@ -247,6 +254,8 @@ void lan966x_mdb_write_entries(struct lan966x *lan966x, u16 vid);
+ 
+ int lan966x_ptp_init(struct lan966x *lan966x);
+ void lan966x_ptp_deinit(struct lan966x *lan966x);
++int lan966x_ptp_hwtstamp_set(struct lan966x_port *port, struct ifreq *ifr);
++int lan966x_ptp_hwtstamp_get(struct lan966x_port *port, struct ifreq *ifr);
+ 
+ static inline void __iomem *lan_addr(void __iomem *base[],
+ 				     int id, int tinst, int tcnt,

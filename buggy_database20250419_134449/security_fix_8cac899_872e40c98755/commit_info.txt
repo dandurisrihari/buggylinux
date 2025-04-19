@@ -1,0 +1,74 @@
+Commit Hash: 8cac89909a30807eb4aba56a0e29f55e3b6df42f
+Subject: Merge tag 'for-linus-2020-01-18' of git://git.kernel.org/pub/scm/linux/kernel/git/brauner/linux
+
+
+Security Keywords:
+- bypass
+
+Full commit message:
+Merge tag 'for-linus-2020-01-18' of git://git.kernel.org/pub/scm/linux/kernel/git/brauner/linux
+
+Pull thread fixes from Christian Brauner:
+ "Here is an urgent fix for ptrace_may_access() permission checking.
+
+  Commit 69f594a38967 ("ptrace: do not audit capability check when
+  outputing /proc/pid/stat") introduced the ability to opt out of audit
+  messages for accesses to various proc files since they are not
+  violations of policy.
+
+  While doing so it switched the check from ns_capable() to
+  has_ns_capability{_noaudit}(). That means it switched from checking
+  the subjective credentials (ktask->cred) of the task to using the
+  objective credentials (ktask->real_cred). This is appears to be wrong.
+  ptrace_has_cap() is currently only used in ptrace_may_access() And is
+  used to check whether the calling task (subject) has the
+  CAP_SYS_PTRACE capability in the provided user namespace to operate on
+  the target task (object). According to the cred.h comments this means
+  the subjective credentials of the calling task need to be used.
+
+  With this fix we switch ptrace_has_cap() to use security_capable() and
+  thus back to using the subjective credentials.
+
+  As one example where this might be particularly problematic, Jann
+  pointed out that in combination with the upcoming IORING_OP_OPENAT{2}
+  feature, this bug might allow unprivileged users to bypass the
+  capability checks while asynchronously opening files like /proc/*/mem,
+  because the capability checks for this would be performed against
+  kernel credentials.
+
+  To illustrate on the former point about this being exploitable: When
+  io_uring creates a new context it records the subjective credentials
+  of the caller. Later on, when it starts to do work it creates a kernel
+  thread and registers a callback. The callback runs with kernel creds
+  for ktask->real_cred and ktask->cred.
+
+  To prevent this from becoming a full-blown 0-day io_uring will call
+  override_cred() and override ktask->cred with the subjective
+  credentials of the creator of the io_uring instance. With
+  ptrace_has_cap() currently looking at ktask->real_cred this override
+  will be ineffective and the caller will be able to open arbitray proc
+  files as mentioned above.
+
+  Luckily, this is currently not exploitable but would be so once
+  IORING_OP_OPENAT{2} land in v5.6. Let's fix it now.
+
+  To minimize potential regressions I successfully ran the criu
+  testsuite. criu makes heavy use of ptrace() and extensively hits
+  ptrace_may_access() codepaths and has a good change of detecting any
+  regressions.
+
+  Additionally, I succesfully ran the ptrace and seccomp kernel tests"
+
+* tag 'for-linus-2020-01-18' of git://git.kernel.org/pub/scm/linux/kernel/git/brauner/linux:
+  ptrace: reintroduce usage of subjective credentials in ptrace_has_cap()
+
+Metadata:
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Author Date: Sat Jan 18 12:23:31 2020 -0800
+Committer: Linus Torvalds <torvalds@linux-foundation.org>
+Commit Date: Sat Jan 18 12:23:31 2020 -0800
+
+Files Changed: 0
+Lines Added: 10
+Lines Removed: 5
+Total Changes: 15

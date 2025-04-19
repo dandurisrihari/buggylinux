@@ -1,0 +1,63 @@
+commit 93f94ea0548c2628efe7d57e0989f06a14cedb53
+Author: Marc Zyngier <maz@kernel.org>
+Date:   Fri Aug 4 18:37:09 2017 +0100
+
+    irqchip/gic-v3-its: Make LPI allocation optional on device creation
+    
+    The normal course of action when allocating the ITS' view of a
+    device is to allocate the corresponding LPIs. But we're about
+    to introduce devices that borrow their interrupts from
+    some other entities.
+    
+    So let's make the allocation optional.
+    
+    Signed-off-by: Marc Zyngier <marc.zyngier@arm.com>
+
+diff --git a/drivers/irqchip/irq-gic-v3-its.c b/drivers/irqchip/irq-gic-v3-its.c
+index 9040fb41d446..017a6efa3747 100644
+--- a/drivers/irqchip/irq-gic-v3-its.c
++++ b/drivers/irqchip/irq-gic-v3-its.c
+@@ -1978,10 +1978,10 @@ static bool its_alloc_vpe_table(u32 vpe_id)
+ }
+ 
+ static struct its_device *its_create_device(struct its_node *its, u32 dev_id,
+-					    int nvecs)
++					    int nvecs, bool alloc_lpis)
+ {
+ 	struct its_device *dev;
+-	unsigned long *lpi_map;
++	unsigned long *lpi_map = NULL;
+ 	unsigned long flags;
+ 	u16 *col_map = NULL;
+ 	void *itt;
+@@ -2003,11 +2003,18 @@ static struct its_device *its_create_device(struct its_node *its, u32 dev_id,
+ 	sz = nr_ites * its->ite_size;
+ 	sz = max(sz, ITS_ITT_ALIGN) + ITS_ITT_ALIGN - 1;
+ 	itt = kzalloc(sz, GFP_KERNEL);
+-	lpi_map = its_lpi_alloc_chunks(nvecs, &lpi_base, &nr_lpis);
+-	if (lpi_map)
+-		col_map = kzalloc(sizeof(*col_map) * nr_lpis, GFP_KERNEL);
++	if (alloc_lpis) {
++		lpi_map = its_lpi_alloc_chunks(nvecs, &lpi_base, &nr_lpis);
++		if (lpi_map)
++			col_map = kzalloc(sizeof(*col_map) * nr_lpis,
++					  GFP_KERNEL);
++	} else {
++		col_map = kzalloc(sizeof(*col_map) * nr_ites, GFP_KERNEL);
++		nr_lpis = 0;
++		lpi_base = 0;
++	}
+ 
+-	if (!dev || !itt || !lpi_map || !col_map) {
++	if (!dev || !itt ||  !col_map || (!lpi_map && alloc_lpis)) {
+ 		kfree(dev);
+ 		kfree(itt);
+ 		kfree(lpi_map);
+@@ -2094,7 +2101,7 @@ static int its_msi_prepare(struct irq_domain *domain, struct device *dev,
+ 		goto out;
+ 	}
+ 
+-	its_dev = its_create_device(its, dev_id, nvec);
++	its_dev = its_create_device(its, dev_id, nvec, true);
+ 	if (!its_dev)
+ 		return -ENOMEM;

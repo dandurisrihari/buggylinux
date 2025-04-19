@@ -1,0 +1,106 @@
+{
+  "hash": "c48f86071027af9c8d264194d6aed73f13016a22",
+  "hash_short": "c48f8607",
+  "subject": "Merge branch 'PTP-for-DSA-tag_ocelot_8021q'",
+  "body": "Vladimir Oltean says:\n\n====================\nPTP for DSA tag_ocelot_8021q\n\nChanges in v2:\nAdd stub definition for ocelot_port_inject_frame when switch driver is\nnot compiled in.\n\nThis is part two of the errata workaround begun here:\nhttps://patchwork.kernel.org/project/netdevbpf/cover/20210129010009.3959398-1-olteanv@gmail.com/\n\nNow that we have basic traffic support when we operate the Ocelot DSA\nswitches without an NPI port, it would be nice to regain some of the\nfeatures lost due to the lack of the NPI port functionality. An\nimportant one is PTP timestamping, which is intimately tied to the DSA\nframe header added by the NPI port: on TX, we put a \"timestamp request\nID\" in the Injection Frame Header, while on RX, the Extraction Frame\nHeader contains a partial 32-bit PTP timestamp. Get rid of the NPI port\nand replace it with a VLAN-based tagger, and you lose PTP, right?\n\nWell, not quite, this is what this patch series is about. The NPI port\nis basically a regular Ethernet port configured to service the packets\nin and out of the switch's CPU port module (which has other non-DSA I/O\nmechanisms too, such as register-based MMIO and DMA). If we disable the\nNPI port, we can in theory still access the packets delivered to the CPU\nport module by doing exactly what the ocelot switchdev driver does:\nextracting Ethernet packets through registers (yes, it is as icky as it\nsounds).\n\nHowever, there's a catch. The Felix switch was integrated into NXP\nLS1028A with the idea in mind that it will operate as DSA, i.e. using\nthe CPU port module connected to the NPI port, not having I/O over\nregister-based MMIO which is painfully slow and CPU intensive. So\nregister-based packet I/O not supposed to work - those registers aren't\neven documented in the hardware reference manual for Felix. However\nthey kinda do, with the exception of the fact that an RX interrupt was\nreally not wired to the CPU cores - so we don't know when the CPU port\nmodule receives a new packet. But we can hack even around that, by\nreplicating every packet that goes to the CPU port module and making it\nalso go to a plain internal Ethernet port. Then drop the Ethernet packet\nand read the other copy of it from the CPU port module, this time\nannotated with the much-wanted RX timestamp.\n\nThis is all fine and it works, but it does raise some questions about\nwhat DSA even is anymore, if we start having switches that inject some\nof their packets over Ethernet and some through registers, where do we\ndraw the line. In principle I believe these concerns are founded, but at\nthe same time, the way that the Felix driver uses register MMIO based\npacket I/O is fundamentally the same as any other DSA driver capable of\nPTP makes use of a side-channel for timestamps like a FIFO (just that\nthis one is a lot more complicated, and comes with the entire actual\npacket, not just the timestamp).\n\nNonetheless, I tried to keep the extra pressure added by this ERR\nworkaround upon the DSA subsystem as small as possible, so some of the\npatches are just a revisit of some of Andrew's complaints w.r.t. the\nfact that tag_ocelot already violates any driver <-> tagger boundary,\nand as a consequence, is not able to be used on testbeds such as\ndsa_loop (which it now can). So now, the tag_ocelot and tag_ocelot_8021q\ndrivers should be dsa_loop-clean, and have the ERR workarounds as\nself-contained as possible, using all the designated features for PTP\ntimestamping and nothing more.\n\nComments appreciated.\n====================\n\nSigned-off-by: David S. Miller <davem@davemloft.net>",
+  "full_message": "Merge branch 'PTP-for-DSA-tag_ocelot_8021q'\n\nVladimir Oltean says:\n\n====================\nPTP for DSA tag_ocelot_8021q\n\nChanges in v2:\nAdd stub definition for ocelot_port_inject_frame when switch driver is\nnot compiled in.\n\nThis is part two of the errata workaround begun here:\nhttps://patchwork.kernel.org/project/netdevbpf/cover/20210129010009.3959398-1-olteanv@gmail.com/\n\nNow that we have basic traffic support when we operate the Ocelot DSA\nswitches without an NPI port, it would be nice to regain some of the\nfeatures lost due to the lack of the NPI port functionality. An\nimportant one is PTP timestamping, which is intimately tied to the DSA\nframe header added by the NPI port: on TX, we put a \"timestamp request\nID\" in the Injection Frame Header, while on RX, the Extraction Frame\nHeader contains a partial 32-bit PTP timestamp. Get rid of the NPI port\nand replace it with a VLAN-based tagger, and you lose PTP, right?\n\nWell, not quite, this is what this patch series is about. The NPI port\nis basically a regular Ethernet port configured to service the packets\nin and out of the switch's CPU port module (which has other non-DSA I/O\nmechanisms too, such as register-based MMIO and DMA). If we disable the\nNPI port, we can in theory still access the packets delivered to the CPU\nport module by doing exactly what the ocelot switchdev driver does:\nextracting Ethernet packets through registers (yes, it is as icky as it\nsounds).\n\nHowever, there's a catch. The Felix switch was integrated into NXP\nLS1028A with the idea in mind that it will operate as DSA, i.e. using\nthe CPU port module connected to the NPI port, not having I/O over\nregister-based MMIO which is painfully slow and CPU intensive. So\nregister-based packet I/O not supposed to work - those registers aren't\neven documented in the hardware reference manual for Felix. However\nthey kinda do, with the exception of the fact that an RX interrupt was\nreally not wired to the CPU cores - so we don't know when the CPU port\nmodule receives a new packet. But we can hack even around that, by\nreplicating every packet that goes to the CPU port module and making it\nalso go to a plain internal Ethernet port. Then drop the Ethernet packet\nand read the other copy of it from the CPU port module, this time\nannotated with the much-wanted RX timestamp.\n\nThis is all fine and it works, but it does raise some questions about\nwhat DSA even is anymore, if we start having switches that inject some\nof their packets over Ethernet and some through registers, where do we\ndraw the line. In principle I believe these concerns are founded, but at\nthe same time, the way that the Felix driver uses register MMIO based\npacket I/O is fundamentally the same as any other DSA driver capable of\nPTP makes use of a side-channel for timestamps like a FIFO (just that\nthis one is a lot more complicated, and comes with the entire actual\npacket, not just the timestamp).\n\nNonetheless, I tried to keep the extra pressure added by this ERR\nworkaround upon the DSA subsystem as small as possible, so some of the\npatches are just a revisit of some of Andrew's complaints w.r.t. the\nfact that tag_ocelot already violates any driver <-> tagger boundary,\nand as a consequence, is not able to be used on testbeds such as\ndsa_loop (which it now can). So now, the tag_ocelot and tag_ocelot_8021q\ndrivers should be dsa_loop-clean, and have the ERR workarounds as\nself-contained as possible, using all the designated features for PTP\ntimestamping and nothing more.\n\nComments appreciated.\n====================\n\nSigned-off-by: David S. Miller <davem@davemloft.net>",
+  "author_name": "David S. Miller",
+  "author_email": "davem@davemloft.net",
+  "author_date": "Sun Feb 14 17:31:44 2021 -0800",
+  "author_date_iso": "2021-02-14T17:31:44-08:00",
+  "committer_name": "David S. Miller",
+  "committer_email": "davem@davemloft.net",
+  "committer_date": "Sun Feb 14 17:31:44 2021 -0800",
+  "committer_date_iso": "2021-02-14T17:31:44-08:00",
+  "files_changed": [],
+  "files_changed_count": 0,
+  "stats": [
+    {
+      "file": "drivers/net/dsa/ocelot/felix.c",
+      "insertions": 204,
+      "deletions": 20
+    },
+    {
+      "file": "drivers/net/dsa/ocelot/felix.h",
+      "insertions": 13,
+      "deletions": 1
+    },
+    {
+      "file": "drivers/net/dsa/ocelot/felix_vsc9959.c",
+      "insertions": 2,
+      "deletions": 27
+    },
+    {
+      "file": "drivers/net/dsa/ocelot/seville_vsc9953.c",
+      "insertions": 2,
+      "deletions": 28
+    },
+    {
+      "file": "drivers/net/ethernet/mscc/ocelot.c",
+      "insertions": 216,
+      "deletions": 0
+    },
+    {
+      "file": "drivers/net/ethernet/mscc/ocelot.h",
+      "insertions": 0,
+      "deletions": 9
+    },
+    {
+      "file": "drivers/net/ethernet/mscc/ocelot_net.c",
+      "insertions": 7,
+      "deletions": 74
+    },
+    {
+      "file": "drivers/net/ethernet/mscc/ocelot_vsc7514.c",
+      "insertions": 12,
+      "deletions": 166
+    },
+    {
+      "file": "include/linux/dsa/ocelot.h",
+      "insertions": 218,
+      "deletions": 0
+    },
+    {
+      "file": "include/net/dsa.h",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "include/soc/mscc/ocelot.h",
+      "insertions": 34,
+      "deletions": 7
+    },
+    {
+      "file": "net/dsa/tag_ocelot.c",
+      "insertions": 81,
+      "deletions": 163
+    },
+    {
+      "file": "net/dsa/tag_ocelot_8021q.c",
+      "insertions": 34,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 825,
+  "total_deletions": 495,
+  "total_changes": 1320,
+  "parents": [
+    "140261925a2a4542ea5a2bf2ff135643751246fb",
+    "0a6f17c6ae2116809a7b7eb6dd3eab59ef5460ef"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": true,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "Injection"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": []
+}

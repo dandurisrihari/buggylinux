@@ -1,0 +1,71 @@
+commit ffc363d970d1d04be0f12b2252aa21aaef3ecfd0
+Author: Pierre-Louis Bossart <pierre-louis.bossart@linux.dev>
+Date:   Thu May 18 10:41:18 2023 +0800
+
+    soundwire: intel/cadence: update hardware reset sequence
+    
+    Combining hardware reset with the multi-link mode leads to a shortened
+    hardware reset pattern observed on the bus.
+    
+    The updated hardware programming sequence is to first enable the clock
+    with the sync_arm/sync_go pattern, and only in a second step to issue
+    the hardware reset sequence. Since there is no longer a dependency
+    between sync_arm/sync_go and hw_reset, the behavior of
+    sdw_cdns_exit_reset() is changed to wait for the self-clearing
+    CONFIG_UPDATE to go back to zero,
+    
+    Link: https://github.com/thesofproject/linux/issues/4170
+    Signed-off-by: Pierre-Louis Bossart <pierre-louis.bossart@linux.intel.com>
+    Reviewed-by: Rander Wang <rander.wang@intel.com>
+    Signed-off-by: Bard Liao <yung-chuan.liao@linux.intel.com>
+    Link: https://lore.kernel.org/r/20230518024119.164160-3-yung-chuan.liao@linux.intel.com
+    Signed-off-by: Vinod Koul <vkoul@kernel.org>
+
+diff --git a/drivers/soundwire/cadence_master.c b/drivers/soundwire/cadence_master.c
+index 39502bc75712..58686ae50bbf 100644
+--- a/drivers/soundwire/cadence_master.c
++++ b/drivers/soundwire/cadence_master.c
+@@ -283,6 +283,29 @@ static int cdns_config_update(struct sdw_cdns *cdns)
+ 	return ret;
+ }
+ 
++/**
++ * sdw_cdns_config_update() - Update configurations
++ * @cdns: Cadence instance
++ */
++void sdw_cdns_config_update(struct sdw_cdns *cdns)
++{
++	/* commit changes */
++	cdns_writel(cdns, CDNS_MCP_CONFIG_UPDATE, CDNS_MCP_CONFIG_UPDATE_BIT);
++}
++EXPORT_SYMBOL(sdw_cdns_config_update);
++
++/**
++ * sdw_cdns_config_update_set_wait() - wait until configuration update bit is self-cleared
++ * @cdns: Cadence instance
++ */
++int sdw_cdns_config_update_set_wait(struct sdw_cdns *cdns)
++{
++	/* the hardware recommendation is to wait at least 300us */
++	return cdns_set_wait(cdns, CDNS_MCP_CONFIG_UPDATE,
++			     CDNS_MCP_CONFIG_UPDATE_BIT, 0);
++}
++EXPORT_SYMBOL(sdw_cdns_config_update_set_wait);
++
+ /*
+  * debugfs
+  */
+@@ -1116,13 +1139,7 @@ int sdw_cdns_exit_reset(struct sdw_cdns *cdns)
+ 		     CDNS_MCP_CONTROL_HW_RST);
+ 
+ 	/* commit changes */
+-	cdns_updatel(cdns, CDNS_MCP_CONFIG_UPDATE,
+-		     CDNS_MCP_CONFIG_UPDATE_BIT,
+-		     CDNS_MCP_CONFIG_UPDATE_BIT);
+-
+-	/* don't wait here */
+-	return 0;
+-
++	return cdns_config_update(cdns);
+ }
+ EXPORT_SYMBOL(sdw_cdns_exit_reset);

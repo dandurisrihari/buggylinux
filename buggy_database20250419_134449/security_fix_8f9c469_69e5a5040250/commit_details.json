@@ -1,0 +1,66 @@
+{
+  "hash": "8f9c469348487844328e162db57112f7d347c49f",
+  "hash_short": "8f9c4693",
+  "subject": "crypto: authenc - fix parsing key with misaligned rta_len",
+  "body": "Keys for \"authenc\" AEADs are formatted as an rtattr containing a 4-byte\n'enckeylen', followed by an authentication key and an encryption key.\ncrypto_authenc_extractkeys() parses the key to find the inner keys.\n\nHowever, it fails to consider the case where the rtattr's payload is\nlonger than 4 bytes but not 4-byte aligned, and where the key ends\nbefore the next 4-byte aligned boundary.  In this case, 'keylen -=\nRTA_ALIGN(rta->rta_len);' underflows to a value near UINT_MAX.  This\ncauses a buffer overread and crash during crypto_ahash_setkey().\n\nFix it by restricting the rtattr payload to the expected size.\n\nReproducer using AF_ALG:\n\n\t#include <linux/if_alg.h>\n\t#include <linux/rtnetlink.h>\n\t#include <sys/socket.h>\n\n\tint main()\n\t{\n\t\tint fd;\n\t\tstruct sockaddr_alg addr = {\n\t\t\t.salg_type = \"aead\",\n\t\t\t.salg_name = \"authenc(hmac(sha256),cbc(aes))\",\n\t\t};\n\t\tstruct {\n\t\t\tstruct rtattr attr;\n\t\t\t__be32 enckeylen;\n\t\t\tchar keys[1];\n\t\t} __attribute__((packed)) key = {\n\t\t\t.attr.rta_len = sizeof(key),\n\t\t\t.attr.rta_type = 1 /* CRYPTO_AUTHENC_KEYA_PARAM */,\n\t\t};\n\n\t\tfd = socket(AF_ALG, SOCK_SEQPACKET, 0);\n\t\tbind(fd, (void *)&addr, sizeof(addr));\n\t\tsetsockopt(fd, SOL_ALG, ALG_SET_KEY, &key, sizeof(key));\n\t}\n\nIt caused:\n\n\tBUG: unable to handle kernel paging request at ffff88007ffdc000\n\tPGD 2e01067 P4D 2e01067 PUD 2e04067 PMD 2e05067 PTE 0\n\tOops: 0000 [#1] SMP\n\tCPU: 0 PID: 883 Comm: authenc Not tainted 4.20.0-rc1-00108-g00c9fe37a7f27 #13\n\tHardware name: QEMU Standard PC (i440FX + PIIX, 1996), BIOS 1.12.0-20181126_142135-anatol 04/01/2014\n\tRIP: 0010:sha256_ni_transform+0xb3/0x330 arch/x86/crypto/sha256_ni_asm.S:155\n\t[...]\n\tCall Trace:\n\t sha256_ni_finup+0x10/0x20 arch/x86/crypto/sha256_ssse3_glue.c:321\n\t crypto_shash_finup+0x1a/0x30 crypto/shash.c:178\n\t shash_digest_unaligned+0x45/0x60 crypto/shash.c:186\n\t crypto_shash_digest+0x24/0x40 crypto/shash.c:202\n\t hmac_setkey+0x135/0x1e0 crypto/hmac.c:66\n\t crypto_shash_setkey+0x2b/0xb0 crypto/shash.c:66\n\t shash_async_setkey+0x10/0x20 crypto/shash.c:223\n\t crypto_ahash_setkey+0x2d/0xa0 crypto/ahash.c:202\n\t crypto_authenc_setkey+0x68/0x100 crypto/authenc.c:96\n\t crypto_aead_setkey+0x2a/0xc0 crypto/aead.c:62\n\t aead_setkey+0xc/0x10 crypto/algif_aead.c:526\n\t alg_setkey crypto/af_alg.c:223 [inline]\n\t alg_setsockopt+0xfe/0x130 crypto/af_alg.c:256\n\t __sys_setsockopt+0x6d/0xd0 net/socket.c:1902\n\t __do_sys_setsockopt net/socket.c:1913 [inline]\n\t __se_sys_setsockopt net/socket.c:1910 [inline]\n\t __x64_sys_setsockopt+0x1f/0x30 net/socket.c:1910\n\t do_syscall_64+0x4a/0x180 arch/x86/entry/common.c:290\n\t entry_SYSCALL_64_after_hwframe+0x49/0xbe\n\nFixes: e236d4a89a2f (\"[CRYPTO] authenc: Move enckeylen into key itself\")\nCc: <stable@vger.kernel.org> # v2.6.25+\nSigned-off-by: Eric Biggers <ebiggers@google.com>\nSigned-off-by: Herbert Xu <herbert@gondor.apana.org.au>",
+  "full_message": "crypto: authenc - fix parsing key with misaligned rta_len\n\nKeys for \"authenc\" AEADs are formatted as an rtattr containing a 4-byte\n'enckeylen', followed by an authentication key and an encryption key.\ncrypto_authenc_extractkeys() parses the key to find the inner keys.\n\nHowever, it fails to consider the case where the rtattr's payload is\nlonger than 4 bytes but not 4-byte aligned, and where the key ends\nbefore the next 4-byte aligned boundary.  In this case, 'keylen -=\nRTA_ALIGN(rta->rta_len);' underflows to a value near UINT_MAX.  This\ncauses a buffer overread and crash during crypto_ahash_setkey().\n\nFix it by restricting the rtattr payload to the expected size.\n\nReproducer using AF_ALG:\n\n\t#include <linux/if_alg.h>\n\t#include <linux/rtnetlink.h>\n\t#include <sys/socket.h>\n\n\tint main()\n\t{\n\t\tint fd;\n\t\tstruct sockaddr_alg addr = {\n\t\t\t.salg_type = \"aead\",\n\t\t\t.salg_name = \"authenc(hmac(sha256),cbc(aes))\",\n\t\t};\n\t\tstruct {\n\t\t\tstruct rtattr attr;\n\t\t\t__be32 enckeylen;\n\t\t\tchar keys[1];\n\t\t} __attribute__((packed)) key = {\n\t\t\t.attr.rta_len = sizeof(key),\n\t\t\t.attr.rta_type = 1 /* CRYPTO_AUTHENC_KEYA_PARAM */,\n\t\t};\n\n\t\tfd = socket(AF_ALG, SOCK_SEQPACKET, 0);\n\t\tbind(fd, (void *)&addr, sizeof(addr));\n\t\tsetsockopt(fd, SOL_ALG, ALG_SET_KEY, &key, sizeof(key));\n\t}\n\nIt caused:\n\n\tBUG: unable to handle kernel paging request at ffff88007ffdc000\n\tPGD 2e01067 P4D 2e01067 PUD 2e04067 PMD 2e05067 PTE 0\n\tOops: 0000 [#1] SMP\n\tCPU: 0 PID: 883 Comm: authenc Not tainted 4.20.0-rc1-00108-g00c9fe37a7f27 #13\n\tHardware name: QEMU Standard PC (i440FX + PIIX, 1996), BIOS 1.12.0-20181126_142135-anatol 04/01/2014\n\tRIP: 0010:sha256_ni_transform+0xb3/0x330 arch/x86/crypto/sha256_ni_asm.S:155\n\t[...]\n\tCall Trace:\n\t sha256_ni_finup+0x10/0x20 arch/x86/crypto/sha256_ssse3_glue.c:321\n\t crypto_shash_finup+0x1a/0x30 crypto/shash.c:178\n\t shash_digest_unaligned+0x45/0x60 crypto/shash.c:186\n\t crypto_shash_digest+0x24/0x40 crypto/shash.c:202\n\t hmac_setkey+0x135/0x1e0 crypto/hmac.c:66\n\t crypto_shash_setkey+0x2b/0xb0 crypto/shash.c:66\n\t shash_async_setkey+0x10/0x20 crypto/shash.c:223\n\t crypto_ahash_setkey+0x2d/0xa0 crypto/ahash.c:202\n\t crypto_authenc_setkey+0x68/0x100 crypto/authenc.c:96\n\t crypto_aead_setkey+0x2a/0xc0 crypto/aead.c:62\n\t aead_setkey+0xc/0x10 crypto/algif_aead.c:526\n\t alg_setkey crypto/af_alg.c:223 [inline]\n\t alg_setsockopt+0xfe/0x130 crypto/af_alg.c:256\n\t __sys_setsockopt+0x6d/0xd0 net/socket.c:1902\n\t __do_sys_setsockopt net/socket.c:1913 [inline]\n\t __se_sys_setsockopt net/socket.c:1910 [inline]\n\t __x64_sys_setsockopt+0x1f/0x30 net/socket.c:1910\n\t do_syscall_64+0x4a/0x180 arch/x86/entry/common.c:290\n\t entry_SYSCALL_64_after_hwframe+0x49/0xbe\n\nFixes: e236d4a89a2f (\"[CRYPTO] authenc: Move enckeylen into key itself\")\nCc: <stable@vger.kernel.org> # v2.6.25+\nSigned-off-by: Eric Biggers <ebiggers@google.com>\nSigned-off-by: Herbert Xu <herbert@gondor.apana.org.au>",
+  "author_name": "Eric Biggers",
+  "author_email": "ebiggers@google.com",
+  "author_date": "Sun Dec 16 23:23:22 2018 -0800",
+  "author_date_iso": "2018-12-16T23:23:22-08:00",
+  "committer_name": "Herbert Xu",
+  "committer_email": "herbert@gondor.apana.org.au",
+  "committer_date": "Thu Jan 10 21:37:31 2019 +0800",
+  "committer_date_iso": "2019-01-10T21:37:31+08:00",
+  "files_changed": [
+    "crypto/authenc.c"
+  ],
+  "files_changed_count": 1,
+  "stats": [
+    {
+      "file": "crypto/authenc.c",
+      "insertions": 11,
+      "deletions": 3
+    }
+  ],
+  "total_insertions": 11,
+  "total_deletions": 3,
+  "total_changes": 14,
+  "parents": [
+    "bfeffd155283772bbe78c6a05dec7c0128ee500c"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v5.0",
+    "v5.0-rc3",
+    "v5.0-rc4",
+    "v5.0-rc5",
+    "v5.0-rc6",
+    "v5.0-rc7",
+    "v5.0-rc8",
+    "v5.1",
+    "v5.1-rc1",
+    "v5.1-rc2"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "authentication"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "crypto/authenc.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

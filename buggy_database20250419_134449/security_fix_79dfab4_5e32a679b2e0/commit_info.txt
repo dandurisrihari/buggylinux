@@ -1,0 +1,157 @@
+Commit Hash: 79dfab43a976b76713c40222987c48e32510ebc1
+Subject: Merge branch 'VXLAN-underlay-VRF'
+
+
+Security Keywords:
+- injection
+
+Full commit message:
+Merge branch 'VXLAN-underlay-VRF'
+
+Alexis Bauvin says:
+
+====================
+net: Add VRF support for VXLAN underlay
+
+v6 -> v7:
+- proper locking for device in udp_tunnel following Sabrina Dubroca's advice
+
+v5 -> v6:
+- remove automatic rebinding patch following Roopa Prabhu's advice
+
+v4 -> v5:
+- move test script to its own patch (6/6)
+- add schematic for test script
+- apply David Ahern comments to the test script
+
+v3 -> v4:
+- rename vxlan_is_in_l3mdev_chain to netdev_is_upper master
+- move it to net/core/dev.c
+- make it return bool instead of int
+- check if remote_ifindex is zero before resolving the l3mdev
+- add testing script
+
+v2 -> v3:
+- fix build when CONFIG_NET_IPV6 is off
+- fix build "unused l3mdev_master_upper_ifindex_by_index" build error with some
+  configs
+
+v1 -> v2:
+- move vxlan_get_l3mdev from vxlan driver to l3mdev driver as
+  l3mdev_master_upper_ifindex_by_index
+- vxlan: rename variables named l3mdev_ifindex to ifindex
+
+v0 -> v1:
+- fix typos
+
+We are trying to isolate the VXLAN traffic from different VMs with VRF as shown
+in the schemas below:
+
++-------------------------+   +----------------------------+
+| +----------+            |   |     +------------+         |
+| |          |            |   |     |            |         |
+| | tap-red  |            |   |     |  tap-blue  |         |
+| |          |            |   |     |            |         |
+| +----+-----+            |   |     +-----+------+         |
+|      |                  |   |           |                |
+|      |                  |   |           |                |
+| +----+---+              |   |      +----+----+           |
+| |        |              |   |      |         |           |
+| | br-red |              |   |      | br-blue |           |
+| |        |              |   |      |         |           |
+| +----+---+              |   |      +----+----+           |
+|      |                  |   |           |                |
+|      |                  |   |           |                |
+|      |                  |   |           |                |
+| +----+--------+         |   |     +--------------+       |
+| |             |         |   |     |              |       |
+| |  vxlan-red  |         |   |     |  vxlan-blue  |       |
+| |             |         |   |     |              |       |
+| +------+------+         |   |     +-------+------+       |
+|        |                |   |             |              |
+|        |           VRF  |   |             |          VRF |
+|        |           red  |   |             |         blue |
++-------------------------+   +----------------------------+
+         |                                  |
+         |                                  |
+ +---------------------------------------------------------+
+ |       |                                  |              |
+ |       |                                  |              |
+ |       |         +--------------+         |              |
+ |       |         |              |         |              |
+ |       +---------+  eth0.2030   +---------+              |
+ |                 |  10.0.0.1/24 |                        |
+ |                 +-----+--------+                    VRF |
+ |                       |                            green|
+ +---------------------------------------------------------+
+                         |
+                         |
+                    +----+---+
+                    |        |
+                    |  eth0  |
+                    |        |
+                    +--------+
+
+iproute2 commands to reproduce the setup:
+
+ip link add green type vrf table 1
+ip link set green up
+ip link add eth0.2030 link eth0 type vlan id 2030
+ip link set eth0.2030 master green
+ip addr add 10.0.0.1/24 dev eth0.2030
+ip link set eth0.2030 up
+
+ip link add blue type vrf table 2
+ip link set blue up
+ip link add br-blue type bridge
+ip link set br-blue master blue
+ip link set br-blue up
+ip link add vxlan-blue type vxlan id 2 local 10.0.0.1 dev eth0.2030 \
+ port 4789
+ip link set vxlan-blue master br-blue
+ip link set vxlan-blue up
+ip link set tap-blue master br-blue
+ip link set tap-blue up
+
+ip link add red type vrf table 3
+ip link set red up
+ip link add br-red type bridge
+ip link set br-red master red
+ip link set br-red up
+ip link add vxlan-red type vxlan id 3 local 10.0.0.1 dev eth0.2030 \
+ port 4789
+ip link set vxlan-red master br-red
+ip link set vxlan-red up
+ip link set tap-red master br-red
+ip link set tap-red up
+
+We faced some issue in the datapath, here are the details:
+
+* Egress traffic:
+The vxlan packets are sent directly to the default VRF because it's where the
+socket is bound, therefore the traffic has a default route via eth0. the
+workaround is to force this traffic to VRF green with ip rules.
+
+* Ingress traffic:
+When receiving the traffic on eth0.2030 the vxlan socket is unreachable from
+VRF green. The workaround is to enable *udp_l3mdev_accept* sysctl, but
+this breaks isolation between overlay and underlay: packets sent from
+blue or red by e.g. a guest VM will be accepted by the socket, allowing
+injection of VXLAN packets from the overlay.
+
+This patch series fixes the issues describe above by allowing VXLAN socket to be
+bound to a specific VRF device therefore looking up in the correct table.
+====================
+
+Signed-off-by: David S. Miller <davem@davemloft.net>
+
+Metadata:
+Author: David S. Miller <davem@davemloft.net>
+Author Date: Mon Dec 3 14:16:14 2018 -0800
+Committer: David S. Miller <davem@davemloft.net>
+Commit Date: Mon Dec 3 14:16:14 2018 -0800
+
+Files Changed: 0
+Lines Added: 228
+Lines Removed: 9
+Total Changes: 237

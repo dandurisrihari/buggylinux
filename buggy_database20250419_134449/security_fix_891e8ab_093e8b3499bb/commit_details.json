@@ -1,0 +1,1491 @@
+{
+  "hash": "891e8abed532423d3b918b0c445dc8919bc445b5",
+  "hash_short": "891e8abe",
+  "subject": "Merge tag 'perf-tools-for-v6.12-1-2024-09-19' of git://git.kernel.org/pub/scm/linux/kernel/git/perf/perf-tools",
+  "body": "Pull perf tools updates from Arnaldo Carvalho de Melo:\n\n - Use BPF + BTF to collect and pretty print syscall and tracepoint\n   arguments in 'perf trace', done as an GSoC activity\n\n - Data-type profiling improvements:\n\n     - Cache debuginfo to speed up data type resolution\n\n     - Add the 'typecln' sort order, to show which cacheline in a target\n       is hot or cold. The following shows members in the cfs_rq's first\n       cache line:\n\n         $ perf report -s type,typecln,typeoff -H\n         ...\n         -    2.67%        struct cfs_rq\n            +    1.23%        struct cfs_rq: cache-line 2\n            +    0.57%        struct cfs_rq: cache-line 4\n            +    0.46%        struct cfs_rq: cache-line 6\n            -    0.41%        struct cfs_rq: cache-line 0\n                    0.39%        struct cfs_rq +0x14 (h_nr_running)\n                    0.02%        struct cfs_rq +0x38 (tasks_timeline.rb_leftmost)\n\n     - When a typedef resolves to a unnamed struct, use the typedef name\n\n     - When a struct has just one basic type field (int, etc), resolve\n       the type sort order to the name of the struct, not the type of\n       the field\n\n     - Support type folding/unfolding in the data-type annotation TUI\n\n     - Fix bitfields offsets and sizes\n\n     - Initial support for PowerPC, using libcapstone and the usual\n       objdump disassembly parsing routines\n\n - Add support for disassembling and addr2line using the LLVM libraries,\n   speeding up those operations\n\n - Support --addr2line option in 'perf script' as with other tools\n\n - Intel branch counters (LBR event logging) support, only available in\n   recent Intel processors, for instance, the new \"brcntr\" field can be\n   asked from 'perf script' to print the information collected from this\n   feature:\n\n     $ perf script -F +brstackinsn,+brcntr\n\n     # Branch counter abbr list:\n     # branch-instructions:ppp = A\n     # branch-misses = B\n     # '-' No event occurs\n     # '+' Event occurrences may be lost due to branch counter saturated\n         tchain_edit  332203 3366329.405674:  53030 branch-instructions:ppp:    401781 f3+0x2c (home/sdp/test/tchain_edit)\n            f3+31:\n         0000000000401774   insn: eb 04                  br_cntr: AA  # PRED 5 cycles [5]\n         000000000040177a   insn: 81 7d fc 0f 27 00 00\n         0000000000401781   insn: 7e e3                  br_cntr: A   # PRED 1 cycles [6] 2.00 IPC\n         0000000000401766   insn: 8b 45 fc\n         0000000000401769   insn: 83 e0 01\n         000000000040176c   insn: 85 c0\n         000000000040176e   insn: 74 06                  br_cntr: A   # PRED 1 cycles [7] 4.00 IPC\n         0000000000401776   insn: 83 45 fc 01\n         000000000040177a   insn: 81 7d fc 0f 27 00 00\n         0000000000401781   insn: 7e e3                  br_cntr: A   # PRED 7 cycles [14] 0.43 IPC\n\n - Support Timed PEBS (Precise Event-Based Sampling), a recent hardware\n   feature in Intel processors\n\n - Add 'perf ftrace profile' subcommand, using ftrace's function-graph\n   tracer so that users can see the total, average, max execution time\n   as well as the number of invocations easily, for instance:\n\n     $ sudo perf ftrace profile -G __x64_sys_perf_event_open -- \\\n       perf stat -e cycles -C1 true 2> /dev/null | head\n     # Total (us)  Avg (us)  Max (us)  Count  Function\n           65.611    65.611    65.611      1  __x64_sys_perf_event_open\n           30.527    30.527    30.527      1  anon_inode_getfile\n           30.260    30.260    30.260      1  __anon_inode_getfile\n           29.700    29.700    29.700      1  alloc_file_pseudo\n           17.578    17.578    17.578      1  d_alloc_pseudo\n           17.382    17.382    17.382      1  __d_alloc\n           16.738    16.738    16.738      1  kmem_cache_alloc_lru\n           15.686    15.686    15.686      1  perf_event_alloc\n           14.012     7.006    11.264      2  obj_cgroup_charge\n\n - 'perf sched timehist' improvements, including the addition of\n   priority showing/filtering command line options\n\n - Varios improvements to the 'perf probe', including 'perf test'\n   regression testings\n\n - Introduce the 'perf check', initially to check if some feature is\n   in place, using it in 'perf test'\n\n - Various fixes for 32-bit systems\n\n - Address more leak sanitizer failures\n\n - Fix memory leaks (LBR, disasm lock ops, etc)\n\n - More reference counting fixes (branch_info, etc)\n\n - Constify 'struct perf_tool' parameters to improve code generation\n   and reduce the chances of having its internals changed, which isn't\n   expected\n\n - More constifications in various other places\n\n - Add more build tests, including for JEVENTS\n\n - Add more 'perf test' entries ('perf record LBR', pipe/inject,\n   --setup-filter, 'perf ftrace', 'cgroup sampling', etc)\n\n - Inject build ids for all entries in a call chain in 'perf inject',\n   not just for the main sample\n\n - Improve the BPF based sample filter, allowing root to setup filters\n   in bpffs that then can be used by non-root users\n\n - Allow filtering by cgroups with the BPF based sample filter\n\n - Allow a more compact way for 'perf mem report' using the\n   -T/--type-profile and also provide a --sort option similar to the one\n   in 'perf report', 'perf top', to setup the sort order manually\n\n - Fix --group behavior in 'perf annotate' when leader has no samples,\n   where it was not showing anything even when other events in the group\n   had samples\n\n - Fix spinlock and rwlock accounting in 'perf lock contention'\n\n - Fix libsubcmd fixdep Makefile dependencies\n\n - Improve 'perf ftrace' error message when ftrace isn't available\n\n - Update various Intel JSON vendor event files\n\n - ARM64 CoreSight hardware tracing infrastructure improvements, mostly\n   not visible to users\n\n - Update power10 JSON events\n\n* tag 'perf-tools-for-v6.12-1-2024-09-19' of git://git.kernel.org/pub/scm/linux/kernel/git/perf/perf-tools: (310 commits)\n  perf trace: Mark the 'head' arg in the set_robust_list syscall as coming from user space\n  perf trace: Mark the 'rseq' arg in the rseq syscall as coming from user space\n  perf env: Find correct branch counter info on hybrid\n  perf evlist: Print hint for group\n  tools: Drop nonsensical -O6\n  perf pmu: To info add event_type_desc\n  perf evsel: Add accessor for tool_event\n  perf pmus: Fake PMU clean up\n  perf list: Avoid potential out of bounds memory read\n  perf help: Fix a typo (\"bellow\")\n  perf ftrace: Detect whether ftrace is enabled on system\n  perf test shell probe_vfs_getname: Remove extraneous '=' from probe line number regex\n  perf build: Require at least clang 16.0.6 to build BPF skeletons\n  perf trace: If a syscall arg is marked as 'const', assume it is coming _from_ userspace\n  perf parse-events: Remove duplicated include in parse-events.c\n  perf callchain: Allow symbols to be optional when resolving a callchain\n  perf inject: Lazy build-id mmap2 event insertion\n  perf inject: Add new mmap2-buildid-all option\n  perf inject: Fix build ID injection\n  perf annotate-data: Add pr_debug_scope()\n  ...",
+  "full_message": "Merge tag 'perf-tools-for-v6.12-1-2024-09-19' of git://git.kernel.org/pub/scm/linux/kernel/git/perf/perf-tools\n\nPull perf tools updates from Arnaldo Carvalho de Melo:\n\n - Use BPF + BTF to collect and pretty print syscall and tracepoint\n   arguments in 'perf trace', done as an GSoC activity\n\n - Data-type profiling improvements:\n\n     - Cache debuginfo to speed up data type resolution\n\n     - Add the 'typecln' sort order, to show which cacheline in a target\n       is hot or cold. The following shows members in the cfs_rq's first\n       cache line:\n\n         $ perf report -s type,typecln,typeoff -H\n         ...\n         -    2.67%        struct cfs_rq\n            +    1.23%        struct cfs_rq: cache-line 2\n            +    0.57%        struct cfs_rq: cache-line 4\n            +    0.46%        struct cfs_rq: cache-line 6\n            -    0.41%        struct cfs_rq: cache-line 0\n                    0.39%        struct cfs_rq +0x14 (h_nr_running)\n                    0.02%        struct cfs_rq +0x38 (tasks_timeline.rb_leftmost)\n\n     - When a typedef resolves to a unnamed struct, use the typedef name\n\n     - When a struct has just one basic type field (int, etc), resolve\n       the type sort order to the name of the struct, not the type of\n       the field\n\n     - Support type folding/unfolding in the data-type annotation TUI\n\n     - Fix bitfields offsets and sizes\n\n     - Initial support for PowerPC, using libcapstone and the usual\n       objdump disassembly parsing routines\n\n - Add support for disassembling and addr2line using the LLVM libraries,\n   speeding up those operations\n\n - Support --addr2line option in 'perf script' as with other tools\n\n - Intel branch counters (LBR event logging) support, only available in\n   recent Intel processors, for instance, the new \"brcntr\" field can be\n   asked from 'perf script' to print the information collected from this\n   feature:\n\n     $ perf script -F +brstackinsn,+brcntr\n\n     # Branch counter abbr list:\n     # branch-instructions:ppp = A\n     # branch-misses = B\n     # '-' No event occurs\n     # '+' Event occurrences may be lost due to branch counter saturated\n         tchain_edit  332203 3366329.405674:  53030 branch-instructions:ppp:    401781 f3+0x2c (home/sdp/test/tchain_edit)\n            f3+31:\n         0000000000401774   insn: eb 04                  br_cntr: AA  # PRED 5 cycles [5]\n         000000000040177a   insn: 81 7d fc 0f 27 00 00\n         0000000000401781   insn: 7e e3                  br_cntr: A   # PRED 1 cycles [6] 2.00 IPC\n         0000000000401766   insn: 8b 45 fc\n         0000000000401769   insn: 83 e0 01\n         000000000040176c   insn: 85 c0\n         000000000040176e   insn: 74 06                  br_cntr: A   # PRED 1 cycles [7] 4.00 IPC\n         0000000000401776   insn: 83 45 fc 01\n         000000000040177a   insn: 81 7d fc 0f 27 00 00\n         0000000000401781   insn: 7e e3                  br_cntr: A   # PRED 7 cycles [14] 0.43 IPC\n\n - Support Timed PEBS (Precise Event-Based Sampling), a recent hardware\n   feature in Intel processors\n\n - Add 'perf ftrace profile' subcommand, using ftrace's function-graph\n   tracer so that users can see the total, average, max execution time\n   as well as the number of invocations easily, for instance:\n\n     $ sudo perf ftrace profile -G __x64_sys_perf_event_open -- \\\n       perf stat -e cycles -C1 true 2> /dev/null | head\n     # Total (us)  Avg (us)  Max (us)  Count  Function\n           65.611    65.611    65.611      1  __x64_sys_perf_event_open\n           30.527    30.527    30.527      1  anon_inode_getfile\n           30.260    30.260    30.260      1  __anon_inode_getfile\n           29.700    29.700    29.700      1  alloc_file_pseudo\n           17.578    17.578    17.578      1  d_alloc_pseudo\n           17.382    17.382    17.382      1  __d_alloc\n           16.738    16.738    16.738      1  kmem_cache_alloc_lru\n           15.686    15.686    15.686      1  perf_event_alloc\n           14.012     7.006    11.264      2  obj_cgroup_charge\n\n - 'perf sched timehist' improvements, including the addition of\n   priority showing/filtering command line options\n\n - Varios improvements to the 'perf probe', including 'perf test'\n   regression testings\n\n - Introduce the 'perf check', initially to check if some feature is\n   in place, using it in 'perf test'\n\n - Various fixes for 32-bit systems\n\n - Address more leak sanitizer failures\n\n - Fix memory leaks (LBR, disasm lock ops, etc)\n\n - More reference counting fixes (branch_info, etc)\n\n - Constify 'struct perf_tool' parameters to improve code generation\n   and reduce the chances of having its internals changed, which isn't\n   expected\n\n - More constifications in various other places\n\n - Add more build tests, including for JEVENTS\n\n - Add more 'perf test' entries ('perf record LBR', pipe/inject,\n   --setup-filter, 'perf ftrace', 'cgroup sampling', etc)\n\n - Inject build ids for all entries in a call chain in 'perf inject',\n   not just for the main sample\n\n - Improve the BPF based sample filter, allowing root to setup filters\n   in bpffs that then can be used by non-root users\n\n - Allow filtering by cgroups with the BPF based sample filter\n\n - Allow a more compact way for 'perf mem report' using the\n   -T/--type-profile and also provide a --sort option similar to the one\n   in 'perf report', 'perf top', to setup the sort order manually\n\n - Fix --group behavior in 'perf annotate' when leader has no samples,\n   where it was not showing anything even when other events in the group\n   had samples\n\n - Fix spinlock and rwlock accounting in 'perf lock contention'\n\n - Fix libsubcmd fixdep Makefile dependencies\n\n - Improve 'perf ftrace' error message when ftrace isn't available\n\n - Update various Intel JSON vendor event files\n\n - ARM64 CoreSight hardware tracing infrastructure improvements, mostly\n   not visible to users\n\n - Update power10 JSON events\n\n* tag 'perf-tools-for-v6.12-1-2024-09-19' of git://git.kernel.org/pub/scm/linux/kernel/git/perf/perf-tools: (310 commits)\n  perf trace: Mark the 'head' arg in the set_robust_list syscall as coming from user space\n  perf trace: Mark the 'rseq' arg in the rseq syscall as coming from user space\n  perf env: Find correct branch counter info on hybrid\n  perf evlist: Print hint for group\n  tools: Drop nonsensical -O6\n  perf pmu: To info add event_type_desc\n  perf evsel: Add accessor for tool_event\n  perf pmus: Fake PMU clean up\n  perf list: Avoid potential out of bounds memory read\n  perf help: Fix a typo (\"bellow\")\n  perf ftrace: Detect whether ftrace is enabled on system\n  perf test shell probe_vfs_getname: Remove extraneous '=' from probe line number regex\n  perf build: Require at least clang 16.0.6 to build BPF skeletons\n  perf trace: If a syscall arg is marked as 'const', assume it is coming _from_ userspace\n  perf parse-events: Remove duplicated include in parse-events.c\n  perf callchain: Allow symbols to be optional when resolving a callchain\n  perf inject: Lazy build-id mmap2 event insertion\n  perf inject: Add new mmap2-buildid-all option\n  perf inject: Fix build ID injection\n  perf annotate-data: Add pr_debug_scope()\n  ...",
+  "author_name": "Linus Torvalds",
+  "author_email": "torvalds@linux-foundation.org",
+  "author_date": "Sun Sep 22 09:11:14 2024 -0700",
+  "author_date_iso": "2024-09-22T09:11:14-07:00",
+  "committer_name": "Linus Torvalds",
+  "committer_email": "torvalds@linux-foundation.org",
+  "committer_date": "Sun Sep 22 09:11:14 2024 -0700",
+  "committer_date_iso": "2024-09-22T09:11:14-07:00",
+  "files_changed": [],
+  "files_changed_count": 0,
+  "stats": [
+    {
+      "file": "tools/build/Build",
+      "insertions": 0,
+      "deletions": 3
+    },
+    {
+      "file": "tools/build/Makefile",
+      "insertions": 2,
+      "deletions": 9
+    },
+    {
+      "file": "tools/build/Makefile.feature",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/build/Makefile.include",
+      "insertions": 11,
+      "deletions": 1
+    },
+    {
+      "file": "tools/build/feature/Makefile",
+      "insertions": 7,
+      "deletions": 4
+    },
+    {
+      "file": "tools/build/feature/test-all.c",
+      "insertions": 0,
+      "deletions": 4
+    },
+    {
+      "file": "tools/build/feature/test-llvm-perf.cpp",
+      "insertions": 14,
+      "deletions": 0
+    },
+    {
+      "file": "tools/include/linux/coresight-pmu.h",
+      "insertions": 13,
+      "deletions": 4
+    },
+    {
+      "file": "tools/include/linux/string.h",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "tools/lib/api/Makefile",
+      "insertions": 0,
+      "deletions": 4
+    },
+    {
+      "file": "tools/lib/api/fs/tracing_path.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/lib/bpf/.gitignore",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "tools/lib/bpf/Makefile",
+      "insertions": 10,
+      "deletions": 3
+    },
+    {
+      "file": "tools/lib/perf/.gitignore",
+      "insertions": 5,
+      "deletions": 0
+    },
+    {
+      "file": "tools/lib/string.c",
+      "insertions": 13,
+      "deletions": 0
+    },
+    {
+      "file": "tools/lib/subcmd/Makefile",
+      "insertions": 2,
+      "deletions": 4
+    },
+    {
+      "file": "tools/lib/subcmd/parse-options.c",
+      "insertions": 3,
+      "deletions": 5
+    },
+    {
+      "file": "tools/lib/symbol/Makefile",
+      "insertions": 0,
+      "deletions": 4
+    },
+    {
+      "file": "tools/perf/Build",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/Documentation/perf-annotate.txt",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/Documentation/perf-check.txt",
+      "insertions": 82,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/Documentation/perf-ftrace.txt",
+      "insertions": 47,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/Documentation/perf-kvm.txt",
+      "insertions": 3,
+      "deletions": 3
+    },
+    {
+      "file": "tools/perf/Documentation/perf-list.txt",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/Documentation/perf-mem.txt",
+      "insertions": 63,
+      "deletions": 31
+    },
+    {
+      "file": "tools/perf/Documentation/perf-record.txt",
+      "insertions": 10,
+      "deletions": 4
+    },
+    {
+      "file": "tools/perf/Documentation/perf-report.txt",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/Documentation/perf-sched.txt",
+      "insertions": 9,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/Documentation/perf-script.txt",
+      "insertions": 4,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/Documentation/perf-stat.txt",
+      "insertions": 8,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/Documentation/perf-top.txt",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "tools/perf/Documentation/perf-trace.txt",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "tools/perf/Documentation/topdown.txt",
+      "insertions": 30,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/Makefile",
+      "insertions": 7,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/Makefile.config",
+      "insertions": 24,
+      "deletions": 27
+    },
+    {
+      "file": "tools/perf/Makefile.perf",
+      "insertions": 6,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/arch/arm/util/cs-etm.c",
+      "insertions": 5,
+      "deletions": 7
+    },
+    {
+      "file": "tools/perf/arch/arm/util/pmu.c",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/arch/arm64/annotate/instructions.c",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/arch/arm64/util/arm-spe.c",
+      "insertions": 62,
+      "deletions": 46
+    },
+    {
+      "file": "tools/perf/arch/arm64/util/hisi-ptt.c",
+      "insertions": 0,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/arch/loongarch/annotate/instructions.c",
+      "insertions": 4,
+      "deletions": 2
+    },
+    {
+      "file": "tools/perf/arch/powerpc/annotate/instructions.c",
+      "insertions": 254,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/arch/powerpc/util/dwarf-regs.c",
+      "insertions": 53,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/arch/s390/annotate/instructions.c",
+      "insertions": 3,
+      "deletions": 2
+    },
+    {
+      "file": "tools/perf/arch/x86/Makefile",
+      "insertions": 5,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/arch/x86/annotate/instructions.c",
+      "insertions": 389,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/arch/x86/entry/syscalls/syscall_32.tbl",
+      "insertions": 470,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/arch/x86/util/event.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "tools/perf/arch/x86/util/evlist.c",
+      "insertions": 6,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/arch/x86/util/intel-bts.c",
+      "insertions": 0,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/arch/x86/util/intel-pt.c",
+      "insertions": 0,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/bench/synthesize.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/builtin-annotate.c",
+      "insertions": 46,
+      "deletions": 31
+    },
+    {
+      "file": "tools/perf/builtin-buildid-list.c",
+      "insertions": 10,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/builtin-c2c.c",
+      "insertions": 19,
+      "deletions": 28
+    },
+    {
+      "file": "tools/perf/builtin-check.c",
+      "insertions": 180,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/builtin-daemon.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/builtin-diff.c",
+      "insertions": 18,
+      "deletions": 20
+    },
+    {
+      "file": "tools/perf/builtin-evlist.c",
+      "insertions": 12,
+      "deletions": 6
+    },
+    {
+      "file": "tools/perf/builtin-ftrace.c",
+      "insertions": 436,
+      "deletions": 26
+    },
+    {
+      "file": "tools/perf/builtin-help.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/builtin-inject.c",
+      "insertions": 469,
+      "deletions": 270
+    },
+    {
+      "file": "tools/perf/builtin-kmem.c",
+      "insertions": 11,
+      "deletions": 11
+    },
+    {
+      "file": "tools/perf/builtin-kvm.c",
+      "insertions": 11,
+      "deletions": 11
+    },
+    {
+      "file": "tools/perf/builtin-kwork.c",
+      "insertions": 19,
+      "deletions": 17
+    },
+    {
+      "file": "tools/perf/builtin-list.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/builtin-lock.c",
+      "insertions": 23,
+      "deletions": 21
+    },
+    {
+      "file": "tools/perf/builtin-mem.c",
+      "insertions": 94,
+      "deletions": 67
+    },
+    {
+      "file": "tools/perf/builtin-record.c",
+      "insertions": 49,
+      "deletions": 30
+    },
+    {
+      "file": "tools/perf/builtin-report.c",
+      "insertions": 62,
+      "deletions": 44
+    },
+    {
+      "file": "tools/perf/builtin-sched.c",
+      "insertions": 192,
+      "deletions": 40
+    },
+    {
+      "file": "tools/perf/builtin-script.c",
+      "insertions": 119,
+      "deletions": 65
+    },
+    {
+      "file": "tools/perf/builtin-stat.c",
+      "insertions": 25,
+      "deletions": 17
+    },
+    {
+      "file": "tools/perf/builtin-timechart.c",
+      "insertions": 12,
+      "deletions": 13
+    },
+    {
+      "file": "tools/perf/builtin-top.c",
+      "insertions": 5,
+      "deletions": 5
+    },
+    {
+      "file": "tools/perf/builtin-trace.c",
+      "insertions": 454,
+      "deletions": 43
+    },
+    {
+      "file": "tools/perf/builtin-version.c",
+      "insertions": 8,
+      "deletions": 35
+    },
+    {
+      "file": "tools/perf/builtin.h",
+      "insertions": 17,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/check-headers.sh",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/perf.c",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/pmu-events/Build",
+      "insertions": 11,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/pmu-events/arch/arm64/ampere/ampereone/instruction.json",
+      "insertions": 0,
+      "deletions": 3
+    },
+    {
+      "file": "tools/perf/pmu-events/arch/arm64/{freescale => thead}/yitian710/sys/ali_drw.json",
+      "insertions": 0,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/pmu-events/arch/arm64/{freescale => thead}/yitian710/sys/metrics.json",
+      "insertions": 0,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/pmu-events/arch/powerpc/power10/cache.json",
+      "insertions": 15,
+      "deletions": 5
+    },
+    {
+      "file": "tools/perf/pmu-events/arch/powerpc/power10/datasource.json",
+      "insertions": 40,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/pmu-events/arch/powerpc/power10/frontend.json",
+      "insertions": 30,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/pmu-events/arch/powerpc/power10/locks.json",
+      "insertions": 10,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/pmu-events/arch/powerpc/power10/memory.json",
+      "insertions": 30,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/pmu-events/arch/powerpc/power10/others.json",
+      "insertions": 33,
+      "deletions": 73
+    },
+    {
+      "file": "tools/perf/pmu-events/arch/powerpc/power10/pipeline.json",
+      "insertions": 45,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/pmu-events/arch/powerpc/power10/pmc.json",
+      "insertions": 10,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/pmu-events/arch/x86/cascadelakex/uncore-cache.json",
+      "insertions": 30,
+      "deletions": 30
+    },
+    {
+      "file": "tools/perf/pmu-events/arch/x86/meteorlake/metricgroups.json",
+      "insertions": 142,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/pmu-events/arch/x86/meteorlake/mtl-metrics.json",
+      "insertions": 2535,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/pmu-events/arch/x86/skylakex/uncore-cache.json",
+      "insertions": 30,
+      "deletions": 30
+    },
+    {
+      "file": "tools/perf/pmu-events/arch/x86/snowridgex/uncore-cache.json",
+      "insertions": 0,
+      "deletions": 57
+    },
+    {
+      "file": "tools/perf/pmu-events/empty-pmu-events.c",
+      "insertions": 544,
+      "deletions": 350
+    },
+    {
+      "file": "tools/perf/pmu-events/jevents.py",
+      "insertions": 19,
+      "deletions": 8
+    },
+    {
+      "file": "tools/perf/pmu-events/models.py",
+      "insertions": 73,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/pmu-events/pmu-events.h",
+      "insertions": 9,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/scripts/python/arm-cs-trace-disasm.py",
+      "insertions": 4,
+      "deletions": 5
+    },
+    {
+      "file": "tools/perf/tests/bp_account.c",
+      "insertions": 3,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/tests/bp_signal.c",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/tests/bp_signal_overflow.c",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/tests/builtin-test.c",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/tests/cpumap.c",
+      "insertions": 3,
+      "deletions": 3
+    },
+    {
+      "file": "tools/perf/tests/dlfilter-test.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/tests/dwarf-unwind.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/tests/event_update.c",
+      "insertions": 5,
+      "deletions": 4
+    },
+    {
+      "file": "tools/perf/tests/make",
+      "insertions": 4,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/tests/parse-events.c",
+      "insertions": 3,
+      "deletions": 3
+    },
+    {
+      "file": "tools/perf/tests/pmu-events.c",
+      "insertions": 5,
+      "deletions": 7
+    },
+    {
+      "file": "tools/perf/tests/pmu.c",
+      "insertions": 3,
+      "deletions": 6
+    },
+    {
+      "file": "tools/perf/tests/shell/annotate.sh",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/tests/shell/base_probe/settings.sh",
+      "insertions": 0,
+      "deletions": 48
+    },
+    {
+      "file": "tools/perf/tests/shell/base_probe/test_adding_blacklisted.sh",
+      "insertions": 67,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/tests/shell/base_probe/test_adding_kernel.sh",
+      "insertions": 0,
+      "deletions": 3
+    },
+    {
+      "file": "tools/perf/tests/shell/base_probe/test_basic.sh",
+      "insertions": 80,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/tests/shell/base_probe/test_invalid_options.sh",
+      "insertions": 79,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/tests/shell/base_probe/test_line_semantics.sh",
+      "insertions": 55,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/tests/shell/base_report/setup.sh",
+      "insertions": 32,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/tests/shell/base_report/stderr-whitelist.txt",
+      "insertions": 5,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/tests/shell/base_report/test_basic.sh",
+      "insertions": 190,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/tests/shell/common/check_errors_whitelisted.pl",
+      "insertions": 51,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/tests/shell/common/init.sh",
+      "insertions": 27,
+      "deletions": 4
+    },
+    {
+      "file": "tools/perf/tests/shell/common/settings.sh",
+      "insertions": 27,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/tests/shell/ftrace.sh",
+      "insertions": 89,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/tests/shell/lib/perf_metric_validation.py",
+      "insertions": 8,
+      "deletions": 2
+    },
+    {
+      "file": "tools/perf/tests/shell/lib/probe_vfs_getname.sh",
+      "insertions": 8,
+      "deletions": 3
+    },
+    {
+      "file": "tools/perf/tests/shell/perftool-testsuite_report.sh",
+      "insertions": 23,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/tests/shell/pipe_test.sh",
+      "insertions": 107,
+      "deletions": 22
+    },
+    {
+      "file": "tools/perf/tests/shell/record+probe_libc_inet_pton.sh",
+      "insertions": 4,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/tests/shell/record+script_probe_vfs_getname.sh",
+      "insertions": 4,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/tests/shell/record.sh",
+      "insertions": 53,
+      "deletions": 6
+    },
+    {
+      "file": "tools/perf/tests/shell/record_bpf_filter.sh",
+      "insertions": 77,
+      "deletions": 9
+    },
+    {
+      "file": "tools/perf/tests/shell/record_lbr.sh",
+      "insertions": 161,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/tests/shell/script.sh",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/tests/shell/test_stat_intel_tpebs.sh",
+      "insertions": 19,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/tests/shell/test_task_analyzer.sh",
+      "insertions": 5,
+      "deletions": 2
+    },
+    {
+      "file": "tools/perf/tests/shell/test_uprobe_from_different_cu.sh",
+      "insertions": 7,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/tests/shell/trace_btf_enum.sh",
+      "insertions": 62,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/tests/stat.c",
+      "insertions": 3,
+      "deletions": 3
+    },
+    {
+      "file": "tools/perf/tests/tests-scripts.c",
+      "insertions": 34,
+      "deletions": 3
+    },
+    {
+      "file": "tools/perf/tests/tests.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/tests/thread-map.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/tests/vmlinux-kallsyms.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "tools/perf/tests/workloads/Build",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/tests/workloads/landlock.c",
+      "insertions": 66,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/tests/wp.c",
+      "insertions": 5,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/trace/beauty/beauty.h",
+      "insertions": 11,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/trace/beauty/perf_event_open.c",
+      "insertions": 5,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/trace/beauty/sockaddr.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/trace/beauty/timespec.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/ui/browsers/annotate-data.c",
+      "insertions": 338,
+      "deletions": 38
+    },
+    {
+      "file": "tools/perf/ui/browsers/annotate.c",
+      "insertions": 17,
+      "deletions": 3
+    },
+    {
+      "file": "tools/perf/ui/browsers/hists.c",
+      "insertions": 17,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/ui/hist.c",
+      "insertions": 5,
+      "deletions": 5
+    },
+    {
+      "file": "tools/perf/ui/stdio/hist.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "tools/perf/util/Build",
+      "insertions": 7,
+      "deletions": 3
+    },
+    {
+      "file": "tools/perf/util/annotate-data.c",
+      "insertions": 495,
+      "deletions": 669
+    },
+    {
+      "file": "tools/perf/util/annotate-data.h",
+      "insertions": 85,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/util/annotate.c",
+      "insertions": 321,
+      "deletions": 39
+    },
+    {
+      "file": "tools/perf/util/annotate.h",
+      "insertions": 30,
+      "deletions": 3
+    },
+    {
+      "file": "tools/perf/util/arm-spe.c",
+      "insertions": 13,
+      "deletions": 42
+    },
+    {
+      "file": "tools/perf/util/auxtrace.c",
+      "insertions": 8,
+      "deletions": 8
+    },
+    {
+      "file": "tools/perf/util/auxtrace.h",
+      "insertions": 10,
+      "deletions": 11
+    },
+    {
+      "file": "tools/perf/util/block-info.c",
+      "insertions": 57,
+      "deletions": 9
+    },
+    {
+      "file": "tools/perf/util/block-info.h",
+      "insertions": 6,
+      "deletions": 2
+    },
+    {
+      "file": "tools/perf/util/bpf-event.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "tools/perf/util/bpf-filter.c",
+      "insertions": 594,
+      "deletions": 37
+    },
+    {
+      "file": "tools/perf/util/bpf-filter.h",
+      "insertions": 17,
+      "deletions": 2
+    },
+    {
+      "file": "tools/perf/util/bpf-filter.l",
+      "insertions": 23,
+      "deletions": 5
+    },
+    {
+      "file": "tools/perf/util/bpf-filter.y",
+      "insertions": 26,
+      "deletions": 2
+    },
+    {
+      "file": "tools/perf/util/bpf_counter_cgroup.c",
+      "insertions": 3,
+      "deletions": 3
+    },
+    {
+      "file": "tools/perf/util/bpf_ftrace.c",
+      "insertions": 4,
+      "deletions": 4
+    },
+    {
+      "file": "tools/perf/util/bpf_kwork.c",
+      "insertions": 5,
+      "deletions": 4
+    },
+    {
+      "file": "tools/perf/util/bpf_kwork_top.c",
+      "insertions": 4,
+      "deletions": 3
+    },
+    {
+      "file": "tools/perf/util/bpf_lock_contention.c",
+      "insertions": 24,
+      "deletions": 21
+    },
+    {
+      "file": "tools/perf/util/bpf_map.c",
+      "insertions": 0,
+      "deletions": 3
+    },
+    {
+      "file": "tools/perf/util/bpf_off_cpu.c",
+      "insertions": 8,
+      "deletions": 8
+    },
+    {
+      "file": "tools/perf/util/bpf_skel/augmented_raw_syscalls.bpf.c",
+      "insertions": 178,
+      "deletions": 44
+    },
+    {
+      "file": "tools/perf/util/bpf_skel/bperf_cgroup.bpf.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/util/bpf_skel/func_latency.bpf.c",
+      "insertions": 4,
+      "deletions": 3
+    },
+    {
+      "file": "tools/perf/util/bpf_skel/kwork_top.bpf.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/util/bpf_skel/kwork_trace.bpf.c",
+      "insertions": 3,
+      "deletions": 2
+    },
+    {
+      "file": "tools/perf/util/bpf_skel/lock_contention.bpf.c",
+      "insertions": 26,
+      "deletions": 27
+    },
+    {
+      "file": "tools/perf/util/bpf_skel/lock_data.h",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "tools/perf/util/bpf_skel/off_cpu.bpf.c",
+      "insertions": 5,
+      "deletions": 4
+    },
+    {
+      "file": "tools/perf/util/bpf_skel/sample-filter.h",
+      "insertions": 11,
+      "deletions": 2
+    },
+    {
+      "file": "tools/perf/util/bpf_skel/sample_filter.bpf.c",
+      "insertions": 84,
+      "deletions": 21
+    },
+    {
+      "file": "tools/perf/util/bpf_skel/vmlinux/vmlinux.h",
+      "insertions": 7,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/branch.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/build-id.c",
+      "insertions": 4,
+      "deletions": 36
+    },
+    {
+      "file": "tools/perf/util/build-id.h",
+      "insertions": 3,
+      "deletions": 5
+    },
+    {
+      "file": "tools/perf/util/callchain.c",
+      "insertions": 35,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/callchain.h",
+      "insertions": 6,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/cap.c",
+      "insertions": 44,
+      "deletions": 19
+    },
+    {
+      "file": "tools/perf/util/cap.h",
+      "insertions": 3,
+      "deletions": 20
+    },
+    {
+      "file": "tools/perf/util/cs-etm-decoder/cs-etm-decoder.c",
+      "insertions": 18,
+      "deletions": 18
+    },
+    {
+      "file": "tools/perf/util/cs-etm-decoder/cs-etm-decoder.h",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/util/cs-etm.c",
+      "insertions": 386,
+      "deletions": 289
+    },
+    {
+      "file": "tools/perf/util/cs-etm.h",
+      "insertions": 1,
+      "deletions": 11
+    },
+    {
+      "file": "tools/perf/util/data-convert-bt.c",
+      "insertions": 16,
+      "deletions": 18
+    },
+    {
+      "file": "tools/perf/util/data-convert-json.c",
+      "insertions": 22,
+      "deletions": 25
+    },
+    {
+      "file": "tools/perf/util/data.c",
+      "insertions": 6,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/util/debuginfo.h",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/disasm.c",
+      "insertions": 644,
+      "deletions": 208
+    },
+    {
+      "file": "tools/perf/util/disasm.h",
+      "insertions": 17,
+      "deletions": 2
+    },
+    {
+      "file": "tools/perf/util/disasm_bpf.c",
+      "insertions": 195,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/disasm_bpf.h",
+      "insertions": 12,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/dso.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "tools/perf/util/dso.h",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "tools/perf/util/dsos.c",
+      "insertions": 6,
+      "deletions": 6
+    },
+    {
+      "file": "tools/perf/util/dsos.h",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/util/dump-insn.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/util/dump-insn.h",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/util/dwarf-aux.c",
+      "insertions": 14,
+      "deletions": 4
+    },
+    {
+      "file": "tools/perf/util/dwarf-aux.h",
+      "insertions": 2,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/env.c",
+      "insertions": 15,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/env.h",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/event.c",
+      "insertions": 37,
+      "deletions": 17
+    },
+    {
+      "file": "tools/perf/util/event.h",
+      "insertions": 21,
+      "deletions": 17
+    },
+    {
+      "file": "tools/perf/util/events_stats.h",
+      "insertions": 14,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/util/evlist.c",
+      "insertions": 86,
+      "deletions": 3
+    },
+    {
+      "file": "tools/perf/util/evlist.h",
+      "insertions": 6,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/util/evsel.c",
+      "insertions": 99,
+      "deletions": 23
+    },
+    {
+      "file": "tools/perf/util/evsel.h",
+      "insertions": 26,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/util/evsel_fprintf.c",
+      "insertions": 0,
+      "deletions": 2
+    },
+    {
+      "file": "tools/perf/util/ftrace.h",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/header.c",
+      "insertions": 97,
+      "deletions": 60
+    },
+    {
+      "file": "tools/perf/util/header.h",
+      "insertions": 20,
+      "deletions": 5
+    },
+    {
+      "file": "tools/perf/util/hisi-ptt.c",
+      "insertions": 3,
+      "deletions": 3
+    },
+    {
+      "file": "tools/perf/util/hist.c",
+      "insertions": 45,
+      "deletions": 18
+    },
+    {
+      "file": "tools/perf/util/hist.h",
+      "insertions": 3,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/util/include/dwarf-regs.h",
+      "insertions": 11,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/intel-bts.c",
+      "insertions": 4,
+      "deletions": 33
+    },
+    {
+      "file": "tools/perf/util/intel-pt-decoder/intel-pt-insn-decoder.c",
+      "insertions": 3,
+      "deletions": 2
+    },
+    {
+      "file": "tools/perf/util/intel-pt.c",
+      "insertions": 4,
+      "deletions": 26
+    },
+    {
+      "file": "tools/perf/util/intel-tpebs.c",
+      "insertions": 432,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/intel-tpebs.h",
+      "insertions": 35,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/jit.h",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/util/jitdump.c",
+      "insertions": 5,
+      "deletions": 5
+    },
+    {
+      "file": "tools/perf/util/llvm-c-helpers.cpp",
+      "insertions": 197,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/llvm-c-helpers.h",
+      "insertions": 60,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/machine.c",
+      "insertions": 76,
+      "deletions": 44
+    },
+    {
+      "file": "tools/perf/util/machine.h",
+      "insertions": 28,
+      "deletions": 8
+    },
+    {
+      "file": "tools/perf/util/map.c",
+      "insertions": 13,
+      "deletions": 12
+    },
+    {
+      "file": "tools/perf/util/map.h",
+      "insertions": 15,
+      "deletions": 7
+    },
+    {
+      "file": "tools/perf/util/map_symbol.c",
+      "insertions": 18,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/map_symbol.h",
+      "insertions": 3,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/mem-events.c",
+      "insertions": 17,
+      "deletions": 3
+    },
+    {
+      "file": "tools/perf/util/mem-events.h",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "tools/perf/util/mem-info.c",
+      "insertions": 13,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/mem-info.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/metricgroup.c",
+      "insertions": 5,
+      "deletions": 5
+    },
+    {
+      "file": "tools/perf/util/mmap.c",
+      "insertions": 0,
+      "deletions": 4
+    },
+    {
+      "file": "tools/perf/util/parse-events.c",
+      "insertions": 47,
+      "deletions": 22
+    },
+    {
+      "file": "tools/perf/util/parse-events.h",
+      "insertions": 7,
+      "deletions": 4
+    },
+    {
+      "file": "tools/perf/util/parse-events.l",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/util/pmu.c",
+      "insertions": 44,
+      "deletions": 31
+    },
+    {
+      "file": "tools/perf/util/pmu.h",
+      "insertions": 5,
+      "deletions": 3
+    },
+    {
+      "file": "tools/perf/util/pmus.c",
+      "insertions": 18,
+      "deletions": 4
+    },
+    {
+      "file": "tools/perf/util/pmus.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/print-events.c",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/util/print_insn.c",
+      "insertions": 11,
+      "deletions": 3
+    },
+    {
+      "file": "tools/perf/util/s390-cpumsf.c",
+      "insertions": 3,
+      "deletions": 8
+    },
+    {
+      "file": "tools/perf/util/scripting-engines/trace-event-python.c",
+      "insertions": 7,
+      "deletions": 9
+    },
+    {
+      "file": "tools/perf/util/session.c",
+      "insertions": 56,
+      "deletions": 338
+    },
+    {
+      "file": "tools/perf/util/session.h",
+      "insertions": 52,
+      "deletions": 9
+    },
+    {
+      "file": "tools/perf/util/setup.py",
+      "insertions": 3,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/util/sort.c",
+      "insertions": 60,
+      "deletions": 6
+    },
+    {
+      "file": "tools/perf/util/sort.h",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/util/srcline.c",
+      "insertions": 58,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/util/stat-display.c",
+      "insertions": 2,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/util/stat-shadow.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/util/symbol.c",
+      "insertions": 4,
+      "deletions": 4
+    },
+    {
+      "file": "tools/perf/util/symbol_conf.h",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/util/synthetic-events.c",
+      "insertions": 129,
+      "deletions": 52
+    },
+    {
+      "file": "tools/perf/util/synthetic-events.h",
+      "insertions": 54,
+      "deletions": 35
+    },
+    {
+      "file": "tools/perf/util/syscalltbl.c",
+      "insertions": 4,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/thread.c",
+      "insertions": 4,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/thread.h",
+      "insertions": 1,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/time-utils.c",
+      "insertions": 2,
+      "deletions": 2
+    },
+    {
+      "file": "tools/perf/util/tool.c",
+      "insertions": 294,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/tool.h",
+      "insertions": 15,
+      "deletions": 4
+    },
+    {
+      "file": "tools/perf/util/trace_augment.h",
+      "insertions": 6,
+      "deletions": 0
+    },
+    {
+      "file": "tools/perf/util/tsc.c",
+      "insertions": 1,
+      "deletions": 1
+    },
+    {
+      "file": "tools/perf/util/util.c",
+      "insertions": 9,
+      "deletions": 3
+    }
+  ],
+  "total_insertions": 15177,
+  "total_deletions": 4249,
+  "total_changes": 19426,
+  "parents": [
+    "673a5009cf2f020dac440cd79e70c4c8b8e20d08",
+    "1de5b5dcb8353f36581c963df2d359a5f151a0be"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": true,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "inject"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": []
+}

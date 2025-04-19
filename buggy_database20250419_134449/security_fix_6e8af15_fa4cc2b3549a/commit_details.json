@@ -1,0 +1,78 @@
+{
+  "hash": "6e8af15ccdc4e138a5b529c1901a0013e1dcaa09",
+  "hash_short": "6e8af15c",
+  "subject": "xfs: drop write error injection is unfixable, remove it",
+  "body": "With the changes to scan the page cache for dirty data to avoid data\ncorruptions from partial write cleanup racing with other page cache\noperations, the drop writes error injection no longer works the same\nway it used to and causes xfs/196 to fail. This is because xfs/196\nwrites to the file and populates the page cache before it turns on\nthe error injection and starts failing -overwrites-.\n\nThe result is that the original drop-writes code failed writes only\n-after- overwriting the data in the cache, followed by invalidates\nthe cached data, then punching out the delalloc extent from under\nthat data.\n\nOn the surface, this looks fine. The problem is that page cache\ninvalidation *doesn't guarantee that it removes anything from the\npage cache* and it doesn't change the dirty state of the folio. When\nblock size == page size and we do page aligned IO (as xfs/196 does)\neverything happens to align perfectly and page cache invalidation\nremoves the single page folios that span the written data. Hence the\nfollowup delalloc punch pass does not find cached data over that\nrange and it can punch the extent out.\n\nIOWs, xfs/196 \"works\" for block size == page size with the new\ncode. I say \"works\", because it actually only works for the case\nwhere IO is page aligned, and no data was read from disk before\nwrites occur. Because the moment we actually read data first, the\nreadahead code allocates multipage folios and suddenly the\ninvalidate code goes back to zeroing subfolio ranges without\nchanging dirty state.\n\nHence, with multipage folios in play, block size == page size is\nfunctionally identical to block size < page size behaviour, and\ndrop-writes is manifestly broken w.r.t to this case. Invalidation of\na subfolio range doesn't result in the folio being removed from the\ncache, just the range gets zeroed. Hence after we've sequentially\nwalked over a folio that we've dirtied (via write data) and then\ninvalidated, we end up with a dirty folio full of zeroed data.\n\nAnd because the new code skips punching ranges that have dirty\nfolios covering them, we end up leaving the delalloc range intact\nafter failing all the writes. Hence failed writes now end up\nwriting zeroes to disk in the cases where invalidation zeroes folios\nrather than removing them from cache.\n\nThis is a fundamental change of behaviour that is needed to avoid\nthe data corruption vectors that exist in the old write fail path,\nand it renders the drop-writes injection non-functional and\nunworkable as it stands.\n\nAs it is, I think the error injection is also now unnecessary, as\npartial writes that need delalloc extent are going to be a lot more\ncommon with stale iomap detection in place. Hence this patch removes\nthe drop-writes error injection completely. xfs/196 can remain for\ntesting kernels that don't have this data corruption fix, but those\nthat do will report:\n\nxfs/196 3s ... [not run] XFS error injection drop_writes unknown on this kernel.\n\nSigned-off-by: Dave Chinner <dchinner@redhat.com>\nReviewed-by: Darrick J. Wong <djwong@kernel.org>",
+  "full_message": "xfs: drop write error injection is unfixable, remove it\n\nWith the changes to scan the page cache for dirty data to avoid data\ncorruptions from partial write cleanup racing with other page cache\noperations, the drop writes error injection no longer works the same\nway it used to and causes xfs/196 to fail. This is because xfs/196\nwrites to the file and populates the page cache before it turns on\nthe error injection and starts failing -overwrites-.\n\nThe result is that the original drop-writes code failed writes only\n-after- overwriting the data in the cache, followed by invalidates\nthe cached data, then punching out the delalloc extent from under\nthat data.\n\nOn the surface, this looks fine. The problem is that page cache\ninvalidation *doesn't guarantee that it removes anything from the\npage cache* and it doesn't change the dirty state of the folio. When\nblock size == page size and we do page aligned IO (as xfs/196 does)\neverything happens to align perfectly and page cache invalidation\nremoves the single page folios that span the written data. Hence the\nfollowup delalloc punch pass does not find cached data over that\nrange and it can punch the extent out.\n\nIOWs, xfs/196 \"works\" for block size == page size with the new\ncode. I say \"works\", because it actually only works for the case\nwhere IO is page aligned, and no data was read from disk before\nwrites occur. Because the moment we actually read data first, the\nreadahead code allocates multipage folios and suddenly the\ninvalidate code goes back to zeroing subfolio ranges without\nchanging dirty state.\n\nHence, with multipage folios in play, block size == page size is\nfunctionally identical to block size < page size behaviour, and\ndrop-writes is manifestly broken w.r.t to this case. Invalidation of\na subfolio range doesn't result in the folio being removed from the\ncache, just the range gets zeroed. Hence after we've sequentially\nwalked over a folio that we've dirtied (via write data) and then\ninvalidated, we end up with a dirty folio full of zeroed data.\n\nAnd because the new code skips punching ranges that have dirty\nfolios covering them, we end up leaving the delalloc range intact\nafter failing all the writes. Hence failed writes now end up\nwriting zeroes to disk in the cases where invalidation zeroes folios\nrather than removing them from cache.\n\nThis is a fundamental change of behaviour that is needed to avoid\nthe data corruption vectors that exist in the old write fail path,\nand it renders the drop-writes injection non-functional and\nunworkable as it stands.\n\nAs it is, I think the error injection is also now unnecessary, as\npartial writes that need delalloc extent are going to be a lot more\ncommon with stale iomap detection in place. Hence this patch removes\nthe drop-writes error injection completely. xfs/196 can remain for\ntesting kernels that don't have this data corruption fix, but those\nthat do will report:\n\nxfs/196 3s ... [not run] XFS error injection drop_writes unknown on this kernel.\n\nSigned-off-by: Dave Chinner <dchinner@redhat.com>\nReviewed-by: Darrick J. Wong <djwong@kernel.org>",
+  "author_name": "Dave Chinner",
+  "author_email": "dchinner@redhat.com",
+  "author_date": "Tue Nov 29 09:09:17 2022 +1100",
+  "author_date_iso": "2022-11-29T09:09:17+11:00",
+  "committer_name": "Dave Chinner",
+  "committer_email": "david@fromorbit.com",
+  "committer_date": "Tue Nov 29 09:09:17 2022 +1100",
+  "committer_date_iso": "2022-11-29T09:09:17+11:00",
+  "files_changed": [
+    "fs/xfs/libxfs/xfs_errortag.h",
+    "fs/xfs/xfs_error.c",
+    "fs/xfs/xfs_iomap.c"
+  ],
+  "files_changed_count": 3,
+  "stats": [
+    {
+      "file": "fs/xfs/libxfs/xfs_errortag.h",
+      "insertions": 5,
+      "deletions": 7
+    },
+    {
+      "file": "fs/xfs/xfs_error.c",
+      "insertions": 20,
+      "deletions": 7
+    },
+    {
+      "file": "fs/xfs/xfs_iomap.c",
+      "insertions": 0,
+      "deletions": 9
+    }
+  ],
+  "total_insertions": 25,
+  "total_deletions": 23,
+  "total_changes": 48,
+  "parents": [
+    "304a68b9c63bbfc1f6e159d68e8892fc54a06067"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "injection"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "fs/xfs/libxfs/xfs_errortag.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/xfs/xfs_error.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/xfs/xfs_iomap.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

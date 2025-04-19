@@ -1,0 +1,174 @@
+{
+  "hash": "6c287605fd56466e645693eff3ae7c08fba56e0a",
+  "hash_short": "6c287605",
+  "subject": "mm: remember exclusively mapped anonymous pages with PG_anon_exclusive",
+  "body": "Let's mark exclusively mapped anonymous pages with PG_anon_exclusive as\nexclusive, and use that information to make GUP pins reliable and stay\nconsistent with the page mapped into the page table even if the page table\nentry gets write-protected.\n\nWith that information at hand, we can extend our COW logic to always reuse\nanonymous pages that are exclusive.  For anonymous pages that might be\nshared, the existing logic applies.\n\nAs already documented, PG_anon_exclusive is usually only expressive in\ncombination with a page table entry.  Especially PTE vs.  PMD-mapped\nanonymous pages require more thought, some examples: due to mremap() we\ncan easily have a single compound page PTE-mapped into multiple page\ntables exclusively in a single process -- multiple page table locks apply.\nFurther, due to MADV_WIPEONFORK we might not necessarily write-protect\nall PTEs, and only some subpages might be pinned.  Long story short: once\nPTE-mapped, we have to track information about exclusivity per sub-page,\nbut until then, we can just track it for the compound page in the head\npage and not having to update a whole bunch of subpages all of the time\nfor a simple PMD mapping of a THP.\n\nFor simplicity, this commit mostly talks about \"anonymous pages\", while\nit's for THP actually \"the part of an anonymous folio referenced via a\npage table entry\".\n\nTo not spill PG_anon_exclusive code all over the mm code-base, we let the\nanon rmap code to handle all PG_anon_exclusive logic it can easily handle.\n\nIf a writable, present page table entry points at an anonymous (sub)page,\nthat (sub)page must be PG_anon_exclusive.  If GUP wants to take a reliably\npin (FOLL_PIN) on an anonymous page references via a present page table\nentry, it must only pin if PG_anon_exclusive is set for the mapped\n(sub)page.\n\nThis commit doesn't adjust GUP, so this is only implicitly handled for\nFOLL_WRITE, follow-up commits will teach GUP to also respect it for\nFOLL_PIN without FOLL_WRITE, to make all GUP pins of anonymous pages fully\nreliable.\n\nWhenever an anonymous page is to be shared (fork(), KSM), or when\ntemporarily unmapping an anonymous page (swap, migration), the relevant\nPG_anon_exclusive bit has to be cleared to mark the anonymous page\npossibly shared.  Clearing will fail if there are GUP pins on the page:\n\n* For fork(), this means having to copy the page and not being able to\n  share it.  fork() protects against concurrent GUP using the PT lock and\n  the src_mm->write_protect_seq.\n\n* For KSM, this means sharing will fail.  For swap this means, unmapping\n  will fail, For migration this means, migration will fail early.  All\n  three cases protect against concurrent GUP using the PT lock and a\n  proper clear/invalidate+flush of the relevant page table entry.\n\nThis fixes memory corruptions reported for FOLL_PIN | FOLL_WRITE, when a\npinned page gets mapped R/O and the successive write fault ends up\nreplacing the page instead of reusing it.  It improves the situation for\nO_DIRECT/vmsplice/...  that still use FOLL_GET instead of FOLL_PIN, if\nfork() is *not* involved, however swapout and fork() are still\nproblematic.  Properly using FOLL_PIN instead of FOLL_GET for these GUP\nusers will fix the issue for them.\n\nI. Details about basic handling\n\nI.1. Fresh anonymous pages\n\npage_add_new_anon_rmap() and hugepage_add_new_anon_rmap() will mark the\ngiven page exclusive via __page_set_anon_rmap(exclusive=1).  As that is\nthe mechanism fresh anonymous pages come into life (besides migration code\nwhere we copy the page->mapping), all fresh anonymous pages will start out\nas exclusive.\n\nI.2. COW reuse handling of anonymous pages\n\nWhen a COW handler stumbles over a (sub)page that's marked exclusive, it\nsimply reuses it.  Otherwise, the handler tries harder under page lock to\ndetect if the (sub)page is exclusive and can be reused.  If exclusive,\npage_move_anon_rmap() will mark the given (sub)page exclusive.\n\nNote that hugetlb code does not yet check for PageAnonExclusive(), as it\nstill uses the old COW logic that is prone to the COW security issue\nbecause hugetlb code cannot really tolerate unnecessary/wrong COW as huge\npages are a scarce resource.\n\nI.3. Migration handling\n\ntry_to_migrate() has to try marking an exclusive anonymous page shared via\npage_try_share_anon_rmap().  If it fails because there are GUP pins on the\npage, unmap fails.  migrate_vma_collect_pmd() and\n__split_huge_pmd_locked() are handled similarly.\n\nWritable migration entries implicitly point at shared anonymous pages. \nFor readable migration entries that information is stored via a new\n\"readable-exclusive\" migration entry, specific to anonymous pages.\n\nWhen restoring a migration entry in remove_migration_pte(), information\nabout exlusivity is detected via the migration entry type, and\nRMAP_EXCLUSIVE is set accordingly for\npage_add_anon_rmap()/hugepage_add_anon_rmap() to restore that information.\n\nI.4. Swapout handling\n\ntry_to_unmap() has to try marking the mapped page possibly shared via\npage_try_share_anon_rmap().  If it fails because there are GUP pins on the\npage, unmap fails.  For now, information about exclusivity is lost.  In\nthe future, we might want to remember that information in the swap entry\nin some cases, however, it requires more thought, care, and a way to store\nthat information in swap entries.\n\nI.5. Swapin handling\n\ndo_swap_page() will never stumble over exclusive anonymous pages in the\nswap cache, as try_to_migrate() prohibits that.  do_swap_page() always has\nto detect manually if an anonymous page is exclusive and has to set\nRMAP_EXCLUSIVE for page_add_anon_rmap() accordingly.\n\nI.6. THP handling\n\n__split_huge_pmd_locked() has to move the information about exclusivity\nfrom the PMD to the PTEs.\n\na) In case we have a readable-exclusive PMD migration entry, simply\n   insert readable-exclusive PTE migration entries.\n\nb) In case we have a present PMD entry and we don't want to freeze\n   (\"convert to migration entries\"), simply forward PG_anon_exclusive to\n   all sub-pages, no need to temporarily clear the bit.\n\nc) In case we have a present PMD entry and want to freeze, handle it\n   similar to try_to_migrate(): try marking the page shared first.  In\n   case we fail, we ignore the \"freeze\" instruction and simply split\n   ordinarily.  try_to_migrate() will properly fail because the THP is\n   still mapped via PTEs.\n\nWhen splitting a compound anonymous folio (THP), the information about\nexclusivity is implicitly handled via the migration entries: no need to\nreplicate PG_anon_exclusive manually.\n\nI.7.  fork() handling fork() handling is relatively easy, because\nPG_anon_exclusive is only expressive for some page table entry types.\n\na) Present anonymous pages\n\npage_try_dup_anon_rmap() will mark the given subpage shared -- which will\nfail if the page is pinned.  If it failed, we have to copy (or PTE-map a\nPMD to handle it on the PTE level).\n\nNote that device exclusive entries are just a pointer at a PageAnon()\npage.  fork() will first convert a device exclusive entry to a present\npage table and handle it just like present anonymous pages.\n\nb) Device private entry\n\nDevice private entries point at PageAnon() pages that cannot be mapped\ndirectly and, therefore, cannot get pinned.\n\npage_try_dup_anon_rmap() will mark the given subpage shared, which cannot\nfail because they cannot get pinned.\n\nc) HW poison entries\n\nPG_anon_exclusive will remain untouched and is stale -- the page table\nentry is just a placeholder after all.\n\nd) Migration entries\n\nWritable and readable-exclusive entries are converted to readable entries:\npossibly shared.\n\nI.8. mprotect() handling\n\nmprotect() only has to properly handle the new readable-exclusive\nmigration entry:\n\nWhen write-protecting a migration entry that points at an anonymous page,\nremember the information about exclusivity via the \"readable-exclusive\"\nmigration entry type.\n\nII. Migration and GUP-fast\n\nWhenever replacing a present page table entry that maps an exclusive\nanonymous page by a migration entry, we have to mark the page possibly\nshared and synchronize against GUP-fast by a proper clear/invalidate+flush\nto make the following scenario impossible:\n\n1. try_to_migrate() places a migration entry after checking for GUP pins\n   and marks the page possibly shared.\n\n2. GUP-fast pins the page due to lack of synchronization\n\n3. fork() converts the \"writable/readable-exclusive\" migration entry into a\n   readable migration entry\n\n4. Migration fails due to the GUP pin (failing to freeze the refcount)\n\n5. Migration entries are restored. PG_anon_exclusive is lost\n\n-> We have a pinned page that is not marked exclusive anymore.\n\nNote that we move information about exclusivity from the page to the\nmigration entry as it otherwise highly overcomplicates fork() and\nPTE-mapping a THP.\n\nIII. Swapout and GUP-fast\n\nWhenever replacing a present page table entry that maps an exclusive\nanonymous page by a swap entry, we have to mark the page possibly shared\nand synchronize against GUP-fast by a proper clear/invalidate+flush to\nmake the following scenario impossible:\n\n1. try_to_unmap() places a swap entry after checking for GUP pins and\n   clears exclusivity information on the page.\n\n2. GUP-fast pins the page due to lack of synchronization.\n\n-> We have a pinned page that is not marked exclusive anymore.\n\nIf we'd ever store information about exclusivity in the swap entry,\nsimilar to migration handling, the same considerations as in II would\napply.  This is future work.\n\nLink: https://lkml.kernel.org/r/20220428083441.37290-13-david@redhat.com\nSigned-off-by: David Hildenbrand <david@redhat.com>\nAcked-by: Vlastimil Babka <vbabka@suse.cz>\nCc: Andrea Arcangeli <aarcange@redhat.com>\nCc: Christoph Hellwig <hch@lst.de>\nCc: David Rientjes <rientjes@google.com>\nCc: Don Dutile <ddutile@redhat.com>\nCc: Hugh Dickins <hughd@google.com>\nCc: Jan Kara <jack@suse.cz>\nCc: Jann Horn <jannh@google.com>\nCc: Jason Gunthorpe <jgg@nvidia.com>\nCc: John Hubbard <jhubbard@nvidia.com>\nCc: Khalid Aziz <khalid.aziz@oracle.com>\nCc: \"Kirill A. Shutemov\" <kirill.shutemov@linux.intel.com>\nCc: Liang Zhang <zhangliang5@huawei.com>\nCc: \"Matthew Wilcox (Oracle)\" <willy@infradead.org>\nCc: Michal Hocko <mhocko@kernel.org>\nCc: Mike Kravetz <mike.kravetz@oracle.com>\nCc: Mike Rapoport <rppt@linux.ibm.com>\nCc: Nadav Amit <namit@vmware.com>\nCc: Oded Gabbay <oded.gabbay@gmail.com>\nCc: Oleg Nesterov <oleg@redhat.com>\nCc: Pedro Demarchi Gomes <pedrodemargomes@gmail.com>\nCc: Peter Xu <peterx@redhat.com>\nCc: Rik van Riel <riel@surriel.com>\nCc: Roman Gushchin <guro@fb.com>\nCc: Shakeel Butt <shakeelb@google.com>\nCc: Yang Shi <shy828301@gmail.com>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>",
+  "full_message": "mm: remember exclusively mapped anonymous pages with PG_anon_exclusive\n\nLet's mark exclusively mapped anonymous pages with PG_anon_exclusive as\nexclusive, and use that information to make GUP pins reliable and stay\nconsistent with the page mapped into the page table even if the page table\nentry gets write-protected.\n\nWith that information at hand, we can extend our COW logic to always reuse\nanonymous pages that are exclusive.  For anonymous pages that might be\nshared, the existing logic applies.\n\nAs already documented, PG_anon_exclusive is usually only expressive in\ncombination with a page table entry.  Especially PTE vs.  PMD-mapped\nanonymous pages require more thought, some examples: due to mremap() we\ncan easily have a single compound page PTE-mapped into multiple page\ntables exclusively in a single process -- multiple page table locks apply.\nFurther, due to MADV_WIPEONFORK we might not necessarily write-protect\nall PTEs, and only some subpages might be pinned.  Long story short: once\nPTE-mapped, we have to track information about exclusivity per sub-page,\nbut until then, we can just track it for the compound page in the head\npage and not having to update a whole bunch of subpages all of the time\nfor a simple PMD mapping of a THP.\n\nFor simplicity, this commit mostly talks about \"anonymous pages\", while\nit's for THP actually \"the part of an anonymous folio referenced via a\npage table entry\".\n\nTo not spill PG_anon_exclusive code all over the mm code-base, we let the\nanon rmap code to handle all PG_anon_exclusive logic it can easily handle.\n\nIf a writable, present page table entry points at an anonymous (sub)page,\nthat (sub)page must be PG_anon_exclusive.  If GUP wants to take a reliably\npin (FOLL_PIN) on an anonymous page references via a present page table\nentry, it must only pin if PG_anon_exclusive is set for the mapped\n(sub)page.\n\nThis commit doesn't adjust GUP, so this is only implicitly handled for\nFOLL_WRITE, follow-up commits will teach GUP to also respect it for\nFOLL_PIN without FOLL_WRITE, to make all GUP pins of anonymous pages fully\nreliable.\n\nWhenever an anonymous page is to be shared (fork(), KSM), or when\ntemporarily unmapping an anonymous page (swap, migration), the relevant\nPG_anon_exclusive bit has to be cleared to mark the anonymous page\npossibly shared.  Clearing will fail if there are GUP pins on the page:\n\n* For fork(), this means having to copy the page and not being able to\n  share it.  fork() protects against concurrent GUP using the PT lock and\n  the src_mm->write_protect_seq.\n\n* For KSM, this means sharing will fail.  For swap this means, unmapping\n  will fail, For migration this means, migration will fail early.  All\n  three cases protect against concurrent GUP using the PT lock and a\n  proper clear/invalidate+flush of the relevant page table entry.\n\nThis fixes memory corruptions reported for FOLL_PIN | FOLL_WRITE, when a\npinned page gets mapped R/O and the successive write fault ends up\nreplacing the page instead of reusing it.  It improves the situation for\nO_DIRECT/vmsplice/...  that still use FOLL_GET instead of FOLL_PIN, if\nfork() is *not* involved, however swapout and fork() are still\nproblematic.  Properly using FOLL_PIN instead of FOLL_GET for these GUP\nusers will fix the issue for them.\n\nI. Details about basic handling\n\nI.1. Fresh anonymous pages\n\npage_add_new_anon_rmap() and hugepage_add_new_anon_rmap() will mark the\ngiven page exclusive via __page_set_anon_rmap(exclusive=1).  As that is\nthe mechanism fresh anonymous pages come into life (besides migration code\nwhere we copy the page->mapping), all fresh anonymous pages will start out\nas exclusive.\n\nI.2. COW reuse handling of anonymous pages\n\nWhen a COW handler stumbles over a (sub)page that's marked exclusive, it\nsimply reuses it.  Otherwise, the handler tries harder under page lock to\ndetect if the (sub)page is exclusive and can be reused.  If exclusive,\npage_move_anon_rmap() will mark the given (sub)page exclusive.\n\nNote that hugetlb code does not yet check for PageAnonExclusive(), as it\nstill uses the old COW logic that is prone to the COW security issue\nbecause hugetlb code cannot really tolerate unnecessary/wrong COW as huge\npages are a scarce resource.\n\nI.3. Migration handling\n\ntry_to_migrate() has to try marking an exclusive anonymous page shared via\npage_try_share_anon_rmap().  If it fails because there are GUP pins on the\npage, unmap fails.  migrate_vma_collect_pmd() and\n__split_huge_pmd_locked() are handled similarly.\n\nWritable migration entries implicitly point at shared anonymous pages. \nFor readable migration entries that information is stored via a new\n\"readable-exclusive\" migration entry, specific to anonymous pages.\n\nWhen restoring a migration entry in remove_migration_pte(), information\nabout exlusivity is detected via the migration entry type, and\nRMAP_EXCLUSIVE is set accordingly for\npage_add_anon_rmap()/hugepage_add_anon_rmap() to restore that information.\n\nI.4. Swapout handling\n\ntry_to_unmap() has to try marking the mapped page possibly shared via\npage_try_share_anon_rmap().  If it fails because there are GUP pins on the\npage, unmap fails.  For now, information about exclusivity is lost.  In\nthe future, we might want to remember that information in the swap entry\nin some cases, however, it requires more thought, care, and a way to store\nthat information in swap entries.\n\nI.5. Swapin handling\n\ndo_swap_page() will never stumble over exclusive anonymous pages in the\nswap cache, as try_to_migrate() prohibits that.  do_swap_page() always has\nto detect manually if an anonymous page is exclusive and has to set\nRMAP_EXCLUSIVE for page_add_anon_rmap() accordingly.\n\nI.6. THP handling\n\n__split_huge_pmd_locked() has to move the information about exclusivity\nfrom the PMD to the PTEs.\n\na) In case we have a readable-exclusive PMD migration entry, simply\n   insert readable-exclusive PTE migration entries.\n\nb) In case we have a present PMD entry and we don't want to freeze\n   (\"convert to migration entries\"), simply forward PG_anon_exclusive to\n   all sub-pages, no need to temporarily clear the bit.\n\nc) In case we have a present PMD entry and want to freeze, handle it\n   similar to try_to_migrate(): try marking the page shared first.  In\n   case we fail, we ignore the \"freeze\" instruction and simply split\n   ordinarily.  try_to_migrate() will properly fail because the THP is\n   still mapped via PTEs.\n\nWhen splitting a compound anonymous folio (THP), the information about\nexclusivity is implicitly handled via the migration entries: no need to\nreplicate PG_anon_exclusive manually.\n\nI.7.  fork() handling fork() handling is relatively easy, because\nPG_anon_exclusive is only expressive for some page table entry types.\n\na) Present anonymous pages\n\npage_try_dup_anon_rmap() will mark the given subpage shared -- which will\nfail if the page is pinned.  If it failed, we have to copy (or PTE-map a\nPMD to handle it on the PTE level).\n\nNote that device exclusive entries are just a pointer at a PageAnon()\npage.  fork() will first convert a device exclusive entry to a present\npage table and handle it just like present anonymous pages.\n\nb) Device private entry\n\nDevice private entries point at PageAnon() pages that cannot be mapped\ndirectly and, therefore, cannot get pinned.\n\npage_try_dup_anon_rmap() will mark the given subpage shared, which cannot\nfail because they cannot get pinned.\n\nc) HW poison entries\n\nPG_anon_exclusive will remain untouched and is stale -- the page table\nentry is just a placeholder after all.\n\nd) Migration entries\n\nWritable and readable-exclusive entries are converted to readable entries:\npossibly shared.\n\nI.8. mprotect() handling\n\nmprotect() only has to properly handle the new readable-exclusive\nmigration entry:\n\nWhen write-protecting a migration entry that points at an anonymous page,\nremember the information about exclusivity via the \"readable-exclusive\"\nmigration entry type.\n\nII. Migration and GUP-fast\n\nWhenever replacing a present page table entry that maps an exclusive\nanonymous page by a migration entry, we have to mark the page possibly\nshared and synchronize against GUP-fast by a proper clear/invalidate+flush\nto make the following scenario impossible:\n\n1. try_to_migrate() places a migration entry after checking for GUP pins\n   and marks the page possibly shared.\n\n2. GUP-fast pins the page due to lack of synchronization\n\n3. fork() converts the \"writable/readable-exclusive\" migration entry into a\n   readable migration entry\n\n4. Migration fails due to the GUP pin (failing to freeze the refcount)\n\n5. Migration entries are restored. PG_anon_exclusive is lost\n\n-> We have a pinned page that is not marked exclusive anymore.\n\nNote that we move information about exclusivity from the page to the\nmigration entry as it otherwise highly overcomplicates fork() and\nPTE-mapping a THP.\n\nIII. Swapout and GUP-fast\n\nWhenever replacing a present page table entry that maps an exclusive\nanonymous page by a swap entry, we have to mark the page possibly shared\nand synchronize against GUP-fast by a proper clear/invalidate+flush to\nmake the following scenario impossible:\n\n1. try_to_unmap() places a swap entry after checking for GUP pins and\n   clears exclusivity information on the page.\n\n2. GUP-fast pins the page due to lack of synchronization.\n\n-> We have a pinned page that is not marked exclusive anymore.\n\nIf we'd ever store information about exclusivity in the swap entry,\nsimilar to migration handling, the same considerations as in II would\napply.  This is future work.\n\nLink: https://lkml.kernel.org/r/20220428083441.37290-13-david@redhat.com\nSigned-off-by: David Hildenbrand <david@redhat.com>\nAcked-by: Vlastimil Babka <vbabka@suse.cz>\nCc: Andrea Arcangeli <aarcange@redhat.com>\nCc: Christoph Hellwig <hch@lst.de>\nCc: David Rientjes <rientjes@google.com>\nCc: Don Dutile <ddutile@redhat.com>\nCc: Hugh Dickins <hughd@google.com>\nCc: Jan Kara <jack@suse.cz>\nCc: Jann Horn <jannh@google.com>\nCc: Jason Gunthorpe <jgg@nvidia.com>\nCc: John Hubbard <jhubbard@nvidia.com>\nCc: Khalid Aziz <khalid.aziz@oracle.com>\nCc: \"Kirill A. Shutemov\" <kirill.shutemov@linux.intel.com>\nCc: Liang Zhang <zhangliang5@huawei.com>\nCc: \"Matthew Wilcox (Oracle)\" <willy@infradead.org>\nCc: Michal Hocko <mhocko@kernel.org>\nCc: Mike Kravetz <mike.kravetz@oracle.com>\nCc: Mike Rapoport <rppt@linux.ibm.com>\nCc: Nadav Amit <namit@vmware.com>\nCc: Oded Gabbay <oded.gabbay@gmail.com>\nCc: Oleg Nesterov <oleg@redhat.com>\nCc: Pedro Demarchi Gomes <pedrodemargomes@gmail.com>\nCc: Peter Xu <peterx@redhat.com>\nCc: Rik van Riel <riel@surriel.com>\nCc: Roman Gushchin <guro@fb.com>\nCc: Shakeel Butt <shakeelb@google.com>\nCc: Yang Shi <shy828301@gmail.com>\nSigned-off-by: Andrew Morton <akpm@linux-foundation.org>",
+  "author_name": "David Hildenbrand",
+  "author_email": "david@redhat.com",
+  "author_date": "Mon May 9 18:20:44 2022 -0700",
+  "author_date_iso": "2022-05-09T18:20:44-07:00",
+  "committer_name": "akpm",
+  "committer_email": "akpm@linux-foundation.org",
+  "committer_date": "Mon May 9 18:20:44 2022 -0700",
+  "committer_date_iso": "2022-05-09T18:20:44-07:00",
+  "files_changed": [
+    "include/linux/rmap.h",
+    "include/linux/swap.h",
+    "include/linux/swapops.h",
+    "mm/huge_memory.c",
+    "mm/hugetlb.c",
+    "mm/ksm.c",
+    "mm/memory.c",
+    "mm/migrate.c",
+    "mm/migrate_device.c",
+    "mm/mprotect.c",
+    "mm/rmap.c"
+  ],
+  "files_changed_count": 11,
+  "stats": [
+    {
+      "file": "include/linux/rmap.h",
+      "insertions": 40,
+      "deletions": 0
+    },
+    {
+      "file": "include/linux/swap.h",
+      "insertions": 11,
+      "deletions": 4
+    },
+    {
+      "file": "include/linux/swapops.h",
+      "insertions": 25,
+      "deletions": 0
+    },
+    {
+      "file": "mm/huge_memory.c",
+      "insertions": 71,
+      "deletions": 7
+    },
+    {
+      "file": "mm/hugetlb.c",
+      "insertions": 11,
+      "deletions": 4
+    },
+    {
+      "file": "mm/ksm.c",
+      "insertions": 12,
+      "deletions": 1
+    },
+    {
+      "file": "mm/memory.c",
+      "insertions": 25,
+      "deletions": 8
+    },
+    {
+      "file": "mm/migrate.c",
+      "insertions": 12,
+      "deletions": 2
+    },
+    {
+      "file": "mm/migrate_device.c",
+      "insertions": 20,
+      "deletions": 1
+    },
+    {
+      "file": "mm/mprotect.c",
+      "insertions": 6,
+      "deletions": 2
+    },
+    {
+      "file": "mm/rmap.c",
+      "insertions": 56,
+      "deletions": 5
+    }
+  ],
+  "total_insertions": 289,
+  "total_deletions": 34,
+  "total_changes": 323,
+  "parents": [
+    "78fbe906cc900b33ce078102e13e0e99b5b8c406"
+  ],
+  "branches": [
+    "* development",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "security issue"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "include/linux/rmap.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/ksm.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/swapops.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/huge_memory.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/swap.h",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/mprotect.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/migrate.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/migrate_device.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/memory.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/hugetlb.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "mm/rmap.c",
+      "pre_version": false,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

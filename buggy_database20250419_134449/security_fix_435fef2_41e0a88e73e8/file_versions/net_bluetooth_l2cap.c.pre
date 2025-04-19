@@ -1,0 +1,46 @@
+commit 6a8d3010b313d99adbb28f1826fac0234395bb26
+Author: Marcel Holtmann <marcel@holtmann.org>
+Date:   Fri Feb 6 23:56:36 2009 +0100
+
+    Bluetooth: Fix double L2CAP connection request
+    
+    If the remote L2CAP server uses authentication pending stage and
+    encryption is enabled it can happen that a L2CAP connection request is
+    sent twice due to a race condition in the connection state machine.
+    
+    When the remote side indicates any kind of connection pending, then
+    track this state and skip sending of L2CAP commands for this period.
+    
+    Signed-off-by: Marcel Holtmann <marcel@holtmann.org>
+
+diff --git a/net/bluetooth/l2cap.c b/net/bluetooth/l2cap.c
+index 07fdbc7dd54d..01f750142d55 100644
+--- a/net/bluetooth/l2cap.c
++++ b/net/bluetooth/l2cap.c
+@@ -1946,11 +1946,14 @@ static inline int l2cap_connect_rsp(struct l2cap_conn *conn, struct l2cap_cmd_hd
+ 		l2cap_pi(sk)->dcid = dcid;
+ 		l2cap_pi(sk)->conf_state |= L2CAP_CONF_REQ_SENT;
+ 
++		l2cap_pi(sk)->conf_state &= ~L2CAP_CONF_CONNECT_PEND;
++
+ 		l2cap_send_cmd(conn, l2cap_get_ident(conn), L2CAP_CONF_REQ,
+ 					l2cap_build_conf_req(sk, req), req);
+ 		break;
+ 
+ 	case L2CAP_CR_PEND:
++		l2cap_pi(sk)->conf_state |= L2CAP_CONF_CONNECT_PEND;
+ 		break;
+ 
+ 	default:
+@@ -2478,6 +2481,11 @@ static int l2cap_security_cfm(struct hci_conn *hcon, u8 status, u8 encrypt)
+ 	for (sk = l->head; sk; sk = l2cap_pi(sk)->next_c) {
+ 		bh_lock_sock(sk);
+ 
++		if (l2cap_pi(sk)->conf_state & L2CAP_CONF_CONNECT_PEND) {
++			bh_unlock_sock(sk);
++			continue;
++		}
++
+ 		if (!status && (sk->sk_state == BT_CONNECTED ||
+ 						sk->sk_state == BT_CONFIG)) {
+ 			l2cap_check_encryption(sk, encrypt);

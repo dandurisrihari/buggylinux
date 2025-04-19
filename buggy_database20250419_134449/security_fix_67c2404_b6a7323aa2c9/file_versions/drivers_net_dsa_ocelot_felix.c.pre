@@ -1,0 +1,56 @@
+commit 886e1387c73d895ad0eff53353913081983570c0
+Author: Vladimir Oltean <vladimir.oltean@nxp.com>
+Date:   Mon Jul 13 19:57:03 2020 +0300
+
+    net: mscc: ocelot: convert QSYS_SWITCH_PORT_MODE and SYS_PORT_MODE to regfields
+    
+    Currently Felix and Ocelot share the same bit layout in these per-port
+    registers, but Seville does not. So we need reg_fields for that.
+    
+    Actually since these are per-port registers, we need to also specify the
+    number of ports, and register size per port, and use the regmap API for
+    multiple ports.
+    
+    There's a more subtle point to be made about the other 2 register
+    fields:
+    - QSYS_SWITCH_PORT_MODE_SCH_NEXT_CFG
+    - QSYS_SWITCH_PORT_MODE_INGRESS_DROP_MODE
+    which we are not writing any longer, for 2 reasons:
+    - Using the previous API (ocelot_write_rix), we were only writing 1 for
+      Felix and Ocelot, which was their hardware-default value, and which
+      there wasn't any intention in changing.
+    - In the case of SCH_NEXT_CFG, in fact Seville does not have this
+      register field at all, and therefore, if we want to have common code
+      we would be required to not write to it.
+    
+    Signed-off-by: Vladimir Oltean <vladimir.oltean@nxp.com>
+    Reviewed-by: Florian Fainelli <f.fainelli@gmail.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/dsa/ocelot/felix.c b/drivers/net/dsa/ocelot/felix.c
+index bf0bd5c7b12c..4b255ed614e4 100644
+--- a/drivers/net/dsa/ocelot/felix.c
++++ b/drivers/net/dsa/ocelot/felix.c
+@@ -249,8 +249,7 @@ static void felix_phylink_mac_link_down(struct dsa_switch *ds, int port,
+ 	struct ocelot_port *ocelot_port = ocelot->ports[port];
+ 
+ 	ocelot_port_writel(ocelot_port, 0, DEV_MAC_ENA_CFG);
+-	ocelot_rmw_rix(ocelot, 0, QSYS_SWITCH_PORT_MODE_PORT_ENA,
+-		       QSYS_SWITCH_PORT_MODE, port);
++	ocelot_fields_write(ocelot, port, QSYS_SWITCH_PORT_MODE_PORT_ENA, 0);
+ }
+ 
+ static void felix_phylink_mac_link_up(struct dsa_switch *ds, int port,
+@@ -326,10 +325,8 @@ static void felix_phylink_mac_link_up(struct dsa_switch *ds, int port,
+ 			 ANA_PORT_PORT_CFG, port);
+ 
+ 	/* Core: Enable port for frame transfer */
+-	ocelot_write_rix(ocelot, QSYS_SWITCH_PORT_MODE_INGRESS_DROP_MODE |
+-			 QSYS_SWITCH_PORT_MODE_SCH_NEXT_CFG(1) |
+-			 QSYS_SWITCH_PORT_MODE_PORT_ENA,
+-			 QSYS_SWITCH_PORT_MODE, port);
++	ocelot_fields_write(ocelot, port,
++			    QSYS_SWITCH_PORT_MODE_PORT_ENA, 1);
+ 
+ 	if (felix->info->pcs_link_up)
+ 		felix->info->pcs_link_up(ocelot, port, link_an_mode, interface,

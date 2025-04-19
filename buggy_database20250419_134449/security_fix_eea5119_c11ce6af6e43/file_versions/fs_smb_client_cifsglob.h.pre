@@ -1,0 +1,51 @@
+commit 021840c1426c012a812f8b8d9413f3cf9d3e0b9b
+Author: Pali Rohár <pali@kernel.org>
+Date:   Sun Dec 29 15:31:05 2024 +0100
+
+    cifs: Fix struct FILE_ALL_INFO
+    
+    struct FILE_ALL_INFO for level 263 (0x107) used by QPathInfo does not have
+    any IndexNumber, AccessFlags, IndexNumber1, CurrentByteOffset, Mode or
+    AlignmentRequirement members. So remove all of them.
+    
+    Also adjust code in move_cifs_info_to_smb2() function which converts struct
+    FILE_ALL_INFO to struct smb2_file_all_info.
+    
+    Fixed content of struct FILE_ALL_INFO was verified that is correct against:
+    * [MS-CIFS] section 2.2.8.3.10 SMB_QUERY_FILE_ALL_INFO
+    * Samba server implementation of trans2 query file/path for level 263
+    * Packet structure tests against Windows SMB servers
+    
+    This change fixes CIFSSMBQFileInfo() and CIFSSMBQPathInfo() functions which
+    directly copy received FILE_ALL_INFO network buffers into kernel structures
+    of FILE_ALL_INFO type.
+    
+    struct FILE_ALL_INFO is the response structure returned by the SMB server.
+    So the incorrect definition of this structure can lead to returning bogus
+    information in stat() call.
+    
+    Signed-off-by: Pali Rohár <pali@kernel.org>
+    Signed-off-by: Steve French <stfrench@microsoft.com>
+
+diff --git a/fs/smb/client/cifsglob.h b/fs/smb/client/cifsglob.h
+index ee9754fad3e8..5ba6b46fe9d1 100644
+--- a/fs/smb/client/cifsglob.h
++++ b/fs/smb/client/cifsglob.h
+@@ -2203,11 +2203,13 @@ static inline size_t ntlmssp_workstation_name_size(const struct cifs_ses *ses)
+ 
+ static inline void move_cifs_info_to_smb2(struct smb2_file_all_info *dst, const FILE_ALL_INFO *src)
+ {
+-	memcpy(dst, src, (size_t)((u8 *)&src->AccessFlags - (u8 *)src));
+-	dst->AccessFlags = src->AccessFlags;
+-	dst->CurrentByteOffset = src->CurrentByteOffset;
+-	dst->Mode = src->Mode;
+-	dst->AlignmentRequirement = src->AlignmentRequirement;
++	memcpy(dst, src, (size_t)((u8 *)&src->EASize - (u8 *)src));
++	dst->IndexNumber = 0;
++	dst->EASize = src->EASize;
++	dst->AccessFlags = 0;
++	dst->CurrentByteOffset = 0;
++	dst->Mode = 0;
++	dst->AlignmentRequirement = 0;
+ 	dst->FileNameLength = src->FileNameLength;
+ }

@@ -1,0 +1,116 @@
+{
+  "hash": "b1c0ec3599f42ad372063b0235a3c33f65eb1e30",
+  "hash_short": "b1c0ec35",
+  "subject": "fscrypt: add FS_IOC_REMOVE_ENCRYPTION_KEY ioctl",
+  "body": "Add a new fscrypt ioctl, FS_IOC_REMOVE_ENCRYPTION_KEY.  This ioctl\nremoves an encryption key that was added by FS_IOC_ADD_ENCRYPTION_KEY.\nIt wipes the secret key itself, then \"locks\" the encrypted files and\ndirectories that had been unlocked using that key -- implemented by\nevicting the relevant dentries and inodes from the VFS caches.\n\nThe problem this solves is that many fscrypt users want the ability to\nremove encryption keys, causing the corresponding encrypted directories\nto appear \"locked\" (presented in ciphertext form) again.  Moreover,\nusers want removing an encryption key to *really* remove it, in the\nsense that the removed keys cannot be recovered even if kernel memory is\ncompromised, e.g. by the exploit of a kernel security vulnerability or\nby a physical attack.  This is desirable after a user logs out of the\nsystem, for example.  In many cases users even already assume this to be\nthe case and are surprised to hear when it's not.\n\nIt is not sufficient to simply unlink the master key from the keyring\n(or to revoke or invalidate it), since the actual encryption transform\nobjects are still pinned in memory by their inodes.  Therefore, to\nreally remove a key we must also evict the relevant inodes.\n\nCurrently one workaround is to run 'sync && echo 2 >\n/proc/sys/vm/drop_caches'.  But, that evicts all unused inodes in the\nsystem rather than just the inodes associated with the key being\nremoved, causing severe performance problems.  Moreover, it requires\nroot privileges, so regular users can't \"lock\" their encrypted files.\n\nAnother workaround, used in Chromium OS kernels, is to add a new\nVFS-level ioctl FS_IOC_DROP_CACHE which is a more restricted version of\ndrop_caches that operates on a single super_block.  It does:\n\n        shrink_dcache_sb(sb);\n        invalidate_inodes(sb, false);\n\nBut it's still a hack.  Yet, the major users of filesystem encryption\nwant this feature badly enough that they are actually using these hacks.\n\nTo properly solve the problem, start maintaining a list of the inodes\nwhich have been \"unlocked\" using each master key.  Originally this\nwasn't possible because the kernel didn't keep track of in-use master\nkeys at all.  But, with the ->s_master_keys keyring it is now possible.\n\nThen, add an ioctl FS_IOC_REMOVE_ENCRYPTION_KEY.  It finds the specified\nmaster key in ->s_master_keys, then wipes the secret key itself, which\nprevents any additional inodes from being unlocked with the key.  Then,\nit syncs the filesystem and evicts the inodes in the key's list.  The\nnormal inode eviction code will free and wipe the per-file keys (in\n->i_crypt_info).  Note that freeing ->i_crypt_info without evicting the\ninodes was also considered, but would have been racy.\n\nSome inodes may still be in use when a master key is removed, and we\ncan't simply revoke random file descriptors, mmap's, etc.  Thus, the\nioctl simply skips in-use inodes, and returns -EBUSY to indicate that\nsome inodes weren't evicted.  The master key *secret* is still removed,\nbut the fscrypt_master_key struct remains to keep track of the remaining\ninodes.  Userspace can then retry the ioctl to evict the remaining\ninodes.  Alternatively, if userspace adds the key again, the refreshed\nsecret will be associated with the existing list of inodes so they\nremain correctly tracked for future key removals.\n\nThe ioctl doesn't wipe pagecache pages.  Thus, we tolerate that after a\nkernel compromise some portions of plaintext file contents may still be\nrecoverable from memory.  This can be solved by enabling page poisoning\nsystem-wide, which security conscious users may choose to do.  But it's\nvery difficult to solve otherwise, e.g. note that plaintext file\ncontents may have been read in other places than pagecache pages.\n\nLike FS_IOC_ADD_ENCRYPTION_KEY, FS_IOC_REMOVE_ENCRYPTION_KEY is\ninitially restricted to privileged users only.  This is sufficient for\nsome use cases, but not all.  A later patch will relax this restriction,\nbut it will require introducing key hashes, among other changes.\n\nReviewed-by: Theodore Ts'o <tytso@mit.edu>\nSigned-off-by: Eric Biggers <ebiggers@google.com>",
+  "full_message": "fscrypt: add FS_IOC_REMOVE_ENCRYPTION_KEY ioctl\n\nAdd a new fscrypt ioctl, FS_IOC_REMOVE_ENCRYPTION_KEY.  This ioctl\nremoves an encryption key that was added by FS_IOC_ADD_ENCRYPTION_KEY.\nIt wipes the secret key itself, then \"locks\" the encrypted files and\ndirectories that had been unlocked using that key -- implemented by\nevicting the relevant dentries and inodes from the VFS caches.\n\nThe problem this solves is that many fscrypt users want the ability to\nremove encryption keys, causing the corresponding encrypted directories\nto appear \"locked\" (presented in ciphertext form) again.  Moreover,\nusers want removing an encryption key to *really* remove it, in the\nsense that the removed keys cannot be recovered even if kernel memory is\ncompromised, e.g. by the exploit of a kernel security vulnerability or\nby a physical attack.  This is desirable after a user logs out of the\nsystem, for example.  In many cases users even already assume this to be\nthe case and are surprised to hear when it's not.\n\nIt is not sufficient to simply unlink the master key from the keyring\n(or to revoke or invalidate it), since the actual encryption transform\nobjects are still pinned in memory by their inodes.  Therefore, to\nreally remove a key we must also evict the relevant inodes.\n\nCurrently one workaround is to run 'sync && echo 2 >\n/proc/sys/vm/drop_caches'.  But, that evicts all unused inodes in the\nsystem rather than just the inodes associated with the key being\nremoved, causing severe performance problems.  Moreover, it requires\nroot privileges, so regular users can't \"lock\" their encrypted files.\n\nAnother workaround, used in Chromium OS kernels, is to add a new\nVFS-level ioctl FS_IOC_DROP_CACHE which is a more restricted version of\ndrop_caches that operates on a single super_block.  It does:\n\n        shrink_dcache_sb(sb);\n        invalidate_inodes(sb, false);\n\nBut it's still a hack.  Yet, the major users of filesystem encryption\nwant this feature badly enough that they are actually using these hacks.\n\nTo properly solve the problem, start maintaining a list of the inodes\nwhich have been \"unlocked\" using each master key.  Originally this\nwasn't possible because the kernel didn't keep track of in-use master\nkeys at all.  But, with the ->s_master_keys keyring it is now possible.\n\nThen, add an ioctl FS_IOC_REMOVE_ENCRYPTION_KEY.  It finds the specified\nmaster key in ->s_master_keys, then wipes the secret key itself, which\nprevents any additional inodes from being unlocked with the key.  Then,\nit syncs the filesystem and evicts the inodes in the key's list.  The\nnormal inode eviction code will free and wipe the per-file keys (in\n->i_crypt_info).  Note that freeing ->i_crypt_info without evicting the\ninodes was also considered, but would have been racy.\n\nSome inodes may still be in use when a master key is removed, and we\ncan't simply revoke random file descriptors, mmap's, etc.  Thus, the\nioctl simply skips in-use inodes, and returns -EBUSY to indicate that\nsome inodes weren't evicted.  The master key *secret* is still removed,\nbut the fscrypt_master_key struct remains to keep track of the remaining\ninodes.  Userspace can then retry the ioctl to evict the remaining\ninodes.  Alternatively, if userspace adds the key again, the refreshed\nsecret will be associated with the existing list of inodes so they\nremain correctly tracked for future key removals.\n\nThe ioctl doesn't wipe pagecache pages.  Thus, we tolerate that after a\nkernel compromise some portions of plaintext file contents may still be\nrecoverable from memory.  This can be solved by enabling page poisoning\nsystem-wide, which security conscious users may choose to do.  But it's\nvery difficult to solve otherwise, e.g. note that plaintext file\ncontents may have been read in other places than pagecache pages.\n\nLike FS_IOC_ADD_ENCRYPTION_KEY, FS_IOC_REMOVE_ENCRYPTION_KEY is\ninitially restricted to privileged users only.  This is sufficient for\nsome use cases, but not all.  A later patch will relax this restriction,\nbut it will require introducing key hashes, among other changes.\n\nReviewed-by: Theodore Ts'o <tytso@mit.edu>\nSigned-off-by: Eric Biggers <ebiggers@google.com>",
+  "author_name": "Eric Biggers",
+  "author_email": "ebiggers@google.com",
+  "author_date": "Sun Aug 4 19:35:46 2019 -0700",
+  "author_date_iso": "2019-08-04T19:35:46-07:00",
+  "committer_name": "Eric Biggers",
+  "committer_email": "ebiggers@google.com",
+  "committer_date": "Mon Aug 12 19:18:49 2019 -0700",
+  "committer_date_iso": "2019-08-12T19:18:49-07:00",
+  "files_changed": [
+    "fs/crypto/fscrypt_private.h",
+    "fs/crypto/keyring.c",
+    "fs/crypto/keysetup.c",
+    "include/linux/fscrypt.h",
+    "include/uapi/linux/fscrypt.h"
+  ],
+  "files_changed_count": 5,
+  "stats": [
+    {
+      "file": "fs/crypto/fscrypt_private.h",
+      "insertions": 52,
+      "deletions": 1
+    },
+    {
+      "file": "fs/crypto/keyring.c",
+      "insertions": 259,
+      "deletions": 1
+    },
+    {
+      "file": "fs/crypto/keysetup.c",
+      "insertions": 100,
+      "deletions": 3
+    },
+    {
+      "file": "include/linux/fscrypt.h",
+      "insertions": 12,
+      "deletions": 0
+    },
+    {
+      "file": "include/uapi/linux/fscrypt.h",
+      "insertions": 9,
+      "deletions": 0
+    }
+  ],
+  "total_insertions": 432,
+  "total_deletions": 5,
+  "total_changes": 437,
+  "parents": [
+    "22d94f493bfb408fdd764f7b1d0363af2122fba5"
+  ],
+  "branches": [
+    "* development",
+    "master",
+    "remotes/origin/HEAD -> origin/master",
+    "remotes/origin/master"
+  ],
+  "tags": [
+    "v5.4",
+    "v5.4-rc1",
+    "v5.4-rc2",
+    "v5.4-rc3",
+    "v5.4-rc4",
+    "v5.4-rc5",
+    "v5.4-rc6",
+    "v5.4-rc7",
+    "v5.4-rc8",
+    "v5.5"
+  ],
+  "is_merge": false,
+  "security_info": {
+    "cve_ids": [],
+    "security_keywords": [
+      "security vulnerability",
+      "vulnerability",
+      "exploit"
+    ]
+  },
+  "fix_type": "security",
+  "file_results": [
+    {
+      "file": "fs/crypto/fscrypt_private.h",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/crypto/keyring.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "fs/crypto/keysetup.c",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/linux/fscrypt.h",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    },
+    {
+      "file": "include/uapi/linux/fscrypt.h",
+      "pre_version": true,
+      "post_version": true,
+      "patch": true
+    }
+  ]
+}

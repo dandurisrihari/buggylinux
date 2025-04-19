@@ -1,0 +1,47 @@
+commit 94034c40ab4a3fcf581fbc7f8fdf4e29943c4a24
+Author: Mathy Vanhoef <Mathy.Vanhoef@kuleuven.be>
+Date:   Tue May 11 20:02:43 2021 +0200
+
+    mac80211: prevent mixed key and fragment cache attacks
+    
+    Simultaneously prevent mixed key attacks (CVE-2020-24587) and fragment
+    cache attacks (CVE-2020-24586). This is accomplished by assigning a
+    unique color to every key (per interface) and using this to track which
+    key was used to decrypt a fragment. When reassembling frames, it is
+    now checked whether all fragments were decrypted using the same key.
+    
+    To assure that fragment cache attacks are also prevented, the ID that is
+    assigned to keys is unique even over (re)associations and (re)connects.
+    This means fragments separated by a (re)association or (re)connect will
+    not be reassembled. Because mac80211 now also prevents the reassembly of
+    mixed encrypted and plaintext fragments, all cache attacks are prevented.
+    
+    Cc: stable@vger.kernel.org
+    Signed-off-by: Mathy Vanhoef <Mathy.Vanhoef@kuleuven.be>
+    Link: https://lore.kernel.org/r/20210511200110.3f8290e59823.I622a67769ed39257327a362cfc09c812320eb979@changeid
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+diff --git a/net/mac80211/rx.c b/net/mac80211/rx.c
+index 65fc674e27cc..531232b91bc4 100644
+--- a/net/mac80211/rx.c
++++ b/net/mac80211/rx.c
+@@ -2255,6 +2255,7 @@ ieee80211_rx_h_defragment(struct ieee80211_rx_data *rx)
+ 			 * next fragment has a sequential PN value.
+ 			 */
+ 			entry->check_sequential_pn = true;
++			entry->key_color = rx->key->color;
+ 			memcpy(entry->last_pn,
+ 			       rx->key->u.ccmp.rx_pn[queue],
+ 			       IEEE80211_CCMP_PN_LEN);
+@@ -2292,6 +2293,11 @@ ieee80211_rx_h_defragment(struct ieee80211_rx_data *rx)
+ 
+ 		if (!requires_sequential_pn(rx, fc))
+ 			return RX_DROP_UNUSABLE;
++
++		/* Prevent mixed key and fragment cache attacks */
++		if (entry->key_color != rx->key->color)
++			return RX_DROP_UNUSABLE;
++
+ 		memcpy(pn, entry->last_pn, IEEE80211_CCMP_PN_LEN);
+ 		for (i = IEEE80211_CCMP_PN_LEN - 1; i >= 0; i--) {
+ 			pn[i]++;

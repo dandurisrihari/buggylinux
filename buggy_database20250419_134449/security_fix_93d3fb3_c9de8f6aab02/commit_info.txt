@@ -1,0 +1,67 @@
+Commit Hash: 93d3fb35aa10a8417f923871c7c58c9ad81d7a08
+Subject: media: atomisp: Remove watchdog timer
+
+
+Security Keywords:
+- injection
+
+Full commit message:
+media: atomisp: Remove watchdog timer
+
+The watchdog timer code to recover from the ISP getting stuck has several
+major issues:
+
+1. There is no way to do fault injection and normally the ISP does not
+get stuck, so is it is impossible to test it.
+
+2. It in essence just stops all streams, resets the ISP and then brings
+everything back up. Userspace can easily do this itself by using a
+timeout on dqbuf and then closing (which causes a poweroff) +
+re-opening the device. Doing this in userspace (if it ever turns out
+to be necessary) greatly simplifies the kernel code and in general
+will be a more robust solution.
+
+Even just a quick look at the code finds several more issues:
+
+3. The need to sync-cancel the timers + work on streamoff requires
+isp->mutex to be dropped halfway during the ioctl opening all sorts of
+races.
+
+4. The atomisp code supports setting up 2 pipelines, streaming from
+two sensors at the same time. But there is only a single wdt_work
+and stopping one of the 2 streams will cancel the timers + work,
+stopping the wdt even though the other stream might still be running.
+
+5. In case atomisp_css_flush() the sync cancel is done while keeping
+isp->mutex locked, causing a deadlock when racing with wdt_work which
+also takes isp->mutex.
+
+6. Even though the watchdog is purely a software/driver thing which
+just checkes that new frames keep coming in, there are 2 completely
+different implementations for the ISP2400/ISP2401 which is not
+necessary at all.
+
+So all in all I believe that it is better to just remove the current
+watchdog implementation. Fixing all the issues with the current
+implementation will be so much work, that if it turns out that we do
+need something like this then doing a clean re-implementation from
+scratch will be better anyways.
+
+wdt_work was also (ab)used to reset the ISP after the firmware signalled
+an fw-assert error through the irq, add a new assert_recover_work to
+replace this.
+
+Reviewed-by: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+Signed-off-by: Hans de Goede <hdegoede@redhat.com>
+Signed-off-by: Mauro Carvalho Chehab <mchehab@kernel.org>
+
+Metadata:
+Author: Hans de Goede <hdegoede@redhat.com>
+Author Date: Sat Sep 3 23:26:27 2022 +0200
+Committer: Mauro Carvalho Chehab <mchehab@kernel.org>
+Commit Date: Sat Sep 24 10:07:13 2022 +0200
+
+Files Changed: 7
+Lines Added: 9
+Lines Removed: 539
+Total Changes: 548
