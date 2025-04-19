@@ -1,0 +1,42 @@
+commit aae4a3d811753d3f79c43c932b8f7d1bcbf42fb0
+Author: Chris Wilson <chris@chris-wilson.co.uk>
+Date:   Mon Feb 13 17:15:44 2017 +0000
+
+    drm/i915: Use fault-injection to force the shrinker to run in live GTT tests
+    
+    It is possible whilst allocating the page-directory tree for a ppgtt
+    bind that the shrinker may run and reap unused parts of the tree. If the
+    shrinker happens to remove a chunk of the tree that the
+    allocate_va_range has already processed, we may then try to insert into
+    the dangling tree. This test uses the fault-injection framework to force
+    the shrinker to be invoked before we allocate new pages, i.e. new chunks
+    of the PD tree.
+    
+    References: https://bugs.freedesktop.org/show_bug.cgi?id=99295
+    Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Reviewed-by: Matthew Auld <matthew.auld@intel.com>
+
+diff --git a/drivers/gpu/drm/i915/i915_gem_gtt.c b/drivers/gpu/drm/i915/i915_gem_gtt.c
+index 9daea3cd9cdc..f8ac69380a0f 100644
+--- a/drivers/gpu/drm/i915/i915_gem_gtt.c
++++ b/drivers/gpu/drm/i915/i915_gem_gtt.c
+@@ -23,6 +23,9 @@
+  *
+  */
+ 
++#include <linux/slab.h> /* fault-inject.h is not standalone! */
++
++#include <linux/fault-inject.h>
+ #include <linux/log2.h>
+ #include <linux/random.h>
+ #include <linux/seq_file.h>
+@@ -345,6 +348,9 @@ static int __setup_page_dma(struct drm_i915_private *dev_priv,
+ {
+ 	struct device *kdev = &dev_priv->drm.pdev->dev;
+ 
++	if (I915_SELFTEST_ONLY(should_fail(&dev_priv->vm_fault, 1)))
++		i915_gem_shrink_all(dev_priv);
++
+ 	p->page = alloc_page(flags);
+ 	if (!p->page)
+ 		return -ENOMEM;

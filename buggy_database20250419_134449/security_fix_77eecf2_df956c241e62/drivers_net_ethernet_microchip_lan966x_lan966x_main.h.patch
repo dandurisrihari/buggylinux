@@ -1,0 +1,66 @@
+commit 77eecf25bd9d2f07673b3a62b86ba1b224b65d9e
+Author: Horatiu Vultur <horatiu.vultur@microchip.com>
+Date:   Mon Jan 31 11:01:20 2022 +0100
+
+    net: lan966x: Update extraction/injection for timestamping
+    
+    Update both the extraction and injection to do timestamping of the
+    frames. The extraction is always doing the timestamping while for
+    injection is doing the timestamping only if it is configured.
+    
+    Signed-off-by: Horatiu Vultur <horatiu.vultur@microchip.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/microchip/lan966x/lan966x_main.h b/drivers/net/ethernet/microchip/lan966x/lan966x_main.h
+index 55fa5e56b8d1..03c6a4f34ae2 100644
+--- a/drivers/net/ethernet/microchip/lan966x/lan966x_main.h
++++ b/drivers/net/ethernet/microchip/lan966x/lan966x_main.h
+@@ -86,6 +86,16 @@ struct lan966x_phc {
+ 	u8 index;
+ };
+ 
++struct lan966x_skb_cb {
++	u8 rew_op;
++	u16 ts_id;
++	unsigned long jiffies;
++};
++
++#define LAN966X_PTP_TIMEOUT		msecs_to_jiffies(10)
++#define LAN966X_SKB_CB(skb) \
++	((struct lan966x_skb_cb *)((skb)->cb))
++
+ struct lan966x {
+ 	struct device *dev;
+ 
+@@ -134,7 +144,9 @@ struct lan966x {
+ 	bool ptp;
+ 	struct lan966x_phc phc[LAN966X_PHC_COUNT];
+ 	spinlock_t ptp_clock_lock; /* lock for phc */
++	spinlock_t ptp_ts_id_lock; /* lock for ts_id */
+ 	struct mutex ptp_lock; /* lock for ptp interface state */
++	u16 ptp_skbs;
+ };
+ 
+ struct lan966x_port_config {
+@@ -166,6 +178,8 @@ struct lan966x_port {
+ 	struct fwnode_handle *fwnode;
+ 
+ 	u8 ptp_cmd;
++	u16 ts_id;
++	struct sk_buff_head tx_skbs;
+ };
+ 
+ extern const struct phylink_mac_ops lan966x_phylink_mac_ops;
+@@ -256,6 +270,12 @@ int lan966x_ptp_init(struct lan966x *lan966x);
+ void lan966x_ptp_deinit(struct lan966x *lan966x);
+ int lan966x_ptp_hwtstamp_set(struct lan966x_port *port, struct ifreq *ifr);
+ int lan966x_ptp_hwtstamp_get(struct lan966x_port *port, struct ifreq *ifr);
++void lan966x_ptp_rxtstamp(struct lan966x *lan966x, struct sk_buff *skb,
++			  u64 timestamp);
++int lan966x_ptp_txtstamp_request(struct lan966x_port *port,
++				 struct sk_buff *skb);
++void lan966x_ptp_txtstamp_release(struct lan966x_port *port,
++				  struct sk_buff *skb);
+ 
+ static inline void __iomem *lan_addr(void __iomem *base[],
+ 				     int id, int tinst, int tcnt,

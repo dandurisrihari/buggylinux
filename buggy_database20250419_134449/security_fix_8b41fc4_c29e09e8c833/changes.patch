@@ -1,0 +1,302 @@
+diff --git a/Documentation/kbuild/kconfig.rst b/Documentation/kbuild/kconfig.rst
+index a9a855f894b3..dce6801d66c9 100644
+--- a/Documentation/kbuild/kconfig.rst
++++ b/Documentation/kbuild/kconfig.rst
+@@ -154,11 +154,6 @@ KCONFIG_AUTOCONFIG
+ This environment variable can be set to specify the path & name of the
+ "auto.conf" file.  Its default value is "include/config/auto.conf".
+ 
+-KCONFIG_TRISTATE
+-----------------
+-This environment variable can be set to specify the path & name of the
+-"tristate.conf" file.  Its default value is "include/config/tristate.conf".
+-
+ KCONFIG_AUTOHEADER
+ ------------------
+ This environment variable can be set to specify the path & name of the
+diff --git a/Makefile b/Makefile
+index e4c2d0327d8c..4f01de6cd43c 100644
+--- a/Makefile
++++ b/Makefile
+@@ -674,7 +674,7 @@ $(KCONFIG_CONFIG):
+ #
+ # This exploits the 'multi-target pattern rule' trick.
+ # The syncconfig should be executed only once to make all the targets.
+-%/auto.conf %/auto.conf.cmd %/tristate.conf: $(KCONFIG_CONFIG)
++%/auto.conf %/auto.conf.cmd: $(KCONFIG_CONFIG)
+ 	$(Q)$(MAKE) -f $(srctree)/Makefile syncconfig
+ else # !may-sync-config
+ # External modules and some install targets need include/generated/autoconf.h
+@@ -1278,24 +1278,13 @@ all: modules
+ # using awk while concatenating to the final file.
+ 
+ PHONY += modules
+-modules: $(if $(KBUILD_BUILTIN),vmlinux) modules.order modules.builtin
++modules: $(if $(KBUILD_BUILTIN),vmlinux) modules.order
+ 	$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.modpost
+ 	$(Q)$(CONFIG_SHELL) $(srctree)/scripts/modules-check.sh
+ 
+ modules.order: descend
+ 	$(Q)$(AWK) '!x[$$0]++' $(addsuffix /$@, $(build-dirs)) > $@
+ 
+-modbuiltin-dirs := $(addprefix _modbuiltin_, $(build-dirs))
+-
+-modules.builtin: $(modbuiltin-dirs)
+-	$(Q)$(AWK) '!x[$$0]++' $(addsuffix /$@, $(build-dirs)) > $@
+-
+-PHONY += $(modbuiltin-dirs)
+-# tristate.conf is not included from this Makefile. Add it as a prerequisite
+-# here to make it self-healing in case somebody accidentally removes it.
+-$(modbuiltin-dirs): include/config/tristate.conf
+-	$(Q)$(MAKE) $(modbuiltin)=$(patsubst _modbuiltin_%,%,$@)
+-
+ # Target to prepare building external modules
+ PHONY += modules_prepare
+ modules_prepare: prepare
+@@ -1315,7 +1304,7 @@ _modinst_:
+ 		ln -s $(CURDIR) $(MODLIB)/build ; \
+ 	fi
+ 	@sed 's:^:kernel/:' modules.order > $(MODLIB)/modules.order
+-	@sed 's:^:kernel/:' modules.builtin > $(MODLIB)/modules.builtin
++	@cp -f modules.builtin $(MODLIB)/
+ 	@cp -f $(objtree)/modules.builtin.modinfo $(MODLIB)/
+ 	$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.modinst
+ 
+@@ -1357,7 +1346,7 @@ endif # CONFIG_MODULES
+ 
+ # Directories & files removed with 'make clean'
+ CLEAN_DIRS  += include/ksym
+-CLEAN_FILES += modules.builtin.modinfo modules.nsdeps
++CLEAN_FILES += modules.builtin modules.builtin.modinfo modules.nsdeps
+ 
+ # Directories & files removed with 'make mrproper'
+ MRPROPER_DIRS  += include/config include/generated          \
+@@ -1712,7 +1701,7 @@ clean: $(clean-dirs)
+ 		-o -name '*.lex.c' -o -name '*.tab.[ch]' \
+ 		-o -name '*.asn1.[ch]' \
+ 		-o -name '*.symtypes' -o -name 'modules.order' \
+-		-o -name modules.builtin -o -name '.tmp_*.o.*' \
++		-o -name '.tmp_*.o.*' \
+ 		-o -name '*.c.[012]*.*' \
+ 		-o -name '*.ll' \
+ 		-o -name '*.gcno' \) -type f -print | xargs rm -f
+diff --git a/include/linux/module.h b/include/linux/module.h
+index bd165ba68617..6877b3b191d0 100644
+--- a/include/linux/module.h
++++ b/include/linux/module.h
+@@ -169,6 +169,16 @@ extern void cleanup_module(void);
+  */
+ #define MODULE_SOFTDEP(_softdep) MODULE_INFO(softdep, _softdep)
+ 
++/*
++ * MODULE_FILE is used for generating modules.builtin
++ * So, make it no-op when this is being built as a module
++ */
++#ifdef MODULE
++#define MODULE_FILE
++#else
++#define MODULE_FILE	MODULE_INFO(file, KBUILD_MODFILE);
++#endif
++
+ /*
+  * The following license idents are currently accepted as indicating free
+  * software modules
+@@ -213,7 +223,7 @@ extern void cleanup_module(void);
+  * 2.	So the community can ignore bug reports including proprietary modules
+  * 3.	So vendors can do likewise based on their own policies
+  */
+-#define MODULE_LICENSE(_license) MODULE_INFO(license, _license)
++#define MODULE_LICENSE(_license) MODULE_FILE MODULE_INFO(license, _license)
+ 
+ /*
+  * Author(s), use "Name <email>" or just "Name", for multiple
+diff --git a/scripts/Kbuild.include b/scripts/Kbuild.include
+index 88c144787e57..3da8321efb74 100644
+--- a/scripts/Kbuild.include
++++ b/scripts/Kbuild.include
+@@ -163,12 +163,6 @@ ld-ifversion = $(shell [ $(ld-version) $(1) $(2) ] && echo $(3) || echo $(4))
+ # $(Q)$(MAKE) $(build)=dir
+ build := -f $(srctree)/scripts/Makefile.build obj
+ 
+-###
+-# Shorthand for $(Q)$(MAKE) -f scripts/Makefile.modbuiltin obj=
+-# Usage:
+-# $(Q)$(MAKE) $(modbuiltin)=dir
+-modbuiltin := -f $(srctree)/scripts/Makefile.modbuiltin obj
+-
+ ###
+ # Shorthand for $(Q)$(MAKE) -f scripts/Makefile.dtbinst obj=
+ # Usage:
+diff --git a/scripts/Makefile.modbuiltin b/scripts/Makefile.modbuiltin
+deleted file mode 100644
+index 7d4711b88656..000000000000
+--- a/scripts/Makefile.modbuiltin
++++ /dev/null
+@@ -1,57 +0,0 @@
+-# SPDX-License-Identifier: GPL-2.0
+-# ==========================================================================
+-# Generating modules.builtin
+-# ==========================================================================
+-
+-src := $(obj)
+-
+-PHONY := __modbuiltin
+-__modbuiltin:
+-
+-include include/config/auto.conf
+-# tristate.conf sets tristate variables to uppercase 'Y' or 'M'
+-# That way, we get the list of built-in modules in obj-Y
+-include include/config/tristate.conf
+-
+-include scripts/Kbuild.include
+-
+-ifdef building_out_of_srctree
+-# Create output directory if not already present
+-_dummy := $(shell [ -d $(obj) ] || mkdir -p $(obj))
+-endif
+-
+-# The filename Kbuild has precedence over Makefile
+-kbuild-dir := $(if $(filter /%,$(src)),$(src),$(srctree)/$(src))
+-kbuild-file := $(if $(wildcard $(kbuild-dir)/Kbuild),$(kbuild-dir)/Kbuild,$(kbuild-dir)/Makefile)
+-include $(kbuild-file)
+-
+-include scripts/Makefile.lib
+-__subdir-Y     := $(patsubst %/,%,$(filter %/, $(obj-Y)))
+-subdir-Y       += $(__subdir-Y)
+-subdir-ym      := $(sort $(subdir-y) $(subdir-Y) $(subdir-m))
+-subdir-ym      := $(addprefix $(obj)/,$(subdir-ym))
+-obj-Y          := $(addprefix $(obj)/,$(obj-Y))
+-
+-modbuiltin-subdirs := $(patsubst %,%/modules.builtin, $(subdir-ym))
+-modbuiltin-mods    := $(filter %.ko, $(obj-Y:.o=.ko))
+-modbuiltin-target  := $(obj)/modules.builtin
+-
+-__modbuiltin: $(modbuiltin-target) $(subdir-ym)
+-	@:
+-
+-$(modbuiltin-target): $(subdir-ym) FORCE
+-	$(Q)(for m in $(modbuiltin-mods); do echo $$m; done;	\
+-	cat /dev/null $(modbuiltin-subdirs)) > $@
+-
+-PHONY += FORCE
+-
+-FORCE:
+-
+-# Descending
+-# ---------------------------------------------------------------------------
+-
+-PHONY += $(subdir-ym)
+-$(subdir-ym):
+-	$(Q)$(MAKE) $(modbuiltin)=$@
+-
+-.PHONY: $(PHONY)
+diff --git a/scripts/kconfig/confdata.c b/scripts/kconfig/confdata.c
+index 3569d2dec37c..fb675bd9a809 100644
+--- a/scripts/kconfig/confdata.c
++++ b/scripts/kconfig/confdata.c
+@@ -710,25 +710,6 @@ static struct conf_printer header_printer_cb =
+ 	.print_comment = header_print_comment,
+ };
+ 
+-/*
+- * Tristate printer
+- *
+- * This printer is used when generating the `include/config/tristate.conf' file.
+- */
+-static void
+-tristate_print_symbol(FILE *fp, struct symbol *sym, const char *value, void *arg)
+-{
+-
+-	if (sym->type == S_TRISTATE && *value != 'n')
+-		fprintf(fp, "%s%s=%c\n", CONFIG_, sym->name, (char)toupper(*value));
+-}
+-
+-static struct conf_printer tristate_printer_cb =
+-{
+-	.print_symbol = tristate_print_symbol,
+-	.print_comment = kconfig_print_comment,
+-};
+-
+ static void conf_write_symbol(FILE *fp, struct symbol *sym,
+ 			      struct conf_printer *printer, void *printer_arg)
+ {
+@@ -1062,7 +1043,7 @@ int conf_write_autoconf(int overwrite)
+ 	struct symbol *sym;
+ 	const char *name;
+ 	const char *autoconf_name = conf_get_autoconfig_name();
+-	FILE *out, *tristate, *out_h;
++	FILE *out, *out_h;
+ 	int i;
+ 
+ 	if (!overwrite && is_present(autoconf_name))
+@@ -1077,23 +1058,13 @@ int conf_write_autoconf(int overwrite)
+ 	if (!out)
+ 		return 1;
+ 
+-	tristate = fopen(".tmpconfig_tristate", "w");
+-	if (!tristate) {
+-		fclose(out);
+-		return 1;
+-	}
+-
+ 	out_h = fopen(".tmpconfig.h", "w");
+ 	if (!out_h) {
+ 		fclose(out);
+-		fclose(tristate);
+ 		return 1;
+ 	}
+ 
+ 	conf_write_heading(out, &kconfig_printer_cb, NULL);
+-
+-	conf_write_heading(tristate, &tristate_printer_cb, NULL);
+-
+ 	conf_write_heading(out_h, &header_printer_cb, NULL);
+ 
+ 	for_all_symbols(i, sym) {
+@@ -1101,15 +1072,11 @@ int conf_write_autoconf(int overwrite)
+ 		if (!(sym->flags & SYMBOL_WRITE) || !sym->name)
+ 			continue;
+ 
+-		/* write symbol to auto.conf, tristate and header files */
++		/* write symbols to auto.conf and autoconf.h */
+ 		conf_write_symbol(out, sym, &kconfig_printer_cb, (void *)1);
+-
+-		conf_write_symbol(tristate, sym, &tristate_printer_cb, (void *)1);
+-
+ 		conf_write_symbol(out_h, sym, &header_printer_cb, NULL);
+ 	}
+ 	fclose(out);
+-	fclose(tristate);
+ 	fclose(out_h);
+ 
+ 	name = getenv("KCONFIG_AUTOHEADER");
+@@ -1120,14 +1087,6 @@ int conf_write_autoconf(int overwrite)
+ 	if (rename(".tmpconfig.h", name))
+ 		return 1;
+ 
+-	name = getenv("KCONFIG_TRISTATE");
+-	if (!name)
+-		name = "include/config/tristate.conf";
+-	if (make_parent_dir(name))
+-		return 1;
+-	if (rename(".tmpconfig_tristate", name))
+-		return 1;
+-
+ 	if (make_parent_dir(autoconf_name))
+ 		return 1;
+ 	/*
+diff --git a/scripts/link-vmlinux.sh b/scripts/link-vmlinux.sh
+index 436379940356..bf0bf9063aaf 100755
+--- a/scripts/link-vmlinux.sh
++++ b/scripts/link-vmlinux.sh
+@@ -250,6 +250,10 @@ ${MAKE} -f "${srctree}/scripts/Makefile.modpost" MODPOST_VMLINUX=1
+ 
+ info MODINFO modules.builtin.modinfo
+ ${OBJCOPY} -j .modinfo -O binary vmlinux.o modules.builtin.modinfo
++info GEN modules.builtin
++# The second line aids cases where multiple modules share the same object.
++tr '\0' '\n' < modules.builtin.modinfo | sed -n 's/^[[:alnum:]:_]*\.file=//p' |
++	tr ' ' '\n' | uniq | sed -e 's:^:kernel/:' -e 's/$/.ko/' > modules.builtin
+ 
+ btf_vmlinux_bin_o=""
+ if [ -n "${CONFIG_DEBUG_INFO_BTF}" ]; then

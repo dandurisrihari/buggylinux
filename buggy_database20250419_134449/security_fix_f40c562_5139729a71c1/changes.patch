@@ -1,0 +1,48 @@
+diff --git a/fs/cifs/cifssmb.c b/fs/cifs/cifssmb.c
+index de405bfb67d2..19678c575dfc 100644
+--- a/fs/cifs/cifssmb.c
++++ b/fs/cifs/cifssmb.c
+@@ -415,6 +415,8 @@ CIFSSMBNegotiate(unsigned int xid, struct cifsSesInfo *ses)
+ 	else /* if override flags set only sign/seal OR them with global auth */
+ 		secFlags = extended_security | ses->overrideSecFlg;
+ 
++	cFYI(1,("secFlags 0x%x",secFlags));
++
+ 	pSMB->hdr.Mid = GetNextMid(server);
+ 	pSMB->hdr.Flags2 |= SMBFLG2_UNICODE;
+ 	if((secFlags & CIFSSEC_MUST_KRB5) == CIFSSEC_MUST_KRB5)
+@@ -511,11 +513,13 @@ CIFSSMBNegotiate(unsigned int xid, struct cifsSesInfo *ses)
+ 			cERROR(1,("Server requests plain text password"
+ 				  " but client support disabled"));
+ 
+-	if(secFlags & CIFSSEC_MUST_NTLMV2)
++	if((secFlags & CIFSSEC_MUST_NTLMV2) == CIFSSEC_MUST_NTLMV2)
+ 		server->secType = NTLMv2;
+-	else
++	else if(secFlags & CIFSSEC_MAY_NTLM)
+ 		server->secType = NTLM;
+-	/* else krb5 ... */
++	else if(secFlags & CIFSSEC_MAY_NTLMV2)
++		server->secType = NTLMv2;
++	/* else krb5 ... any others ... */
+ 
+ 	/* one byte, so no need to convert this or EncryptionKeyLen from
+ 	   little endian */
+diff --git a/fs/cifs/sess.c b/fs/cifs/sess.c
+index b7d49c03985c..7202d534ef0b 100644
+--- a/fs/cifs/sess.c
++++ b/fs/cifs/sess.c
+@@ -323,11 +323,12 @@ CIFS_SessSetup(unsigned int xid, struct cifsSesInfo *ses, int first_time,
+ 	__u16 action;
+ 	int bytes_remaining;
+ 
+-	cFYI(1,("new sess setup"));
+ 	if(ses == NULL)
+ 		return -EINVAL;
+ 
+ 	type = ses->server->secType;
++
++	cFYI(1,("sess setup type %d",type));
+ 	if(type == LANMAN) {
+ #ifndef CONFIG_CIFS_WEAK_PW_HASH
+ 		/* LANMAN and plaintext are less secure and off by default.

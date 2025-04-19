@@ -1,0 +1,70 @@
+commit fffd0934b9390f34bec45762192b7edd3b12b4b5
+Author: Johannes Berg <johannes@sipsolutions.net>
+Date:   Wed Jul 8 14:22:54 2009 +0200
+
+    cfg80211: rework key operation
+    
+    This reworks the key operation in cfg80211, and now only
+    allows, from userspace, configuring keys (via nl80211)
+    after the connection has been established (in managed
+    mode), the IBSS been joined (in IBSS mode), at any time
+    (in AP[_VLAN] modes) or never for all the other modes.
+    
+    In order to do shared key authentication correctly, it
+    is now possible to give a WEP key to the AUTH command.
+    To configure static WEP keys, these are given to the
+    CONNECT or IBSS_JOIN command directly, for a userspace
+    SME it is assumed it will configure it properly after
+    the connection has been established.
+    
+    Since mac80211 used to check the default key in IBSS
+    mode to see whether or not the network is protected,
+    it needs an update in that area, as well as an update
+    to make use of the WEP key passed to auth() for shared
+    key authentication.
+    
+    Signed-off-by: Johannes Berg <johannes@sipsolutions.net>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/mac80211/ibss.c b/net/mac80211/ibss.c
+index 15d5a53b59a8..8e2220000e5c 100644
+--- a/net/mac80211/ibss.c
++++ b/net/mac80211/ibss.c
+@@ -57,7 +57,7 @@ static void ieee80211_rx_mgmt_auth_ibss(struct ieee80211_sub_if_data *sdata,
+ 	 */
+ 	if (auth_alg == WLAN_AUTH_OPEN && auth_transaction == 1)
+ 		ieee80211_send_auth(sdata, 2, WLAN_AUTH_OPEN, NULL, 0,
+-				    sdata->u.ibss.bssid, 0);
++				    sdata->u.ibss.bssid, NULL, 0, 0);
+ }
+ 
+ static void __ieee80211_sta_join_ibss(struct ieee80211_sub_if_data *sdata,
+@@ -494,7 +494,7 @@ static void ieee80211_sta_create_ibss(struct ieee80211_sub_if_data *sdata)
+ 
+ 	capability = WLAN_CAPABILITY_IBSS;
+ 
+-	if (sdata->default_key)
++	if (ifibss->privacy)
+ 		capability |= WLAN_CAPABILITY_PRIVACY;
+ 	else
+ 		sdata->drop_unencrypted = 0;
+@@ -524,9 +524,8 @@ static void ieee80211_sta_find_ibss(struct ieee80211_sub_if_data *sdata)
+ 		return;
+ 
+ 	capability = WLAN_CAPABILITY_IBSS;
+-	if (sdata->default_key)
++	if (ifibss->privacy)
+ 		capability |= WLAN_CAPABILITY_PRIVACY;
+-
+ 	if (ifibss->fixed_bssid)
+ 		bssid = ifibss->bssid;
+ 	if (ifibss->fixed_channel)
+@@ -872,6 +871,8 @@ int ieee80211_ibss_join(struct ieee80211_sub_if_data *sdata,
+ 	} else
+ 		sdata->u.ibss.fixed_bssid = false;
+ 
++	sdata->u.ibss.privacy = params->privacy;
++
+ 	sdata->vif.bss_conf.beacon_int = params->beacon_interval;
+ 
+ 	sdata->u.ibss.channel = params->channel;

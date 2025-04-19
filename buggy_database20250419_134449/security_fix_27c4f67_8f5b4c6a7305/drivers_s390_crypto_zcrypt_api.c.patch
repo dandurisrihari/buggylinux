@@ -1,0 +1,260 @@
+commit 27c4f6738bdc535e42dfc1295dadc78ab7582939
+Author: Harald Freudenberger <freude@linux.ibm.com>
+Date:   Tue Sep 29 16:07:22 2020 +0200
+
+    s390/zcrypt: Introduce Failure Injection feature
+    
+    Introduce a way to specify additional debug flags with an crpyto
+    request to be able to trigger certain failures within the zcrypt
+    device drivers and/or ap core code.
+    
+    This failure injection possibility is only enabled with a kernel debug
+    build CONFIG_ZCRYPT_DEBUG) and should never be available on a regular
+    kernel running in production environment.
+    
+    Details:
+    
+    * The ioctl(ICARSAMODEXPO) get's a struct ica_rsa_modexpo. If the
+      leftmost bit of the 32 bit unsigned int inputdatalength field is
+      set, the uppermost 16 bits are separated and used as debug flag
+      value. The process is checked to have the CAP_SYS_ADMIN capability
+      enabled or EPERM is returned.
+    
+    * The ioctl(ICARSACRT) get's a struct ica_rsa_modexpo_crt. If the
+      leftmost bit of the 32 bit unsigned int inputdatalength field is set,
+      the uppermost 16 bits are separated and used als debug flag
+      value. The process is checked to have the CAP_SYS_ADMIN capability
+      enabled or EPERM is returned.
+    
+    * The ioctl(ZSECSENDCPRB) used to send CCA CPRBs get's a struct
+      ica_xcRB. If the leftmost bit of the 32 bit unsigned int status
+      field is set, the uppermost 16 bits of this field are used as debug
+      flag value. The process is checked to have the CAP_SYS_ADMIN
+      capability enabled or EPERM is returned.
+    
+    * The ioctl(ZSENDEP11CPRB) used to send EP11 CPRBs get's a struct
+      ep11_urb. If the leftmost bit of the 64 bit unsigned int req_len
+      field is set, the uppermost 16 bits of this field are used as debug
+      flag value. The process is checked to have the CAP_SYS_ADMIN
+      capability enabled or EPERM is returned.
+    
+    So it is possible to send an additional 16 bit value to the zcrypt API
+    to be used to carry a failure injection command which may trigger
+    special behavior within the zcrypt API and layers below. This 16 bit
+    value is for the rest of the test referred as 'fi command' for Failure
+    Injection.
+    
+    The lower 8 bits of the fi command construct a numerical argument in
+    the range of 1-255 and is the 'fi action' to be performed with the
+    request or the resulting reply:
+    
+    * 0x00 (all requests): No failure injection action but flags may be
+      provided which may affect the processing of the request or reply.
+    * 0x01 (only CCA CPRBs): The CPRB's agent_ID field is set to
+      'FF'. This results in an reply code 0x90 (Transport-Protocol
+      Failure).
+    * 0x02 (only CCA CPRBs): After the APQN to send to has been chosen,
+      the domain field within the CPRB is overwritten with value 99 to
+      enforce an reply with RY 0x8A.
+    * 0x03 (all requests): At NQAP invocation the invalid qid value 0xFF00
+      is used causing an response code of 0x01 (AP queue not valid).
+    
+    The upper 8 bits of the fi command may carry bit flags which may
+    influence the processing of an request or response:
+    
+    * 0x01: No retry. If this bit is set, the usual loop in the zcrypt API
+      which retries an CPRB up to 10 times when the lower layers return
+      with EAGAIN is abandoned after the first attempt to send the CPRB.
+    * 0x02: Toggle special. Toggles the special bit on this request. This
+      should result in an reply code RY~0x41 and result in an ioctl
+      failure with errno EINVAL.
+    
+    This failure injection possibilities may get some further extensions
+    in the future. As of now this is a starting point for Continuous Test
+    and Integration to trigger some failures and watch for the reaction of
+    the ap bus and zcrypt device driver code.
+    
+    Signed-off-by: Harald Freudenberger <freude@linux.ibm.com>
+    Signed-off-by: Vasily Gorbik <gor@linux.ibm.com>
+
+diff --git a/drivers/s390/crypto/zcrypt_api.c b/drivers/s390/crypto/zcrypt_api.c
+index d642be65a3a0..08bb0f60c4b0 100644
+--- a/drivers/s390/crypto/zcrypt_api.c
++++ b/drivers/s390/crypto/zcrypt_api.c
+@@ -25,6 +25,7 @@
+ #include <linux/debugfs.h>
+ #include <linux/cdev.h>
+ #include <linux/ctype.h>
++#include <linux/capability.h>
+ #include <asm/debug.h>
+ 
+ #define CREATE_TRACE_POINTS
+@@ -645,6 +646,11 @@ static long zcrypt_rsa_modexpo(struct ap_perms *perms,
+ 
+ 	ap_init_message(&ap_msg);
+ 
++#ifdef CONFIG_ZCRYPT_DEBUG
++	if (tr && tr->fi.cmd)
++		ap_msg.fi.cmd = tr->fi.cmd;
++#endif
++
+ 	if (mex->outputdatalength < mex->inputdatalength) {
+ 		func_code = 0;
+ 		rc = -EINVAL;
+@@ -748,6 +754,11 @@ static long zcrypt_rsa_crt(struct ap_perms *perms,
+ 
+ 	ap_init_message(&ap_msg);
+ 
++#ifdef CONFIG_ZCRYPT_DEBUG
++	if (tr && tr->fi.cmd)
++		ap_msg.fi.cmd = tr->fi.cmd;
++#endif
++
+ 	if (crt->outputdatalength < crt->inputdatalength) {
+ 		func_code = 0;
+ 		rc = -EINVAL;
+@@ -852,6 +863,17 @@ static long _zcrypt_send_cprb(bool userspace, struct ap_perms *perms,
+ 
+ 	xcRB->status = 0;
+ 	ap_init_message(&ap_msg);
++
++#ifdef CONFIG_ZCRYPT_DEBUG
++	if (tr && tr->fi.cmd)
++		ap_msg.fi.cmd = tr->fi.cmd;
++	if (tr && tr->fi.action == AP_FI_ACTION_CCA_AGENT_FF) {
++		ZCRYPT_DBF_WARN("%s fi cmd 0x%04x: forcing invalid agent_ID 'FF'\n",
++				__func__, tr->fi.cmd);
++		xcRB->agent_ID = 0x4646;
++	}
++#endif
++
+ 	rc = get_cprb_fc(userspace, xcRB, &ap_msg, &func_code, &domain);
+ 	if (rc)
+ 		goto out;
+@@ -927,6 +949,14 @@ static long _zcrypt_send_cprb(bool userspace, struct ap_perms *perms,
+ 	if (*domain == AUTOSEL_DOM)
+ 		*domain = AP_QID_QUEUE(qid);
+ 
++#ifdef CONFIG_ZCRYPT_DEBUG
++	if (tr && tr->fi.action == AP_FI_ACTION_CCA_DOM_INVAL) {
++		ZCRYPT_DBF_WARN("%s fi cmd 0x%04x: forcing invalid domain\n",
++				__func__, tr->fi.cmd);
++		*domain = 99;
++	}
++#endif
++
+ 	rc = pref_zq->ops->send_cprb(userspace, pref_zq, xcRB, &ap_msg);
+ 
+ 	spin_lock(&zcrypt_list_lock);
+@@ -995,6 +1025,11 @@ static long _zcrypt_send_ep11_cprb(bool userspace, struct ap_perms *perms,
+ 
+ 	ap_init_message(&ap_msg);
+ 
++#ifdef CONFIG_ZCRYPT_DEBUG
++	if (tr && tr->fi.cmd)
++		ap_msg.fi.cmd = tr->fi.cmd;
++#endif
++
+ 	target_num = (unsigned short) xcrb->targets_num;
+ 
+ 	/* empty list indicates autoselect (all available targets) */
+@@ -1377,10 +1412,24 @@ static int icarsamodexpo_ioctl(struct ap_perms *perms, unsigned long arg)
+ 	memset(&tr, 0, sizeof(tr));
+ 	if (copy_from_user(&mex, umex, sizeof(mex)))
+ 		return -EFAULT;
++
++#ifdef CONFIG_ZCRYPT_DEBUG
++	if (mex.inputdatalength & (1U << 31)) {
++		if (!capable(CAP_SYS_ADMIN))
++			return -EPERM;
++		tr.fi.cmd = (u16)(mex.inputdatalength >> 16);
++	}
++	mex.inputdatalength &= 0x0000FFFF;
++#endif
++
+ 	do {
+ 		rc = zcrypt_rsa_modexpo(perms, &tr, &mex);
+ 		if (rc == -EAGAIN)
+ 			tr.again_counter++;
++#ifdef CONFIG_ZCRYPT_DEBUG
++		if (rc == -EAGAIN && (tr.fi.flags & AP_FI_FLAG_NO_RETRY))
++			break;
++#endif
+ 	} while (rc == -EAGAIN && tr.again_counter < TRACK_AGAIN_MAX);
+ 	/* on failure: retry once again after a requested rescan */
+ 	if ((rc == -ENODEV) && (zcrypt_process_rescan()))
+@@ -1406,10 +1455,24 @@ static int icarsacrt_ioctl(struct ap_perms *perms, unsigned long arg)
+ 	memset(&tr, 0, sizeof(tr));
+ 	if (copy_from_user(&crt, ucrt, sizeof(crt)))
+ 		return -EFAULT;
++
++#ifdef CONFIG_ZCRYPT_DEBUG
++	if (crt.inputdatalength & (1U << 31)) {
++		if (!capable(CAP_SYS_ADMIN))
++			return -EPERM;
++		tr.fi.cmd = (u16)(crt.inputdatalength >> 16);
++	}
++	crt.inputdatalength &= 0x0000FFFF;
++#endif
++
+ 	do {
+ 		rc = zcrypt_rsa_crt(perms, &tr, &crt);
+ 		if (rc == -EAGAIN)
+ 			tr.again_counter++;
++#ifdef CONFIG_ZCRYPT_DEBUG
++		if (rc == -EAGAIN && (tr.fi.flags & AP_FI_FLAG_NO_RETRY))
++			break;
++#endif
+ 	} while (rc == -EAGAIN && tr.again_counter < TRACK_AGAIN_MAX);
+ 	/* on failure: retry once again after a requested rescan */
+ 	if ((rc == -ENODEV) && (zcrypt_process_rescan()))
+@@ -1435,10 +1498,24 @@ static int zsecsendcprb_ioctl(struct ap_perms *perms, unsigned long arg)
+ 	memset(&tr, 0, sizeof(tr));
+ 	if (copy_from_user(&xcRB, uxcRB, sizeof(xcRB)))
+ 		return -EFAULT;
++
++#ifdef CONFIG_ZCRYPT_DEBUG
++	if (xcRB.status & (1U << 31)) {
++		if (!capable(CAP_SYS_ADMIN))
++			return -EPERM;
++		tr.fi.cmd = (u16)(xcRB.status >> 16);
++	}
++	xcRB.status &= 0x0000FFFF;
++#endif
++
+ 	do {
+ 		rc = _zcrypt_send_cprb(true, perms, &tr, &xcRB);
+ 		if (rc == -EAGAIN)
+ 			tr.again_counter++;
++#ifdef CONFIG_ZCRYPT_DEBUG
++		if (rc == -EAGAIN && (tr.fi.flags & AP_FI_FLAG_NO_RETRY))
++			break;
++#endif
+ 	} while (rc == -EAGAIN && tr.again_counter < TRACK_AGAIN_MAX);
+ 	/* on failure: retry once again after a requested rescan */
+ 	if ((rc == -ENODEV) && (zcrypt_process_rescan()))
+@@ -1465,10 +1542,24 @@ static int zsendep11cprb_ioctl(struct ap_perms *perms, unsigned long arg)
+ 	memset(&tr, 0, sizeof(tr));
+ 	if (copy_from_user(&xcrb, uxcrb, sizeof(xcrb)))
+ 		return -EFAULT;
++
++#ifdef CONFIG_ZCRYPT_DEBUG
++	if (xcrb.req_len & (1ULL << 63)) {
++		if (!capable(CAP_SYS_ADMIN))
++			return -EPERM;
++		tr.fi.cmd = (u16)(xcrb.req_len >> 48);
++	}
++	xcrb.req_len &= 0x0000FFFFFFFFFFFFULL;
++#endif
++
+ 	do {
+ 		rc = _zcrypt_send_ep11_cprb(true, perms, &tr, &xcrb);
+ 		if (rc == -EAGAIN)
+ 			tr.again_counter++;
++#ifdef CONFIG_ZCRYPT_DEBUG
++		if (rc == -EAGAIN && (tr.fi.flags & AP_FI_FLAG_NO_RETRY))
++			break;
++#endif
+ 	} while (rc == -EAGAIN && tr.again_counter < TRACK_AGAIN_MAX);
+ 	/* on failure: retry once again after a requested rescan */
+ 	if ((rc == -ENODEV) && (zcrypt_process_rescan()))

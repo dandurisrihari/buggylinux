@@ -1,0 +1,39 @@
+commit 598781d71119827b454fd75d46f84755bca6f0c6
+Author: Thomas Hellstrom <thellstrom@vmware.com>
+Date:   Tue Jan 24 18:54:21 2012 +0100
+
+    drm: Fix authentication kernel crash
+    
+    If the master tries to authenticate a client using drm_authmagic and
+    that client has already closed its drm file descriptor,
+    either wilfully or because it was terminated, the
+    call to drm_authmagic will dereference a stale pointer into kmalloc'ed memory
+    and corrupt it.
+    
+    Typically this results in a hard system hang.
+    
+    This patch fixes that problem by removing any authentication tokens
+    (struct drm_magic_entry) open for a file descriptor when that file
+    descriptor is closed.
+    
+    Signed-off-by: Thomas Hellstrom <thellstrom@vmware.com>
+    Reviewed-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+    Cc: stable@vger.kernel.org
+    Signed-off-by: Dave Airlie <airlied@redhat.com>
+
+diff --git a/drivers/gpu/drm/drm_fops.c b/drivers/gpu/drm/drm_fops.c
+index c00cf154cc0b..6263b0147598 100644
+--- a/drivers/gpu/drm/drm_fops.c
++++ b/drivers/gpu/drm/drm_fops.c
+@@ -487,6 +487,11 @@ int drm_release(struct inode *inode, struct file *filp)
+ 		  (long)old_encode_dev(file_priv->minor->device),
+ 		  dev->open_count);
+ 
++	/* Release any auth tokens that might point to this file_priv,
++	   (do that under the drm_global_mutex) */
++	if (file_priv->magic)
++		(void) drm_remove_magic(file_priv->master, file_priv->magic);
++
+ 	/* if the master has gone away we can't do anything with the lock */
+ 	if (file_priv->minor->master)
+ 		drm_master_release(dev, filp);

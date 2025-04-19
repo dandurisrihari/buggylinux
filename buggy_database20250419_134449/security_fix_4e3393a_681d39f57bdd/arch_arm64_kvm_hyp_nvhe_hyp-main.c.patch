@@ -1,0 +1,59 @@
+commit 4e3393a969a0bdaae83263918b6824b2d08c3996
+Author: Andrew Scull <ascull@google.com>
+Date:   Tue Sep 15 11:46:36 2020 +0100
+
+    KVM: arm64: nVHE: Switch to hyp context for EL2
+    
+    Save and restore the host context when switching to and from hyp. This
+    gives hyp its own context that the host will not see as a step towards a
+    full trust boundary between the two.
+    
+    SP_EL0 and pointer authentication keys are currently shared between the
+    host and hyp so don't need to be switched yet.
+    
+    Signed-off-by: Andrew Scull <ascull@google.com>
+    Signed-off-by: Marc Zyngier <maz@kernel.org>
+    Link: https://lore.kernel.org/r/20200915104643.2543892-13-ascull@google.com
+
+diff --git a/arch/arm64/kvm/hyp/nvhe/hyp-main.c b/arch/arm64/kvm/hyp/nvhe/hyp-main.c
+new file mode 100644
+index 000000000000..570c3896f42e
+--- /dev/null
++++ b/arch/arm64/kvm/hyp/nvhe/hyp-main.c
+@@ -0,0 +1,36 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Copyright (C) 2020 - Google Inc
++ * Author: Andrew Scull <ascull@google.com>
++ */
++
++#include <hyp/switch.h>
++
++#include <asm/kvm_asm.h>
++#include <asm/kvm_emulate.h>
++#include <asm/kvm_host.h>
++#include <asm/kvm_hyp.h>
++#include <asm/kvm_mmu.h>
++
++typedef unsigned long (*hypcall_fn_t)
++	(unsigned long, unsigned long, unsigned long);
++
++void handle_trap(struct kvm_cpu_context *host_ctxt)
++{
++	u64 esr = read_sysreg_el2(SYS_ESR);
++	hypcall_fn_t func;
++	unsigned long ret;
++
++	if (ESR_ELx_EC(esr) != ESR_ELx_EC_HVC64)
++		hyp_panic();
++
++	/*
++	 * __kvm_call_hyp takes a pointer in the host address space and
++	 * up to three arguments.
++	 */
++	func = (hypcall_fn_t)kern_hyp_va(host_ctxt->regs.regs[0]);
++	ret = func(host_ctxt->regs.regs[1],
++		   host_ctxt->regs.regs[2],
++		   host_ctxt->regs.regs[3]);
++	host_ctxt->regs.regs[0] = ret;
++}

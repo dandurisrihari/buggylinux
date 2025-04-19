@@ -1,0 +1,55 @@
+commit c5745187a4812f2991a58e469a866582a7326d91
+Author: Ohad Ben-Cohen <ohad@wizery.com>
+Date:   Wed Mar 30 16:35:59 2011 +0200
+
+    wl12xx: fix roaming
+    
+    The wl12xx device normally drops all frames coming from BSSID
+    it is not joined with.
+    
+    This behavior is configured today by the wl12xx driver in response
+    to a handful of ieee80211_bss_change and ieee80211_conf_changed
+    notification flags, such as BSS_CHANGED_ASSOC, BSS_CHANGED_BSSID,
+    IEEE80211_CONF_CHANGE_IDLE, etc..
+    
+    This breaks when we roam to a new BSSID, where authentication frames
+    are sent before any BSS_CHANGED/CONF_CHANGED flags are received.
+    When this happens the hardware silently drops the authentication
+    responses, and the roaming fails.
+    
+    Ideally this aggressive filtering behavior of the device should be disabled
+    upon a notification from mac80211. Such notification will take place
+    after multi-channel support will be added: mac80211 will likely send a
+    remain-on-channel notification to drivers when entering sensitive
+    states (like authentication), otherwise the firmware might jump to
+    different channels (to serve a different role).
+    
+    Until those notifications materialize, disable the hw BSSID filter
+    when authentication requests are sent, so roaming would work.
+    
+    Signed-off-by: Ohad Ben-Cohen <ohad@wizery.com>
+    Reviewed-by: Luciano Coelho <coelho@ti.com>
+    Signed-off-by: Luciano Coelho <coelho@ti.com>
+
+diff --git a/drivers/net/wireless/wl12xx/main.c b/drivers/net/wireless/wl12xx/main.c
+index 57d0af6cfa64..0efa7a055109 100644
+--- a/drivers/net/wireless/wl12xx/main.c
++++ b/drivers/net/wireless/wl12xx/main.c
+@@ -1528,7 +1528,7 @@ static void wl1271_op_remove_interface(struct ieee80211_hw *hw,
+ 	cancel_work_sync(&wl->recovery_work);
+ }
+ 
+-static void wl1271_configure_filters(struct wl1271 *wl, unsigned int filters)
++void wl1271_configure_filters(struct wl1271 *wl, unsigned int filters)
+ {
+ 	wl1271_set_default_filters(wl);
+ 
+@@ -1650,7 +1650,7 @@ static int wl1271_unjoin(struct wl1271 *wl)
+ 	clear_bit(WL1271_FLAG_JOINED, &wl->flags);
+ 	memset(wl->bssid, 0, ETH_ALEN);
+ 
+-	/* stop filterting packets based on bssid */
++	/* stop filtering packets based on bssid */
+ 	wl1271_configure_filters(wl, FIF_OTHER_BSS);
+ 
+ out:

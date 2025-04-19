@@ -1,0 +1,132 @@
+commit e48354ce078c079996f89d715dfa44814b4eba01
+Author: Nicholas Bellinger <nab@linux-iscsi.org>
+Date:   Sat Jul 23 06:43:04 2011 +0000
+
+    iscsi-target: Add iSCSI fabric support for target v4.1
+    
+    The Linux-iSCSI.org target module is a full featured in-kernel
+    software implementation of iSCSI target mode (RFC-3720) for the
+    current WIP mainline target v4.1 infrastructure code for the v3.1
+    kernel.  More information can be found here:
+    
+    http://linux-iscsi.org/wiki/ISCSI
+    
+    This includes support for:
+    
+       * RFC-3720 defined request / response state machines and support for
+         all defined iSCSI operation codes from Section 10.2.1.2 using libiscsi
+         include/scsi/iscsi_proto.h PDU definitions
+       * Target v4.1 compatible control plane using the generic layout in
+         target_core_fabric_configfs.c and fabric dependent attributes
+         within /sys/kernel/config/target/iscsi/ subdirectories.
+       * Target v4.1 compatible iSCSI statistics based on RFC-4544 (iSCSI MIBS)
+       * Support for IPv6 and IPv4 network portals in M:N mapping to TPGs
+       * iSCSI Error Recovery Hierarchy support
+       * Per iSCSI connection RX/TX thread pair scheduling affinity
+       * crc32c + crc32c_intel SSEv4 instruction offload support using libcrypto
+       * CHAP Authentication support using libcrypto
+       * Conversion to use internal SGl allocation with iscsit_alloc_buffs() ->
+         transport_generic_map_mem_to_cmd()
+    
+    (nab: Fix iscsi_proto.h struct scsi_lun usage from linux-next in commit:
+          iscsi: Use struct scsi_lun in iscsi structs instead of u8[8])
+    (nab: Fix 32-bit compile warnings)
+    
+    Reviewed-by: Christoph Hellwig <hch@lst.de>
+    Reviewed-by: Andy Grover <agrover@redhat.com>
+    Acked-by: Roland Dreier <roland@kernel.org>
+    Signed-off-by: Nicholas A. Bellinger <nab@linux-iscsi.org>
+
+diff --git a/drivers/target/iscsi/iscsi_target_device.c b/drivers/target/iscsi/iscsi_target_device.c
+new file mode 100644
+index 000000000000..a19fa5eea88e
+--- /dev/null
++++ b/drivers/target/iscsi/iscsi_target_device.c
+@@ -0,0 +1,87 @@
++/*******************************************************************************
++ * This file contains the iSCSI Virtual Device and Disk Transport
++ * agnostic related functions.
++ *
++ \u00a9 Copyright 2007-2011 RisingTide Systems LLC.
++ *
++ * Licensed to the Linux Foundation under the General Public License (GPL) version 2.
++ *
++ * Author: Nicholas A. Bellinger <nab@linux-iscsi.org>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ ******************************************************************************/
++
++#include <scsi/scsi_device.h>
++#include <target/target_core_base.h>
++#include <target/target_core_device.h>
++#include <target/target_core_transport.h>
++
++#include "iscsi_target_core.h"
++#include "iscsi_target_device.h"
++#include "iscsi_target_tpg.h"
++#include "iscsi_target_util.h"
++
++int iscsit_get_lun_for_tmr(
++	struct iscsi_cmd *cmd,
++	u64 lun)
++{
++	u32 unpacked_lun = scsilun_to_int((struct scsi_lun *)&lun);
++
++	return transport_lookup_tmr_lun(&cmd->se_cmd, unpacked_lun);
++}
++
++int iscsit_get_lun_for_cmd(
++	struct iscsi_cmd *cmd,
++	unsigned char *cdb,
++	u64 lun)
++{
++	u32 unpacked_lun = scsilun_to_int((struct scsi_lun *)&lun);
++
++	return transport_lookup_cmd_lun(&cmd->se_cmd, unpacked_lun);
++}
++
++void iscsit_determine_maxcmdsn(struct iscsi_session *sess)
++{
++	struct se_node_acl *se_nacl;
++
++	/*
++	 * This is a discovery session, the single queue slot was already
++	 * assigned in iscsi_login_zero_tsih().  Since only Logout and
++	 * Text Opcodes are allowed during discovery we do not have to worry
++	 * about the HBA's queue depth here.
++	 */
++	if (sess->sess_ops->SessionType)
++		return;
++
++	se_nacl = sess->se_sess->se_node_acl;
++
++	/*
++	 * This is a normal session, set the Session's CmdSN window to the
++	 * struct se_node_acl->queue_depth.  The value in struct se_node_acl->queue_depth
++	 * has already been validated as a legal value in
++	 * core_set_queue_depth_for_node().
++	 */
++	sess->cmdsn_window = se_nacl->queue_depth;
++	sess->max_cmd_sn = (sess->max_cmd_sn + se_nacl->queue_depth) - 1;
++}
++
++void iscsit_increment_maxcmdsn(struct iscsi_cmd *cmd, struct iscsi_session *sess)
++{
++	if (cmd->immediate_cmd || cmd->maxcmdsn_inc)
++		return;
++
++	cmd->maxcmdsn_inc = 1;
++
++	mutex_lock(&sess->cmdsn_mutex);
++	sess->max_cmd_sn += 1;
++	pr_debug("Updated MaxCmdSN to 0x%08x\n", sess->max_cmd_sn);
++	mutex_unlock(&sess->cmdsn_mutex);
++}

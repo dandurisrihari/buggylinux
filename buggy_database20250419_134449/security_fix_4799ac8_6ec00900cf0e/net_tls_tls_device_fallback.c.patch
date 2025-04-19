@@ -1,0 +1,43 @@
+commit 4799ac81e52a72a6404827bf2738337bb581a174
+Author: Boris Pismenny <borisp@mellanox.com>
+Date:   Fri Jul 13 14:33:43 2018 +0300
+
+    tls: Add rx inline crypto offload
+    
+    This patch completes the generic infrastructure to offload TLS crypto to a
+    network device. It enables the kernel to skip decryption and
+    authentication of some skbs marked as decrypted by the NIC. In the fast
+    path, all packets received are decrypted by the NIC and the performance
+    is comparable to plain TCP.
+    
+    This infrastructure doesn't require a TCP offload engine. Instead, the
+    NIC only decrypts packets that contain the expected TCP sequence number.
+    Out-Of-Order TCP packets are provided unmodified. As a result, at the
+    worst case a received TLS record consists of both plaintext and ciphertext
+    packets. These partially decrypted records must be reencrypted,
+    only to be decrypted.
+    
+    The notable differences between SW KTLS Rx and this offload are as
+    follows:
+    1. Partial decryption - Software must handle the case of a TLS record
+    that was only partially decrypted by HW. This can happen due to packet
+    reordering.
+    2. Resynchronization - tls_read_size calls the device driver to
+    resynchronize HW after HW lost track of TLS record framing in
+    the TCP stream.
+    
+    Signed-off-by: Boris Pismenny <borisp@mellanox.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/tls/tls_device_fallback.c b/net/tls/tls_device_fallback.c
+index d1d7dce38e0b..e3313c45663f 100644
+--- a/net/tls/tls_device_fallback.c
++++ b/net/tls/tls_device_fallback.c
+@@ -413,6 +413,7 @@ struct sk_buff *tls_validate_xmit_skb(struct sock *sk,
+ 
+ 	return tls_sw_fallback(sk, skb);
+ }
++EXPORT_SYMBOL_GPL(tls_validate_xmit_skb);
+ 
+ int tls_sw_fallback_init(struct sock *sk,
+ 			 struct tls_offload_context_tx *offload_ctx,

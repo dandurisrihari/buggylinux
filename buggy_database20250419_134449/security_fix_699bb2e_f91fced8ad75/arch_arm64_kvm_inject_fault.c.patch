@@ -1,0 +1,78 @@
+commit 699bb2e0c6f3796549dabac329501df7ffd99439
+Author: Marc Zyngier <maz@kernel.org>
+Date:   Sat May 28 12:38:18 2022 +0100
+
+    KVM: arm64: Move vcpu PC/Exception flags to the input flag set
+    
+    The PC update flags (which also deal with exception injection)
+    is one of the most complicated use of the flag we have. Make it
+    more fool prof by:
+    
+    - moving it over to the new accessors and assign it to the
+      input flag set
+    
+    - turn the combination of generic ELx flags with another flag
+      indicating the target EL itself into an explicit set of
+      flags for each EL and vector combination
+    
+    - add a new accessor to pend the exception
+    
+    This is otherwise a pretty straightformward conversion.
+    
+    Reviewed-by: Fuad Tabba <tabba@google.com>
+    Reviewed-by: Reiji Watanabe <reijiw@google.com>
+    Signed-off-by: Marc Zyngier <maz@kernel.org>
+
+diff --git a/arch/arm64/kvm/inject_fault.c b/arch/arm64/kvm/inject_fault.c
+index 55a5dbe957e0..f32f4a2a347f 100644
+--- a/arch/arm64/kvm/inject_fault.c
++++ b/arch/arm64/kvm/inject_fault.c
+@@ -20,9 +20,7 @@ static void inject_abt64(struct kvm_vcpu *vcpu, bool is_iabt, unsigned long addr
+ 	bool is_aarch32 = vcpu_mode_is_32bit(vcpu);
+ 	u64 esr = 0;
+ 
+-	vcpu->arch.flags |= (KVM_ARM64_EXCEPT_AA64_EL1		|
+-			     KVM_ARM64_EXCEPT_AA64_ELx_SYNC	|
+-			     KVM_ARM64_PENDING_EXCEPTION);
++	kvm_pend_exception(vcpu, EXCEPT_AA64_EL1_SYNC);
+ 
+ 	vcpu_write_sys_reg(vcpu, addr, FAR_EL1);
+ 
+@@ -52,9 +50,7 @@ static void inject_undef64(struct kvm_vcpu *vcpu)
+ {
+ 	u64 esr = (ESR_ELx_EC_UNKNOWN << ESR_ELx_EC_SHIFT);
+ 
+-	vcpu->arch.flags |= (KVM_ARM64_EXCEPT_AA64_EL1		|
+-			     KVM_ARM64_EXCEPT_AA64_ELx_SYNC	|
+-			     KVM_ARM64_PENDING_EXCEPTION);
++	kvm_pend_exception(vcpu, EXCEPT_AA64_EL1_SYNC);
+ 
+ 	/*
+ 	 * Build an unknown exception, depending on the instruction
+@@ -73,8 +69,7 @@ static void inject_undef64(struct kvm_vcpu *vcpu)
+ 
+ static void inject_undef32(struct kvm_vcpu *vcpu)
+ {
+-	vcpu->arch.flags |= (KVM_ARM64_EXCEPT_AA32_UND |
+-			     KVM_ARM64_PENDING_EXCEPTION);
++	kvm_pend_exception(vcpu, EXCEPT_AA32_UND);
+ }
+ 
+ /*
+@@ -97,14 +92,12 @@ static void inject_abt32(struct kvm_vcpu *vcpu, bool is_pabt, u32 addr)
+ 	far = vcpu_read_sys_reg(vcpu, FAR_EL1);
+ 
+ 	if (is_pabt) {
+-		vcpu->arch.flags |= (KVM_ARM64_EXCEPT_AA32_IABT |
+-				     KVM_ARM64_PENDING_EXCEPTION);
++		kvm_pend_exception(vcpu, EXCEPT_AA32_IABT);
+ 		far &= GENMASK(31, 0);
+ 		far |= (u64)addr << 32;
+ 		vcpu_write_sys_reg(vcpu, fsr, IFSR32_EL2);
+ 	} else { /* !iabt */
+-		vcpu->arch.flags |= (KVM_ARM64_EXCEPT_AA32_DABT |
+-				     KVM_ARM64_PENDING_EXCEPTION);
++		kvm_pend_exception(vcpu, EXCEPT_AA32_DABT);
+ 		far &= GENMASK(63, 32);
+ 		far |= addr;
+ 		vcpu_write_sys_reg(vcpu, fsr, ESR_EL1);

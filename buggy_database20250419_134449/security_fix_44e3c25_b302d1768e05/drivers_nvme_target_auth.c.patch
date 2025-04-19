@@ -1,0 +1,89 @@
+commit 44e3c25efae8575e06f1c5d1dc40058a991e3cb2
+Author: Hannes Reinecke <hare@kernel.org>
+Date:   Tue Apr 30 15:19:25 2024 +0200
+
+    nvmet: return DHCHAP status codes from nvmet_setup_auth()
+    
+    A failure in nvmet_setup_auth() does not mean that the NVMe
+    authentication command failed, so we should rather return a protocol
+    error with a 'failure1' response than an NVMe status.
+    
+    Also update the type used for dhchap_step and dhchap_status to u8 to
+    avoid confusions with nvme status. Furthermore, split dhchap_status and
+    nvme status so we don't accidentally mix these return values.
+    
+    Reviewed-by: Christoph Hellwig <hch@lst.de>
+    Signed-off-by: Hannes Reinecke <hare@suse.de>
+    [dwagner: - use u8 as type for dhchap_{step|status}
+              - separate nvme status from dhcap_status]
+    Signed-off-by: Daniel Wagner <dwagner@suse.de>
+    Signed-off-by: Keith Busch <kbusch@kernel.org>
+
+diff --git a/drivers/nvme/target/auth.c b/drivers/nvme/target/auth.c
+index 9afc28f1ffac..53bf1a084469 100644
+--- a/drivers/nvme/target/auth.c
++++ b/drivers/nvme/target/auth.c
+@@ -126,12 +126,11 @@ int nvmet_setup_dhgroup(struct nvmet_ctrl *ctrl, u8 dhgroup_id)
+ 	return ret;
+ }
+ 
+-int nvmet_setup_auth(struct nvmet_ctrl *ctrl)
++u8 nvmet_setup_auth(struct nvmet_ctrl *ctrl)
+ {
+ 	int ret = 0;
+ 	struct nvmet_host_link *p;
+ 	struct nvmet_host *host = NULL;
+-	const char *hash_name;
+ 
+ 	down_read(&nvmet_config_sem);
+ 	if (nvmet_is_disc_subsys(ctrl->subsys))
+@@ -149,13 +148,16 @@ int nvmet_setup_auth(struct nvmet_ctrl *ctrl)
+ 	}
+ 	if (!host) {
+ 		pr_debug("host %s not found\n", ctrl->hostnqn);
+-		ret = -EPERM;
++		ret = NVME_AUTH_DHCHAP_FAILURE_FAILED;
+ 		goto out_unlock;
+ 	}
+ 
+ 	ret = nvmet_setup_dhgroup(ctrl, host->dhchap_dhgroup_id);
+-	if (ret < 0)
++	if (ret < 0) {
+ 		pr_warn("Failed to setup DH group");
++		ret = NVME_AUTH_DHCHAP_FAILURE_DHGROUP_UNUSABLE;
++		goto out_unlock;
++	}
+ 
+ 	if (!host->dhchap_secret) {
+ 		pr_debug("No authentication provided\n");
+@@ -166,12 +168,6 @@ int nvmet_setup_auth(struct nvmet_ctrl *ctrl)
+ 		pr_debug("Re-use existing hash ID %d\n",
+ 			 ctrl->shash_id);
+ 	} else {
+-		hash_name = nvme_auth_hmac_name(host->dhchap_hash_id);
+-		if (!hash_name) {
+-			pr_warn("Hash ID %d invalid\n", host->dhchap_hash_id);
+-			ret = -EINVAL;
+-			goto out_unlock;
+-		}
+ 		ctrl->shash_id = host->dhchap_hash_id;
+ 	}
+ 
+@@ -180,7 +176,7 @@ int nvmet_setup_auth(struct nvmet_ctrl *ctrl)
+ 	ctrl->host_key = nvme_auth_extract_key(host->dhchap_secret + 10,
+ 					       host->dhchap_key_hash);
+ 	if (IS_ERR(ctrl->host_key)) {
+-		ret = PTR_ERR(ctrl->host_key);
++		ret = NVME_AUTH_DHCHAP_FAILURE_NOT_USABLE;
+ 		ctrl->host_key = NULL;
+ 		goto out_free_hash;
+ 	}
+@@ -198,7 +194,7 @@ int nvmet_setup_auth(struct nvmet_ctrl *ctrl)
+ 	ctrl->ctrl_key = nvme_auth_extract_key(host->dhchap_ctrl_secret + 10,
+ 					       host->dhchap_ctrl_key_hash);
+ 	if (IS_ERR(ctrl->ctrl_key)) {
+-		ret = PTR_ERR(ctrl->ctrl_key);
++		ret = NVME_AUTH_DHCHAP_FAILURE_NOT_USABLE;
+ 		ctrl->ctrl_key = NULL;
+ 		goto out_free_hash;
+ 	}

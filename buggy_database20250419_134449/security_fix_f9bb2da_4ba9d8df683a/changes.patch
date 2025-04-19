@@ -1,0 +1,641 @@
+diff --git a/drivers/scsi/lpfc/lpfc.h b/drivers/scsi/lpfc/lpfc.h
+index c088a36d1f33..bb4c8e0584e2 100644
+--- a/drivers/scsi/lpfc/lpfc.h
++++ b/drivers/scsi/lpfc/lpfc.h
+@@ -846,8 +846,24 @@ struct lpfc_hba {
+ 	struct dentry *debug_hbqinfo;
+ 	struct dentry *debug_dumpHostSlim;
+ 	struct dentry *debug_dumpHBASlim;
+-	struct dentry *debug_dumpData;   /* BlockGuard BPL*/
+-	struct dentry *debug_dumpDif;    /* BlockGuard BPL*/
++	struct dentry *debug_dumpData;   /* BlockGuard BPL */
++	struct dentry *debug_dumpDif;    /* BlockGuard BPL */
++	struct dentry *debug_InjErrLBA;  /* LBA to inject errors at */
++	struct dentry *debug_writeGuard; /* inject write guard_tag errors */
++	struct dentry *debug_writeApp;   /* inject write app_tag errors */
++	struct dentry *debug_writeRef;   /* inject write ref_tag errors */
++	struct dentry *debug_readApp;    /* inject read app_tag errors */
++	struct dentry *debug_readRef;    /* inject read ref_tag errors */
++
++	/* T10 DIF error injection */
++	uint32_t lpfc_injerr_wgrd_cnt;
++	uint32_t lpfc_injerr_wapp_cnt;
++	uint32_t lpfc_injerr_wref_cnt;
++	uint32_t lpfc_injerr_rapp_cnt;
++	uint32_t lpfc_injerr_rref_cnt;
++	sector_t lpfc_injerr_lba;
++#define LPFC_INJERR_LBA_OFF	(sector_t)0xffffffffffffffff
++
+ 	struct dentry *debug_slow_ring_trc;
+ 	struct lpfc_debugfs_trc *slow_ring_trc;
+ 	atomic_t slow_ring_trc_cnt;
+diff --git a/drivers/scsi/lpfc/lpfc_debugfs.c b/drivers/scsi/lpfc/lpfc_debugfs.c
+index a0424dd90e40..2cd844f7058f 100644
+--- a/drivers/scsi/lpfc/lpfc_debugfs.c
++++ b/drivers/scsi/lpfc/lpfc_debugfs.c
+@@ -996,6 +996,85 @@ lpfc_debugfs_dumpDataDif_write(struct file *file, const char __user *buf,
+ 	return nbytes;
+ }
+ 
++static int
++lpfc_debugfs_dif_err_open(struct inode *inode, struct file *file)
++{
++	file->private_data = inode->i_private;
++	return 0;
++}
++
++static ssize_t
++lpfc_debugfs_dif_err_read(struct file *file, char __user *buf,
++	size_t nbytes, loff_t *ppos)
++{
++	struct dentry *dent = file->f_dentry;
++	struct lpfc_hba *phba = file->private_data;
++	char cbuf[16];
++	int cnt = 0;
++
++	if (dent == phba->debug_writeGuard)
++		cnt = snprintf(cbuf, 16, "%u\n", phba->lpfc_injerr_wgrd_cnt);
++	else if (dent == phba->debug_writeApp)
++		cnt = snprintf(cbuf, 16, "%u\n", phba->lpfc_injerr_wapp_cnt);
++	else if (dent == phba->debug_writeRef)
++		cnt = snprintf(cbuf, 16, "%u\n", phba->lpfc_injerr_wref_cnt);
++	else if (dent == phba->debug_readApp)
++		cnt = snprintf(cbuf, 16, "%u\n", phba->lpfc_injerr_rapp_cnt);
++	else if (dent == phba->debug_readRef)
++		cnt = snprintf(cbuf, 16, "%u\n", phba->lpfc_injerr_rref_cnt);
++	else if (dent == phba->debug_InjErrLBA)
++		cnt = snprintf(cbuf, 16, "0x%lx\n",
++				 (unsigned long) phba->lpfc_injerr_lba);
++	else
++		lpfc_printf_log(phba, KERN_ERR, LOG_INIT,
++			 "0547 Unknown debugfs error injection entry\n");
++
++	return simple_read_from_buffer(buf, nbytes, ppos, &cbuf, cnt);
++}
++
++static ssize_t
++lpfc_debugfs_dif_err_write(struct file *file, const char __user *buf,
++	size_t nbytes, loff_t *ppos)
++{
++	struct dentry *dent = file->f_dentry;
++	struct lpfc_hba *phba = file->private_data;
++	char dstbuf[32];
++	unsigned long tmp;
++	int size;
++
++	memset(dstbuf, 0, 32);
++	size = (nbytes < 32) ? nbytes : 32;
++	if (copy_from_user(dstbuf, buf, size))
++		return 0;
++
++	if (strict_strtoul(dstbuf, 0, &tmp))
++		return 0;
++
++	if (dent == phba->debug_writeGuard)
++		phba->lpfc_injerr_wgrd_cnt = (uint32_t)tmp;
++	else if (dent == phba->debug_writeApp)
++		phba->lpfc_injerr_wapp_cnt = (uint32_t)tmp;
++	else if (dent == phba->debug_writeRef)
++		phba->lpfc_injerr_wref_cnt = (uint32_t)tmp;
++	else if (dent == phba->debug_readApp)
++		phba->lpfc_injerr_rapp_cnt = (uint32_t)tmp;
++	else if (dent == phba->debug_readRef)
++		phba->lpfc_injerr_rref_cnt = (uint32_t)tmp;
++	else if (dent == phba->debug_InjErrLBA)
++		phba->lpfc_injerr_lba = (sector_t)tmp;
++	else
++		lpfc_printf_log(phba, KERN_ERR, LOG_INIT,
++			 "0548 Unknown debugfs error injection entry\n");
++
++	return nbytes;
++}
++
++static int
++lpfc_debugfs_dif_err_release(struct inode *inode, struct file *file)
++{
++	return 0;
++}
++
+ /**
+  * lpfc_debugfs_nodelist_open - Open the nodelist debugfs file
+  * @inode: The inode pointer that contains a vport pointer.
+@@ -3380,6 +3459,16 @@ static const struct file_operations lpfc_debugfs_op_dumpDif = {
+ 	.release =      lpfc_debugfs_dumpDataDif_release,
+ };
+ 
++#undef lpfc_debugfs_op_dif_err
++static const struct file_operations lpfc_debugfs_op_dif_err = {
++	.owner =	THIS_MODULE,
++	.open =		lpfc_debugfs_dif_err_open,
++	.llseek =	lpfc_debugfs_lseek,
++	.read =		lpfc_debugfs_dif_err_read,
++	.write =	lpfc_debugfs_dif_err_write,
++	.release =	lpfc_debugfs_dif_err_release,
++};
++
+ #undef lpfc_debugfs_op_slow_ring_trc
+ static const struct file_operations lpfc_debugfs_op_slow_ring_trc = {
+ 	.owner =        THIS_MODULE,
+@@ -3788,6 +3877,74 @@ lpfc_debugfs_initialize(struct lpfc_vport *vport)
+ 			goto debug_failed;
+ 		}
+ 
++		/* Setup DIF Error Injections */
++		snprintf(name, sizeof(name), "InjErrLBA");
++		phba->debug_InjErrLBA =
++			debugfs_create_file(name, S_IFREG|S_IRUGO|S_IWUSR,
++			phba->hba_debugfs_root,
++			phba, &lpfc_debugfs_op_dif_err);
++		if (!phba->debug_InjErrLBA) {
++			lpfc_printf_vlog(vport, KERN_ERR, LOG_INIT,
++				"0807 Cannot create debugfs InjErrLBA\n");
++			goto debug_failed;
++		}
++		phba->lpfc_injerr_lba = LPFC_INJERR_LBA_OFF;
++
++		snprintf(name, sizeof(name), "writeGuardInjErr");
++		phba->debug_writeGuard =
++			debugfs_create_file(name, S_IFREG|S_IRUGO|S_IWUSR,
++			phba->hba_debugfs_root,
++			phba, &lpfc_debugfs_op_dif_err);
++		if (!phba->debug_writeGuard) {
++			lpfc_printf_vlog(vport, KERN_ERR, LOG_INIT,
++				"0802 Cannot create debugfs writeGuard\n");
++			goto debug_failed;
++		}
++
++		snprintf(name, sizeof(name), "writeAppInjErr");
++		phba->debug_writeApp =
++			debugfs_create_file(name, S_IFREG|S_IRUGO|S_IWUSR,
++			phba->hba_debugfs_root,
++			phba, &lpfc_debugfs_op_dif_err);
++		if (!phba->debug_writeApp) {
++			lpfc_printf_vlog(vport, KERN_ERR, LOG_INIT,
++				"0803 Cannot create debugfs writeApp\n");
++			goto debug_failed;
++		}
++
++		snprintf(name, sizeof(name), "writeRefInjErr");
++		phba->debug_writeRef =
++			debugfs_create_file(name, S_IFREG|S_IRUGO|S_IWUSR,
++			phba->hba_debugfs_root,
++			phba, &lpfc_debugfs_op_dif_err);
++		if (!phba->debug_writeRef) {
++			lpfc_printf_vlog(vport, KERN_ERR, LOG_INIT,
++				"0804 Cannot create debugfs writeRef\n");
++			goto debug_failed;
++		}
++
++		snprintf(name, sizeof(name), "readAppInjErr");
++		phba->debug_readApp =
++			debugfs_create_file(name, S_IFREG|S_IRUGO|S_IWUSR,
++			phba->hba_debugfs_root,
++			phba, &lpfc_debugfs_op_dif_err);
++		if (!phba->debug_readApp) {
++			lpfc_printf_vlog(vport, KERN_ERR, LOG_INIT,
++				"0805 Cannot create debugfs readApp\n");
++			goto debug_failed;
++		}
++
++		snprintf(name, sizeof(name), "readRefInjErr");
++		phba->debug_readRef =
++			debugfs_create_file(name, S_IFREG|S_IRUGO|S_IWUSR,
++			phba->hba_debugfs_root,
++			phba, &lpfc_debugfs_op_dif_err);
++		if (!phba->debug_readRef) {
++			lpfc_printf_vlog(vport, KERN_ERR, LOG_INIT,
++				"0806 Cannot create debugfs readApp\n");
++			goto debug_failed;
++		}
++
+ 		/* Setup slow ring trace */
+ 		if (lpfc_debugfs_max_slow_ring_trc) {
+ 			num = lpfc_debugfs_max_slow_ring_trc - 1;
+@@ -4090,6 +4247,30 @@ lpfc_debugfs_terminate(struct lpfc_vport *vport)
+ 			debugfs_remove(phba->debug_dumpDif); /* dumpDif */
+ 			phba->debug_dumpDif = NULL;
+ 		}
++		if (phba->debug_InjErrLBA) {
++			debugfs_remove(phba->debug_InjErrLBA); /* InjErrLBA */
++			phba->debug_InjErrLBA = NULL;
++		}
++		if (phba->debug_writeGuard) {
++			debugfs_remove(phba->debug_writeGuard); /* writeGuard */
++			phba->debug_writeGuard = NULL;
++		}
++		if (phba->debug_writeApp) {
++			debugfs_remove(phba->debug_writeApp); /* writeApp */
++			phba->debug_writeApp = NULL;
++		}
++		if (phba->debug_writeRef) {
++			debugfs_remove(phba->debug_writeRef); /* writeRef */
++			phba->debug_writeRef = NULL;
++		}
++		if (phba->debug_readApp) {
++			debugfs_remove(phba->debug_readApp); /* readApp */
++			phba->debug_readApp = NULL;
++		}
++		if (phba->debug_readRef) {
++			debugfs_remove(phba->debug_readRef); /* readRef */
++			phba->debug_readRef = NULL;
++		}
+ 
+ 		if (phba->slow_ring_trc) {
+ 			kfree(phba->slow_ring_trc);
+diff --git a/drivers/scsi/lpfc/lpfc_hw4.h b/drivers/scsi/lpfc/lpfc_hw4.h
+index 1a417135b734..98d21521f539 100644
+--- a/drivers/scsi/lpfc/lpfc_hw4.h
++++ b/drivers/scsi/lpfc/lpfc_hw4.h
+@@ -1484,16 +1484,81 @@ struct sli4_sge {	/* SLI-4 */
+ 	uint32_t addr_lo;
+ 
+ 	uint32_t word2;
+-#define lpfc_sli4_sge_offset_SHIFT	0 /* Offset of buffer - Not used*/
+-#define lpfc_sli4_sge_offset_MASK	0x1FFFFFFF
++#define lpfc_sli4_sge_offset_SHIFT	0
++#define lpfc_sli4_sge_offset_MASK	0x07FFFFFF
+ #define lpfc_sli4_sge_offset_WORD	word2
+-#define lpfc_sli4_sge_last_SHIFT	31 /* Last SEG in the SGL sets
+-						this  flag !! */
++#define lpfc_sli4_sge_type_SHIFT	27
++#define lpfc_sli4_sge_type_MASK		0x0000000F
++#define lpfc_sli4_sge_type_WORD		word2
++#define LPFC_SGE_TYPE_DATA		0x0
++#define LPFC_SGE_TYPE_DIF		0x4
++#define LPFC_SGE_TYPE_LSP		0x5
++#define LPFC_SGE_TYPE_PEDIF		0x6
++#define LPFC_SGE_TYPE_PESEED		0x7
++#define LPFC_SGE_TYPE_DISEED		0x8
++#define LPFC_SGE_TYPE_ENC		0x9
++#define LPFC_SGE_TYPE_ATM		0xA
++#define LPFC_SGE_TYPE_SKIP		0xC
++#define lpfc_sli4_sge_last_SHIFT	31 /* Last SEG in the SGL sets it */
+ #define lpfc_sli4_sge_last_MASK		0x00000001
+ #define lpfc_sli4_sge_last_WORD		word2
+ 	uint32_t sge_len;
+ };
+ 
++struct sli4_sge_diseed {	/* SLI-4 */
++	uint32_t ref_tag;
++	uint32_t ref_tag_tran;
++
++	uint32_t word2;
++#define lpfc_sli4_sge_dif_apptran_SHIFT	0
++#define lpfc_sli4_sge_dif_apptran_MASK	0x0000FFFF
++#define lpfc_sli4_sge_dif_apptran_WORD	word2
++#define lpfc_sli4_sge_dif_af_SHIFT	24
++#define lpfc_sli4_sge_dif_af_MASK	0x00000001
++#define lpfc_sli4_sge_dif_af_WORD	word2
++#define lpfc_sli4_sge_dif_na_SHIFT	25
++#define lpfc_sli4_sge_dif_na_MASK	0x00000001
++#define lpfc_sli4_sge_dif_na_WORD	word2
++#define lpfc_sli4_sge_dif_hi_SHIFT	26
++#define lpfc_sli4_sge_dif_hi_MASK	0x00000001
++#define lpfc_sli4_sge_dif_hi_WORD	word2
++#define lpfc_sli4_sge_dif_type_SHIFT	27
++#define lpfc_sli4_sge_dif_type_MASK	0x0000000F
++#define lpfc_sli4_sge_dif_type_WORD	word2
++#define lpfc_sli4_sge_dif_last_SHIFT	31 /* Last SEG in the SGL sets it */
++#define lpfc_sli4_sge_dif_last_MASK	0x00000001
++#define lpfc_sli4_sge_dif_last_WORD	word2
++	uint32_t word3;
++#define lpfc_sli4_sge_dif_apptag_SHIFT	0
++#define lpfc_sli4_sge_dif_apptag_MASK	0x0000FFFF
++#define lpfc_sli4_sge_dif_apptag_WORD	word3
++#define lpfc_sli4_sge_dif_bs_SHIFT	16
++#define lpfc_sli4_sge_dif_bs_MASK	0x00000007
++#define lpfc_sli4_sge_dif_bs_WORD	word3
++#define lpfc_sli4_sge_dif_ai_SHIFT	19
++#define lpfc_sli4_sge_dif_ai_MASK	0x00000001
++#define lpfc_sli4_sge_dif_ai_WORD	word3
++#define lpfc_sli4_sge_dif_me_SHIFT	20
++#define lpfc_sli4_sge_dif_me_MASK	0x00000001
++#define lpfc_sli4_sge_dif_me_WORD	word3
++#define lpfc_sli4_sge_dif_re_SHIFT	21
++#define lpfc_sli4_sge_dif_re_MASK	0x00000001
++#define lpfc_sli4_sge_dif_re_WORD	word3
++#define lpfc_sli4_sge_dif_ce_SHIFT	22
++#define lpfc_sli4_sge_dif_ce_MASK	0x00000001
++#define lpfc_sli4_sge_dif_ce_WORD	word3
++#define lpfc_sli4_sge_dif_nr_SHIFT	23
++#define lpfc_sli4_sge_dif_nr_MASK	0x00000001
++#define lpfc_sli4_sge_dif_nr_WORD	word3
++#define lpfc_sli4_sge_dif_oprx_SHIFT	24
++#define lpfc_sli4_sge_dif_oprx_MASK	0x0000000F
++#define lpfc_sli4_sge_dif_oprx_WORD	word3
++#define lpfc_sli4_sge_dif_optx_SHIFT	28
++#define lpfc_sli4_sge_dif_optx_MASK	0x0000000F
++#define lpfc_sli4_sge_dif_optx_WORD	word3
++/* optx and oprx use BG_OP_IN defines in lpfc_hw.h */
++};
++
+ struct fcf_record {
+ 	uint32_t max_rcv_size;
+ 	uint32_t fka_adv_period;
+@@ -3023,6 +3088,9 @@ struct wqe_common {
+ #define wqe_ctxt_tag_MASK     0x0000FFFF
+ #define wqe_ctxt_tag_WORD     word6
+ 	uint32_t word7;
++#define wqe_dif_SHIFT         0
++#define wqe_dif_MASK          0x00000003
++#define wqe_dif_WORD          word7
+ #define wqe_ct_SHIFT          2
+ #define wqe_ct_MASK           0x00000003
+ #define wqe_ct_WORD           word7
+@@ -3035,12 +3103,21 @@ struct wqe_common {
+ #define wqe_class_SHIFT       16
+ #define wqe_class_MASK        0x00000007
+ #define wqe_class_WORD        word7
++#define wqe_ar_SHIFT          19
++#define wqe_ar_MASK           0x00000001
++#define wqe_ar_WORD           word7
++#define wqe_ag_SHIFT          wqe_ar_SHIFT
++#define wqe_ag_MASK           wqe_ar_MASK
++#define wqe_ag_WORD           wqe_ar_WORD
+ #define wqe_pu_SHIFT          20
+ #define wqe_pu_MASK           0x00000003
+ #define wqe_pu_WORD           word7
+ #define wqe_erp_SHIFT         22
+ #define wqe_erp_MASK          0x00000001
+ #define wqe_erp_WORD          word7
++#define wqe_conf_SHIFT        wqe_erp_SHIFT
++#define wqe_conf_MASK         wqe_erp_MASK
++#define wqe_conf_WORD         wqe_erp_WORD
+ #define wqe_lnk_SHIFT         23
+ #define wqe_lnk_MASK          0x00000001
+ #define wqe_lnk_WORD          word7
+@@ -3099,6 +3176,9 @@ struct wqe_common {
+ #define wqe_xc_SHIFT          21
+ #define wqe_xc_MASK           0x00000001
+ #define wqe_xc_WORD           word10
++#define wqe_sr_SHIFT          22
++#define wqe_sr_MASK           0x00000001
++#define wqe_sr_WORD           word10
+ #define wqe_ccpe_SHIFT        23
+ #define wqe_ccpe_MASK         0x00000001
+ #define wqe_ccpe_WORD         word10
+diff --git a/drivers/scsi/lpfc/lpfc_scsi.c b/drivers/scsi/lpfc/lpfc_scsi.c
+index 2a3c9c924279..5b8790b3cf4b 100644
+--- a/drivers/scsi/lpfc/lpfc_scsi.c
++++ b/drivers/scsi/lpfc/lpfc_scsi.c
+@@ -58,6 +58,13 @@ static char *dif_op_str[] = {
+ 	"SCSI_PROT_READ_PASS",
+ 	"SCSI_PROT_WRITE_PASS",
+ };
++
++struct scsi_dif_tuple {
++	__be16 guard_tag;       /* Checksum */
++	__be16 app_tag;         /* Opaque storage */
++	__be32 ref_tag;         /* Target LBA or indirect LBA */
++};
++
+ static void
+ lpfc_release_scsi_buf_s4(struct lpfc_hba *phba, struct lpfc_scsi_buf *psb);
+ static void
+@@ -1263,6 +1270,174 @@ lpfc_scsi_prep_dma_buf_s3(struct lpfc_hba *phba, struct lpfc_scsi_buf *lpfc_cmd)
+ 	return 0;
+ }
+ 
++static inline unsigned
++lpfc_cmd_blksize(struct scsi_cmnd *sc)
++{
++	return sc->device->sector_size;
++}
++
++#ifdef CONFIG_SCSI_LPFC_DEBUG_FS
++/*
++ * Given a scsi cmnd, determine the BlockGuard tags to be used with it
++ * @sc: The SCSI command to examine
++ * @reftag: (out) BlockGuard reference tag for transmitted data
++ * @apptag: (out) BlockGuard application tag for transmitted data
++ * @new_guard (in) Value to replace CRC with if needed
++ *
++ * Returns (1) if error injection was performed, (0) otherwise
++ */
++static int
++lpfc_bg_err_inject(struct lpfc_hba *phba, struct scsi_cmnd *sc,
++		uint32_t *reftag, uint16_t *apptag, uint32_t new_guard)
++{
++	struct scatterlist *sgpe; /* s/g prot entry */
++	struct scatterlist *sgde; /* s/g data entry */
++	struct scsi_dif_tuple *src;
++	uint32_t op = scsi_get_prot_op(sc);
++	uint32_t blksize;
++	uint32_t numblks;
++	sector_t lba;
++	int rc = 0;
++
++	if (op == SCSI_PROT_NORMAL)
++		return 0;
++
++	lba = scsi_get_lba(sc);
++	if (phba->lpfc_injerr_lba != LPFC_INJERR_LBA_OFF) {
++		blksize = lpfc_cmd_blksize(sc);
++		numblks = (scsi_bufflen(sc) + blksize - 1) / blksize;
++
++		/* Make sure we have the right LBA if one is specified */
++		if ((phba->lpfc_injerr_lba < lba) ||
++			(phba->lpfc_injerr_lba >= (lba + numblks)))
++			return 0;
++	}
++
++	sgpe = scsi_prot_sglist(sc);
++	sgde = scsi_sglist(sc);
++
++	/* Should we change the Reference Tag */
++	if (reftag) {
++		/*
++		 * If we are SCSI_PROT_WRITE_STRIP, the protection data is
++		 * being stripped from the wire, thus it doesn't matter.
++		 */
++		if ((op == SCSI_PROT_WRITE_PASS) ||
++			(op == SCSI_PROT_WRITE_INSERT)) {
++			if (phba->lpfc_injerr_wref_cnt) {
++
++				/* DEADBEEF will be the reftag on the wire */
++				*reftag = 0xDEADBEEF;
++				phba->lpfc_injerr_wref_cnt--;
++				phba->lpfc_injerr_lba = LPFC_INJERR_LBA_OFF;
++				rc = 1;
++
++				lpfc_printf_log(phba, KERN_ERR, LOG_BG,
++					"9081 BLKGRD: Injecting reftag error: "
++					"write lba x%lx\n", (unsigned long)lba);
++			}
++		} else {
++			if (phba->lpfc_injerr_rref_cnt) {
++				*reftag = 0xDEADBEEF;
++				phba->lpfc_injerr_rref_cnt--;
++				phba->lpfc_injerr_lba = LPFC_INJERR_LBA_OFF;
++				rc = 1;
++
++				lpfc_printf_log(phba, KERN_ERR, LOG_BG,
++					"9076 BLKGRD: Injecting reftag error: "
++					"read lba x%lx\n", (unsigned long)lba);
++			}
++		}
++	}
++
++	/* Should we change the Application Tag */
++	if (apptag) {
++		/*
++		 * If we are SCSI_PROT_WRITE_STRIP, the protection data is
++		 * being stripped from the wire, thus it doesn't matter.
++		 */
++		if ((op == SCSI_PROT_WRITE_PASS) ||
++			(op == SCSI_PROT_WRITE_INSERT)) {
++			if (phba->lpfc_injerr_wapp_cnt) {
++
++				/* DEAD will be the apptag on the wire */
++				*apptag = 0xDEAD;
++				phba->lpfc_injerr_wapp_cnt--;
++				phba->lpfc_injerr_lba = LPFC_INJERR_LBA_OFF;
++				rc = 1;
++
++				lpfc_printf_log(phba, KERN_ERR, LOG_BG,
++					"9077 BLKGRD: Injecting apptag error: "
++					"write lba x%lx\n", (unsigned long)lba);
++			}
++		} else {
++			if (phba->lpfc_injerr_rapp_cnt) {
++				*apptag = 0xDEAD;
++				phba->lpfc_injerr_rapp_cnt--;
++				phba->lpfc_injerr_lba = LPFC_INJERR_LBA_OFF;
++				rc = 1;
++
++				lpfc_printf_log(phba, KERN_ERR, LOG_BG,
++					"9078 BLKGRD: Injecting apptag error: "
++					"read lba x%lx\n", (unsigned long)lba);
++			}
++		}
++	}
++
++	/* Should we change the Guard Tag */
++
++	/*
++	 * If we are SCSI_PROT_WRITE_INSERT, the protection data is
++	 * being on the wire is being fully generated on the HBA.
++	 * The host cannot change it or force an error.
++	 */
++	if (((op == SCSI_PROT_WRITE_STRIP) ||
++		(op == SCSI_PROT_WRITE_PASS)) &&
++		phba->lpfc_injerr_wgrd_cnt) {
++		if (sgpe) {
++			src = (struct scsi_dif_tuple *)sg_virt(sgpe);
++			/*
++			 * Just inject an error in the first
++			 * prot block.
++			 */
++			lpfc_printf_log(phba, KERN_ERR, LOG_BG,
++				"9079 BLKGRD: Injecting guard error: "
++				"write lba x%lx oldGuard x%x refTag x%x\n",
++				(unsigned long)lba, src->guard_tag,
++				src->ref_tag);
++
++			src->guard_tag = (uint16_t)new_guard;
++			phba->lpfc_injerr_wgrd_cnt--;
++			phba->lpfc_injerr_lba = LPFC_INJERR_LBA_OFF;
++			rc = 1;
++
++		} else {
++			blksize = lpfc_cmd_blksize(sc);
++			/*
++			 * Jump past the first data block
++			 * and inject an error in the
++			 * prot data. The prot data is already
++			 * embedded after the regular data.
++			 */
++			src = (struct scsi_dif_tuple *)
++					(sg_virt(sgde) + blksize);
++
++			lpfc_printf_log(phba, KERN_ERR, LOG_BG,
++				"9080 BLKGRD: Injecting guard error: "
++				"write lba x%lx oldGuard x%x refTag x%x\n",
++				(unsigned long)lba, src->guard_tag,
++				src->ref_tag);
++
++			src->guard_tag = (uint16_t)new_guard;
++			phba->lpfc_injerr_wgrd_cnt--;
++			phba->lpfc_injerr_lba = LPFC_INJERR_LBA_OFF;
++			rc = 1;
++		}
++	}
++	return rc;
++}
++#endif
++
+ /*
+  * Given a scsi cmnd, determine the BlockGuard opcodes to be used with it
+  * @sc: The SCSI command to examine
+@@ -1341,18 +1516,6 @@ lpfc_sc_to_bg_opcodes(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 	return ret;
+ }
+ 
+-struct scsi_dif_tuple {
+-	__be16 guard_tag;       /* Checksum */
+-	__be16 app_tag;         /* Opaque storage */
+-	__be32 ref_tag;         /* Target LBA or indirect LBA */
+-};
+-
+-static inline unsigned
+-lpfc_cmd_blksize(struct scsi_cmnd *sc)
+-{
+-	return sc->device->sector_size;
+-}
+-
+ /*
+  * This function sets up buffer list for protection groups of
+  * type LPFC_PG_TYPE_NO_DIF
+@@ -1401,6 +1564,11 @@ lpfc_bg_setup_bpl(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 	blksize = lpfc_cmd_blksize(sc);
+ 	reftag = scsi_get_lba(sc) & 0xffffffff;
+ 
++#ifdef CONFIG_SCSI_LPFC_DEBUG_FS
++	/* reftag is the only error we can inject here */
++	lpfc_bg_err_inject(phba, sc, &reftag, 0, 0);
++#endif
++
+ 	/* setup PDE5 with what we have */
+ 	pde5 = (struct lpfc_pde5 *) bpl;
+ 	memset(pde5, 0, sizeof(struct lpfc_pde5));
+@@ -1532,6 +1700,11 @@ lpfc_bg_setup_bpl_prot(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 	blksize = lpfc_cmd_blksize(sc);
+ 	reftag = scsi_get_lba(sc) & 0xffffffff;
+ 
++#ifdef CONFIG_SCSI_LPFC_DEBUG_FS
++	/* reftag / guard tag are the only errors we can inject here */
++	lpfc_bg_err_inject(phba, sc, &reftag, 0, 0xDEAD);
++#endif
++
+ 	split_offset = 0;
+ 	do {
+ 		/* setup PDE5 with what we have */
+@@ -1671,7 +1844,6 @@ lpfc_bg_setup_bpl_prot(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 		}
+ 
+ 	} while (!alldone);
+-
+ out:
+ 
+ 	return num_bde;
+@@ -2075,6 +2247,7 @@ lpfc_scsi_prep_dma_buf_s4(struct lpfc_hba *phba, struct lpfc_scsi_buf *lpfc_cmd)
+ 			else
+ 				bf_set(lpfc_sli4_sge_last, sgl, 0);
+ 			bf_set(lpfc_sli4_sge_offset, sgl, dma_offset);
++			bf_set(lpfc_sli4_sge_type, sgl, LPFC_SGE_TYPE_DATA);
+ 			sgl->word2 = cpu_to_le32(sgl->word2);
+ 			sgl->sge_len = cpu_to_le32(dma_len);
+ 			dma_offset += dma_len;
+diff --git a/drivers/scsi/lpfc/lpfc_sli.c b/drivers/scsi/lpfc/lpfc_sli.c
+index c430aada02be..4d4104f38c98 100644
+--- a/drivers/scsi/lpfc/lpfc_sli.c
++++ b/drivers/scsi/lpfc/lpfc_sli.c
+@@ -7538,6 +7538,8 @@ lpfc_sli4_bpl2sgl(struct lpfc_hba *phba, struct lpfc_iocbq *piocbq,
+ 				if (inbound == 1)
+ 					offset = 0;
+ 				bf_set(lpfc_sli4_sge_offset, sgl, offset);
++				bf_set(lpfc_sli4_sge_type, sgl,
++					LPFC_SGE_TYPE_DATA);
+ 				offset += bde.tus.f.bdeSize;
+ 			}
+ 			sgl->word2 = cpu_to_le32(sgl->word2);

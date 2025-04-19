@@ -1,0 +1,72 @@
+diff --cc arch/s390/kvm/kvm-s390.c
+index c2e6d4ba4e23,f6268dfb8362..19a81024fe16
+--- a/arch/s390/kvm/kvm-s390.c
++++ b/arch/s390/kvm/kvm-s390.c
+@@@ -3280,24 -3532,18 +3535,31 @@@ static void kvm_arch_vcpu_ioctl_initial
+  	memset(vcpu->arch.sie_block->gcr, 0, sizeof(vcpu->arch.sie_block->gcr));
+  	vcpu->arch.sie_block->gcr[0] = CR0_INITIAL_MASK;
+  	vcpu->arch.sie_block->gcr[14] = CR14_INITIAL_MASK;
+ +
+ +	/* ... the data in sync regs */
+ +	memset(vcpu->run->s.regs.crs, 0, sizeof(vcpu->run->s.regs.crs));
+ +	vcpu->run->s.regs.ckc = 0;
+ +	vcpu->run->s.regs.crs[0] = CR0_INITIAL_MASK;
+ +	vcpu->run->s.regs.crs[14] = CR14_INITIAL_MASK;
+ +	vcpu->run->psw_addr = 0;
+ +	vcpu->run->psw_mask = 0;
+ +	vcpu->run->s.regs.todpr = 0;
+ +	vcpu->run->s.regs.cputm = 0;
+ +	vcpu->run->s.regs.ckc = 0;
+ +	vcpu->run->s.regs.pp = 0;
+ +	vcpu->run->s.regs.gbea = 1;
+  	vcpu->run->s.regs.fpc = 0;
+- 	vcpu->arch.sie_block->gbea = 1;
+- 	vcpu->arch.sie_block->pp = 0;
+- 	vcpu->arch.sie_block->fpf &= ~FPF_BPBC;
++ 	/*
++ 	 * Do not reset these registers in the protected case, as some of
++ 	 * them are overlayed and they are not accessible in this case
++ 	 * anyway.
++ 	 */
++ 	if (!kvm_s390_pv_cpu_is_protected(vcpu)) {
++ 		vcpu->arch.sie_block->gbea = 1;
++ 		vcpu->arch.sie_block->pp = 0;
++ 		vcpu->arch.sie_block->fpf &= ~FPF_BPBC;
++ 		vcpu->arch.sie_block->todpr = 0;
++ 	}
+  }
+  
+  static void kvm_arch_vcpu_ioctl_clear_reset(struct kvm_vcpu *vcpu)
+diff --cc arch/x86/kvm/kvm_emulate.h
+index c06e8353efd3,4688b26c17ee..43c93ffa76ed
+--- a/arch/x86/kvm/kvm_emulate.h
++++ b/arch/x86/kvm/kvm_emulate.h
+@@@ -359,7 -361,13 +361,12 @@@ struct x86_emulate_ctxt 
+  	u8 seg_override;
+  	u64 d;
+  	unsigned long _eip;
++ 
++ 	/* Here begins the usercopy section. */
++ 	struct operand src;
++ 	struct operand src2;
++ 	struct operand dst;
+  	struct operand memop;
+ -	/* Fields above regs are cleared together. */
+  	unsigned long _regs[NR_VCPU_REGS];
+  	struct operand *memopp;
+  	struct fetch_cache fetch;
+diff --cc arch/x86/kvm/vmx/vmx.h
+index 0695ea177e22,79d38f41ef7a..aab9df55336e
+--- a/arch/x86/kvm/vmx/vmx.h
++++ b/arch/x86/kvm/vmx/vmx.h
+@@@ -12,8 -12,9 +12,7 @@@
+  #include "vmcs.h"
+  
+  extern const u32 vmx_msr_index[];
+- extern u64 host_efer;
+  
+ -extern u32 get_umwait_control_msr(void);
+ -
+  #define MSR_TYPE_R	1
+  #define MSR_TYPE_W	2
+  #define MSR_TYPE_RW	3

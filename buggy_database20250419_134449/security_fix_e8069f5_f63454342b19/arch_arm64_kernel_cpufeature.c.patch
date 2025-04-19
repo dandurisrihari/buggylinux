@@ -1,0 +1,174 @@
+commit e8069f5a8e3bdb5fdeeff895780529388592ee7a
+Merge: eded37770c9f 255006adb3da
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Mon Jul 3 15:32:22 2023 -0700
+
+    Merge tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm
+    
+    Pull kvm updates from Paolo Bonzini:
+     "ARM64:
+    
+       - Eager page splitting optimization for dirty logging, optionally
+         allowing for a VM to avoid the cost of hugepage splitting in the
+         stage-2 fault path.
+    
+       - Arm FF-A proxy for pKVM, allowing a pKVM host to safely interact
+         with services that live in the Secure world. pKVM intervenes on
+         FF-A calls to guarantee the host doesn't misuse memory donated to
+         the hyp or a pKVM guest.
+    
+       - Support for running the split hypervisor with VHE enabled, known as
+         'hVHE' mode. This is extremely useful for testing the split
+         hypervisor on VHE-only systems, and paves the way for new use cases
+         that depend on having two TTBRs available at EL2.
+    
+       - Generalized framework for configurable ID registers from userspace.
+         KVM/arm64 currently prevents arbitrary CPU feature set
+         configuration from userspace, but the intent is to relax this
+         limitation and allow userspace to select a feature set consistent
+         with the CPU.
+    
+       - Enable the use of Branch Target Identification (FEAT_BTI) in the
+         hypervisor.
+    
+       - Use a separate set of pointer authentication keys for the
+         hypervisor when running in protected mode, as the host is untrusted
+         at runtime.
+    
+       - Ensure timer IRQs are consistently released in the init failure
+         paths.
+    
+       - Avoid trapping CTR_EL0 on systems with Enhanced Virtualization
+         Traps (FEAT_EVT), as it is a register commonly read from userspace.
+    
+       - Erratum workaround for the upcoming AmpereOne part, which has
+         broken hardware A/D state management.
+    
+      RISC-V:
+    
+       - Redirect AMO load/store misaligned traps to KVM guest
+    
+       - Trap-n-emulate AIA in-kernel irqchip for KVM guest
+    
+       - Svnapot support for KVM Guest
+    
+      s390:
+    
+       - New uvdevice secret API
+    
+       - CMM selftest and fixes
+    
+       - fix racy access to target CPU for diag 9c
+    
+      x86:
+    
+       - Fix missing/incorrect #GP checks on ENCLS
+    
+       - Use standard mmu_notifier hooks for handling APIC access page
+    
+       - Drop now unnecessary TR/TSS load after VM-Exit on AMD
+    
+       - Print more descriptive information about the status of SEV and
+         SEV-ES during module load
+    
+       - Add a test for splitting and reconstituting hugepages during and
+         after dirty logging
+    
+       - Add support for CPU pinning in demand paging test
+    
+       - Add support for AMD PerfMonV2, with a variety of cleanups and minor
+         fixes included along the way
+    
+       - Add a "nx_huge_pages=never" option to effectively avoid creating NX
+         hugepage recovery threads (because nx_huge_pages=off can be toggled
+         at runtime)
+    
+       - Move handling of PAT out of MTRR code and dedup SVM+VMX code
+    
+       - Fix output of PIC poll command emulation when there's an interrupt
+    
+       - Add a maintainer's handbook to document KVM x86 processes,
+         preferred coding style, testing expectations, etc.
+    
+       - Misc cleanups, fixes and comments
+    
+      Generic:
+    
+       - Miscellaneous bugfixes and cleanups
+    
+      Selftests:
+    
+       - Generate dependency files so that partial rebuilds work as
+         expected"
+    
+    * tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm: (153 commits)
+      Documentation/process: Add a maintainer handbook for KVM x86
+      Documentation/process: Add a label for the tip tree handbook's coding style
+      KVM: arm64: Fix misuse of KVM_ARM_VCPU_POWER_OFF bit index
+      RISC-V: KVM: Remove unneeded semicolon
+      RISC-V: KVM: Allow Svnapot extension for Guest/VM
+      riscv: kvm: define vcpu_sbi_ext_pmu in header
+      RISC-V: KVM: Expose IMSIC registers as attributes of AIA irqchip
+      RISC-V: KVM: Add in-kernel virtualization of AIA IMSIC
+      RISC-V: KVM: Expose APLIC registers as attributes of AIA irqchip
+      RISC-V: KVM: Add in-kernel emulation of AIA APLIC
+      RISC-V: KVM: Implement device interface for AIA irqchip
+      RISC-V: KVM: Skeletal in-kernel AIA irqchip support
+      RISC-V: KVM: Set kvm_riscv_aia_nr_hgei to zero
+      RISC-V: KVM: Add APLIC related defines
+      RISC-V: KVM: Add IMSIC related defines
+      RISC-V: KVM: Implement guest external interrupt line management
+      KVM: x86: Remove PRIx* definitions as they are solely for user space
+      s390/uv: Update query for secret-UVCs
+      s390/uv: replace scnprintf with sysfs_emit
+      s390/uvdevice: Add 'Lock Secret Store' UVC
+      ...
+
+diff --cc arch/arm64/kernel/cpufeature.c
+index 6ea7f23b1287,3d93147179a0..f9d456fe132d
+--- a/arch/arm64/kernel/cpufeature.c
++++ b/arch/arm64/kernel/cpufeature.c
+@@@ -2662,27 -2656,23 +2677,44 @@@ static const struct arm64_cpu_capabilit
+  		.cpu_enable = cpu_enable_dit,
+  		ARM64_CPUID_FIELDS(ID_AA64PFR0_EL1, DIT, IMP)
+  	},
+ +	{
+ +		.desc = "Memory Copy and Memory Set instructions",
+ +		.capability = ARM64_HAS_MOPS,
+ +		.type = ARM64_CPUCAP_SYSTEM_FEATURE,
+ +		.matches = has_cpuid_feature,
+ +		.cpu_enable = cpu_enable_mops,
+ +		ARM64_CPUID_FIELDS(ID_AA64ISAR2_EL1, MOPS, IMP)
+ +	},
+ +	{
+ +		.capability = ARM64_HAS_TCR2,
+ +		.type = ARM64_CPUCAP_SYSTEM_FEATURE,
+ +		.matches = has_cpuid_feature,
+ +		ARM64_CPUID_FIELDS(ID_AA64MMFR3_EL1, TCRX, IMP)
+ +	},
+ +	{
+ +		.desc = "Stage-1 Permission Indirection Extension (S1PIE)",
+ +		.capability = ARM64_HAS_S1PIE,
+ +		.type = ARM64_CPUCAP_BOOT_CPU_FEATURE,
+ +		.matches = has_cpuid_feature,
+ +		ARM64_CPUID_FIELDS(ID_AA64MMFR3_EL1, S1PIE, IMP)
+ +	},
++ 	{
++ 		.desc = "VHE for hypervisor only",
++ 		.capability = ARM64_KVM_HVHE,
++ 		.type = ARM64_CPUCAP_SYSTEM_FEATURE,
++ 		.matches = hvhe_possible,
++ 	},
++ 	{
++ 		.desc = "Enhanced Virtualization Traps",
++ 		.capability = ARM64_HAS_EVT,
++ 		.type = ARM64_CPUCAP_SYSTEM_FEATURE,
++ 		.sys_reg = SYS_ID_AA64MMFR2_EL1,
++ 		.sign = FTR_UNSIGNED,
++ 		.field_pos = ID_AA64MMFR2_EL1_EVT_SHIFT,
++ 		.field_width = 4,
++ 		.min_field_value = ID_AA64MMFR2_EL1_EVT_IMP,
++ 		.matches = has_cpuid_feature,
++ 	},
+  	{},
+  };

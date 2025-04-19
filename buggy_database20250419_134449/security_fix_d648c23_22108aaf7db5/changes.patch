@@ -1,0 +1,301 @@
+diff --git a/include/net/cfg80211.h b/include/net/cfg80211.h
+index 772e099fc932..a4f9e6094118 100644
+--- a/include/net/cfg80211.h
++++ b/include/net/cfg80211.h
+@@ -2718,6 +2718,12 @@ static inline const u8 *ieee80211_bss_get_ie(struct cfg80211_bss *bss, u8 id)
+  *	Authentication algorithm number, i.e., starting at the Authentication
+  *	transaction sequence number field.
+  * @auth_data_len: Length of auth_data buffer in octets
++ * @link_id: if >= 0, indicates authentication should be done as an MLD,
++ *	the interface address is included as the MLD address and the
++ *	necessary link (with the given link_id) will be created (and
++ *	given an MLD address) by the driver
++ * @ap_mld_addr: AP MLD address in case of authentication request with
++ *	an AP MLD, valid iff @link_id >= 0
+  */
+ struct cfg80211_auth_request {
+ 	struct cfg80211_bss *bss;
+@@ -2728,6 +2734,21 @@ struct cfg80211_auth_request {
+ 	u8 key_len, key_idx;
+ 	const u8 *auth_data;
+ 	size_t auth_data_len;
++	s8 link_id;
++	const u8 *ap_mld_addr;
++};
++
++/**
++ * struct cfg80211_assoc_link - per-link information for MLO association
++ * @bss: the BSS pointer, see also &struct cfg80211_assoc_request::bss;
++ *	if this is %NULL for a link, that link is not requested
++ * @elems: extra elements for the per-STA profile for this link
++ * @elems_len: length of the elements
++ */
++struct cfg80211_assoc_link {
++	struct cfg80211_bss *bss;
++	const u8 *elems;
++	size_t elems_len;
+ };
+ 
+ /**
+@@ -2761,6 +2782,8 @@ enum cfg80211_assoc_req_flags {
+  *	given a reference that it must give back to cfg80211_send_rx_assoc()
+  *	or to cfg80211_assoc_timeout(). To ensure proper refcounting, new
+  *	association requests while already associating must be rejected.
++ *	This also applies to the @links.bss parameter, which is used instead
++ *	of this one (it is %NULL) for MLO associations.
+  * @ie: Extra IEs to add to (Re)Association Request frame or %NULL
+  * @ie_len: Length of ie buffer in octets
+  * @use_mfp: Use management frame protection (IEEE 802.11w) in this association
+@@ -2785,6 +2808,11 @@ enum cfg80211_assoc_req_flags {
+  *	with 16 octets of STA Nonce followed by 16 octets of AP Nonce.
+  * @s1g_capa: S1G capability override
+  * @s1g_capa_mask: S1G capability override mask
++ * @links: per-link information for MLO connections
++ * @link_id: >= 0 for MLO connections, where links are given, and indicates
++ *	the link on which the association request should be sent
++ * @ap_mld_addr: AP MLD address in case of MLO association request,
++ *	valid iff @link_id >= 0
+  */
+ struct cfg80211_assoc_request {
+ 	struct cfg80211_bss *bss;
+@@ -2800,6 +2828,9 @@ struct cfg80211_assoc_request {
+ 	size_t fils_kek_len;
+ 	const u8 *fils_nonces;
+ 	struct ieee80211_s1g_cap s1g_capa, s1g_capa_mask;
++	struct cfg80211_assoc_link links[IEEE80211_MLD_MAX_NUM_LINKS];
++	const u8 *ap_mld_addr;
++	s8 link_id;
+ };
+ 
+ /**
+diff --git a/include/uapi/linux/nl80211.h b/include/uapi/linux/nl80211.h
+index a9a2c9fef295..60ad9a9f153d 100644
+--- a/include/uapi/linux/nl80211.h
++++ b/include/uapi/linux/nl80211.h
+@@ -2687,6 +2687,8 @@ enum nl80211_commands {
+  *	various commands that need a link ID to operate.
+  * @NL80211_ATTR_MLO_LINKS: A nested array of links, each containing some
+  *	per-link information and a link ID.
++ * @NL80211_ATTR_MLD_ADDR: An MLD address, used with various commands such as
++ *	authenticate/associate.
+  *
+  * @NUM_NL80211_ATTR: total number of nl80211_attrs available
+  * @NL80211_ATTR_MAX: highest attribute number currently defined
+@@ -3204,6 +3206,7 @@ enum nl80211_attrs {
+ 
+ 	NL80211_ATTR_MLO_LINKS,
+ 	NL80211_ATTR_MLO_LINK_ID,
++	NL80211_ATTR_MLD_ADDR,
+ 
+ 	/* add attributes here, update the policy in nl80211.c */
+ 
+diff --git a/net/wireless/mlme.c b/net/wireless/mlme.c
+index 532113937469..d92eed0e52cd 100644
+--- a/net/wireless/mlme.c
++++ b/net/wireless/mlme.c
+@@ -241,6 +241,10 @@ int cfg80211_mlme_auth(struct cfg80211_registered_device *rdev,
+ 	if (!req->bss)
+ 		return -ENOENT;
+ 
++	if (req->link_id >= 0 &&
++	    !(wdev->wiphy->flags & WIPHY_FLAG_SUPPORTS_MLO))
++		return -EINVAL;
++
+ 	if (req->auth_type == NL80211_AUTHTYPE_SHARED_KEY) {
+ 		if (!req->key || !req->key_len ||
+ 		    req->key_idx < 0 || req->key_idx > 3)
+@@ -294,10 +298,19 @@ int cfg80211_mlme_assoc(struct cfg80211_registered_device *rdev,
+ 			struct cfg80211_assoc_request *req)
+ {
+ 	struct wireless_dev *wdev = dev->ieee80211_ptr;
+-	int err;
++	int err, i, j;
+ 
+ 	ASSERT_WDEV_LOCK(wdev);
+ 
++	for (i = 1; i < ARRAY_SIZE(req->links); i++) {
++		if (!req->links[i].bss)
++			continue;
++		for (j = 0; j < i; j++) {
++			if (req->links[i].bss == req->links[j].bss)
++				return -EINVAL;
++		}
++	}
++
+ 	if (wdev->connected &&
+ 	    (!req->prev_bssid ||
+ 	     !ether_addr_equal(wdev->u.client.connected_addr, req->prev_bssid)))
+@@ -310,8 +323,19 @@ int cfg80211_mlme_assoc(struct cfg80211_registered_device *rdev,
+ 
+ 	err = rdev_assoc(rdev, dev, req);
+ 	if (!err) {
+-		cfg80211_ref_bss(&rdev->wiphy, req->bss);
+-		cfg80211_hold_bss(bss_from_pub(req->bss));
++		int link_id;
++
++		if (req->bss) {
++			cfg80211_ref_bss(&rdev->wiphy, req->bss);
++			cfg80211_hold_bss(bss_from_pub(req->bss));
++		}
++
++		for (link_id = 0; link_id < ARRAY_SIZE(req->links); link_id++) {
++			if (!req->links[link_id].bss)
++				continue;
++			cfg80211_ref_bss(&rdev->wiphy, req->links[link_id].bss);
++			cfg80211_hold_bss(bss_from_pub(req->links[link_id].bss));
++		}
+ 	}
+ 	return err;
+ }
+diff --git a/net/wireless/nl80211.c b/net/wireless/nl80211.c
+index 5a4d3ddcdf80..9bc66a21ac3a 100644
+--- a/net/wireless/nl80211.c
++++ b/net/wireless/nl80211.c
+@@ -796,6 +796,7 @@ static const struct nla_policy nl80211_policy[NUM_NL80211_ATTR] = {
+ 		NLA_POLICY_NESTED_ARRAY(nl80211_policy),
+ 	[NL80211_ATTR_MLO_LINK_ID] =
+ 		NLA_POLICY_RANGE(NLA_U8, 0, IEEE80211_MLD_MAX_NUM_LINKS),
++	[NL80211_ATTR_MLD_ADDR] = NLA_POLICY_EXACT_LEN(ETH_ALEN),
+ };
+ 
+ /* policy for the key attributes */
+@@ -10282,6 +10283,12 @@ static int nl80211_authenticate(struct sk_buff *skb, struct genl_info *info)
+ 	req.key = key.p.key;
+ 	req.key_len = key.p.key_len;
+ 	req.key_idx = key.idx;
++	req.link_id = nl80211_link_id_or_invalid(info->attrs);
++	if (req.link_id >= 0) {
++		if (!info->attrs[NL80211_ATTR_MLD_ADDR])
++			return -EINVAL;
++		req.ap_mld_addr = nla_data(info->attrs[NL80211_ATTR_MLD_ADDR]);
++	}
+ 
+ 	req.bss = cfg80211_get_bss(&rdev->wiphy, chan, bssid, ssid, ssid_len,
+ 				   IEEE80211_BSS_TYPE_ESS,
+@@ -10475,7 +10482,9 @@ static int nl80211_associate(struct sk_buff *skb, struct genl_info *info)
+ 	struct cfg80211_registered_device *rdev = info->user_ptr[0];
+ 	struct net_device *dev = info->user_ptr[1];
+ 	struct cfg80211_assoc_request req = {};
++	struct nlattr **attrs = NULL;
+ 	const u8 *bssid, *ssid;
++	unsigned int link_id;
+ 	int err, ssid_len;
+ 
+ 	if (dev->ieee80211_ptr->conn_owner_nlportid &&
+@@ -10585,9 +10594,81 @@ static int nl80211_associate(struct sk_buff *skb, struct genl_info *info)
+ 		       sizeof(req.s1g_capa));
+ 	}
+ 
+-	req.bss = nl80211_assoc_bss(rdev, ssid, ssid_len, info->attrs, &bssid);
+-	if (IS_ERR(req.bss))
+-		return PTR_ERR(req.bss);
++	req.link_id = nl80211_link_id_or_invalid(info->attrs);
++
++	if (info->attrs[NL80211_ATTR_MLO_LINKS]) {
++		unsigned int attrsize = NUM_NL80211_ATTR * sizeof(*attrs);
++		struct nlattr *link;
++		int rem = 0;
++
++		if (req.link_id < 0)
++			return -EINVAL;
++
++		if (!(rdev->wiphy.flags & WIPHY_FLAG_SUPPORTS_MLO))
++			return -EINVAL;
++
++		if (info->attrs[NL80211_ATTR_MAC] ||
++		    info->attrs[NL80211_ATTR_WIPHY_FREQ] ||
++		    !info->attrs[NL80211_ATTR_MLD_ADDR])
++			return -EINVAL;
++
++		req.ap_mld_addr = nla_data(info->attrs[NL80211_ATTR_MLD_ADDR]);
++
++		attrs = kzalloc(attrsize, GFP_KERNEL);
++		if (!attrs)
++			return -ENOMEM;
++
++		nla_for_each_nested(link,
++				    info->attrs[NL80211_ATTR_MLO_LINKS],
++				    rem) {
++			memset(attrs, 0, attrsize);
++
++			nla_parse_nested(attrs, NL80211_ATTR_MAX,
++					 link, NULL, NULL);
++
++			if (!attrs[NL80211_ATTR_MLO_LINK_ID]) {
++				err = -EINVAL;
++				goto free;
++			}
++
++			link_id = nla_get_u8(attrs[NL80211_ATTR_MLO_LINK_ID]);
++			/* cannot use the same link ID again */
++			if (req.links[link_id].bss) {
++				err = -EINVAL;
++				goto free;
++			}
++			req.links[link_id].bss =
++				nl80211_assoc_bss(rdev, ssid, ssid_len, attrs,
++						  &bssid);
++			if (IS_ERR(req.links[link_id].bss)) {
++				err = PTR_ERR(req.links[link_id].bss);
++				goto free;
++			}
++
++			if (attrs[NL80211_ATTR_IE]) {
++				req.links[link_id].elems =
++					nla_data(attrs[NL80211_ATTR_IE]);
++				req.links[link_id].elems_len =
++					nla_len(attrs[NL80211_ATTR_IE]);
++			}
++		}
++
++		if (!req.links[req.link_id].bss) {
++			err = -EINVAL;
++			goto free;
++		}
++
++		kfree(attrs);
++		attrs = NULL;
++	} else {
++		if (req.link_id >= 0)
++			return -EINVAL;
++
++		req.bss = nl80211_assoc_bss(rdev, ssid, ssid_len, info->attrs,
++					    &bssid);
++		if (IS_ERR(req.bss))
++			return PTR_ERR(req.bss);
++	}
+ 
+ 	err = nl80211_crypto_settings(rdev, info, &req.crypto, 1);
+ 	if (!err) {
+@@ -10605,7 +10686,11 @@ static int nl80211_associate(struct sk_buff *skb, struct genl_info *info)
+ 		wdev_unlock(dev->ieee80211_ptr);
+ 	}
+ 
++free:
++	for (link_id = 0; link_id < ARRAY_SIZE(req.links); link_id++)
++		cfg80211_put_bss(&rdev->wiphy, req.links[link_id].bss);
+ 	cfg80211_put_bss(&rdev->wiphy, req.bss);
++	kfree(attrs);
+ 
+ 	return err;
+ }
+diff --git a/net/wireless/sme.c b/net/wireless/sme.c
+index c8a99b90723b..b3c6ce4f85ee 100644
+--- a/net/wireless/sme.c
++++ b/net/wireless/sme.c
+@@ -177,6 +177,7 @@ static int cfg80211_conn_do_work(struct wireless_dev *wdev,
+ 						params->ssid, params->ssid_len,
+ 						IEEE80211_BSS_TYPE_ESS,
+ 						IEEE80211_PRIVACY_ANY);
++		auth_req.link_id = -1;
+ 		err = cfg80211_mlme_auth(rdev, wdev->netdev, &auth_req);
+ 		cfg80211_put_bss(&rdev->wiphy, auth_req.bss);
+ 		return err;
+@@ -198,6 +199,7 @@ static int cfg80211_conn_do_work(struct wireless_dev *wdev,
+ 		req.ht_capa_mask = params->ht_capa_mask;
+ 		req.vht_capa = params->vht_capa;
+ 		req.vht_capa_mask = params->vht_capa_mask;
++		req.link_id = -1;
+ 
+ 		req.bss = cfg80211_get_bss(&rdev->wiphy, params->channel,
+ 					   params->bssid,

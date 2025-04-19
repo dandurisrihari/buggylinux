@@ -1,0 +1,64 @@
+commit 08273c9f619cb32fb041935724f576e607101f3b
+Author: Nathan Lynch <nathanl@linux.ibm.com>
+Date:   Fri Feb 10 12:42:08 2023 -0600
+
+    powerpc/rtas: arch-wide function token lookup conversions
+    
+    With the tokens for all implemented RTAS functions now available via
+    rtas_function_token(), which is optimal and safe for arbitrary
+    contexts, there is no need to use rtas_token() or cache its result.
+    
+    Most conversions are trivial, but a few are worth describing in more
+    detail:
+    
+    * Error injection token comparisons for lockdown purposes are
+      consolidated into a simple predicate: token_is_restricted_errinjct().
+    
+    * A couple of special cases in block_rtas_call() do not use
+      rtas_token() but perform string comparisons against names in the
+      function table. These are converted to compare against token values
+      instead, which is logically equivalent but less expensive.
+    
+    * The lookup for the ibm,os-term token can be deferred until needed,
+      instead of caching it at boot to avoid device tree traversal during
+      panic.
+    
+    * Since rtas_function_token() accesses a read-only data structure
+      without taking any locks, xmon's lookup of set-indicator can be
+      performed as needed instead of cached at startup.
+    
+    Signed-off-by: Nathan Lynch <nathanl@linux.ibm.com>
+    Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+    Link: https://lore.kernel.org/r/20230125-b4-powerpc-rtas-queue-v3-20-26929c8cce78@linux.ibm.com
+
+diff --git a/arch/powerpc/platforms/pseries/smp.c b/arch/powerpc/platforms/pseries/smp.c
+index 2bcfee86ff87..c597711ef20a 100644
+--- a/arch/powerpc/platforms/pseries/smp.c
++++ b/arch/powerpc/platforms/pseries/smp.c
+@@ -55,7 +55,7 @@ static cpumask_var_t of_spin_mask;
+ int smp_query_cpu_stopped(unsigned int pcpu)
+ {
+ 	int cpu_status, status;
+-	int qcss_tok = rtas_token("query-cpu-stopped-state");
++	int qcss_tok = rtas_function_token(RTAS_FN_QUERY_CPU_STOPPED_STATE);
+ 
+ 	if (qcss_tok == RTAS_UNKNOWN_SERVICE) {
+ 		printk_once(KERN_INFO
+@@ -108,7 +108,7 @@ static inline int smp_startup_cpu(unsigned int lcpu)
+ 	 * If the RTAS start-cpu token does not exist then presume the
+ 	 * cpu is already spinning.
+ 	 */
+-	start_cpu = rtas_token("start-cpu");
++	start_cpu = rtas_function_token(RTAS_FN_START_CPU);
+ 	if (start_cpu == RTAS_UNKNOWN_SERVICE)
+ 		return 1;
+ 
+@@ -266,7 +266,7 @@ void __init smp_init_pseries(void)
+ 	 * We know prom_init will not have started them if RTAS supports
+ 	 * query-cpu-stopped-state.
+ 	 */
+-	if (rtas_token("query-cpu-stopped-state") == RTAS_UNKNOWN_SERVICE) {
++	if (rtas_function_token(RTAS_FN_QUERY_CPU_STOPPED_STATE) == RTAS_UNKNOWN_SERVICE) {
+ 		if (cpu_has_feature(CPU_FTR_SMT)) {
+ 			for_each_present_cpu(i) {
+ 				if (cpu_thread_in_core(i) == 0)

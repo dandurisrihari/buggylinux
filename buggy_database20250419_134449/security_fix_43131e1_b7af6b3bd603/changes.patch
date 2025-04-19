@@ -1,0 +1,68 @@
+diff --git a/mm/hugetlb.c b/mm/hugetlb.c
+index 4c2efc0f3919..3c275ffd32a7 100644
+--- a/mm/hugetlb.c
++++ b/mm/hugetlb.c
+@@ -615,6 +615,8 @@ int PageHuge(struct page *page)
+ 	return dtor == free_huge_page;
+ }
+ 
++EXPORT_SYMBOL_GPL(PageHuge);
++
+ static struct page *alloc_fresh_huge_page_node(struct hstate *h, int nid)
+ {
+ 	struct page *page;
+diff --git a/mm/hwpoison-inject.c b/mm/hwpoison-inject.c
+index 10ea71905c1f..0948f1072d6b 100644
+--- a/mm/hwpoison-inject.c
++++ b/mm/hwpoison-inject.c
+@@ -5,6 +5,7 @@
+ #include <linux/mm.h>
+ #include <linux/swap.h>
+ #include <linux/pagemap.h>
++#include <linux/hugetlb.h>
+ #include "internal.h"
+ 
+ static struct dentry *hwpoison_dir;
+@@ -13,6 +14,7 @@ static int hwpoison_inject(void *data, u64 val)
+ {
+ 	unsigned long pfn = val;
+ 	struct page *p;
++	struct page *hpage;
+ 	int err;
+ 
+ 	if (!capable(CAP_SYS_ADMIN))
+@@ -24,18 +26,19 @@ static int hwpoison_inject(void *data, u64 val)
+ 		return -ENXIO;
+ 
+ 	p = pfn_to_page(pfn);
++	hpage = compound_head(p);
+ 	/*
+ 	 * This implies unable to support free buddy pages.
+ 	 */
+-	if (!get_page_unless_zero(p))
++	if (!get_page_unless_zero(hpage))
+ 		return 0;
+ 
+-	if (!PageLRU(p))
++	if (!PageLRU(p) && !PageHuge(p))
+ 		shake_page(p, 0);
+ 	/*
+ 	 * This implies unable to support non-LRU pages.
+ 	 */
+-	if (!PageLRU(p))
++	if (!PageLRU(p) && !PageHuge(p))
+ 		return 0;
+ 
+ 	/*
+@@ -44,9 +47,9 @@ static int hwpoison_inject(void *data, u64 val)
+ 	 * We temporarily take page lock for try_get_mem_cgroup_from_page().
+ 	 * __memory_failure() will redo the check reliably inside page lock.
+ 	 */
+-	lock_page(p);
+-	err = hwpoison_filter(p);
+-	unlock_page(p);
++	lock_page(hpage);
++	err = hwpoison_filter(hpage);
++	unlock_page(hpage);
+ 	if (err)
+ 		return 0;

@@ -1,0 +1,134 @@
+diff --cc include/linux/uio.h
+index 55cd54a0e941,243e2362fe1a..342d2dc225b9
+--- a/include/linux/uio.h
++++ b/include/linux/uio.h
+@@@ -91,26 -92,58 +92,79 @@@ size_t copy_page_to_iter(struct page *p
+  			 struct iov_iter *i);
+  size_t copy_page_from_iter(struct page *page, size_t offset, size_t bytes,
+  			 struct iov_iter *i);
+- size_t copy_to_iter(const void *addr, size_t bytes, struct iov_iter *i);
+- size_t copy_from_iter(void *addr, size_t bytes, struct iov_iter *i);
+- bool copy_from_iter_full(void *addr, size_t bytes, struct iov_iter *i);
+- size_t copy_from_iter_nocache(void *addr, size_t bytes, struct iov_iter *i);
++ 
++ size_t _copy_to_iter(const void *addr, size_t bytes, struct iov_iter *i);
++ size_t _copy_from_iter(void *addr, size_t bytes, struct iov_iter *i);
++ bool _copy_from_iter_full(void *addr, size_t bytes, struct iov_iter *i);
++ size_t _copy_from_iter_nocache(void *addr, size_t bytes, struct iov_iter *i);
++ bool _copy_from_iter_full_nocache(void *addr, size_t bytes, struct iov_iter *i);
++ 
++ static __always_inline __must_check
++ size_t copy_to_iter(const void *addr, size_t bytes, struct iov_iter *i)
++ {
++ 	if (unlikely(!check_copy_size(addr, bytes, true)))
++ 		return bytes;
++ 	else
++ 		return _copy_to_iter(addr, bytes, i);
++ }
++ 
++ static __always_inline __must_check
++ size_t copy_from_iter(void *addr, size_t bytes, struct iov_iter *i)
++ {
++ 	if (unlikely(!check_copy_size(addr, bytes, false)))
++ 		return bytes;
++ 	else
++ 		return _copy_from_iter(addr, bytes, i);
++ }
++ 
++ static __always_inline __must_check
++ bool copy_from_iter_full(void *addr, size_t bytes, struct iov_iter *i)
++ {
++ 	if (unlikely(!check_copy_size(addr, bytes, false)))
++ 		return false;
++ 	else
++ 		return _copy_from_iter_full(addr, bytes, i);
++ }
++ 
++ static __always_inline __must_check
++ size_t copy_from_iter_nocache(void *addr, size_t bytes, struct iov_iter *i)
++ {
++ 	if (unlikely(!check_copy_size(addr, bytes, false)))
++ 		return bytes;
++ 	else
++ 		return _copy_from_iter_nocache(addr, bytes, i);
++ }
++ 
++ static __always_inline __must_check
++ bool copy_from_iter_full_nocache(void *addr, size_t bytes, struct iov_iter *i)
++ {
++ 	if (unlikely(!check_copy_size(addr, bytes, false)))
++ 		return false;
++ 	else
++ 		return _copy_from_iter_full_nocache(addr, bytes, i);
++ }
++ 
+ +#ifdef CONFIG_ARCH_HAS_UACCESS_FLUSHCACHE
+ +/*
+ + * Note, users like pmem that depend on the stricter semantics of
+ + * copy_from_iter_flushcache() than copy_from_iter_nocache() must check for
+ + * IS_ENABLED(CONFIG_ARCH_HAS_UACCESS_FLUSHCACHE) before assuming that the
+ + * destination is flushed from the cache on return.
+ + */
+- size_t copy_from_iter_flushcache(void *addr, size_t bytes, struct iov_iter *i);
+++size_t _copy_from_iter_flushcache(void *addr, size_t bytes, struct iov_iter *i);
+ +#else
+- static inline size_t copy_from_iter_flushcache(void *addr, size_t bytes,
+- 				       struct iov_iter *i)
+++#define _copy_from_iter_flushcache _copy_from_iter_nocache
+++#endif
+++
+++static __always_inline __must_check
+++size_t copy_from_iter_flushcache(void *addr, size_t bytes, struct iov_iter *i)
+ +{
+- 	return copy_from_iter_nocache(addr, bytes, i);
+++	if (unlikely(!check_copy_size(addr, bytes, false)))
+++		return bytes;
+++	else
+++		return _copy_from_iter_flushcache(addr, bytes, i);
+ +}
+- #endif
+- bool copy_from_iter_full_nocache(void *addr, size_t bytes, struct iov_iter *i);
+++
+  size_t iov_iter_zero(size_t bytes, struct iov_iter *);
+  unsigned long iov_iter_alignment(const struct iov_iter *i);
+  unsigned long iov_iter_gap_alignment(const struct iov_iter *i);
+diff --cc lib/iov_iter.c
+index c9a69064462f,b3b2ee8a20b5..52c8dd6d8e82
+--- a/lib/iov_iter.c
++++ b/lib/iov_iter.c
+@@@ -613,31 -637,9 +637,31 @@@ size_t _copy_from_iter_nocache(void *ad
+  
+  	return bytes;
+  }
+- EXPORT_SYMBOL(copy_from_iter_nocache);
++ EXPORT_SYMBOL(_copy_from_iter_nocache);
+  
+ +#ifdef CONFIG_ARCH_HAS_UACCESS_FLUSHCACHE
+- size_t copy_from_iter_flushcache(void *addr, size_t bytes, struct iov_iter *i)
+++size_t _copy_from_iter_flushcache(void *addr, size_t bytes, struct iov_iter *i)
+ +{
+ +	char *to = addr;
+ +	if (unlikely(i->type & ITER_PIPE)) {
+ +		WARN_ON(1);
+ +		return 0;
+ +	}
+ +	iterate_and_advance(i, bytes, v,
+ +		__copy_from_user_flushcache((to += v.iov_len) - v.iov_len,
+ +					 v.iov_base, v.iov_len),
+ +		memcpy_page_flushcache((to += v.bv_len) - v.bv_len, v.bv_page,
+ +				 v.bv_offset, v.bv_len),
+ +		memcpy_flushcache((to += v.iov_len) - v.iov_len, v.iov_base,
+ +			v.iov_len)
+ +	)
+ +
+ +	return bytes;
+ +}
+- EXPORT_SYMBOL_GPL(copy_from_iter_flushcache);
+++EXPORT_SYMBOL_GPL(_copy_from_iter_flushcache);
+ +#endif
+ +
+- bool copy_from_iter_full_nocache(void *addr, size_t bytes, struct iov_iter *i)
++ bool _copy_from_iter_full_nocache(void *addr, size_t bytes, struct iov_iter *i)
+  {
+  	char *to = addr;
+  	if (unlikely(i->type & ITER_PIPE)) {

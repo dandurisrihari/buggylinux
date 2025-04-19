@@ -1,0 +1,112 @@
+commit 87be949912eedb73690d8eaeb086f24bfe17438d
+Merge: c7020e1b346d 52f31ed22821
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Wed Dec 14 10:11:51 2022 -0800
+
+    Merge tag 'xfs-6.2-merge-8' of git://git.kernel.org/pub/scm/fs/xfs/xfs-linux
+    
+    Pull XFS updates from Darrick Wong:
+     "The highlight of this is a batch of fixes for the online metadata
+      checking code as we start the loooong march towards merging online
+      repair. I aim to merge that in time for the 2023 LTS.
+    
+      There are also a large number of data corruption and race condition
+      fixes in this patchset. Most notably fixed are write() calls to
+      unwritten extents racing with writeback, which required some late(r
+      than I prefer) code changes to iomap to support the necessary
+      revalidations. I don't really like iomap changes going in past -rc4,
+      but Dave and I have been working on it long enough that I chose to
+      push it for 6.2 anyway.
+    
+      There are also a number of other subtle problems fixed, including the
+      log racing with inode writeback to write inodes with incorrect link
+      count to disk; file data mapping corruptions as a result of incorrect
+      lock cycling when attaching dquots; refcount metadata corruption if
+      one actually manages to share a block 2^32 times; and the log
+      clobbering cow staging extents if they were formerly metadata blocks.
+    
+      Summary:
+    
+       - Fix a race condition w.r.t. percpu inode free counters
+    
+       - Fix a broken error return in xfs_remove
+    
+       - Print FS UUID at mount/unmount time
+    
+       - Numerous fixes to the online fsck code
+    
+       - Fix inode locking inconsistency problems when dealing with realtime
+         metadata files
+    
+       - Actually merge pull requests so that we capture the cover letter
+         contents
+    
+       - Fix a race between rebuilding VFS inode state and the AIL flushing
+         inodes that could cause corrupt inodes to be written to the
+         filesystem
+    
+       - Fix a data corruption problem resulting from a write() to an
+         unwritten extent racing with writeback started on behalf of memory
+         reclaim changing the extent state
+    
+       - Add debugging knobs so that we can test iomap invalidation
+    
+       - Fix the blockdev pagecache contents being stale after unmounting
+         the filesystem, leading to spurious xfs_db errors and corrupt
+         metadumps
+    
+       - Fix a file mapping corruption bug due to ilock cycling when
+         attaching dquots to a file during delalloc reservation
+    
+       - Fix a refcount btree corruption problem due to the refcount
+         adjustment code not handling MAXREFCOUNT correctly, resulting in
+         unnecessary record splits
+    
+       - Fix COW staging extent alloctions not being classified as USERDATA,
+         which results in filestreams being ignored and possible data
+         corruption if the allocation was filled from the AGFL and the block
+         buffer is still being tracked in the AIL
+    
+       - Fix new duplicated includes
+    
+       - Fix a race between the dquot shrinker and dquot freeing that could
+         cause a UAF"
+    
+    * tag 'xfs-6.2-merge-8' of git://git.kernel.org/pub/scm/fs/xfs/xfs-linux: (50 commits)
+      xfs: dquot shrinker doesn't check for XFS_DQFLAG_FREEING
+      xfs: Remove duplicated include in xfs_iomap.c
+      xfs: invalidate xfs_bufs when allocating cow extents
+      xfs: get rid of assert from xfs_btree_islastblock
+      xfs: estimate post-merge refcounts correctly
+      xfs: hoist refcount record merge predicates
+      xfs: fix super block buf log item UAF during force shutdown
+      xfs: wait iclog complete before tearing down AIL
+      xfs: attach dquots to inode before reading data/cow fork mappings
+      xfs: shut up -Wuninitialized in xfsaild_push
+      xfs: use memcpy, not strncpy, to format the attr prefix during listxattr
+      xfs: invalidate block device page cache during unmount
+      xfs: add debug knob to slow down write for fun
+      xfs: add debug knob to slow down writeback for fun
+      xfs: drop write error injection is unfixable, remove it
+      xfs: use iomap_valid method to detect stale cached iomaps
+      iomap: write iomap validity checks
+      xfs: xfs_bmap_punch_delalloc_range() should take a byte range
+      iomap: buffered write failure should not truncate the page cache
+      xfs,iomap: move delalloc punching to iomap
+      ...
+
+diff --cc fs/xfs/xfs_iomap.c
+index d9401d0300ad,43f447199c08..669c1bc5c3a7
+--- a/fs/xfs/xfs_iomap.c
++++ b/fs/xfs/xfs_iomap.c
+@@@ -1215,8 -1251,9 +1251,9 @@@ xfs_read_iomap_begin
+  		return error;
+  	error = xfs_bmapi_read(ip, offset_fsb, end_fsb - offset_fsb, &imap,
+  			       &nimaps, 0);
+ -	if (!error && (flags & IOMAP_REPORT))
+ +	if (!error && ((flags & IOMAP_REPORT) || IS_DAX(inode)))
+  		error = xfs_reflink_trim_around_shared(ip, &imap, &shared);
++ 	seq = xfs_iomap_inode_sequence(ip, shared ? IOMAP_F_SHARED : 0);
+  	xfs_iunlock(ip, lockmode);
+  
+  	if (error)

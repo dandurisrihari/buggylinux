@@ -1,0 +1,65 @@
+commit afb0379b0f6657b9f626d23c3bb00b4e8823bd2d
+Author: Justin Stitt <justinstitt@google.com>
+Date:   Fri Oct 20 19:11:07 2023 +0000
+
+    power: supply: bq25980: replace deprecated strncpy with strscpy
+    
+    strncpy() is deprecated for use on NUL-terminated destination strings
+    [1] and as such we should prefer more robust and less ambiguous string
+    interfaces.
+    
+    We expect bq->model_name to be NUL-terminated based on its usage with
+    sysfs_emit and format strings:
+    
+    val->strval is assigned to bq->model_name in
+    bq25980_get_charger_property():
+    |       val->strval = bq->model_name;
+    
+    ... then in power_supply_sysfs.c we use value.strval with a format string:
+    |       ret = sysfs_emit(buf, "%s\n", value.strval);
+    
+    we assigned value.strval via:
+    |       ret = power_supply_get_property(psy, psp, &value);
+    ... which invokes psy->desc->get_property():
+    |       return psy->desc->get_property(psy, psp, val);
+    
+    with bq25980_get_charger_property():
+    |       static const struct power_supply_desc bq25980_power_supply_desc = {
+    ...
+    |               .get_property = bq25980_get_charger_property,
+    
+    Moreover, no NUL-padding is required as bq is zero-allocated in
+    bq25980_charger.c:
+    |       bq = devm_kzalloc(dev, sizeof(*bq), GFP_KERNEL);
+    
+    Considering the above, a suitable replacement is `strscpy` [2] due to
+    the fact that it guarantees NUL-termination on the destination buffer
+    without unnecessarily NUL-padding.
+    
+    Let's also opt to use the more idiomatic strscpy() usage of (dest, src,
+    sizeof(dest)) as this more closely ties the destination buffer and the
+    length.
+    
+    Link: https://www.kernel.org/doc/html/latest/process/deprecated.html#strncpy-on-nul-terminated-strings [1]
+    Link: https://manpages.debian.org/testing/linux-manual-4.8/strscpy.9.en.html [2]
+    Link: https://github.com/KSPP/linux/issues/90
+    Cc: linux-hardening@vger.kernel.org
+    Similar-to: https://lore.kernel.org/all/20231020-strncpy-drivers-power-supply-bq24190_charger-c-v1-1-e896223cb795@google.com/
+    Similar-to: https://lore.kernel.org/all/20231020-strncpy-drivers-power-supply-bq2515x_charger-c-v1-1-46664c6edf78@google.com/
+    Signed-off-by: Justin Stitt <justinstitt@google.com>
+    Link: https://lore.kernel.org/r/20231020-strncpy-drivers-power-supply-bq25980_charger-c-v1-1-7b93be54537b@google.com
+    Signed-off-by: Sebastian Reichel <sebastian.reichel@collabora.com>
+
+diff --git a/drivers/power/supply/bq25980_charger.c b/drivers/power/supply/bq25980_charger.c
+index d8411722266f..0c5e2938bb36 100644
+--- a/drivers/power/supply/bq25980_charger.c
++++ b/drivers/power/supply/bq25980_charger.c
+@@ -1223,7 +1223,7 @@ static int bq25980_probe(struct i2c_client *client)
+ 
+ 	mutex_init(&bq->lock);
+ 
+-	strncpy(bq->model_name, id->name, I2C_NAME_SIZE);
++	strscpy(bq->model_name, id->name, sizeof(bq->model_name));
+ 	bq->chip_info = &bq25980_chip_info_tbl[id->driver_data];
+ 
+ 	bq->regmap = devm_regmap_init_i2c(client,

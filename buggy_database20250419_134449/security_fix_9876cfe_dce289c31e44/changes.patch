@@ -1,0 +1,151 @@
+diff --git a/include/linux/pid_namespace.h b/include/linux/pid_namespace.h
+index 53974d79d98e..f9f9931e02d6 100644
+--- a/include/linux/pid_namespace.h
++++ b/include/linux/pid_namespace.h
+@@ -39,7 +39,6 @@ struct pid_namespace {
+ 	int reboot;	/* group exit code if this pidns was rebooted */
+ 	struct ns_common ns;
+ #if defined(CONFIG_SYSCTL) && defined(CONFIG_MEMFD_CREATE)
+-	/* sysctl for vm.memfd_noexec */
+ 	int memfd_noexec_scope;
+ #endif
+ } __randomize_layout;
+@@ -56,6 +55,23 @@ static inline struct pid_namespace *get_pid_ns(struct pid_namespace *ns)
+ 	return ns;
+ }
+ 
++#if defined(CONFIG_SYSCTL) && defined(CONFIG_MEMFD_CREATE)
++static inline int pidns_memfd_noexec_scope(struct pid_namespace *ns)
++{
++	int scope = MEMFD_NOEXEC_SCOPE_EXEC;
++
++	for (; ns; ns = ns->parent)
++		scope = max(scope, READ_ONCE(ns->memfd_noexec_scope));
++
++	return scope;
++}
++#else
++static inline int pidns_memfd_noexec_scope(struct pid_namespace *ns)
++{
++	return 0;
++}
++#endif
++
+ extern struct pid_namespace *copy_pid_ns(unsigned long flags,
+ 	struct user_namespace *user_ns, struct pid_namespace *ns);
+ extern void zap_pid_ns_processes(struct pid_namespace *pid_ns);
+@@ -70,6 +86,11 @@ static inline struct pid_namespace *get_pid_ns(struct pid_namespace *ns)
+ 	return ns;
+ }
+ 
++static inline int pidns_memfd_noexec_scope(struct pid_namespace *ns)
++{
++	return 0;
++}
++
+ static inline struct pid_namespace *copy_pid_ns(unsigned long flags,
+ 	struct user_namespace *user_ns, struct pid_namespace *ns)
+ {
+diff --git a/kernel/pid.c b/kernel/pid.c
+index 6a1d23a11026..fee14a4486a3 100644
+--- a/kernel/pid.c
++++ b/kernel/pid.c
+@@ -83,6 +83,9 @@ struct pid_namespace init_pid_ns = {
+ #ifdef CONFIG_PID_NS
+ 	.ns.ops = &pidns_operations,
+ #endif
++#if defined(CONFIG_SYSCTL) && defined(CONFIG_MEMFD_CREATE)
++	.memfd_noexec_scope = MEMFD_NOEXEC_SCOPE_EXEC,
++#endif
+ };
+ EXPORT_SYMBOL_GPL(init_pid_ns);
+ 
+diff --git a/kernel/pid_namespace.c b/kernel/pid_namespace.c
+index 0bf44afe04dd..619972c78774 100644
+--- a/kernel/pid_namespace.c
++++ b/kernel/pid_namespace.c
+@@ -110,9 +110,9 @@ static struct pid_namespace *create_pid_namespace(struct user_namespace *user_ns
+ 	ns->user_ns = get_user_ns(user_ns);
+ 	ns->ucounts = ucounts;
+ 	ns->pid_allocated = PIDNS_ADDING;
+-
+-	initialize_memfd_noexec_scope(ns);
+-
++#if defined(CONFIG_SYSCTL) && defined(CONFIG_MEMFD_CREATE)
++	ns->memfd_noexec_scope = pidns_memfd_noexec_scope(parent_pid_ns);
++#endif
+ 	return ns;
+ 
+ out_free_idr:
+diff --git a/kernel/pid_sysctl.h b/kernel/pid_sysctl.h
+index b26e027fc9cd..2ee41a3a1dfd 100644
+--- a/kernel/pid_sysctl.h
++++ b/kernel/pid_sysctl.h
+@@ -5,33 +5,30 @@
+ #include <linux/pid_namespace.h>
+ 
+ #if defined(CONFIG_SYSCTL) && defined(CONFIG_MEMFD_CREATE)
+-static inline void initialize_memfd_noexec_scope(struct pid_namespace *ns)
+-{
+-	ns->memfd_noexec_scope =
+-		task_active_pid_ns(current)->memfd_noexec_scope;
+-}
+-
+ static int pid_mfd_noexec_dointvec_minmax(struct ctl_table *table,
+ 	int write, void *buf, size_t *lenp, loff_t *ppos)
+ {
+ 	struct pid_namespace *ns = task_active_pid_ns(current);
+ 	struct ctl_table table_copy;
++	int err, scope, parent_scope;
+ 
+ 	if (write && !ns_capable(ns->user_ns, CAP_SYS_ADMIN))
+ 		return -EPERM;
+ 
+ 	table_copy = *table;
+-	if (ns != &init_pid_ns)
+-		table_copy.data = &ns->memfd_noexec_scope;
+ 
+-	/*
+-	 * set minimum to current value, the effect is only bigger
+-	 * value is accepted.
+-	 */
+-	if (*(int *)table_copy.data > *(int *)table_copy.extra1)
+-		table_copy.extra1 = table_copy.data;
++	/* You cannot set a lower enforcement value than your parent. */
++	parent_scope = pidns_memfd_noexec_scope(ns->parent);
++	/* Equivalent to pidns_memfd_noexec_scope(ns). */
++	scope = max(READ_ONCE(ns->memfd_noexec_scope), parent_scope);
++
++	table_copy.data = &scope;
++	table_copy.extra1 = &parent_scope;
+ 
+-	return proc_dointvec_minmax(&table_copy, write, buf, lenp, ppos);
++	err = proc_dointvec_minmax(&table_copy, write, buf, lenp, ppos);
++	if (!err && write)
++		WRITE_ONCE(ns->memfd_noexec_scope, scope);
++	return err;
+ }
+ 
+ static struct ctl_table pid_ns_ctl_table_vm[] = {
+@@ -51,7 +48,6 @@ static inline void register_pid_ns_sysctl_table_vm(void)
+ 	register_sysctl("vm", pid_ns_ctl_table_vm);
+ }
+ #else
+-static inline void initialize_memfd_noexec_scope(struct pid_namespace *ns) {}
+ static inline void register_pid_ns_sysctl_table_vm(void) {}
+ #endif
+ 
+diff --git a/mm/memfd.c b/mm/memfd.c
+index aa46521057ab..1cad1904fc26 100644
+--- a/mm/memfd.c
++++ b/mm/memfd.c
+@@ -271,7 +271,8 @@ long memfd_fcntl(struct file *file, unsigned int cmd, unsigned int arg)
+ static int check_sysctl_memfd_noexec(unsigned int *flags)
+ {
+ #ifdef CONFIG_SYSCTL
+-	int sysctl = task_active_pid_ns(current)->memfd_noexec_scope;
++	struct pid_namespace *ns = task_active_pid_ns(current);
++	int sysctl = pidns_memfd_noexec_scope(ns);
+ 
+ 	if (!(*flags & (MFD_EXEC | MFD_NOEXEC_SEAL))) {
+ 		if (sysctl >= MEMFD_NOEXEC_SCOPE_NOEXEC_SEAL)

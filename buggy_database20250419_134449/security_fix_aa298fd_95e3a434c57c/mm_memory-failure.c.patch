@@ -1,0 +1,94 @@
+commit aa298fdf535d47df1279b12a0212deb2389f709a
+Author: Jane Chu <jane.chu@oracle.com>
+Date:   Fri May 24 15:53:02 2024 -0600
+
+    mm/memory-failure: try to send SIGBUS even if unmap failed
+    
+    Patch series "Enhance soft hwpoison handling and injection", v4.
+    
+    This series is aimed at the following enhancements:
+    
+    - Let one hwpoison injector, that is, madvise(MADV_HWPOISON) to behave
+      more like as if a real UE occurred.  Because the other two injectors
+      such as hwpoison-inject and the 'einj' on x86 can't, and it seems to me
+      we need a better simulation to real UE scenario.
+    - For years, if the kernel is unable to unmap a hwpoisoned page, it send
+      a SIGKILL instead of SIGBUS to prevent user process from potentially
+      accessing the page again.  But in doing so, the user process also lose
+      important information: vaddr, for recovery.  Fortunately, the kernel
+      already has code to kill process re-accessing a hwpoisoned page, so
+      remove the '!unmap_success' check.
+    - Right now, if a thp page under GUP longterm pin is hwpoisoned, and
+      kernel cannot split the thp page, memory-failure simply ignores the UE
+      and returns.  That's not ideal, it could deliver a SIGBUS with useful
+      information for userspace recovery.
+    
+    
+    This patch (of 5):
+    
+    For years when it comes down to kill a process due to hwpoison, a SIGBUS
+    is delivered only if unmap has been successful.  Otherwise, a SIGKILL is
+    delivered.  And the reason for that is to prevent the involved process
+    from accessing the hwpoisoned page again.
+    
+    Since then a lot has changed, a hwpoisoned page is marked and upon being
+    re-accessed, the memory-failure handler invokes kill_accessing_process()
+    to kill the process immediately.  So let's take out the '!unmap_success'
+    factor and try to deliver SIGBUS if possible.
+    
+    Link: https://lkml.kernel.org/r/20240524215306.2705454-1-jane.chu@oracle.com
+    Link: https://lkml.kernel.org/r/20240524215306.2705454-2-jane.chu@oracle.com
+    Signed-off-by: Jane Chu <jane.chu@oracle.com>
+    Reviewed-by: Oscar Salvador <osalvador@suse.de>
+    Acked-by: Miaohe Lin <linmiaohe@huawei.com>
+    Cc: Naoya Horiguchi <nao.horiguchi@gmail.com>
+    Cc: Oscar Salvador <oalvador@suse.de>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+
+diff --git a/mm/memory-failure.c b/mm/memory-failure.c
+index d3c830e817e3..0ce5f5176435 100644
+--- a/mm/memory-failure.c
++++ b/mm/memory-failure.c
+@@ -514,22 +514,15 @@ void add_to_kill_ksm(struct task_struct *tsk, struct page *p,
+  *
+  * Only do anything when FORCEKILL is set, otherwise just free the
+  * list (this is used for clean pages which do not need killing)
+- * Also when FAIL is set do a force kill because something went
+- * wrong earlier.
+  */
+-static void kill_procs(struct list_head *to_kill, int forcekill, bool fail,
++static void kill_procs(struct list_head *to_kill, int forcekill,
+ 		unsigned long pfn, int flags)
+ {
+ 	struct to_kill *tk, *next;
+ 
+ 	list_for_each_entry_safe(tk, next, to_kill, nd) {
+ 		if (forcekill) {
+-			/*
+-			 * In case something went wrong with munmapping
+-			 * make sure the process doesn't catch the
+-			 * signal and then access the memory. Just kill it.
+-			 */
+-			if (fail || tk->addr == -EFAULT) {
++			if (tk->addr == -EFAULT) {
+ 				pr_err("%#lx: forcibly killing %s:%d because of failure to unmap corrupted page\n",
+ 				       pfn, tk->tsk->comm, tk->tsk->pid);
+ 				do_send_sig_info(SIGKILL, SEND_SIG_PRIV,
+@@ -1660,7 +1653,7 @@ static bool hwpoison_user_mappings(struct folio *folio, struct page *p,
+ 	 */
+ 	forcekill = folio_test_dirty(folio) || (flags & MF_MUST_KILL) ||
+ 		    !unmap_success;
+-	kill_procs(&tokill, forcekill, !unmap_success, pfn, flags);
++	kill_procs(&tokill, forcekill, pfn, flags);
+ 
+ 	return unmap_success;
+ }
+@@ -1724,7 +1717,7 @@ static void unmap_and_kill(struct list_head *to_kill, unsigned long pfn,
+ 		unmap_mapping_range(mapping, start, size, 0);
+ 	}
+ 
+-	kill_procs(to_kill, flags & MF_MUST_KILL, false, pfn, flags);
++	kill_procs(to_kill, flags & MF_MUST_KILL, pfn, flags);
+ }
+ 
+ /*

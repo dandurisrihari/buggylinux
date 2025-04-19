@@ -1,0 +1,37 @@
+commit c853354429f7ec88f9cdde4e46e69a2c0e3c8310
+Author: Wanpeng Li <wanpeng.li@hotmail.com>
+Date:   Thu Jun 29 06:28:09 2017 -0700
+
+    KVM: LAPIC: Fix lapic timer injection delay
+    
+    If the TSC deadline timer is programmed really close to the deadline or
+    even in the past, the computation in vmx_set_hv_timer will program the
+    absolute target tsc value to vmcs preemption timer field w/ delta == 0,
+    then plays a vmentry and an upcoming vmx preemption timer fire vmexit
+    dance, the lapic timer injection is delayed due to this duration. Actually
+    the lapic timer which is emulated by hrtimer can handle this correctly.
+    
+    This patch fixes it by firing the lapic timer and injecting a timer interrupt
+    immediately during the next vmentry if the TSC deadline timer is programmed
+    really close to the deadline or even in the past. This saves ~300 cycles on
+    the tsc_deadline_timer test of apic.flat.
+    
+    Cc: Paolo Bonzini <pbonzini@redhat.com>
+    Cc: Radim Krčmář <rkrcmar@redhat.com>
+    Signed-off-by: Wanpeng Li <wanpeng.li@hotmail.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/vmx.c b/arch/x86/kvm/vmx.c
+index e8b61ad84a8e..92ddea08f999 100644
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -11147,7 +11147,8 @@ static int vmx_set_hv_timer(struct kvm_vcpu *vcpu, u64 guest_deadline_tsc)
+ 	vmx->hv_deadline_tsc = tscl + delta_tsc;
+ 	vmcs_set_bits(PIN_BASED_VM_EXEC_CONTROL,
+ 			PIN_BASED_VMX_PREEMPTION_TIMER);
+-	return 0;
++
++	return delta_tsc == 0;
+ }
+ 
+ static void vmx_cancel_hv_timer(struct kvm_vcpu *vcpu)

@@ -1,0 +1,86 @@
+commit a1767077b0176de17fa40ec743a20cbdac7a0d56
+Author: David Howells <dhowells@redhat.com>
+Date:   Thu Sep 29 22:37:15 2016 +0100
+
+    rxrpc: Make Tx loss-injection go through normal return and adjust tracing
+    
+    In rxrpc_send_data_packet() make the loss-injection path return through the
+    same code as the transmission path so that the RTT determination is
+    initiated and any future timer shuffling will be done, despite the packet
+    having been binned.
+    
+    Whilst we're at it:
+    
+     (1) Add to the tx_data tracepoint an indication of whether or not we're
+         retransmitting a data packet.
+    
+     (2) When we're deciding whether or not to request an ACK, rather than
+         checking if we're in fast-retransmit mode check instead if we're
+         retransmitting.
+    
+     (3) Don't invoke the lose_skb tracepoint when losing a Tx packet as we're
+         not altering the sk_buff refcount nor are we just seeing it after
+         getting it off the Tx list.
+    
+     (4) The rxrpc_skb_tx_lost note is then no longer used so remove it.
+    
+     (5) rxrpc_lose_skb() no longer needs to deal with rxrpc_skb_tx_lost.
+    
+    Signed-off-by: David Howells <dhowells@redhat.com>
+
+diff --git a/net/rxrpc/output.c b/net/rxrpc/output.c
+index cf43a715685e..ac9a58b619a6 100644
+--- a/net/rxrpc/output.c
++++ b/net/rxrpc/output.c
+@@ -238,7 +238,8 @@ int rxrpc_send_call_packet(struct rxrpc_call *call, u8 type)
+ /*
+  * send a packet through the transport endpoint
+  */
+-int rxrpc_send_data_packet(struct rxrpc_call *call, struct sk_buff *skb)
++int rxrpc_send_data_packet(struct rxrpc_call *call, struct sk_buff *skb,
++			   bool retrans)
+ {
+ 	struct rxrpc_connection *conn = call->conn;
+ 	struct rxrpc_wire_header whdr;
+@@ -247,6 +248,7 @@ int rxrpc_send_data_packet(struct rxrpc_call *call, struct sk_buff *skb)
+ 	struct kvec iov[2];
+ 	rxrpc_serial_t serial;
+ 	size_t len;
++	bool lost = false;
+ 	int ret, opt;
+ 
+ 	_enter(",{%d}", skb->len);
+@@ -281,7 +283,7 @@ int rxrpc_send_data_packet(struct rxrpc_call *call, struct sk_buff *skb)
+ 	/* If our RTT cache needs working on, request an ACK.  Also request
+ 	 * ACKs if a DATA packet appears to have been lost.
+ 	 */
+-	if (call->cong_mode == RXRPC_CALL_FAST_RETRANSMIT ||
++	if (retrans ||
+ 	    (call->peer->rtt_usage < 3 && sp->hdr.seq & 1) ||
+ 	    ktime_before(ktime_add_ms(call->peer->rtt_last_req, 1000),
+ 			 ktime_get_real()))
+@@ -290,11 +292,9 @@ int rxrpc_send_data_packet(struct rxrpc_call *call, struct sk_buff *skb)
+ 	if (IS_ENABLED(CONFIG_AF_RXRPC_INJECT_LOSS)) {
+ 		static int lose;
+ 		if ((lose++ & 7) == 7) {
+-			trace_rxrpc_tx_data(call, sp->hdr.seq, serial,
+-					    whdr.flags, true);
+-			rxrpc_lose_skb(skb, rxrpc_skb_tx_lost);
+-			_leave(" = 0 [lose]");
+-			return 0;
++			ret = 0;
++			lost = true;
++			goto done;
+ 		}
+ 	}
+ 
+@@ -319,7 +319,8 @@ int rxrpc_send_data_packet(struct rxrpc_call *call, struct sk_buff *skb)
+ 		goto send_fragmentable;
+ 
+ done:
+-	trace_rxrpc_tx_data(call, sp->hdr.seq, serial, whdr.flags, false);
++	trace_rxrpc_tx_data(call, sp->hdr.seq, serial, whdr.flags,
++			    retrans, lost);
+ 	if (ret >= 0) {
+ 		ktime_t now = ktime_get_real();
+ 		skb->tstamp = now;

@@ -1,0 +1,51 @@
+commit c1150d8cf9e9d2b356fab52d79f2366985e5511b
+Author: Dor Laor <dor.laor@qumranet.com>
+Date:   Fri Jan 5 16:36:24 2007 -0800
+
+    [PATCH] KVM: Improve interrupt response
+    
+    The current interrupt injection mechanism might delay an interrupt under
+    the following circumstances:
+    
+     - if injection fails because the guest is not interruptible (rflags.IF clear,
+       or after a 'mov ss' or 'sti' instruction).  Userspace can check rflags,
+       but the other cases or not testable under the current API.
+     - if injection fails because of a fault during delivery.  This probably
+       never happens under normal guests.
+     - if injection fails due to a physical interrupt causing a vmexit so that
+       it can be handled by the host.
+    
+    In all cases the guest proceeds without processing the interrupt, reducing
+    the interactive feel and interrupt throughput of the guest.
+    
+    This patch fixes the situation by allowing userspace to request an exit
+    when the 'interrupt window' opens, so that it can re-inject the interrupt
+    at the right time.  Guest interactivity is very visibly improved.
+    
+    Signed-off-by: Dor Laor <dor.laor@qumranet.com>
+    Signed-off-by: Avi Kivity <avi@qumranet.com>
+    Acked-by: Ingo Molnar <mingo@elte.hu>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/drivers/kvm/kvm.h b/drivers/kvm/kvm.h
+index 100df6f38d92..32023d1ac24b 100644
+--- a/drivers/kvm/kvm.h
++++ b/drivers/kvm/kvm.h
+@@ -173,6 +173,7 @@ struct kvm_vcpu {
+ 	struct mutex mutex;
+ 	int   cpu;
+ 	int   launched;
++	int interrupt_window_open;
+ 	unsigned long irq_summary; /* bit vector: 1 per word in irq_pending */
+ #define NR_IRQ_WORDS KVM_IRQ_BITMAP_SIZE(unsigned long)
+ 	unsigned long irq_pending[NR_IRQ_WORDS];
+@@ -247,6 +248,9 @@ struct kvm_stat {
+ 	u32 io_exits;
+ 	u32 mmio_exits;
+ 	u32 signal_exits;
++	u32 irq_window_exits;
++	u32 halt_exits;
++	u32 request_irq_exits;
+ 	u32 irq_exits;
+ };

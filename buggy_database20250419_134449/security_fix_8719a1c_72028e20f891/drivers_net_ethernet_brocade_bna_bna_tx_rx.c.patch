@@ -1,0 +1,63 @@
+commit 8719a1c30d3a1b4f347afca8e78be201d66d5c49
+Author: Gustavo A. R. Silva <gustavoars@kernel.org>
+Date:   Wed Nov 16 10:59:44 2022 -0600
+
+    bna: Avoid clashing function prototypes
+    
+    When built with Control Flow Integrity, function prototypes between
+    caller and function declaration must match. These mismatches are visible
+    at compile time with the new -Wcast-function-type-strict in Clang[1].
+    
+    Fix a total of 227 warnings like these:
+    
+    drivers/net/ethernet/brocade/bna/bna_enet.c:519:3: warning: cast from 'void (*)(struct bna_ethport *, enum bna_ethport_event)' to 'bfa_fsm_t' (aka 'void (*)(void *, int)') converts to incompatible function type [-Wcast-function-type-strict]
+                    bfa_fsm_set_state(ethport, bna_ethport_sm_down);
+                    ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    
+    The bna state machine code heavily overloads its state machine functions,
+    so these have been separated into their own sets of structs, enums,
+    typedefs, and helper functions. There are almost zero binary code changes,
+    all seem to be related to header file line numbers changing, or the
+    addition of the new stats helper.
+    
+    Important to mention is that while I was manually implementing this changes
+    I was staring at this[2] patch from Kees Cook. Thanks, Kees. :)
+    
+    Link: https://github.com/KSPP/linux/issues/240
+    [1] https://reviews.llvm.org/D134831
+    [2] https://lore.kernel.org/linux-hardening/20220929230334.2109344-1-keescook@chromium.org/
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Signed-off-by: Gustavo A. R. Silva <gustavoars@kernel.org>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/brocade/bna/bna_tx_rx.c b/drivers/net/ethernet/brocade/bna/bna_tx_rx.c
+index 2623a0da4682..c05dc7a1c4a1 100644
+--- a/drivers/net/ethernet/brocade/bna/bna_tx_rx.c
++++ b/drivers/net/ethernet/brocade/bna/bna_tx_rx.c
+@@ -1956,7 +1956,7 @@ static void
+ bna_rx_stop(struct bna_rx *rx)
+ {
+ 	rx->rx_flags &= ~BNA_RX_F_ENET_STARTED;
+-	if (rx->fsm == (bfa_fsm_t) bna_rx_sm_stopped)
++	if (rx->fsm == bna_rx_sm_stopped)
+ 		bna_rx_mod_cb_rx_stopped(&rx->bna->rx_mod, rx);
+ 	else {
+ 		rx->stop_cbfn = bna_rx_mod_cb_rx_stopped;
+@@ -2535,7 +2535,7 @@ bna_rx_destroy(struct bna_rx *rx)
+ void
+ bna_rx_enable(struct bna_rx *rx)
+ {
+-	if (rx->fsm != (bfa_sm_t)bna_rx_sm_stopped)
++	if (rx->fsm != bna_rx_sm_stopped)
+ 		return;
+ 
+ 	rx->rx_flags |= BNA_RX_F_ENABLED;
+@@ -3523,7 +3523,7 @@ bna_tx_destroy(struct bna_tx *tx)
+ void
+ bna_tx_enable(struct bna_tx *tx)
+ {
+-	if (tx->fsm != (bfa_sm_t)bna_tx_sm_stopped)
++	if (tx->fsm != bna_tx_sm_stopped)
+ 		return;
+ 
+ 	tx->flags |= BNA_TX_F_ENABLED;

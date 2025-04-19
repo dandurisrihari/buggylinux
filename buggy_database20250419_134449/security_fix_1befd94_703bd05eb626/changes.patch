@@ -1,0 +1,87 @@
+diff --git a/drivers/nvme/target/core.c b/drivers/nvme/target/core.c
+index a1345790005f..8e3cf0c3588c 100644
+--- a/drivers/nvme/target/core.c
++++ b/drivers/nvme/target/core.c
+@@ -830,6 +830,7 @@ int nvmet_sq_init(struct nvmet_sq *sq)
+ 	}
+ 	init_completion(&sq->free_done);
+ 	init_completion(&sq->confirm_done);
++	nvmet_auth_sq_init(sq);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/nvme/target/fabrics-cmd-auth.c b/drivers/nvme/target/fabrics-cmd-auth.c
+index 84601e38a335..7970a7640e58 100644
+--- a/drivers/nvme/target/fabrics-cmd-auth.c
++++ b/drivers/nvme/target/fabrics-cmd-auth.c
+@@ -23,17 +23,12 @@ static void nvmet_auth_expired_work(struct work_struct *work)
+ 	sq->dhchap_tid = -1;
+ }
+ 
+-void nvmet_init_auth(struct nvmet_ctrl *ctrl, struct nvmet_req *req)
++void nvmet_auth_sq_init(struct nvmet_sq *sq)
+ {
+-	u32 result = le32_to_cpu(req->cqe->result.u32);
+-
+ 	/* Initialize in-band authentication */
+-	INIT_DELAYED_WORK(&req->sq->auth_expired_work,
+-			  nvmet_auth_expired_work);
+-	req->sq->authenticated = false;
+-	req->sq->dhchap_step = NVME_AUTH_DHCHAP_MESSAGE_NEGOTIATE;
+-	result |= (u32)NVME_CONNECT_AUTHREQ_ATR << 16;
+-	req->cqe->result.u32 = cpu_to_le32(result);
++	INIT_DELAYED_WORK(&sq->auth_expired_work, nvmet_auth_expired_work);
++	sq->authenticated = false;
++	sq->dhchap_step = NVME_AUTH_DHCHAP_MESSAGE_NEGOTIATE;
+ }
+ 
+ static u16 nvmet_auth_negotiate(struct nvmet_req *req, void *d)
+diff --git a/drivers/nvme/target/fabrics-cmd.c b/drivers/nvme/target/fabrics-cmd.c
+index c1dfdfb92ebf..c7e903589d37 100644
+--- a/drivers/nvme/target/fabrics-cmd.c
++++ b/drivers/nvme/target/fabrics-cmd.c
+@@ -272,7 +272,8 @@ static void nvmet_execute_admin_connect(struct nvmet_req *req)
+ 	req->cqe->result.u16 = cpu_to_le16(ctrl->cntlid);
+ 
+ 	if (nvmet_has_auth(ctrl))
+-		nvmet_init_auth(ctrl, req);
++		req->cqe->result.u32 |=
++			cpu_to_le32((u32)NVME_CONNECT_AUTHREQ_ATR << 16);
+ out:
+ 	kfree(d);
+ complete:
+@@ -333,7 +334,8 @@ static void nvmet_execute_io_connect(struct nvmet_req *req)
+ 
+ 	pr_debug("adding queue %d to ctrl %d.\n", qid, ctrl->cntlid);
+ 	if (nvmet_has_auth(ctrl))
+-		nvmet_init_auth(ctrl, req);
++		req->cqe->result.u32 |=
++			cpu_to_le32((u32)NVME_CONNECT_AUTHREQ_ATR << 16);
+ 
+ out:
+ 	kfree(d);
+diff --git a/drivers/nvme/target/nvmet.h b/drivers/nvme/target/nvmet.h
+index 6ffeeb0a1c49..dfe3894205aa 100644
+--- a/drivers/nvme/target/nvmet.h
++++ b/drivers/nvme/target/nvmet.h
+@@ -704,7 +704,7 @@ int nvmet_auth_set_key(struct nvmet_host *host, const char *secret,
+ 		       bool set_ctrl);
+ int nvmet_auth_set_host_hash(struct nvmet_host *host, const char *hash);
+ int nvmet_setup_auth(struct nvmet_ctrl *ctrl);
+-void nvmet_init_auth(struct nvmet_ctrl *ctrl, struct nvmet_req *req);
++void nvmet_auth_sq_init(struct nvmet_sq *sq);
+ void nvmet_destroy_auth(struct nvmet_ctrl *ctrl);
+ void nvmet_auth_sq_free(struct nvmet_sq *sq);
+ int nvmet_setup_dhgroup(struct nvmet_ctrl *ctrl, u8 dhgroup_id);
+@@ -726,8 +726,9 @@ static inline int nvmet_setup_auth(struct nvmet_ctrl *ctrl)
+ {
+ 	return 0;
+ }
+-static inline void nvmet_init_auth(struct nvmet_ctrl *ctrl,
+-				   struct nvmet_req *req) {};
++static inline void nvmet_auth_sq_init(struct nvmet_sq *sq)
++{
++}
+ static inline void nvmet_destroy_auth(struct nvmet_ctrl *ctrl) {};
+ static inline void nvmet_auth_sq_free(struct nvmet_sq *sq) {};
+ static inline bool nvmet_check_auth_status(struct nvmet_req *req)

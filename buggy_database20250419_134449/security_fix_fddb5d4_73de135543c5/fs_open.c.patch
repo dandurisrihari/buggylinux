@@ -1,0 +1,364 @@
+commit fddb5d430ad9fa91b49b1d34d0202ffe2fa0e179
+Author: Aleksa Sarai <cyphar@cyphar.com>
+Date:   Sat Jan 18 23:07:59 2020 +1100
+
+    open: introduce openat2(2) syscall
+    
+    /* Background. */
+    For a very long time, extending openat(2) with new features has been
+    incredibly frustrating. This stems from the fact that openat(2) is
+    possibly the most famous counter-example to the mantra "don't silently
+    accept garbage from userspace" -- it doesn't check whether unknown flags
+    are present[1].
+    
+    This means that (generally) the addition of new flags to openat(2) has
+    been fraught with backwards-compatibility issues (O_TMPFILE has to be
+    defined as __O_TMPFILE|O_DIRECTORY|[O_RDWR or O_WRONLY] to ensure old
+    kernels gave errors, since it's insecure to silently ignore the
+    flag[2]). All new security-related flags therefore have a tough road to
+    being added to openat(2).
+    
+    Userspace also has a hard time figuring out whether a particular flag is
+    supported on a particular kernel. While it is now possible with
+    contemporary kernels (thanks to [3]), older kernels will expose unknown
+    flag bits through fcntl(F_GETFL). Giving a clear -EINVAL during
+    openat(2) time matches modern syscall designs and is far more
+    fool-proof.
+    
+    In addition, the newly-added path resolution restriction LOOKUP flags
+    (which we would like to expose to user-space) don't feel related to the
+    pre-existing O_* flag set -- they affect all components of path lookup.
+    We'd therefore like to add a new flag argument.
+    
+    Adding a new syscall allows us to finally fix the flag-ignoring problem,
+    and we can make it extensible enough so that we will hopefully never
+    need an openat3(2).
+    
+    /* Syscall Prototype. */
+      /*
+       * open_how is an extensible structure (similar in interface to
+       * clone3(2) or sched_setattr(2)). The size parameter must be set to
+       * sizeof(struct open_how), to allow for future extensions. All future
+       * extensions will be appended to open_how, with their zero value
+       * acting as a no-op default.
+       */
+      struct open_how { /* ... */ };
+    
+      int openat2(int dfd, const char *pathname,
+                  struct open_how *how, size_t size);
+    
+    /* Description. */
+    The initial version of 'struct open_how' contains the following fields:
+    
+      flags
+        Used to specify openat(2)-style flags. However, any unknown flag
+        bits or otherwise incorrect flag combinations (like O_PATH|O_RDWR)
+        will result in -EINVAL. In addition, this field is 64-bits wide to
+        allow for more O_ flags than currently permitted with openat(2).
+    
+      mode
+        The file mode for O_CREAT or O_TMPFILE.
+    
+        Must be set to zero if flags does not contain O_CREAT or O_TMPFILE.
+    
+      resolve
+        Restrict path resolution (in contrast to O_* flags they affect all
+        path components). The current set of flags are as follows (at the
+        moment, all of the RESOLVE_ flags are implemented as just passing
+        the corresponding LOOKUP_ flag).
+    
+        RESOLVE_NO_XDEV       => LOOKUP_NO_XDEV
+        RESOLVE_NO_SYMLINKS   => LOOKUP_NO_SYMLINKS
+        RESOLVE_NO_MAGICLINKS => LOOKUP_NO_MAGICLINKS
+        RESOLVE_BENEATH       => LOOKUP_BENEATH
+        RESOLVE_IN_ROOT       => LOOKUP_IN_ROOT
+    
+    open_how does not contain an embedded size field, because it is of
+    little benefit (userspace can figure out the kernel open_how size at
+    runtime fairly easily without it). It also only contains u64s (even
+    though ->mode arguably should be a u16) to avoid having padding fields
+    which are never used in the future.
+    
+    Note that as a result of the new how->flags handling, O_PATH|O_TMPFILE
+    is no longer permitted for openat(2). As far as I can tell, this has
+    always been a bug and appears to not be used by userspace (and I've not
+    seen any problems on my machines by disallowing it). If it turns out
+    this breaks something, we can special-case it and only permit it for
+    openat(2) but not openat2(2).
+    
+    After input from Florian Weimer, the new open_how and flag definitions
+    are inside a separate header from uapi/linux/fcntl.h, to avoid problems
+    that glibc has with importing that header.
+    
+    /* Testing. */
+    In a follow-up patch there are over 200 selftests which ensure that this
+    syscall has the correct semantics and will correctly handle several
+    attack scenarios.
+    
+    In addition, I've written a userspace library[4] which provides
+    convenient wrappers around openat2(RESOLVE_IN_ROOT) (this is necessary
+    because no other syscalls support RESOLVE_IN_ROOT, and thus lots of care
+    must be taken when using RESOLVE_IN_ROOT'd file descriptors with other
+    syscalls). During the development of this patch, I've run numerous
+    verification tests using libpathrs (showing that the API is reasonably
+    usable by userspace).
+    
+    /* Future Work. */
+    Additional RESOLVE_ flags have been suggested during the review period.
+    These can be easily implemented separately (such as blocking auto-mount
+    during resolution).
+    
+    Furthermore, there are some other proposed changes to the openat(2)
+    interface (the most obvious example is magic-link hardening[5]) which
+    would be a good opportunity to add a way for userspace to restrict how
+    O_PATH file descriptors can be re-opened.
+    
+    Another possible avenue of future work would be some kind of
+    CHECK_FIELDS[6] flag which causes the kernel to indicate to userspace
+    which openat2(2) flags and fields are supported by the current kernel
+    (to avoid userspace having to go through several guesses to figure it
+    out).
+    
+    [1]: https://lwn.net/Articles/588444/
+    [2]: https://lore.kernel.org/lkml/CA+55aFyyxJL1LyXZeBsf2ypriraj5ut1XkNDsunRBqgVjZU_6Q@mail.gmail.com
+    [3]: commit 629e014bb834 ("fs: completely ignore unknown open flags")
+    [4]: https://sourceware.org/bugzilla/show_bug.cgi?id=17523
+    [5]: https://lore.kernel.org/lkml/20190930183316.10190-2-cyphar@cyphar.com/
+    [6]: https://youtu.be/ggD-eb3yPVs
+    
+    Suggested-by: Christian Brauner <christian.brauner@ubuntu.com>
+    Signed-off-by: Aleksa Sarai <cyphar@cyphar.com>
+    Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+
+diff --git a/fs/open.c b/fs/open.c
+index b62f5c0923a8..8cdb2b675867 100644
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -955,48 +955,84 @@ struct file *open_with_fake_path(const struct path *path, int flags,
+ }
+ EXPORT_SYMBOL(open_with_fake_path);
+ 
+-static inline int build_open_flags(int flags, umode_t mode, struct open_flags *op)
++#define WILL_CREATE(flags)	(flags & (O_CREAT | __O_TMPFILE))
++#define O_PATH_FLAGS		(O_DIRECTORY | O_NOFOLLOW | O_PATH | O_CLOEXEC)
++
++static inline struct open_how build_open_how(int flags, umode_t mode)
++{
++	struct open_how how = {
++		.flags = flags & VALID_OPEN_FLAGS,
++		.mode = mode & S_IALLUGO,
++	};
++
++	/* O_PATH beats everything else. */
++	if (how.flags & O_PATH)
++		how.flags &= O_PATH_FLAGS;
++	/* Modes should only be set for create-like flags. */
++	if (!WILL_CREATE(how.flags))
++		how.mode = 0;
++	return how;
++}
++
++static inline int build_open_flags(const struct open_how *how,
++				   struct open_flags *op)
+ {
++	int flags = how->flags;
+ 	int lookup_flags = 0;
+ 	int acc_mode = ACC_MODE(flags);
+ 
++	/* Must never be set by userspace */
++	flags &= ~(FMODE_NONOTIFY | O_CLOEXEC);
++
+ 	/*
+-	 * Clear out all open flags we don't know about so that we don't report
+-	 * them in fcntl(F_GETFD) or similar interfaces.
++	 * Older syscalls implicitly clear all of the invalid flags or argument
++	 * values before calling build_open_flags(), but openat2(2) checks all
++	 * of its arguments.
+ 	 */
+-	flags &= VALID_OPEN_FLAGS;
++	if (flags & ~VALID_OPEN_FLAGS)
++		return -EINVAL;
++	if (how->resolve & ~VALID_RESOLVE_FLAGS)
++		return -EINVAL;
+ 
+-	if (flags & (O_CREAT | __O_TMPFILE))
+-		op->mode = (mode & S_IALLUGO) | S_IFREG;
+-	else
++	/* Deal with the mode. */
++	if (WILL_CREATE(flags)) {
++		if (how->mode & ~S_IALLUGO)
++			return -EINVAL;
++		op->mode = how->mode | S_IFREG;
++	} else {
++		if (how->mode != 0)
++			return -EINVAL;
+ 		op->mode = 0;
+-
+-	/* Must never be set by userspace */
+-	flags &= ~FMODE_NONOTIFY & ~O_CLOEXEC;
++	}
+ 
+ 	/*
+-	 * O_SYNC is implemented as __O_SYNC|O_DSYNC.  As many places only
+-	 * check for O_DSYNC if the need any syncing at all we enforce it's
+-	 * always set instead of having to deal with possibly weird behaviour
+-	 * for malicious applications setting only __O_SYNC.
++	 * In order to ensure programs get explicit errors when trying to use
++	 * O_TMPFILE on old kernels, O_TMPFILE is implemented such that it
++	 * looks like (O_DIRECTORY|O_RDWR & ~O_CREAT) to old kernels. But we
++	 * have to require userspace to explicitly set it.
+ 	 */
+-	if (flags & __O_SYNC)
+-		flags |= O_DSYNC;
+-
+ 	if (flags & __O_TMPFILE) {
+ 		if ((flags & O_TMPFILE_MASK) != O_TMPFILE)
+ 			return -EINVAL;
+ 		if (!(acc_mode & MAY_WRITE))
+ 			return -EINVAL;
+-	} else if (flags & O_PATH) {
+-		/*
+-		 * If we have O_PATH in the open flag. Then we
+-		 * cannot have anything other than the below set of flags
+-		 */
+-		flags &= O_DIRECTORY | O_NOFOLLOW | O_PATH;
++	}
++	if (flags & O_PATH) {
++		/* O_PATH only permits certain other flags to be set. */
++		if (flags & ~O_PATH_FLAGS)
++			return -EINVAL;
+ 		acc_mode = 0;
+ 	}
+ 
++	/*
++	 * O_SYNC is implemented as __O_SYNC|O_DSYNC.  As many places only
++	 * check for O_DSYNC if the need any syncing at all we enforce it's
++	 * always set instead of having to deal with possibly weird behaviour
++	 * for malicious applications setting only __O_SYNC.
++	 */
++	if (flags & __O_SYNC)
++		flags |= O_DSYNC;
++
+ 	op->open_flag = flags;
+ 
+ 	/* O_TRUNC implies we need access checks for write permissions */
+@@ -1022,6 +1058,18 @@ static inline int build_open_flags(int flags, umode_t mode, struct open_flags *o
+ 		lookup_flags |= LOOKUP_DIRECTORY;
+ 	if (!(flags & O_NOFOLLOW))
+ 		lookup_flags |= LOOKUP_FOLLOW;
++
++	if (how->resolve & RESOLVE_NO_XDEV)
++		lookup_flags |= LOOKUP_NO_XDEV;
++	if (how->resolve & RESOLVE_NO_MAGICLINKS)
++		lookup_flags |= LOOKUP_NO_MAGICLINKS;
++	if (how->resolve & RESOLVE_NO_SYMLINKS)
++		lookup_flags |= LOOKUP_NO_SYMLINKS;
++	if (how->resolve & RESOLVE_BENEATH)
++		lookup_flags |= LOOKUP_BENEATH;
++	if (how->resolve & RESOLVE_IN_ROOT)
++		lookup_flags |= LOOKUP_IN_ROOT;
++
+ 	op->lookup_flags = lookup_flags;
+ 	return 0;
+ }
+@@ -1040,8 +1088,11 @@ static inline int build_open_flags(int flags, umode_t mode, struct open_flags *o
+ struct file *file_open_name(struct filename *name, int flags, umode_t mode)
+ {
+ 	struct open_flags op;
+-	int err = build_open_flags(flags, mode, &op);
+-	return err ? ERR_PTR(err) : do_filp_open(AT_FDCWD, name, &op);
++	struct open_how how = build_open_how(flags, mode);
++	int err = build_open_flags(&how, &op);
++	if (err)
++		return ERR_PTR(err);
++	return do_filp_open(AT_FDCWD, name, &op);
+ }
+ 
+ /**
+@@ -1072,17 +1123,19 @@ struct file *file_open_root(struct dentry *dentry, struct vfsmount *mnt,
+ 			    const char *filename, int flags, umode_t mode)
+ {
+ 	struct open_flags op;
+-	int err = build_open_flags(flags, mode, &op);
++	struct open_how how = build_open_how(flags, mode);
++	int err = build_open_flags(&how, &op);
+ 	if (err)
+ 		return ERR_PTR(err);
+ 	return do_file_open_root(dentry, mnt, filename, &op);
+ }
+ EXPORT_SYMBOL(file_open_root);
+ 
+-long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
++static long do_sys_openat2(int dfd, const char __user *filename,
++			   struct open_how *how)
+ {
+ 	struct open_flags op;
+-	int fd = build_open_flags(flags, mode, &op);
++	int fd = build_open_flags(how, &op);
+ 	struct filename *tmp;
+ 
+ 	if (fd)
+@@ -1092,7 +1145,7 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
+ 	if (IS_ERR(tmp))
+ 		return PTR_ERR(tmp);
+ 
+-	fd = get_unused_fd_flags(flags);
++	fd = get_unused_fd_flags(how->flags);
+ 	if (fd >= 0) {
+ 		struct file *f = do_filp_open(dfd, tmp, &op);
+ 		if (IS_ERR(f)) {
+@@ -1107,12 +1160,16 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
+ 	return fd;
+ }
+ 
+-SYSCALL_DEFINE3(open, const char __user *, filename, int, flags, umode_t, mode)
++long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
+ {
+-	if (force_o_largefile())
+-		flags |= O_LARGEFILE;
++	struct open_how how = build_open_how(flags, mode);
++	return do_sys_openat2(dfd, filename, &how);
++}
+ 
+-	return do_sys_open(AT_FDCWD, filename, flags, mode);
++
++SYSCALL_DEFINE3(open, const char __user *, filename, int, flags, umode_t, mode)
++{
++	return ksys_open(filename, flags, mode);
+ }
+ 
+ SYSCALL_DEFINE4(openat, int, dfd, const char __user *, filename, int, flags,
+@@ -1120,10 +1177,32 @@ SYSCALL_DEFINE4(openat, int, dfd, const char __user *, filename, int, flags,
+ {
+ 	if (force_o_largefile())
+ 		flags |= O_LARGEFILE;
+-
+ 	return do_sys_open(dfd, filename, flags, mode);
+ }
+ 
++SYSCALL_DEFINE4(openat2, int, dfd, const char __user *, filename,
++		struct open_how __user *, how, size_t, usize)
++{
++	int err;
++	struct open_how tmp;
++
++	BUILD_BUG_ON(sizeof(struct open_how) < OPEN_HOW_SIZE_VER0);
++	BUILD_BUG_ON(sizeof(struct open_how) != OPEN_HOW_SIZE_LATEST);
++
++	if (unlikely(usize < OPEN_HOW_SIZE_VER0))
++		return -EINVAL;
++
++	err = copy_struct_from_user(&tmp, sizeof(tmp), how, usize);
++	if (err)
++		return err;
++
++	/* O_LARGEFILE is only allowed for non-O_PATH. */
++	if (!(tmp.flags & O_PATH) && force_o_largefile())
++		tmp.flags |= O_LARGEFILE;
++
++	return do_sys_openat2(dfd, filename, &tmp);
++}
++
+ #ifdef CONFIG_COMPAT
+ /*
+  * Exactly like sys_open(), except that it doesn't set the

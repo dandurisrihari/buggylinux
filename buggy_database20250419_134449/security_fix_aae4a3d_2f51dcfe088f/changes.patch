@@ -1,0 +1,197 @@
+diff --git a/drivers/gpu/drm/i915/Kconfig.debug b/drivers/gpu/drm/i915/Kconfig.debug
+index a4d8cfd77c3c..68ff072f8b76 100644
+--- a/drivers/gpu/drm/i915/Kconfig.debug
++++ b/drivers/gpu/drm/i915/Kconfig.debug
+@@ -65,6 +65,7 @@ config DRM_I915_SELFTEST
+ 	bool "Enable selftests upon driver load"
+ 	depends on DRM_I915
+ 	default n
++	select FAULT_INJECTION
+ 	select PRIME_NUMBERS
+ 	help
+ 	  Choose this option to allow the driver to perform selftests upon
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index f7ff2df0c0c5..80b653fb3722 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -2485,6 +2485,8 @@ struct drm_i915_private {
+ 	/* Used to save the pipe-to-encoder mapping for audio */
+ 	struct intel_encoder *av_enc_map[I915_MAX_PIPES];
+ 
++	I915_SELFTEST_DECLARE(struct fault_attr vm_fault);
++
+ 	/*
+ 	 * NOTE: This is the dri1/ums dungeon, don't add stuff here. Your patch
+ 	 * will be rejected. Instead look for a better place.
+diff --git a/drivers/gpu/drm/i915/i915_gem_gtt.c b/drivers/gpu/drm/i915/i915_gem_gtt.c
+index 9daea3cd9cdc..f8ac69380a0f 100644
+--- a/drivers/gpu/drm/i915/i915_gem_gtt.c
++++ b/drivers/gpu/drm/i915/i915_gem_gtt.c
+@@ -23,6 +23,9 @@
+  *
+  */
+ 
++#include <linux/slab.h> /* fault-inject.h is not standalone! */
++
++#include <linux/fault-inject.h>
+ #include <linux/log2.h>
+ #include <linux/random.h>
+ #include <linux/seq_file.h>
+@@ -345,6 +348,9 @@ static int __setup_page_dma(struct drm_i915_private *dev_priv,
+ {
+ 	struct device *kdev = &dev_priv->drm.pdev->dev;
+ 
++	if (I915_SELFTEST_ONLY(should_fail(&dev_priv->vm_fault, 1)))
++		i915_gem_shrink_all(dev_priv);
++
+ 	p->page = alloc_page(flags);
+ 	if (!p->page)
+ 		return -ENOMEM;
+diff --git a/drivers/gpu/drm/i915/i915_selftest.h b/drivers/gpu/drm/i915/i915_selftest.h
+index e43777b72211..9d7d86f1733d 100644
+--- a/drivers/gpu/drm/i915/i915_selftest.h
++++ b/drivers/gpu/drm/i915/i915_selftest.h
+@@ -36,6 +36,8 @@ struct i915_selftest {
+ };
+ 
+ #if IS_ENABLED(CONFIG_DRM_I915_SELFTEST)
++#include <linux/fault-inject.h>
++
+ extern struct i915_selftest i915_selftest;
+ 
+ int i915_mock_selftests(void);
+diff --git a/drivers/gpu/drm/i915/selftests/i915_gem_gtt.c b/drivers/gpu/drm/i915/selftests/i915_gem_gtt.c
+index d0ec74671ef8..2e571bbe98ae 100644
+--- a/drivers/gpu/drm/i915/selftests/i915_gem_gtt.c
++++ b/drivers/gpu/drm/i915/selftests/i915_gem_gtt.c
+@@ -271,11 +271,14 @@ static void close_object_list(struct list_head *objects,
+ 			      struct i915_address_space *vm)
+ {
+ 	struct drm_i915_gem_object *obj, *on;
++	int ignored;
+ 
+ 	list_for_each_entry_safe(obj, on, objects, st_link) {
+ 		struct i915_vma *vma;
+ 
+ 		vma = i915_vma_instance(obj, vm, NULL);
++		if (!IS_ERR(vma))
++			ignored = i915_vma_unbind(vma);
+ 		/* Only ppgtt vma may be closed before the object is freed */
+ 		if (!IS_ERR(vma) && !i915_vma_is_ggtt(vma))
+ 			i915_vma_close(vma);
+@@ -677,6 +680,95 @@ static int drunk_hole(struct drm_i915_private *i915,
+ 	return 0;
+ }
+ 
++static int __shrink_hole(struct drm_i915_private *i915,
++			 struct i915_address_space *vm,
++			 u64 hole_start, u64 hole_end,
++			 unsigned long end_time)
++{
++	struct drm_i915_gem_object *obj;
++	unsigned long flags = PIN_OFFSET_FIXED | PIN_USER;
++	unsigned int order = 12;
++	LIST_HEAD(objects);
++	int err = 0;
++	u64 addr;
++
++	/* Keep creating larger objects until one cannot fit into the hole */
++	for (addr = hole_start; addr < hole_end; ) {
++		struct i915_vma *vma;
++		u64 size = BIT_ULL(order++);
++
++		size = min(size, hole_end - addr);
++		obj = fake_dma_object(i915, size);
++		if (IS_ERR(obj)) {
++			err = PTR_ERR(obj);
++			break;
++		}
++
++		list_add(&obj->st_link, &objects);
++
++		vma = i915_vma_instance(obj, vm, NULL);
++		if (IS_ERR(vma)) {
++			err = PTR_ERR(vma);
++			break;
++		}
++
++		GEM_BUG_ON(vma->size != size);
++
++		err = i915_vma_pin(vma, 0, 0, addr | flags);
++		if (err) {
++			pr_err("%s failed to pin object at %llx + %llx in hole [%llx - %llx], with err=%d\n",
++			       __func__, addr, size, hole_start, hole_end, err);
++			break;
++		}
++
++		if (!drm_mm_node_allocated(&vma->node) ||
++		    i915_vma_misplaced(vma, 0, 0, addr | flags)) {
++			pr_err("%s incorrect at %llx + %llx\n",
++			       __func__, addr, size);
++			i915_vma_unpin(vma);
++			err = i915_vma_unbind(vma);
++			err = -EINVAL;
++			break;
++		}
++
++		i915_vma_unpin(vma);
++		addr += size;
++
++		if (igt_timeout(end_time,
++				"%s timed out at ofset %llx [%llx - %llx]\n",
++				__func__, addr, hole_start, hole_end)) {
++			err = -EINTR;
++			break;
++		}
++	}
++
++	close_object_list(&objects, vm);
++	return err;
++}
++
++static int shrink_hole(struct drm_i915_private *i915,
++		       struct i915_address_space *vm,
++		       u64 hole_start, u64 hole_end,
++		       unsigned long end_time)
++{
++	unsigned long prime;
++	int err;
++
++	i915->vm_fault.probability = 999;
++	atomic_set(&i915->vm_fault.times, -1);
++
++	for_each_prime_number_from(prime, 0, ULONG_MAX - 1) {
++		i915->vm_fault.interval = prime;
++		err = __shrink_hole(i915, vm, hole_start, hole_end, end_time);
++		if (err)
++			break;
++	}
++
++	memset(&i915->vm_fault, 0, sizeof(i915->vm_fault));
++
++	return err;
++}
++
+ static int exercise_ppgtt(struct drm_i915_private *dev_priv,
+ 			  int (*func)(struct drm_i915_private *i915,
+ 				      struct i915_address_space *vm,
+@@ -735,6 +827,11 @@ static int igt_ppgtt_lowlevel(void *arg)
+ 	return exercise_ppgtt(arg, lowlevel_hole);
+ }
+ 
++static int igt_ppgtt_shrink(void *arg)
++{
++	return exercise_ppgtt(arg, shrink_hole);
++}
++
+ static int sort_holes(void *priv, struct list_head *A, struct list_head *B)
+ {
+ 	struct drm_mm_node *a = list_entry(A, typeof(*a), hole_stack);
+@@ -812,6 +909,7 @@ int i915_gem_gtt_live_selftests(struct drm_i915_private *i915)
+ 		SUBTEST(igt_ppgtt_drunk),
+ 		SUBTEST(igt_ppgtt_walk),
+ 		SUBTEST(igt_ppgtt_fill),
++		SUBTEST(igt_ppgtt_shrink),
+ 		SUBTEST(igt_ggtt_lowlevel),
+ 		SUBTEST(igt_ggtt_drunk),
+ 		SUBTEST(igt_ggtt_walk),

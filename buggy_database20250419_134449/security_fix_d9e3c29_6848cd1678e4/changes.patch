@@ -1,0 +1,191 @@
+diff --git a/drivers/net/ethernet/netronome/nfp/nfp_net.h b/drivers/net/ethernet/netronome/nfp/nfp_net.h
+index 3c386972f69a..e7646377de37 100644
+--- a/drivers/net/ethernet/netronome/nfp/nfp_net.h
++++ b/drivers/net/ethernet/netronome/nfp/nfp_net.h
+@@ -411,13 +411,17 @@ struct nfp_net_fw_version {
+ 	u8 minor;
+ 	u8 major;
+ 	u8 class;
+-	u8 resv;
++
++	/* This byte can be exploited for more use, currently,
++	 * BIT0: dp type, BIT[7:1]: reserved
++	 */
++	u8 extend;
+ } __packed;
+ 
+ static inline bool nfp_net_fw_ver_eq(struct nfp_net_fw_version *fw_ver,
+-				     u8 resv, u8 class, u8 major, u8 minor)
++				     u8 extend, u8 class, u8 major, u8 minor)
+ {
+-	return fw_ver->resv == resv &&
++	return fw_ver->extend == extend &&
+ 	       fw_ver->class == class &&
+ 	       fw_ver->major == major &&
+ 	       fw_ver->minor == minor;
+@@ -855,11 +859,11 @@ static inline void nn_ctrl_bar_unlock(struct nfp_net *nn)
+ /* Globals */
+ extern const char nfp_driver_version[];
+ 
+-extern const struct net_device_ops nfp_net_netdev_ops;
++extern const struct net_device_ops nfp_nfd3_netdev_ops;
+ 
+ static inline bool nfp_netdev_is_nfp_net(struct net_device *netdev)
+ {
+-	return netdev->netdev_ops == &nfp_net_netdev_ops;
++	return netdev->netdev_ops == &nfp_nfd3_netdev_ops;
+ }
+ 
+ static inline int nfp_net_coalesce_para_check(u32 usecs, u32 pkts)
+diff --git a/drivers/net/ethernet/netronome/nfp/nfp_net_common.c b/drivers/net/ethernet/netronome/nfp/nfp_net_common.c
+index 331253149f50..0aa91065a7cb 100644
+--- a/drivers/net/ethernet/netronome/nfp/nfp_net_common.c
++++ b/drivers/net/ethernet/netronome/nfp/nfp_net_common.c
+@@ -1892,7 +1892,7 @@ static int nfp_net_set_mac_address(struct net_device *netdev, void *addr)
+ 	return 0;
+ }
+ 
+-const struct net_device_ops nfp_net_netdev_ops = {
++const struct net_device_ops nfp_nfd3_netdev_ops = {
+ 	.ndo_init		= nfp_app_ndo_init,
+ 	.ndo_uninit		= nfp_app_ndo_uninit,
+ 	.ndo_open		= nfp_net_netdev_open,
+@@ -1962,7 +1962,7 @@ void nfp_net_info(struct nfp_net *nn)
+ 		nn->dp.num_tx_rings, nn->max_tx_rings,
+ 		nn->dp.num_rx_rings, nn->max_rx_rings);
+ 	nn_info(nn, "VER: %d.%d.%d.%d, Maximum supported MTU: %d\n",
+-		nn->fw_ver.resv, nn->fw_ver.class,
++		nn->fw_ver.extend, nn->fw_ver.class,
+ 		nn->fw_ver.major, nn->fw_ver.minor,
+ 		nn->max_mtu);
+ 	nn_info(nn, "CAP: %#x %s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
+@@ -2036,7 +2036,16 @@ nfp_net_alloc(struct pci_dev *pdev, const struct nfp_dev_info *dev_info,
+ 	nn->dp.ctrl_bar = ctrl_bar;
+ 	nn->dev_info = dev_info;
+ 	nn->pdev = pdev;
+-	nn->dp.ops = &nfp_nfd3_ops;
++	nfp_net_get_fw_version(&nn->fw_ver, ctrl_bar);
++
++	switch (FIELD_GET(NFP_NET_CFG_VERSION_DP_MASK, nn->fw_ver.extend)) {
++	case NFP_NET_CFG_VERSION_DP_NFD3:
++		nn->dp.ops = &nfp_nfd3_ops;
++		break;
++	default:
++		err = -EINVAL;
++		goto err_free_nn;
++	}
+ 
+ 	nn->max_tx_rings = max_tx_rings;
+ 	nn->max_rx_rings = max_rx_rings;
+@@ -2255,7 +2264,12 @@ static void nfp_net_netdev_init(struct nfp_net *nn)
+ 	nn->dp.ctrl &= ~NFP_NET_CFG_CTRL_LSO_ANY;
+ 
+ 	/* Finalise the netdev setup */
+-	netdev->netdev_ops = &nfp_net_netdev_ops;
++	switch (nn->dp.ops->version) {
++	case NFP_NFD_VER_NFD3:
++		netdev->netdev_ops = &nfp_nfd3_netdev_ops;
++		break;
++	}
++
+ 	netdev->watchdog_timeo = msecs_to_jiffies(5 * 1000);
+ 
+ 	/* MTU range: 68 - hw-specific max */
+diff --git a/drivers/net/ethernet/netronome/nfp/nfp_net_ctrl.h b/drivers/net/ethernet/netronome/nfp/nfp_net_ctrl.h
+index 33fd32478905..7f04a5275a2d 100644
+--- a/drivers/net/ethernet/netronome/nfp/nfp_net_ctrl.h
++++ b/drivers/net/ethernet/netronome/nfp/nfp_net_ctrl.h
+@@ -149,7 +149,9 @@
+  * - define more STS bits
+  */
+ #define NFP_NET_CFG_VERSION		0x0030
+-#define   NFP_NET_CFG_VERSION_RESERVED_MASK	(0xff << 24)
++#define   NFP_NET_CFG_VERSION_RESERVED_MASK	(0xfe << 24)
++#define   NFP_NET_CFG_VERSION_DP_NFD3		0
++#define   NFP_NET_CFG_VERSION_DP_MASK		1
+ #define   NFP_NET_CFG_VERSION_CLASS_MASK  (0xff << 16)
+ #define   NFP_NET_CFG_VERSION_CLASS(x)	  (((x) & 0xff) << 16)
+ #define   NFP_NET_CFG_VERSION_CLASS_GENERIC	0
+diff --git a/drivers/net/ethernet/netronome/nfp/nfp_net_ethtool.c b/drivers/net/ethernet/netronome/nfp/nfp_net_ethtool.c
+index 7d7150600485..61c8b450aafb 100644
+--- a/drivers/net/ethernet/netronome/nfp/nfp_net_ethtool.c
++++ b/drivers/net/ethernet/netronome/nfp/nfp_net_ethtool.c
+@@ -219,7 +219,7 @@ nfp_net_get_drvinfo(struct net_device *netdev, struct ethtool_drvinfo *drvinfo)
+ 	struct nfp_net *nn = netdev_priv(netdev);
+ 
+ 	snprintf(vnic_version, sizeof(vnic_version), "%d.%d.%d.%d",
+-		 nn->fw_ver.resv, nn->fw_ver.class,
++		 nn->fw_ver.extend, nn->fw_ver.class,
+ 		 nn->fw_ver.major, nn->fw_ver.minor);
+ 	strlcpy(drvinfo->bus_info, pci_name(nn->pdev),
+ 		sizeof(drvinfo->bus_info));
+diff --git a/drivers/net/ethernet/netronome/nfp/nfp_net_main.c b/drivers/net/ethernet/netronome/nfp/nfp_net_main.c
+index 09a0a2076c6e..ca4e05650fe6 100644
+--- a/drivers/net/ethernet/netronome/nfp/nfp_net_main.c
++++ b/drivers/net/ethernet/netronome/nfp/nfp_net_main.c
+@@ -123,7 +123,6 @@ nfp_net_pf_alloc_vnic(struct nfp_pf *pf, bool needs_netdev,
+ 		return nn;
+ 
+ 	nn->app = pf->app;
+-	nfp_net_get_fw_version(&nn->fw_ver, ctrl_bar);
+ 	nn->tx_bar = qc_bar + tx_base * NFP_QCP_QUEUE_ADDR_SZ;
+ 	nn->rx_bar = qc_bar + rx_base * NFP_QCP_QUEUE_ADDR_SZ;
+ 	nn->dp.is_vf = 0;
+@@ -679,9 +678,11 @@ int nfp_net_pci_probe(struct nfp_pf *pf)
+ 	}
+ 
+ 	nfp_net_get_fw_version(&fw_ver, ctrl_bar);
+-	if (fw_ver.resv || fw_ver.class != NFP_NET_CFG_VERSION_CLASS_GENERIC) {
++	if (fw_ver.extend & NFP_NET_CFG_VERSION_RESERVED_MASK ||
++	    fw_ver.class != NFP_NET_CFG_VERSION_CLASS_GENERIC) {
+ 		nfp_err(pf->cpp, "Unknown Firmware ABI %d.%d.%d.%d\n",
+-			fw_ver.resv, fw_ver.class, fw_ver.major, fw_ver.minor);
++			fw_ver.extend, fw_ver.class,
++			fw_ver.major, fw_ver.minor);
+ 		err = -EINVAL;
+ 		goto err_unmap;
+ 	}
+@@ -697,7 +698,7 @@ int nfp_net_pci_probe(struct nfp_pf *pf)
+ 			break;
+ 		default:
+ 			nfp_err(pf->cpp, "Unsupported Firmware ABI %d.%d.%d.%d\n",
+-				fw_ver.resv, fw_ver.class,
++				fw_ver.extend, fw_ver.class,
+ 				fw_ver.major, fw_ver.minor);
+ 			err = -EINVAL;
+ 			goto err_unmap;
+diff --git a/drivers/net/ethernet/netronome/nfp/nfp_netvf_main.c b/drivers/net/ethernet/netronome/nfp/nfp_netvf_main.c
+index 9ef226c6706e..a51eb26dd977 100644
+--- a/drivers/net/ethernet/netronome/nfp/nfp_netvf_main.c
++++ b/drivers/net/ethernet/netronome/nfp/nfp_netvf_main.c
+@@ -122,9 +122,11 @@ static int nfp_netvf_pci_probe(struct pci_dev *pdev,
+ 	}
+ 
+ 	nfp_net_get_fw_version(&fw_ver, ctrl_bar);
+-	if (fw_ver.resv || fw_ver.class != NFP_NET_CFG_VERSION_CLASS_GENERIC) {
++	if (fw_ver.extend & NFP_NET_CFG_VERSION_RESERVED_MASK ||
++	    fw_ver.class != NFP_NET_CFG_VERSION_CLASS_GENERIC) {
+ 		dev_err(&pdev->dev, "Unknown Firmware ABI %d.%d.%d.%d\n",
+-			fw_ver.resv, fw_ver.class, fw_ver.major, fw_ver.minor);
++			fw_ver.extend, fw_ver.class,
++			fw_ver.major, fw_ver.minor);
+ 		err = -EINVAL;
+ 		goto err_ctrl_unmap;
+ 	}
+@@ -144,7 +146,7 @@ static int nfp_netvf_pci_probe(struct pci_dev *pdev,
+ 			break;
+ 		default:
+ 			dev_err(&pdev->dev, "Unsupported Firmware ABI %d.%d.%d.%d\n",
+-				fw_ver.resv, fw_ver.class,
++				fw_ver.extend, fw_ver.class,
+ 				fw_ver.major, fw_ver.minor);
+ 			err = -EINVAL;
+ 			goto err_ctrl_unmap;
+@@ -186,7 +188,6 @@ static int nfp_netvf_pci_probe(struct pci_dev *pdev,
+ 	}
+ 	vf->nn = nn;
+ 
+-	nn->fw_ver = fw_ver;
+ 	nn->dp.is_vf = 1;
+ 	nn->stride_tx = stride;
+ 	nn->stride_rx = stride;

@@ -1,0 +1,111 @@
+commit c8c05a8eec6f1258f6d5cb71a44ee5dc1e989b63
+Author: Catherine Zhang <cxzhang@watson.ibm.com>
+Date:   Thu Jun 8 23:39:49 2006 -0700
+
+    [LSM-IPsec]: SELinux Authorize
+    
+    This patch contains a fix for the previous patch that adds security
+    contexts to IPsec policies and security associations.  In the previous
+    patch, no authorization (besides the check for write permissions to
+    SAD and SPD) is required to delete IPsec policies and security
+    assocations with security contexts.  Thus a user authorized to change
+    SAD and SPD can bypass the IPsec policy authorization by simply
+    deleteing policies with security contexts.  To fix this security hole,
+    an additional authorization check is added for removing security
+    policies and security associations with security contexts.
+    
+    Note that if no security context is supplied on add or present on
+    policy to be deleted, the SELinux module allows the change
+    unconditionally.  The hook is called on deletion when no context is
+    present, which we may want to change.  At present, I left it up to the
+    module.
+    
+    LSM changes:
+    
+    The patch adds two new LSM hooks: xfrm_policy_delete and
+    xfrm_state_delete.  The new hooks are necessary to authorize deletion
+    of IPsec policies that have security contexts.  The existing hooks
+    xfrm_policy_free and xfrm_state_free lack the context to do the
+    authorization, so I decided to split authorization of deletion and
+    memory management of security data, as is typical in the LSM
+    interface.
+    
+    Use:
+    
+    The new delete hooks are checked when xfrm_policy or xfrm_state are
+    deleted by either the xfrm_user interface (xfrm_get_policy,
+    xfrm_del_sa) or the pfkey interface (pfkey_spddelete, pfkey_delete).
+    
+    SELinux changes:
+    
+    The new policy_delete and state_delete functions are added.
+    
+    Signed-off-by: Catherine Zhang <cxzhang@watson.ibm.com>
+    Signed-off-by: Trent Jaeger <tjaeger@cse.psu.edu>
+    Acked-by: James Morris <jmorris@namei.org>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/security/selinux/xfrm.c b/security/selinux/xfrm.c
+index abe99d881376..0e24df41099f 100644
+--- a/security/selinux/xfrm.c
++++ b/security/selinux/xfrm.c
+@@ -132,10 +132,7 @@ static int selinux_xfrm_sec_ctx_alloc(struct xfrm_sec_ctx **ctxp, struct xfrm_us
+ 		goto out;
+ 
+ 	/*
+-	 * Does the subject have permission to set security or permission to
+-	 * do the relabel?
+-	 * Must be permitted to relabel from default socket type (process type)
+-	 * to specified context
++	 * Does the subject have permission to set security context?
+ 	 */
+ 	rc = avc_has_perm(tsec->sid, ctx->ctx_sid,
+ 			  SECCLASS_ASSOCIATION,
+@@ -200,6 +197,23 @@ void selinux_xfrm_policy_free(struct xfrm_policy *xp)
+ 		kfree(ctx);
+ }
+ 
++/*
++ * LSM hook implementation that authorizes deletion of labeled policies.
++ */
++int selinux_xfrm_policy_delete(struct xfrm_policy *xp)
++{
++	struct task_security_struct *tsec = current->security;
++	struct xfrm_sec_ctx *ctx = xp->security;
++	int rc = 0;
++
++	if (ctx)
++		rc = avc_has_perm(tsec->sid, ctx->ctx_sid,
++				  SECCLASS_ASSOCIATION,
++				  ASSOCIATION__SETCONTEXT, NULL);
++
++	return rc;
++}
++
+ /*
+  * LSM hook implementation that allocs and transfers sec_ctx spec to
+  * xfrm_state.
+@@ -292,6 +306,23 @@ u32 selinux_socket_getpeer_dgram(struct sk_buff *skb)
+ 	return SECSID_NULL;
+ }
+ 
++ /*
++  * LSM hook implementation that authorizes deletion of labeled SAs.
++  */
++int selinux_xfrm_state_delete(struct xfrm_state *x)
++{
++	struct task_security_struct *tsec = current->security;
++	struct xfrm_sec_ctx *ctx = x->security;
++	int rc = 0;
++
++	if (ctx)
++		rc = avc_has_perm(tsec->sid, ctx->ctx_sid,
++				  SECCLASS_ASSOCIATION,
++				  ASSOCIATION__SETCONTEXT, NULL);
++
++	return rc;
++}
++
+ /*
+  * LSM hook that controls access to unlabelled packets.  If
+  * a xfrm_state is authorizable (defined by macro) then it was

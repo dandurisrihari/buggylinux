@@ -1,0 +1,70 @@
+commit 6279017e807708a07db5edace462713a93625da3
+Author: Will Deacon <will@kernel.org>
+Date:   Fri Nov 13 11:38:42 2020 +0000
+
+    KVM: arm64: Move BP hardening helpers into spectre.h
+    
+    The BP hardening helpers are an integral part of the Spectre-v2
+    mitigation, so move them into asm/spectre.h and inline the
+    arm64_get_bp_hardening_data() function at the same time.
+    
+    Signed-off-by: Will Deacon <will@kernel.org>
+    Signed-off-by: Marc Zyngier <maz@kernel.org>
+    Cc: Marc Zyngier <maz@kernel.org>
+    Cc: Quentin Perret <qperret@google.com>
+    Link: https://lore.kernel.org/r/20201113113847.21619-6-will@kernel.org
+
+diff --git a/arch/arm64/include/asm/spectre.h b/arch/arm64/include/asm/spectre.h
+index fcdfbce302bd..d22f8b7d9c50 100644
+--- a/arch/arm64/include/asm/spectre.h
++++ b/arch/arm64/include/asm/spectre.h
+@@ -9,7 +9,15 @@
+ #ifndef __ASM_SPECTRE_H
+ #define __ASM_SPECTRE_H
+ 
++#define BP_HARDEN_EL2_SLOTS 4
++#define __BP_HARDEN_HYP_VECS_SZ (BP_HARDEN_EL2_SLOTS * SZ_2K)
++
++#ifndef __ASSEMBLY__
++
++#include <linux/percpu.h>
++
+ #include <asm/cpufeature.h>
++#include <asm/virt.h>
+ 
+ /* Watch out, ordering is important here. */
+ enum mitigation_state {
+@@ -20,6 +28,27 @@ enum mitigation_state {
+ 
+ struct task_struct;
+ 
++typedef void (*bp_hardening_cb_t)(void);
++
++struct bp_hardening_data {
++	int			hyp_vectors_slot;
++	bp_hardening_cb_t	fn;
++};
++
++DECLARE_PER_CPU_READ_MOSTLY(struct bp_hardening_data, bp_hardening_data);
++
++static inline void arm64_apply_bp_hardening(void)
++{
++	struct bp_hardening_data *d;
++
++	if (!cpus_have_const_cap(ARM64_SPECTRE_V2))
++		return;
++
++	d = this_cpu_ptr(&bp_hardening_data);
++	if (d->fn)
++		d->fn();
++}
++
+ enum mitigation_state arm64_get_spectre_v2_state(void);
+ bool has_spectre_v2(const struct arm64_cpu_capabilities *cap, int scope);
+ void spectre_v2_enable_mitigation(const struct arm64_cpu_capabilities *__unused);
+@@ -29,4 +58,5 @@ bool has_spectre_v4(const struct arm64_cpu_capabilities *cap, int scope);
+ void spectre_v4_enable_mitigation(const struct arm64_cpu_capabilities *__unused);
+ void spectre_v4_enable_task_mitigation(struct task_struct *tsk);
+ 
++#endif	/* __ASSEMBLY__ */
+ #endif	/* __ASM_SPECTRE_H */

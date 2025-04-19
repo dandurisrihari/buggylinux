@@ -1,0 +1,115 @@
+commit 006df0f34930e18d0aa52f05705bdfe1fc565943
+Author: Christoffer Dall <cdall@linaro.org>
+Date:   Sun Oct 16 22:19:11 2016 +0200
+
+    KVM: arm/arm64: Support calling vgic_update_irq_pending from irq context
+    
+    We are about to optimize our timer handling logic which involves
+    injecting irqs to the vgic directly from the irq handler.
+    
+    Unfortunately, the injection path can take any AP list lock and irq lock
+    and we must therefore make sure to use spin_lock_irqsave where ever
+    interrupts are enabled and we are taking any of those locks, to avoid
+    deadlocking between process context and the ISR.
+    
+    This changes a lot of the VGIC code, but the good news are that the
+    changes are mostly mechanical.
+    
+    Acked-by: Marc Zyngier <marc,zyngier@arm.com>
+    Signed-off-by: Christoffer Dall <cdall@linaro.org>
+
+diff --git a/virt/kvm/arm/vgic/vgic-mmio-v2.c b/virt/kvm/arm/vgic/vgic-mmio-v2.c
+index b3d4a10f09a1..e21e2f49b005 100644
+--- a/virt/kvm/arm/vgic/vgic-mmio-v2.c
++++ b/virt/kvm/arm/vgic/vgic-mmio-v2.c
+@@ -74,6 +74,7 @@ static void vgic_mmio_write_sgir(struct kvm_vcpu *source_vcpu,
+ 	int mode = (val >> 24) & 0x03;
+ 	int c;
+ 	struct kvm_vcpu *vcpu;
++	unsigned long flags;
+ 
+ 	switch (mode) {
+ 	case 0x0:		/* as specified by targets */
+@@ -97,11 +98,11 @@ static void vgic_mmio_write_sgir(struct kvm_vcpu *source_vcpu,
+ 
+ 		irq = vgic_get_irq(source_vcpu->kvm, vcpu, intid);
+ 
+-		spin_lock(&irq->irq_lock);
++		spin_lock_irqsave(&irq->irq_lock, flags);
+ 		irq->pending_latch = true;
+ 		irq->source |= 1U << source_vcpu->vcpu_id;
+ 
+-		vgic_queue_irq_unlock(source_vcpu->kvm, irq);
++		vgic_queue_irq_unlock(source_vcpu->kvm, irq, flags);
+ 		vgic_put_irq(source_vcpu->kvm, irq);
+ 	}
+ }
+@@ -131,6 +132,7 @@ static void vgic_mmio_write_target(struct kvm_vcpu *vcpu,
+ 	u32 intid = VGIC_ADDR_TO_INTID(addr, 8);
+ 	u8 cpu_mask = GENMASK(atomic_read(&vcpu->kvm->online_vcpus) - 1, 0);
+ 	int i;
++	unsigned long flags;
+ 
+ 	/* GICD_ITARGETSR[0-7] are read-only */
+ 	if (intid < VGIC_NR_PRIVATE_IRQS)
+@@ -140,13 +142,13 @@ static void vgic_mmio_write_target(struct kvm_vcpu *vcpu,
+ 		struct vgic_irq *irq = vgic_get_irq(vcpu->kvm, NULL, intid + i);
+ 		int target;
+ 
+-		spin_lock(&irq->irq_lock);
++		spin_lock_irqsave(&irq->irq_lock, flags);
+ 
+ 		irq->targets = (val >> (i * 8)) & cpu_mask;
+ 		target = irq->targets ? __ffs(irq->targets) : 0;
+ 		irq->target_vcpu = kvm_get_vcpu(vcpu->kvm, target);
+ 
+-		spin_unlock(&irq->irq_lock);
++		spin_unlock_irqrestore(&irq->irq_lock, flags);
+ 		vgic_put_irq(vcpu->kvm, irq);
+ 	}
+ }
+@@ -174,17 +176,18 @@ static void vgic_mmio_write_sgipendc(struct kvm_vcpu *vcpu,
+ {
+ 	u32 intid = addr & 0x0f;
+ 	int i;
++	unsigned long flags;
+ 
+ 	for (i = 0; i < len; i++) {
+ 		struct vgic_irq *irq = vgic_get_irq(vcpu->kvm, vcpu, intid + i);
+ 
+-		spin_lock(&irq->irq_lock);
++		spin_lock_irqsave(&irq->irq_lock, flags);
+ 
+ 		irq->source &= ~((val >> (i * 8)) & 0xff);
+ 		if (!irq->source)
+ 			irq->pending_latch = false;
+ 
+-		spin_unlock(&irq->irq_lock);
++		spin_unlock_irqrestore(&irq->irq_lock, flags);
+ 		vgic_put_irq(vcpu->kvm, irq);
+ 	}
+ }
+@@ -195,19 +198,20 @@ static void vgic_mmio_write_sgipends(struct kvm_vcpu *vcpu,
+ {
+ 	u32 intid = addr & 0x0f;
+ 	int i;
++	unsigned long flags;
+ 
+ 	for (i = 0; i < len; i++) {
+ 		struct vgic_irq *irq = vgic_get_irq(vcpu->kvm, vcpu, intid + i);
+ 
+-		spin_lock(&irq->irq_lock);
++		spin_lock_irqsave(&irq->irq_lock, flags);
+ 
+ 		irq->source |= (val >> (i * 8)) & 0xff;
+ 
+ 		if (irq->source) {
+ 			irq->pending_latch = true;
+-			vgic_queue_irq_unlock(vcpu->kvm, irq);
++			vgic_queue_irq_unlock(vcpu->kvm, irq, flags);
+ 		} else {
+-			spin_unlock(&irq->irq_lock);
++			spin_unlock_irqrestore(&irq->irq_lock, flags);
+ 		}
+ 		vgic_put_irq(vcpu->kvm, irq);
+ 	}

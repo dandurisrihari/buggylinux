@@ -1,0 +1,90 @@
+diff --git a/drivers/gpu/drm/i915/i915_drv.c b/drivers/gpu/drm/i915/i915_drv.c
+index d258388605d6..4cdd70de5ed0 100644
+--- a/drivers/gpu/drm/i915/i915_drv.c
++++ b/drivers/gpu/drm/i915/i915_drv.c
+@@ -73,6 +73,12 @@ bool __i915_inject_load_failure(const char *func, int line)
+ 
+ 	return false;
+ }
++
++bool i915_error_injected(void)
++{
++	return i915_load_fail_count && !i915_modparams.inject_load_failure;
++}
++
+ #endif
+ 
+ #define FDO_BUG_URL "https://bugs.freedesktop.org/enter_bug.cgi?product=DRI"
+@@ -115,20 +121,6 @@ __i915_printk(struct drm_i915_private *dev_priv, const char *level,
+ 	va_end(args);
+ }
+ 
+-static bool i915_error_injected(struct drm_i915_private *dev_priv)
+-{
+-#if IS_ENABLED(CONFIG_DRM_I915_DEBUG)
+-	return i915_load_fail_count && !i915_modparams.inject_load_failure;
+-#else
+-	return false;
+-#endif
+-}
+-
+-#define i915_load_error(i915, fmt, ...)					 \
+-	__i915_printk(i915,						 \
+-		      i915_error_injected(i915) ? KERN_DEBUG : KERN_ERR, \
+-		      fmt, ##__VA_ARGS__)
+-
+ /* Map PCH device id to PCH type, or PCH_NONE if unknown. */
+ static enum intel_pch
+ intel_pch_type(const struct drm_i915_private *dev_priv, unsigned short id)
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 71651ca7a8b1..6104d7115054 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -108,13 +108,24 @@
+ 	I915_STATE_WARN((x), "%s", "WARN_ON(" __stringify(x) ")")
+ 
+ #if IS_ENABLED(CONFIG_DRM_I915_DEBUG)
++
+ bool __i915_inject_load_failure(const char *func, int line);
+ #define i915_inject_load_failure() \
+ 	__i915_inject_load_failure(__func__, __LINE__)
++
++bool i915_error_injected(void);
++
+ #else
++
+ #define i915_inject_load_failure() false
++#define i915_error_injected() false
++
+ #endif
+ 
++#define i915_load_error(i915, fmt, ...)					 \
++	__i915_printk(i915, i915_error_injected() ? KERN_DEBUG : KERN_ERR, \
++		      fmt, ##__VA_ARGS__)
++
+ typedef struct {
+ 	uint32_t val;
+ } uint_fixed_16_16_t;
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index 4187e0688e50..0f28b5ddfd15 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -5491,8 +5491,6 @@ int i915_gem_init(struct drm_i915_private *dev_priv)
+ 	}
+ 
+ 	if (i915_inject_load_failure()) {
+-		DRM_DEBUG_DRIVER("Marking the driver as wedged\n");
+-		i915_gem_set_wedged(dev_priv);  /* Fail silently! */
+ 		ret = -EIO;
+ 		goto err_init_hw;
+ 	}
+@@ -5543,7 +5541,8 @@ int i915_gem_init(struct drm_i915_private *dev_priv)
+ 		 * for all other failure, such as an allocation failure, bail.
+ 		 */
+ 		if (!i915_terminally_wedged(&dev_priv->gpu_error)) {
+-			DRM_ERROR("Failed to initialize GPU, declaring it wedged\n");
++			i915_load_error(dev_priv,
++					"Failed to initialize GPU, declaring it wedged!\n");
+ 			i915_gem_set_wedged(dev_priv);
+ 		}
+ 		ret = 0;

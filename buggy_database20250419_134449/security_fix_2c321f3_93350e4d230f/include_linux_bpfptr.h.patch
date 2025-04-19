@@ -1,0 +1,81 @@
+commit 2c321f3f70bc284510598f712b702ce8d60c4d14
+Author: Suren Baghdasaryan <surenb@google.com>
+Date:   Sun Apr 14 19:07:31 2024 -0700
+
+    mm: change inlined allocation helpers to account at the call site
+    
+    Main goal of memory allocation profiling patchset is to provide accounting
+    that is cheap enough to run in production.  To achieve that we inject
+    counters using codetags at the allocation call sites to account every time
+    allocation is made.  This injection allows us to perform accounting
+    efficiently because injected counters are immediately available as opposed
+    to the alternative methods, such as using _RET_IP_, which would require
+    counter lookup and appropriate locking that makes accounting much more
+    expensive.  This method requires all allocation functions to inject
+    separate counters at their call sites so that their callers can be
+    individually accounted.  Counter injection is implemented by allocation
+    hooks which should wrap all allocation functions.
+    
+    Inlined functions which perform allocations but do not use allocation
+    hooks are directly charged for the allocations they perform.  In most
+    cases these functions are just specialized allocation wrappers used from
+    multiple places to allocate objects of a specific type.  It would be more
+    useful to do the accounting at their call sites instead.  Instrument these
+    helpers to do accounting at the call site.  Simple inlined allocation
+    wrappers are converted directly into macros.  More complex allocators or
+    allocators with documentation are converted into _noprof versions and
+    allocation hooks are added.  This allows memory allocation profiling
+    mechanism to charge allocations to the callers of these functions.
+    
+    Link: https://lkml.kernel.org/r/20240415020731.1152108-1-surenb@google.com
+    Signed-off-by: Suren Baghdasaryan <surenb@google.com>
+    Acked-by: Jan Kara <jack@suse.cz>               [jbd2]
+    Cc: Anna Schumaker <anna@kernel.org>
+    Cc: Arnd Bergmann <arnd@arndb.de>
+    Cc: Benjamin Tissoires <benjamin.tissoires@redhat.com>
+    Cc: Christoph Lameter <cl@linux.com>
+    Cc: David Rientjes <rientjes@google.com>
+    Cc: David S. Miller <davem@davemloft.net>
+    Cc: Dennis Zhou <dennis@kernel.org>
+    Cc: Eric Dumazet <edumazet@google.com>
+    Cc: Herbert Xu <herbert@gondor.apana.org.au>
+    Cc: Jakub Kicinski <kuba@kernel.org>
+    Cc: Jakub Sitnicki <jakub@cloudflare.com>
+    Cc: Jiri Kosina <jikos@kernel.org>
+    Cc: Joerg Roedel <joro@8bytes.org>
+    Cc: Joonsoo Kim <iamjoonsoo.kim@lge.com>
+    Cc: Kent Overstreet <kent.overstreet@linux.dev>
+    Cc: Matthew Wilcox (Oracle) <willy@infradead.org>
+    Cc: Paolo Abeni <pabeni@redhat.com>
+    Cc: Pekka Enberg <penberg@kernel.org>
+    Cc: Tejun Heo <tj@kernel.org>
+    Cc: Theodore Ts'o <tytso@mit.edu>
+    Cc: Trond Myklebust <trond.myklebust@hammerspace.com>
+    Cc: Vlastimil Babka <vbabka@suse.cz>
+    Cc: Will Deacon <will@kernel.org>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+
+diff --git a/include/linux/bpfptr.h b/include/linux/bpfptr.h
+index 79b2f78eec1a..1af241525a17 100644
+--- a/include/linux/bpfptr.h
++++ b/include/linux/bpfptr.h
+@@ -65,9 +65,9 @@ static inline int copy_to_bpfptr_offset(bpfptr_t dst, size_t offset,
+ 	return copy_to_sockptr_offset((sockptr_t) dst, offset, src, size);
+ }
+ 
+-static inline void *kvmemdup_bpfptr(bpfptr_t src, size_t len)
++static inline void *kvmemdup_bpfptr_noprof(bpfptr_t src, size_t len)
+ {
+-	void *p = kvmalloc(len, GFP_USER | __GFP_NOWARN);
++	void *p = kvmalloc_noprof(len, GFP_USER | __GFP_NOWARN);
+ 
+ 	if (!p)
+ 		return ERR_PTR(-ENOMEM);
+@@ -77,6 +77,7 @@ static inline void *kvmemdup_bpfptr(bpfptr_t src, size_t len)
+ 	}
+ 	return p;
+ }
++#define kvmemdup_bpfptr(...)	alloc_hooks(kvmemdup_bpfptr_noprof(__VA_ARGS__))
+ 
+ static inline long strncpy_from_bpfptr(char *dst, bpfptr_t src, size_t count)
+ {

@@ -1,0 +1,216 @@
+diff --git a/arch/s390/include/asm/kvm_host.h b/arch/s390/include/asm/kvm_host.h
+index 4f89b2783512..76d6f0ef3dbd 100644
+--- a/arch/s390/include/asm/kvm_host.h
++++ b/arch/s390/include/asm/kvm_host.h
+@@ -785,6 +785,7 @@ struct kvm_arch{
+ 	struct kvm_s390_migration_state *migration_state;
+ 	/* subset of available cpu features enabled by user space */
+ 	DECLARE_BITMAP(cpu_feat, KVM_S390_VM_CPU_FEAT_NR_BITS);
++	struct kvm_s390_gisa *gisa;
+ };
+ 
+ #define KVM_HVA_ERR_BAD		(-1UL)
+diff --git a/arch/s390/kvm/interrupt.c b/arch/s390/kvm/interrupt.c
+index 8985ce51f687..f293c956e6db 100644
+--- a/arch/s390/kvm/interrupt.c
++++ b/arch/s390/kvm/interrupt.c
+@@ -234,7 +234,8 @@ static inline int kvm_s390_gisa_tac_ipm_gisc(struct kvm_s390_gisa *gisa, u32 gis
+ static inline unsigned long pending_irqs(struct kvm_vcpu *vcpu)
+ {
+ 	return vcpu->kvm->arch.float_int.pending_irqs |
+-	       vcpu->arch.local_int.pending_irqs;
++		vcpu->arch.local_int.pending_irqs |
++		kvm_s390_gisa_get_ipm(vcpu->kvm->arch.gisa) << IRQ_PEND_IO_ISC_7;
+ }
+ 
+ static inline int isc_to_irq_type(unsigned long isc)
+@@ -919,18 +920,38 @@ static int __must_check __deliver_virtio(struct kvm_vcpu *vcpu)
+ 	return rc ? -EFAULT : 0;
+ }
+ 
++static int __do_deliver_io(struct kvm_vcpu *vcpu, struct kvm_s390_io_info *io)
++{
++	int rc;
++
++	rc  = put_guest_lc(vcpu, io->subchannel_id, (u16 *)__LC_SUBCHANNEL_ID);
++	rc |= put_guest_lc(vcpu, io->subchannel_nr, (u16 *)__LC_SUBCHANNEL_NR);
++	rc |= put_guest_lc(vcpu, io->io_int_parm, (u32 *)__LC_IO_INT_PARM);
++	rc |= put_guest_lc(vcpu, io->io_int_word, (u32 *)__LC_IO_INT_WORD);
++	rc |= write_guest_lc(vcpu, __LC_IO_OLD_PSW,
++			     &vcpu->arch.sie_block->gpsw,
++			     sizeof(psw_t));
++	rc |= read_guest_lc(vcpu, __LC_IO_NEW_PSW,
++			    &vcpu->arch.sie_block->gpsw,
++			    sizeof(psw_t));
++	return rc ? -EFAULT : 0;
++}
++
+ static int __must_check __deliver_io(struct kvm_vcpu *vcpu,
+ 				     unsigned long irq_type)
+ {
+ 	struct list_head *isc_list;
+ 	struct kvm_s390_float_interrupt *fi;
+ 	struct kvm_s390_interrupt_info *inti = NULL;
++	struct kvm_s390_io_info io;
++	u32 isc;
+ 	int rc = 0;
+ 
+ 	fi = &vcpu->kvm->arch.float_int;
+ 
+ 	spin_lock(&fi->lock);
+-	isc_list = &fi->lists[irq_type_to_isc(irq_type)];
++	isc = irq_type_to_isc(irq_type);
++	isc_list = &fi->lists[isc];
+ 	inti = list_first_entry_or_null(isc_list,
+ 					struct kvm_s390_interrupt_info,
+ 					list);
+@@ -958,24 +979,31 @@ static int __must_check __deliver_io(struct kvm_vcpu *vcpu,
+ 	spin_unlock(&fi->lock);
+ 
+ 	if (inti) {
+-		rc  = put_guest_lc(vcpu, inti->io.subchannel_id,
+-				(u16 *)__LC_SUBCHANNEL_ID);
+-		rc |= put_guest_lc(vcpu, inti->io.subchannel_nr,
+-				(u16 *)__LC_SUBCHANNEL_NR);
+-		rc |= put_guest_lc(vcpu, inti->io.io_int_parm,
+-				(u32 *)__LC_IO_INT_PARM);
+-		rc |= put_guest_lc(vcpu, inti->io.io_int_word,
+-				(u32 *)__LC_IO_INT_WORD);
+-		rc |= write_guest_lc(vcpu, __LC_IO_OLD_PSW,
+-				&vcpu->arch.sie_block->gpsw,
+-				sizeof(psw_t));
+-		rc |= read_guest_lc(vcpu, __LC_IO_NEW_PSW,
+-				&vcpu->arch.sie_block->gpsw,
+-				sizeof(psw_t));
++		rc = __do_deliver_io(vcpu, &(inti->io));
+ 		kfree(inti);
++		goto out;
+ 	}
+ 
+-	return rc ? -EFAULT : 0;
++	if (vcpu->kvm->arch.gisa &&
++	    kvm_s390_gisa_tac_ipm_gisc(vcpu->kvm->arch.gisa, isc)) {
++		/*
++		 * in case an adapter interrupt was not delivered
++		 * in SIE context KVM will handle the delivery
++		 */
++		VCPU_EVENT(vcpu, 4, "%s isc %u", "deliver: I/O (AI/gisa)", isc);
++		memset(&io, 0, sizeof(io));
++		io.io_int_word = (isc << 27) | 0x80000000;
++		vcpu->stat.deliver_io_int++;
++		trace_kvm_s390_deliver_interrupt(vcpu->vcpu_id,
++			KVM_S390_INT_IO(1, 0, 0, 0),
++			((__u32)io.subchannel_id << 16) |
++			io.subchannel_nr,
++			((__u64)io.io_int_parm << 32) |
++			io.io_int_word);
++		rc = __do_deliver_io(vcpu, &io);
++	}
++out:
++	return rc;
+ }
+ 
+ typedef int (*deliver_irq_t)(struct kvm_vcpu *vcpu);
+@@ -1539,6 +1567,15 @@ static int __inject_io(struct kvm *kvm, struct kvm_s390_interrupt_info *inti)
+ 	struct list_head *list;
+ 	int isc;
+ 
++	isc = int_word_to_isc(inti->io.io_int_word);
++
++	if (kvm->arch.gisa && inti->type & KVM_S390_INT_IO_AI_MASK) {
++		VM_EVENT(kvm, 4, "%s isc %1u", "inject: I/O (AI/gisa)", isc);
++		kvm_s390_gisa_set_ipm_gisc(kvm->arch.gisa, isc);
++		kfree(inti);
++		return 0;
++	}
++
+ 	fi = &kvm->arch.float_int;
+ 	spin_lock(&fi->lock);
+ 	if (fi->counters[FIRQ_CNTR_IO] >= KVM_S390_MAX_FLOAT_IRQS) {
+@@ -1554,7 +1591,6 @@ static int __inject_io(struct kvm *kvm, struct kvm_s390_interrupt_info *inti)
+ 			inti->io.subchannel_id >> 8,
+ 			inti->io.subchannel_id >> 1 & 0x3,
+ 			inti->io.subchannel_nr);
+-	isc = int_word_to_isc(inti->io.io_int_word);
+ 	list = &fi->lists[FIRQ_LIST_IO_ISC_0 + isc];
+ 	list_add_tail(&inti->list, list);
+ 	set_bit(isc_to_irq_type(isc), &fi->pending_irqs);
+@@ -2705,3 +2741,24 @@ int kvm_s390_get_irq_state(struct kvm_vcpu *vcpu, __u8 __user *buf, int len)
+ 
+ 	return n;
+ }
++
++void kvm_s390_gisa_clear(struct kvm *kvm)
++{
++	if (kvm->arch.gisa) {
++		memset(kvm->arch.gisa, 0, sizeof(struct kvm_s390_gisa));
++		kvm->arch.gisa->next_alert = (u32)(u64)kvm->arch.gisa;
++		VM_EVENT(kvm, 3, "gisa 0x%pK cleared", kvm->arch.gisa);
++	}
++}
++
++void kvm_s390_gisa_init(struct kvm *kvm)
++{
++	/* not implemented yet */
++}
++
++void kvm_s390_gisa_destroy(struct kvm *kvm)
++{
++	if (!kvm->arch.gisa)
++		return;
++	kvm->arch.gisa = NULL;
++}
+diff --git a/arch/s390/kvm/kvm-s390.c b/arch/s390/kvm/kvm-s390.c
+index 2fbdb1601089..2c5e25b39435 100644
+--- a/arch/s390/kvm/kvm-s390.c
++++ b/arch/s390/kvm/kvm-s390.c
+@@ -1999,6 +1999,7 @@ int kvm_arch_init_vm(struct kvm *kvm, unsigned long type)
+ 
+ 	spin_lock_init(&kvm->arch.start_stop_lock);
+ 	kvm_s390_vsie_init(kvm);
++	kvm_s390_gisa_init(kvm);
+ 	KVM_EVENT(3, "vm 0x%pK created by pid %u", kvm, current->pid);
+ 
+ 	return 0;
+@@ -2061,6 +2062,7 @@ void kvm_arch_destroy_vm(struct kvm *kvm)
+ 	kvm_free_vcpus(kvm);
+ 	sca_dispose(kvm);
+ 	debug_unregister(kvm->arch.dbf);
++	kvm_s390_gisa_destroy(kvm);
+ 	free_page((unsigned long)kvm->arch.sie_page2);
+ 	if (!kvm_is_ucontrol(kvm))
+ 		gmap_remove(kvm->arch.gmap);
+@@ -2471,6 +2473,11 @@ int kvm_arch_vcpu_setup(struct kvm_vcpu *vcpu)
+ 	if (test_kvm_facility(vcpu->kvm, 139))
+ 		vcpu->arch.sie_block->ecd |= ECD_MEF;
+ 
++	if (vcpu->arch.sie_block->gd) {
++		vcpu->arch.sie_block->eca |= ECA_AIV;
++		VCPU_EVENT(vcpu, 3, "AIV gisa format-%u enabled for cpu %03u",
++			   vcpu->arch.sie_block->gd & 0x3, vcpu->vcpu_id);
++	}
+ 	vcpu->arch.sie_block->sdnxo = ((unsigned long) &vcpu->run->s.regs.sdnx)
+ 					| SDNXC;
+ 	vcpu->arch.sie_block->riccbd = (unsigned long) &vcpu->run->s.regs.riccb;
+@@ -2523,6 +2530,7 @@ struct kvm_vcpu *kvm_arch_vcpu_create(struct kvm *kvm,
+ 
+ 	vcpu->arch.sie_block->icpua = id;
+ 	spin_lock_init(&vcpu->arch.local_int.lock);
++	vcpu->arch.sie_block->gd = (u32)(u64)kvm->arch.gisa;
+ 	seqcount_init(&vcpu->arch.cputm_seqcount);
+ 
+ 	rc = kvm_vcpu_init(vcpu, kvm, id);
+diff --git a/arch/s390/kvm/kvm-s390.h b/arch/s390/kvm/kvm-s390.h
+index f110fa96807e..bd31b37b0e6f 100644
+--- a/arch/s390/kvm/kvm-s390.h
++++ b/arch/s390/kvm/kvm-s390.h
+@@ -382,6 +382,9 @@ int kvm_s390_set_irq_state(struct kvm_vcpu *vcpu,
+ 			   void __user *buf, int len);
+ int kvm_s390_get_irq_state(struct kvm_vcpu *vcpu,
+ 			   __u8 __user *buf, int len);
++void kvm_s390_gisa_init(struct kvm *kvm);
++void kvm_s390_gisa_clear(struct kvm *kvm);
++void kvm_s390_gisa_destroy(struct kvm *kvm);
+ 
+ /* implemented in guestdbg.c */
+ void kvm_s390_backup_guest_per_regs(struct kvm_vcpu *vcpu);

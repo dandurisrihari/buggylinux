@@ -1,0 +1,141 @@
+commit 371c16101ee8a076cbe93ab95bbefdb43927003e
+Author: Alison Schofield <alison.schofield@intel.com>
+Date:   Tue Apr 18 20:26:30 2023 -0700
+
+    tools/testing/cxl: Mock the Inject Poison mailbox command
+    
+    Mock the injection of poison by storing the device:address entries in
+    mock_poison_list[]. Enforce a limit of 8 poison injections per memdev
+    device and 128 total entries for the cxl_test mock driver.
+    
+    Introducing the mock_poison[] list here, makes it available for use in
+    the mock of Clear Poison, and the mock of Get Poison List.
+    
+    Signed-off-by: Alison Schofield <alison.schofield@intel.com>
+    Reviewed-by: Dave Jiang <dave.jiang@intel.com>
+    Link: https://lore.kernel.org/r/f6b7f03541eaa8c2260d3eafadd04afe3f0d7962.1681874357.git.alison.schofield@intel.com
+    Signed-off-by: Dan Williams <dan.j.williams@intel.com>
+
+diff --git a/tools/testing/cxl/test/mem.c b/tools/testing/cxl/test/mem.c
+index cf7975db05ed..2731ebbd175b 100644
+--- a/tools/testing/cxl/test/mem.c
++++ b/tools/testing/cxl/test/mem.c
+@@ -16,6 +16,9 @@
+ #define DEV_SIZE SZ_2G
+ #define EFFECT(x) (1U << x)
+ 
++#define MOCK_INJECT_DEV_MAX 8
++#define MOCK_INJECT_TEST_MAX 128
++
+ static struct cxl_cel_entry mock_cel[] = {
+ 	{
+ 		.opcode = cpu_to_le16(CXL_MBOX_OP_GET_SUPPORTED_LOGS),
+@@ -45,6 +48,10 @@ static struct cxl_cel_entry mock_cel[] = {
+ 		.opcode = cpu_to_le16(CXL_MBOX_OP_GET_POISON),
+ 		.effect = cpu_to_le16(0),
+ 	},
++	{
++		.opcode = cpu_to_le16(CXL_MBOX_OP_INJECT_POISON),
++		.effect = cpu_to_le16(0),
++	},
+ };
+ 
+ /* See CXL 2.0 Table 181 Get Health Info Output Payload */
+@@ -474,6 +481,7 @@ static int mock_id(struct cxl_dev_state *cxlds, struct cxl_mbox_cmd *cmd)
+ 			cpu_to_le64(SZ_256M / CXL_CAPACITY_MULTIPLIER),
+ 		.total_capacity =
+ 			cpu_to_le64(DEV_SIZE / CXL_CAPACITY_MULTIPLIER),
++		.inject_poison_limit = cpu_to_le16(MOCK_INJECT_DEV_MAX),
+ 	};
+ 
+ 	put_unaligned_le24(CXL_POISON_LIST_MAX, id.poison_list_max_mer);
+@@ -895,6 +903,11 @@ static int mock_health_info(struct cxl_dev_state *cxlds,
+ 	return 0;
+ }
+ 
++static struct mock_poison {
++	struct cxl_dev_state *cxlds;
++	u64 dpa;
++} mock_poison_list[MOCK_INJECT_TEST_MAX];
++
+ static int mock_get_poison(struct cxl_dev_state *cxlds,
+ 			   struct cxl_mbox_cmd *cmd)
+ {
+@@ -923,6 +936,67 @@ static int mock_get_poison(struct cxl_dev_state *cxlds,
+ 	return 0;
+ }
+ 
++static bool mock_poison_dev_max_injected(struct cxl_dev_state *cxlds)
++{
++	int count = 0;
++
++	for (int i = 0; i < MOCK_INJECT_TEST_MAX; i++) {
++		if (mock_poison_list[i].cxlds == cxlds)
++			count++;
++	}
++	return (count >= MOCK_INJECT_DEV_MAX);
++}
++
++static bool mock_poison_add(struct cxl_dev_state *cxlds, u64 dpa)
++{
++	if (mock_poison_dev_max_injected(cxlds)) {
++		dev_dbg(cxlds->dev,
++			"Device poison injection limit has been reached: %d\n",
++			MOCK_INJECT_DEV_MAX);
++		return false;
++	}
++
++	for (int i = 0; i < MOCK_INJECT_TEST_MAX; i++) {
++		if (!mock_poison_list[i].cxlds) {
++			mock_poison_list[i].cxlds = cxlds;
++			mock_poison_list[i].dpa = dpa;
++			return true;
++		}
++	}
++	dev_dbg(cxlds->dev,
++		"Mock test poison injection limit has been reached: %d\n",
++		MOCK_INJECT_TEST_MAX);
++
++	return false;
++}
++
++static bool mock_poison_found(struct cxl_dev_state *cxlds, u64 dpa)
++{
++	for (int i = 0; i < MOCK_INJECT_TEST_MAX; i++) {
++		if (mock_poison_list[i].cxlds == cxlds &&
++		    mock_poison_list[i].dpa == dpa)
++			return true;
++	}
++	return false;
++}
++
++static int mock_inject_poison(struct cxl_dev_state *cxlds,
++			      struct cxl_mbox_cmd *cmd)
++{
++	struct cxl_mbox_inject_poison *pi = cmd->payload_in;
++	u64 dpa = le64_to_cpu(pi->address);
++
++	if (mock_poison_found(cxlds, dpa)) {
++		/* Not an error to inject poison if already poisoned */
++		dev_dbg(cxlds->dev, "DPA: 0x%llx already poisoned\n", dpa);
++		return 0;
++	}
++	if (!mock_poison_add(cxlds, dpa))
++		return -ENXIO;
++
++	return 0;
++}
++
+ static int cxl_mock_mbox_send(struct cxl_dev_state *cxlds, struct cxl_mbox_cmd *cmd)
+ {
+ 	struct device *dev = cxlds->dev;
+@@ -980,6 +1054,9 @@ static int cxl_mock_mbox_send(struct cxl_dev_state *cxlds, struct cxl_mbox_cmd *
+ 	case CXL_MBOX_OP_GET_POISON:
+ 		rc = mock_get_poison(cxlds, cmd);
+ 		break;
++	case CXL_MBOX_OP_INJECT_POISON:
++		rc = mock_inject_poison(cxlds, cmd);
++		break;
+ 	default:
+ 		break;
+ 	}

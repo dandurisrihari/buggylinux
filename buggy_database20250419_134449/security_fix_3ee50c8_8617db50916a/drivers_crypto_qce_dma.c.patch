@@ -1,0 +1,54 @@
+commit 3ee50c896d712dc2fc8f34c2cd1918d035e74045
+Author: Eneas U de Queiroz <cotequeiroz@gmail.com>
+Date:   Fri Dec 20 16:02:15 2019 -0300
+
+    crypto: qce - save a sg table slot for result buf
+    
+    When ctr-aes-qce is used for gcm-mode, an extra sg entry for the
+    authentication tag is present, causing trouble when the qce driver
+    prepares the dst-results sg table for dma.
+    
+    It computes the number of entries needed with sg_nents_for_len, leaving
+    out the tag entry.  Then it creates a sg table with that number plus
+    one, used to store a result buffer.
+    
+    When copying the sg table, there's no limit to the number of entries
+    copied, so the extra slot is filled with the authentication tag sg.
+    When the driver tries to add the result sg, the list is full, and it
+    returns EINVAL.
+    
+    By limiting the number of sg entries copied to the dest table, the slot
+    for the result buffer is guaranteed to be unused.
+    
+    Signed-off-by: Eneas U de Queiroz <cotequeiroz@gmail.com>
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+diff --git a/drivers/crypto/qce/dma.c b/drivers/crypto/qce/dma.c
+index 40a59214d2e1..7da893dc00e7 100644
+--- a/drivers/crypto/qce/dma.c
++++ b/drivers/crypto/qce/dma.c
+@@ -47,7 +47,8 @@ void qce_dma_release(struct qce_dma_data *dma)
+ }
+ 
+ struct scatterlist *
+-qce_sgtable_add(struct sg_table *sgt, struct scatterlist *new_sgl)
++qce_sgtable_add(struct sg_table *sgt, struct scatterlist *new_sgl,
++		int max_ents)
+ {
+ 	struct scatterlist *sg = sgt->sgl, *sg_last = NULL;
+ 
+@@ -60,12 +61,13 @@ qce_sgtable_add(struct sg_table *sgt, struct scatterlist *new_sgl)
+ 	if (!sg)
+ 		return ERR_PTR(-EINVAL);
+ 
+-	while (new_sgl && sg) {
++	while (new_sgl && sg && max_ents) {
+ 		sg_set_page(sg, sg_page(new_sgl), new_sgl->length,
+ 			    new_sgl->offset);
+ 		sg_last = sg;
+ 		sg = sg_next(sg);
+ 		new_sgl = sg_next(new_sgl);
++		max_ents--;
+ 	}
+ 
+ 	return sg_last;

@@ -1,0 +1,50 @@
+commit de734831224e74fcaf8917386e33644c4243db95
+Author: Chuck Lever <chuck.lever@oracle.com>
+Date:   Wed Jul 11 16:30:50 2012 -0400
+
+    NFS: Treat NFS4ERR_CLID_INUSE as a fatal error
+    
+    For NFSv4 minor version 0, currently the cl_id_uniquifier allows the
+    Linux client to generate a unique nfs_client_id4 string whenever a
+    server replies with NFS4ERR_CLID_INUSE.
+    
+    This implementation seems to be based on a flawed reading of RFC
+    3530.  NFS4ERR_CLID_INUSE actually means that the client has presented
+    this nfs_client_id4 string with a different principal at some time in
+    the past, and that lease is still in use on the server.
+    
+    For a Linux client this might be rather difficult to achieve: the
+    authentication flavor is named right in the nfs_client_id4.id
+    string.  If we change flavors, we change strings automatically.
+    
+    So, practically speaking, NFS4ERR_CLID_INUSE means there is some other
+    client using our string.  There is not much that can be done to
+    recover automatically.  Let's make it a permanent error.
+    
+    Remove the recovery logic in nfs4_proc_setclientid(), and remove the
+    cl_id_uniquifier field from the nfs_client data structure.  And,
+    remove the authentication flavor from the nfs_client_id4 string.
+    
+    Keeping the authentication flavor in the nfs_client_id4.id string
+    means that we could have a separate lease for each authentication
+    flavor used by mounts on the client.  But we want just one lease for
+    all the mounts on this client.
+    
+    Signed-off-by: Chuck Lever <chuck.lever@oracle.com>
+    Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+
+diff --git a/include/linux/nfs_fs_sb.h b/include/linux/nfs_fs_sb.h
+index f58325a1d8fb..65327652c61a 100644
+--- a/include/linux/nfs_fs_sb.h
++++ b/include/linux/nfs_fs_sb.h
+@@ -69,10 +69,9 @@ struct nfs_client {
+ 	struct idmap *		cl_idmap;
+ 
+ 	/* Our own IP address, as a null-terminated string.
+-	 * This is used to generate the clientid, and the callback address.
++	 * This is used to generate the mv0 callback address.
+ 	 */
+ 	char			cl_ipaddr[48];
+-	unsigned char		cl_id_uniquifier;
+ 	u32			cl_cb_ident;	/* v4.0 callback identifier */
+ 	const struct nfs4_minor_version_ops *cl_mvops;

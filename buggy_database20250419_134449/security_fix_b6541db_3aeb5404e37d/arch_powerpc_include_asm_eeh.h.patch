@@ -1,0 +1,41 @@
+commit b6541db1395298b326ae1bf59fae6fbb2c6e8f77
+Author: Gavin Shan <gwshan@linux.vnet.ibm.com>
+Date:   Wed Oct 1 17:07:53 2014 +1000
+
+    powerpc/eeh: Block PCI config access upon frozen PE
+    
+    The problem was found when I tried to inject PCI config error by
+    PHB3 PAPR error injection registers into Broadcom Austin 4-ports
+    NIC adapter. The frozen PE was reported successfully and EEH core
+    started to recover it. However, I run into fenced PHB when dumping
+    PCI config space as EEH logs. I was told that PCI config requests
+    should not be progagated to the adapter until PE reset is done
+    successfully. Otherise, we would run out of PHB internal credits
+    and trigger PCT (PCIE Completion Timeout), which leads to the
+    fenced PHB.
+    
+    The patch introduces another PE flag EEH_PE_CFG_RESTRICTED, which
+    is set during PE initialization time if the PE includes the specific
+    PCI devices that need block PCI config access until PE reset is done.
+    When the PE becomes frozen for the first time, EEH_PE_CFG_BLOCKED is
+    set if the PE has flag EEH_PE_CFG_RESTRICTED. Then the PCI config
+    access to the PE will be dropped by platform PCI accessors until
+    PE reset is done successfully. The mechanism is shared by PowerNV
+    platform owned PE or userland owned ones. It's not used on pSeries
+    platform yet.
+    
+    Signed-off-by: Gavin Shan <gwshan@linux.vnet.ibm.com>
+    Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+
+diff --git a/arch/powerpc/include/asm/eeh.h b/arch/powerpc/include/asm/eeh.h
+index 6a2ad90e6d8c..ca07f9c27335 100644
+--- a/arch/powerpc/include/asm/eeh.h
++++ b/arch/powerpc/include/asm/eeh.h
+@@ -74,6 +74,7 @@ struct device_node;
+ #define EEH_PE_CFG_BLOCKED	(1 << 2)	/* Block config access	*/
+ 
+ #define EEH_PE_KEEP		(1 << 8)	/* Keep PE on hotplug	*/
++#define EEH_PE_CFG_RESTRICTED	(1 << 9)	/* Block config on error */
+ 
+ struct eeh_pe {
+ 	int type;			/* PE type: PHB/Bus/Device	*/

@@ -1,0 +1,43 @@
+commit 4d5523cfd5d298c58743eb31c003886cfc856709
+Author: Paolo Bonzini <pbonzini@redhat.com>
+Date:   Tue May 5 07:33:20 2020 -0400
+
+    KVM: x86: fix DR6 delivery for various cases of #DB injection
+    
+    Go through kvm_queue_exception_p so that the payload is correctly delivered
+    through the exit qualification, and add a kvm_update_dr6 call to
+    kvm_deliver_exception_payload that is needed on AMD.
+    
+    Reported-by: Peter Xu <peterx@redhat.com>
+    Reviewed-by: Peter Xu <peterx@redhat.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index c2c6335a998c..bb5a527e49d9 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -4677,12 +4677,10 @@ static int handle_exception_nmi(struct kvm_vcpu *vcpu)
+ 		dr6 = vmcs_readl(EXIT_QUALIFICATION);
+ 		if (!(vcpu->guest_debug &
+ 		      (KVM_GUESTDBG_SINGLESTEP | KVM_GUESTDBG_USE_HW_BP))) {
+-			vcpu->arch.dr6 &= ~DR_TRAP_BITS;
+-			vcpu->arch.dr6 |= dr6 | DR6_RTM;
+ 			if (is_icebp(intr_info))
+ 				WARN_ON(!skip_emulated_instruction(vcpu));
+ 
+-			kvm_queue_exception(vcpu, DB_VECTOR);
++			kvm_queue_exception_p(vcpu, DB_VECTOR, dr6);
+ 			return 1;
+ 		}
+ 		kvm_run->debug.arch.dr6 = dr6 | DR6_FIXED_1;
+@@ -4936,9 +4934,7 @@ static int handle_dr(struct kvm_vcpu *vcpu)
+ 			vcpu->run->exit_reason = KVM_EXIT_DEBUG;
+ 			return 0;
+ 		} else {
+-			vcpu->arch.dr6 &= ~DR_TRAP_BITS;
+-			vcpu->arch.dr6 |= DR6_BD | DR6_RTM;
+-			kvm_queue_exception(vcpu, DB_VECTOR);
++			kvm_queue_exception_p(vcpu, DB_VECTOR, DR6_BD);
+ 			return 1;
+ 		}
+ 	}

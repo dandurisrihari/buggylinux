@@ -1,0 +1,49 @@
+commit 765c2a964b49bd06b61a52991519281c85d82b67
+Author: Johan Hedberg <johan.hedberg@nokia.com>
+Date:   Wed Jan 19 12:06:52 2011 +0530
+
+    Bluetooth: Fix race condition with conn->sec_level
+    
+    The conn->sec_level value is supposed to represent the current level of
+    security that the connection has. However, by assigning to it before
+    requesting authentication it will have the wrong value during the
+    authentication procedure. To fix this a pending_sec_level variable is
+    added which is used to track the desired security level while making
+    sure that sec_level always represents the current level of security.
+    
+    Signed-off-by: Johan Hedberg <johan.hedberg@nokia.com>
+    Signed-off-by: Gustavo F. Padovan <padovan@profusion.mobi>
+
+diff --git a/net/bluetooth/hci_event.c b/net/bluetooth/hci_event.c
+index 38100170d380..a290854fdaa6 100644
+--- a/net/bluetooth/hci_event.c
++++ b/net/bluetooth/hci_event.c
+@@ -692,13 +692,13 @@ static int hci_outgoing_auth_needed(struct hci_dev *hdev,
+ 	if (conn->state != BT_CONFIG || !conn->out)
+ 		return 0;
+ 
+-	if (conn->sec_level == BT_SECURITY_SDP)
++	if (conn->pending_sec_level == BT_SECURITY_SDP)
+ 		return 0;
+ 
+ 	/* Only request authentication for SSP connections or non-SSP
+ 	 * devices with sec_level HIGH */
+ 	if (!(hdev->ssp_mode > 0 && conn->ssp_mode > 0) &&
+-					conn->sec_level != BT_SECURITY_HIGH)
++				conn->pending_sec_level != BT_SECURITY_HIGH)
+ 		return 0;
+ 
+ 	return 1;
+@@ -1095,9 +1095,10 @@ static inline void hci_auth_complete_evt(struct hci_dev *hdev, struct sk_buff *s
+ 
+ 	conn = hci_conn_hash_lookup_handle(hdev, __le16_to_cpu(ev->handle));
+ 	if (conn) {
+-		if (!ev->status)
++		if (!ev->status) {
+ 			conn->link_mode |= HCI_LM_AUTH;
+-		else
++			conn->sec_level = conn->pending_sec_level;
++		} else
+ 			conn->sec_level = BT_SECURITY_LOW;
+ 
+ 		clear_bit(HCI_CONN_AUTH_PEND, &conn->pend);

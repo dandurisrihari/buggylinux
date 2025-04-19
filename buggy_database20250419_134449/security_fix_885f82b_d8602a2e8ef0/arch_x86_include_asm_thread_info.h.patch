@@ -1,0 +1,59 @@
+commit 885f82bfbc6fefb6664ea27965c3ab9ac4194b8c
+Author: Thomas Gleixner <tglx@linutronix.de>
+Date:   Sun Apr 29 15:21:42 2018 +0200
+
+    x86/process: Allow runtime control of Speculative Store Bypass
+    
+    The Speculative Store Bypass vulnerability can be mitigated with the
+    Reduced Data Speculation (RDS) feature. To allow finer grained control of
+    this eventually expensive mitigation a per task mitigation control is
+    required.
+    
+    Add a new TIF_RDS flag and put it into the group of TIF flags which are
+    evaluated for mismatch in switch_to(). If these bits differ in the previous
+    and the next task, then the slow path function __switch_to_xtra() is
+    invoked. Implement the TIF_RDS dependent mitigation control in the slow
+    path.
+    
+    If the prctl for controlling Speculative Store Bypass is disabled or no
+    task uses the prctl then there is no overhead in the switch_to() fast
+    path.
+    
+    Update the KVM related speculation control functions to take TID_RDS into
+    account as well.
+    
+    Based on a patch from Tim Chen. Completely rewritten.
+    
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Reviewed-by: Ingo Molnar <mingo@kernel.org>
+    Reviewed-by: Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+
+diff --git a/arch/x86/include/asm/thread_info.h b/arch/x86/include/asm/thread_info.h
+index a5d9521bb2cb..e5c26cc59619 100644
+--- a/arch/x86/include/asm/thread_info.h
++++ b/arch/x86/include/asm/thread_info.h
+@@ -79,6 +79,7 @@ struct thread_info {
+ #define TIF_SIGPENDING		2	/* signal pending */
+ #define TIF_NEED_RESCHED	3	/* rescheduling necessary */
+ #define TIF_SINGLESTEP		4	/* reenable singlestep on user return*/
++#define TIF_RDS			5	/* Reduced data speculation */
+ #define TIF_SYSCALL_EMU		6	/* syscall emulation active */
+ #define TIF_SYSCALL_AUDIT	7	/* syscall auditing active */
+ #define TIF_SECCOMP		8	/* secure computing */
+@@ -105,6 +106,7 @@ struct thread_info {
+ #define _TIF_SIGPENDING		(1 << TIF_SIGPENDING)
+ #define _TIF_NEED_RESCHED	(1 << TIF_NEED_RESCHED)
+ #define _TIF_SINGLESTEP		(1 << TIF_SINGLESTEP)
++#define _TIF_RDS		(1 << TIF_RDS)
+ #define _TIF_SYSCALL_EMU	(1 << TIF_SYSCALL_EMU)
+ #define _TIF_SYSCALL_AUDIT	(1 << TIF_SYSCALL_AUDIT)
+ #define _TIF_SECCOMP		(1 << TIF_SECCOMP)
+@@ -144,7 +146,7 @@ struct thread_info {
+ 
+ /* flags to check in __switch_to() */
+ #define _TIF_WORK_CTXSW							\
+-	(_TIF_IO_BITMAP|_TIF_NOCPUID|_TIF_NOTSC|_TIF_BLOCKSTEP)
++	(_TIF_IO_BITMAP|_TIF_NOCPUID|_TIF_NOTSC|_TIF_BLOCKSTEP|_TIF_RDS)
+ 
+ #define _TIF_WORK_CTXSW_PREV (_TIF_WORK_CTXSW|_TIF_USER_RETURN_NOTIFY)
+ #define _TIF_WORK_CTXSW_NEXT (_TIF_WORK_CTXSW)

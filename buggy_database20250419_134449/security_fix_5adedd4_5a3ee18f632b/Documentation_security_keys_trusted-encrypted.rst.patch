@@ -1,0 +1,54 @@
+commit 5adedd42245af0860ebda8fe0949f24f5204c1b1
+Author: Nikolaus Voss <nikolaus.voss@haag-streit.com>
+Date:   Wed Oct 19 18:38:20 2022 +0200
+
+    KEYS: encrypted: fix key instantiation with user-provided data
+    
+    Commit cd3bc044af48 ("KEYS: encrypted: Instantiate key with
+    user-provided decrypted data") added key instantiation with user
+    provided decrypted data.  The user data is hex-ascii-encoded but was
+    just memcpy'ed to the binary buffer. Fix this to use hex2bin instead.
+    
+    Old keys created from user provided decrypted data saved with "keyctl
+    pipe" are still valid, however if the key is recreated from decrypted
+    data the old key must be converted to the correct format. This can be
+    done with a small shell script, e.g.:
+    
+    BROKENKEY=abcdefABCDEF1234567890aaaaaaaaaa
+    NEWKEY=$(echo -ne $BROKENKEY | xxd -p -c32)
+    keyctl add user masterkey "$(cat masterkey.bin)" @u
+    keyctl add encrypted testkey "new user:masterkey 32 $NEWKEY" @u
+    
+    However, NEWKEY is still broken: If for BROKENKEY 32 bytes were
+    specified, a brute force attacker knowing the key properties would only
+    need to try at most 2^(16*8) keys, as if the key was only 16 bytes long.
+    
+    The security issue is a result of the combination of limiting the input
+    range to hex-ascii and using memcpy() instead of hex2bin(). It could
+    have been fixed either by allowing binary input or using hex2bin() (and
+    doubling the ascii input key length). This patch implements the latter.
+    
+    The corresponding test for the Linux Test Project ltp has also been
+    fixed (see link below).
+    
+    Fixes: cd3bc044af48 ("KEYS: encrypted: Instantiate key with user-provided decrypted data")
+    Cc: stable@kernel.org
+    Link: https://lore.kernel.org/ltp/20221006081709.92303897@mail.steuer-voss.de/
+    Reviewed-by: Mimi Zohar <zohar@linux.ibm.com>
+    Signed-off-by: Nikolaus Voss <nikolaus.voss@haag-streit.com>
+    Signed-off-by: Mimi Zohar <zohar@linux.ibm.com>
+
+diff --git a/Documentation/security/keys/trusted-encrypted.rst b/Documentation/security/keys/trusted-encrypted.rst
+index 0bfb4c339748..9bc9db8ec651 100644
+--- a/Documentation/security/keys/trusted-encrypted.rst
++++ b/Documentation/security/keys/trusted-encrypted.rst
+@@ -350,7 +350,8 @@ Load an encrypted key "evm" from saved blob::
+ 
+ Instantiate an encrypted key "evm" using user-provided decrypted data::
+ 
+-    $ keyctl add encrypted evm "new default user:kmk 32 `cat evm_decrypted_data.blob`" @u
++    $ evmkey=$(dd if=/dev/urandom bs=1 count=32 | xxd -c32 -p)
++    $ keyctl add encrypted evm "new default user:kmk 32 $evmkey" @u
+     794890253
+ 
+     $ keyctl print 794890253

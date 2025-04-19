@@ -1,0 +1,67 @@
+commit a4e17fc1cf64a6f93e1685dc4a32075dfb426082
+Author: Robert Elliott <elliott@hp.com>
+Date:   Fri Jan 23 16:41:51 2015 -0600
+
+    hpsa: notice all request_irq errors
+    
+    In MSI and MSI-X mode, where hpsa asks for more than one interrupt,
+    hpsa_request_irqs forgets if the first request_irq call failed
+    if later ones succeed.
+    
+    It needs to exit the loop on any failure rather than continue,
+    freeing all irqs that were requested until that point.
+    
+    Also, it needs to clear out the q numbers up to MAX_REPLY_QUEUES.
+    The same is true for the general hpsa_free_irqs function.
+    
+    Tested with error injection of -ENOSYS on the 4th call:
+    [    9.277691]  injecting error in inj_request_irq: 1 4
+    [    9.277780] hpsa 0000:02:00.0: failed to get irq 35 for hpsa1
+    [   10.711623] scsi host1: Error handler scsi_eh_1 exiting
+    [   10.739170] hpsa: probe of 0000:02:00.0 failed with error -38
+    
+    Reviewed-by: Scott Teel <scott.teel@pmcs.com>
+    Signed-off-by: Robert Elliott <elliott@hp.com>
+    Signed-off-by: Don Brace <don.brace@pmcs.com>
+    Signed-off-by: Christoph Hellwig <hch@lst.de>
+
+diff --git a/drivers/scsi/hpsa.c b/drivers/scsi/hpsa.c
+index 11d21efa5476..97bb718e66ef 100644
+--- a/drivers/scsi/hpsa.c
++++ b/drivers/scsi/hpsa.c
+@@ -6508,6 +6508,8 @@ static void hpsa_free_irqs(struct ctlr_info *h)
+ 		irq_set_affinity_hint(h->intr[i], NULL);
+ 		free_irq(h->intr[i], &h->q[i]);
+ 	}
++	for (; i < MAX_REPLY_QUEUES; i++)
++		h->q[i] = 0;
+ }
+ 
+ static int hpsa_request_irq(struct ctlr_info *h,
+@@ -6525,10 +6527,25 @@ static int hpsa_request_irq(struct ctlr_info *h,
+ 
+ 	if (h->intr_mode == PERF_MODE_INT && h->msix_vector > 0) {
+ 		/* If performant mode and MSI-X, use multiple reply queues */
+-		for (i = 0; i < h->msix_vector; i++)
++		for (i = 0; i < h->msix_vector; i++) {
+ 			rc = request_irq(h->intr[i], msixhandler,
+ 					0, h->devname,
+ 					&h->q[i]);
++			if (rc) {
++				int j;
++
++				dev_err(&h->pdev->dev,
++					"failed to get irq %d for %s\n",
++				       h->intr[i], h->devname);
++				for (j = 0; j < i; j++) {
++					free_irq(h->intr[j], &h->q[j]);
++					h->q[j] = 0;
++				}
++				for (; j < MAX_REPLY_QUEUES; j++)
++					h->q[j] = 0;
++				return rc;
++			}
++		}
+ 		hpsa_irq_affinity_hints(h);
+ 	} else {
+ 		/* Use single reply pool */

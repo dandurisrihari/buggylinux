@@ -1,0 +1,124 @@
+commit c5e12ac3beb0dd3a718296b2d8af5528e9ab728e
+Author: Vladimir Oltean <vladimir.oltean@nxp.com>
+Date:   Thu Aug 15 03:07:04 2024 +0300
+
+    net: mscc: ocelot: serialize access to the injection/extraction groups
+    
+    As explained by Horatiu Vultur in commit 603ead96582d ("net: sparx5: Add
+    spinlock for frame transmission from CPU") which is for a similar
+    hardware design, multiple CPUs can simultaneously perform injection
+    or extraction. There are only 2 register groups for injection and 2
+    for extraction, and the driver only uses one of each. So we'd better
+    serialize access using spin locks, otherwise frame corruption is
+    possible.
+    
+    Note that unlike in sparx5, FDMA in ocelot does not have this issue
+    because struct ocelot_fdma_tx_ring already contains an xmit_lock.
+    
+    I guess this is mostly a problem for NXP LS1028A, as that is dual core.
+    I don't think VSC7514 is. So I'm blaming the commit where LS1028A (aka
+    the felix DSA driver) started using register-based packet injection and
+    extraction.
+    
+    Fixes: 0a6f17c6ae21 ("net: dsa: tag_ocelot_8021q: add support for PTP timestamping")
+    Signed-off-by: Vladimir Oltean <vladimir.oltean@nxp.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/mscc/ocelot.c b/drivers/net/ethernet/mscc/ocelot.c
+index 9301716e21d5..f4e027a6fe95 100644
+--- a/drivers/net/ethernet/mscc/ocelot.c
++++ b/drivers/net/ethernet/mscc/ocelot.c
+@@ -1099,6 +1099,48 @@ void ocelot_ptp_rx_timestamp(struct ocelot *ocelot, struct sk_buff *skb,
+ }
+ EXPORT_SYMBOL(ocelot_ptp_rx_timestamp);
+ 
++void ocelot_lock_inj_grp(struct ocelot *ocelot, int grp)
++			 __acquires(&ocelot->inj_lock)
++{
++	spin_lock(&ocelot->inj_lock);
++}
++EXPORT_SYMBOL_GPL(ocelot_lock_inj_grp);
++
++void ocelot_unlock_inj_grp(struct ocelot *ocelot, int grp)
++			   __releases(&ocelot->inj_lock)
++{
++	spin_unlock(&ocelot->inj_lock);
++}
++EXPORT_SYMBOL_GPL(ocelot_unlock_inj_grp);
++
++void ocelot_lock_xtr_grp(struct ocelot *ocelot, int grp)
++			 __acquires(&ocelot->inj_lock)
++{
++	spin_lock(&ocelot->inj_lock);
++}
++EXPORT_SYMBOL_GPL(ocelot_lock_xtr_grp);
++
++void ocelot_unlock_xtr_grp(struct ocelot *ocelot, int grp)
++			   __releases(&ocelot->inj_lock)
++{
++	spin_unlock(&ocelot->inj_lock);
++}
++EXPORT_SYMBOL_GPL(ocelot_unlock_xtr_grp);
++
++void ocelot_lock_xtr_grp_bh(struct ocelot *ocelot, int grp)
++			    __acquires(&ocelot->xtr_lock)
++{
++	spin_lock_bh(&ocelot->xtr_lock);
++}
++EXPORT_SYMBOL_GPL(ocelot_lock_xtr_grp_bh);
++
++void ocelot_unlock_xtr_grp_bh(struct ocelot *ocelot, int grp)
++			      __releases(&ocelot->xtr_lock)
++{
++	spin_unlock_bh(&ocelot->xtr_lock);
++}
++EXPORT_SYMBOL_GPL(ocelot_unlock_xtr_grp_bh);
++
+ int ocelot_xtr_poll_frame(struct ocelot *ocelot, int grp, struct sk_buff **nskb)
+ {
+ 	u64 timestamp, src_port, len;
+@@ -1109,6 +1151,8 @@ int ocelot_xtr_poll_frame(struct ocelot *ocelot, int grp, struct sk_buff **nskb)
+ 	u32 val, *buf;
+ 	int err;
+ 
++	lockdep_assert_held(&ocelot->xtr_lock);
++
+ 	err = ocelot_xtr_poll_xfh(ocelot, grp, xfh);
+ 	if (err)
+ 		return err;
+@@ -1184,6 +1228,8 @@ bool ocelot_can_inject(struct ocelot *ocelot, int grp)
+ {
+ 	u32 val = ocelot_read(ocelot, QS_INJ_STATUS);
+ 
++	lockdep_assert_held(&ocelot->inj_lock);
++
+ 	if (!(val & QS_INJ_STATUS_FIFO_RDY(BIT(grp))))
+ 		return false;
+ 	if (val & QS_INJ_STATUS_WMARK_REACHED(BIT(grp)))
+@@ -1236,6 +1282,8 @@ void ocelot_port_inject_frame(struct ocelot *ocelot, int port, int grp,
+ 	u32 ifh[OCELOT_TAG_LEN / 4];
+ 	unsigned int i, count, last;
+ 
++	lockdep_assert_held(&ocelot->inj_lock);
++
+ 	ocelot_write_rix(ocelot, QS_INJ_CTRL_GAP_SIZE(1) |
+ 			 QS_INJ_CTRL_SOF, QS_INJ_CTRL, grp);
+ 
+@@ -1272,6 +1320,8 @@ EXPORT_SYMBOL(ocelot_port_inject_frame);
+ 
+ void ocelot_drain_cpu_queue(struct ocelot *ocelot, int grp)
+ {
++	lockdep_assert_held(&ocelot->xtr_lock);
++
+ 	while (ocelot_read(ocelot, QS_XTR_DATA_PRESENT) & BIT(grp))
+ 		ocelot_read_rix(ocelot, QS_XTR_RD, grp);
+ }
+@@ -2954,6 +3004,8 @@ int ocelot_init(struct ocelot *ocelot)
+ 	mutex_init(&ocelot->fwd_domain_lock);
+ 	spin_lock_init(&ocelot->ptp_clock_lock);
+ 	spin_lock_init(&ocelot->ts_id_lock);
++	spin_lock_init(&ocelot->inj_lock);
++	spin_lock_init(&ocelot->xtr_lock);
+ 
+ 	ocelot->owq = alloc_ordered_workqueue("ocelot-owq", 0);
+ 	if (!ocelot->owq)

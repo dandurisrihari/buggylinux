@@ -1,0 +1,119 @@
+commit 530e9b76ae8f863dfdef4a6ad0b38613d32e8c3f
+Author: Thomas Gleixner <tglx@linutronix.de>
+Date:   Wed Dec 21 20:19:53 2016 +0100
+
+    cpu/hotplug: Remove obsolete cpu hotplug register/unregister functions
+    
+    hotcpu_notifier(), cpu_notifier(), __hotcpu_notifier(), __cpu_notifier(),
+    register_hotcpu_notifier(), register_cpu_notifier(),
+    __register_hotcpu_notifier(), __register_cpu_notifier(),
+    unregister_hotcpu_notifier(), unregister_cpu_notifier(),
+    __unregister_hotcpu_notifier(), __unregister_cpu_notifier()
+    
+    are unused now. Remove them and all related code.
+    
+    Remove also the now pointless cpu notifier error injection mechanism. The
+    states can be executed step by step and error rollback is the same as cpu
+    down, so any state transition can be tested w/o requiring the notifier
+    error injection.
+    
+    Some CPU hotplug states are kept as they are (ab)used for hotplug state
+    tracking.
+    
+    Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: rt@linutronix.de
+    Link: http://lkml.kernel.org/r/20161221192112.005642358@linutronix.de
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+
+diff --git a/lib/cpu-notifier-error-inject.c b/lib/cpu-notifier-error-inject.c
+deleted file mode 100644
+index 0e2c9a1e958a..000000000000
+--- a/lib/cpu-notifier-error-inject.c
++++ /dev/null
+@@ -1,84 +0,0 @@
+-#include <linux/kernel.h>
+-#include <linux/module.h>
+-#include <linux/cpu.h>
+-
+-#include "notifier-error-inject.h"
+-
+-static int priority;
+-module_param(priority, int, 0);
+-MODULE_PARM_DESC(priority, "specify cpu notifier priority");
+-
+-#define UP_PREPARE 0
+-#define UP_PREPARE_FROZEN 0
+-#define DOWN_PREPARE 0
+-#define DOWN_PREPARE_FROZEN 0
+-
+-static struct notifier_err_inject cpu_notifier_err_inject = {
+-	.actions = {
+-		{ NOTIFIER_ERR_INJECT_ACTION(UP_PREPARE) },
+-		{ NOTIFIER_ERR_INJECT_ACTION(UP_PREPARE_FROZEN) },
+-		{ NOTIFIER_ERR_INJECT_ACTION(DOWN_PREPARE) },
+-		{ NOTIFIER_ERR_INJECT_ACTION(DOWN_PREPARE_FROZEN) },
+-		{}
+-	}
+-};
+-
+-static int notf_err_handle(struct notifier_err_inject_action *action)
+-{
+-	int ret;
+-
+-	ret = action->error;
+-	if (ret)
+-		pr_info("Injecting error (%d) to %s\n", ret, action->name);
+-	return ret;
+-}
+-
+-static int notf_err_inj_up_prepare(unsigned int cpu)
+-{
+-	if (!cpuhp_tasks_frozen)
+-		return notf_err_handle(&cpu_notifier_err_inject.actions[0]);
+-	else
+-		return notf_err_handle(&cpu_notifier_err_inject.actions[1]);
+-}
+-
+-static int notf_err_inj_dead(unsigned int cpu)
+-{
+-	if (!cpuhp_tasks_frozen)
+-		return notf_err_handle(&cpu_notifier_err_inject.actions[2]);
+-	else
+-		return notf_err_handle(&cpu_notifier_err_inject.actions[3]);
+-}
+-
+-static struct dentry *dir;
+-
+-static int err_inject_init(void)
+-{
+-	int err;
+-
+-	dir = notifier_err_inject_init("cpu", notifier_err_inject_dir,
+-					&cpu_notifier_err_inject, priority);
+-	if (IS_ERR(dir))
+-		return PTR_ERR(dir);
+-
+-	err = cpuhp_setup_state_nocalls(CPUHP_NOTF_ERR_INJ_PREPARE,
+-					"cpu-err-notif:prepare",
+-					notf_err_inj_up_prepare,
+-					notf_err_inj_dead);
+-	if (err)
+-		debugfs_remove_recursive(dir);
+-
+-	return err;
+-}
+-
+-static void err_inject_exit(void)
+-{
+-	cpuhp_remove_state_nocalls(CPUHP_NOTF_ERR_INJ_PREPARE);
+-	debugfs_remove_recursive(dir);
+-}
+-
+-module_init(err_inject_init);
+-module_exit(err_inject_exit);
+-
+-MODULE_DESCRIPTION("CPU notifier error injection module");
+-MODULE_LICENSE("GPL");
+-MODULE_AUTHOR("Akinobu Mita <akinobu.mita@gmail.com>");

@@ -1,0 +1,51 @@
+commit 32f55e475ce2c4b8b124d335fcfaf1152ba977a1
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Fri Jun 7 10:26:05 2024 -0700
+
+    KVM: nVMX: Request immediate exit iff pending nested event needs injection
+    
+    When requesting an immediate exit from L2 in order to inject a pending
+    event, do so only if the pending event actually requires manual injection,
+    i.e. if and only if KVM actually needs to regain control in order to
+    deliver the event.
+    
+    Avoiding the "immediate exit" isn't simply an optimization, it's necessary
+    to make forward progress, as the "already expired" VMX preemption timer
+    trick that KVM uses to force a VM-Exit has higher priority than events
+    that aren't directly injected.
+    
+    At present time, this is a glorified nop as all events processed by
+    vmx_has_nested_events() require injection, but that will not hold true in
+    the future, e.g. if there's a pending virtual interrupt in vmcs02.RVI.
+    I.e. if KVM is trying to deliver a virtual interrupt to L2, the expired
+    VMX preemption timer will trigger VM-Exit before the virtual interrupt is
+    delivered, and KVM will effectively hang the vCPU in an endless loop of
+    forced immediate VM-Exits (because the pending virtual interrupt never
+    goes away).
+    
+    Cc: stable@vger.kernel.org
+    Link: https://lore.kernel.org/r/20240607172609.3205077-3-seanjc@google.com
+    Signed-off-by: Sean Christopherson <seanjc@google.com>
+
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index ba0ad76f53bc..8cce76b93d83 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -10516,7 +10516,7 @@ static int kvm_check_and_inject_events(struct kvm_vcpu *vcpu,
+ 
+ 	if (is_guest_mode(vcpu) &&
+ 	    kvm_x86_ops.nested_ops->has_events &&
+-	    kvm_x86_ops.nested_ops->has_events(vcpu))
++	    kvm_x86_ops.nested_ops->has_events(vcpu, true))
+ 		*req_immediate_exit = true;
+ 
+ 	/*
+@@ -13157,7 +13157,7 @@ static inline bool kvm_vcpu_has_events(struct kvm_vcpu *vcpu)
+ 
+ 	if (is_guest_mode(vcpu) &&
+ 	    kvm_x86_ops.nested_ops->has_events &&
+-	    kvm_x86_ops.nested_ops->has_events(vcpu))
++	    kvm_x86_ops.nested_ops->has_events(vcpu, false))
+ 		return true;
+ 
+ 	if (kvm_xen_has_pending_events(vcpu))

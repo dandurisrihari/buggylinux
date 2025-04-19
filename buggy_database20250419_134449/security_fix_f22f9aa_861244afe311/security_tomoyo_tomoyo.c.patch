@@ -1,0 +1,81 @@
+commit f22f9aaf6c3d92ebd5ad9e67acc03afebaaeb289
+Author: Paul Moore <paul@paul-moore.com>
+Date:   Fri Mar 17 12:43:07 2023 -0400
+
+    selinux: remove the runtime disable functionality
+    
+    After working with the larger SELinux-based distros for several
+    years, we're finally at a place where we can disable the SELinux
+    runtime disable functionality.  The existing kernel deprecation
+    notice explains the functionality and why we want to remove it:
+    
+      The selinuxfs "disable" node allows SELinux to be disabled at
+      runtime prior to a policy being loaded into the kernel.  If
+      disabled via this mechanism, SELinux will remain disabled until
+      the system is rebooted.
+    
+      The preferred method of disabling SELinux is via the "selinux=0"
+      boot parameter, but the selinuxfs "disable" node was created to
+      make it easier for systems with primitive bootloaders that did not
+      allow for easy modification of the kernel command line.
+      Unfortunately, allowing for SELinux to be disabled at runtime makes
+      it difficult to secure the kernel's LSM hooks using the
+      "__ro_after_init" feature.
+    
+    It is that last sentence, mentioning the '__ro_after_init' hardening,
+    which is the real motivation for this change, and if you look at the
+    diffstat you'll see that the impact of this patch reaches across all
+    the different LSMs, helping prevent tampering at the LSM hook level.
+    
+    From a SELinux perspective, it is important to note that if you
+    continue to disable SELinux via "/etc/selinux/config" it may appear
+    that SELinux is disabled, but it is simply in an uninitialized state.
+    If you load a policy with `load_policy -i`, you will see SELinux
+    come alive just as if you had loaded the policy during early-boot.
+    
+    It is also worth noting that the "/sys/fs/selinux/disable" file is
+    always writable now, regardless of the Kconfig settings, but writing
+    to the file has no effect on the system, other than to display an
+    error on the console if a non-zero/true value is written.
+    
+    Finally, in the several years where we have been working on
+    deprecating this functionality, there has only been one instance of
+    someone mentioning any user visible breakage.  In this particular
+    case it was an individual's kernel test system, and the workaround
+    documented in the deprecation notice ("selinux=0" on the kernel
+    command line) resolved the issue without problem.
+    
+    Acked-by: Casey Schaufler <casey@schaufler-ca.com>
+    Signed-off-by: Paul Moore <paul@paul-moore.com>
+
+diff --git a/security/tomoyo/tomoyo.c b/security/tomoyo/tomoyo.c
+index af04a7b7eb28..25006fddc964 100644
+--- a/security/tomoyo/tomoyo.c
++++ b/security/tomoyo/tomoyo.c
+@@ -499,7 +499,7 @@ static int tomoyo_socket_sendmsg(struct socket *sock, struct msghdr *msg,
+ 	return tomoyo_socket_sendmsg_permission(sock, msg, size);
+ }
+ 
+-struct lsm_blob_sizes tomoyo_blob_sizes __lsm_ro_after_init = {
++struct lsm_blob_sizes tomoyo_blob_sizes __ro_after_init = {
+ 	.lbs_task = sizeof(struct tomoyo_task),
+ };
+ 
+@@ -546,7 +546,7 @@ static void tomoyo_task_free(struct task_struct *task)
+  * tomoyo_security_ops is a "struct security_operations" which is used for
+  * registering TOMOYO.
+  */
+-static struct security_hook_list tomoyo_hooks[] __lsm_ro_after_init = {
++static struct security_hook_list tomoyo_hooks[] __ro_after_init = {
+ 	LSM_HOOK_INIT(cred_prepare, tomoyo_cred_prepare),
+ 	LSM_HOOK_INIT(bprm_committed_creds, tomoyo_bprm_committed_creds),
+ 	LSM_HOOK_INIT(task_alloc, tomoyo_task_alloc),
+@@ -583,7 +583,7 @@ static struct security_hook_list tomoyo_hooks[] __lsm_ro_after_init = {
+ /* Lock for GC. */
+ DEFINE_SRCU(tomoyo_ss);
+ 
+-int tomoyo_enabled __lsm_ro_after_init = 1;
++int tomoyo_enabled __ro_after_init = 1;
+ 
+ /**
+  * tomoyo_init - Register TOMOYO Linux as a LSM module.

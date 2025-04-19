@@ -1,0 +1,80 @@
+commit fffd0934b9390f34bec45762192b7edd3b12b4b5
+Author: Johannes Berg <johannes@sipsolutions.net>
+Date:   Wed Jul 8 14:22:54 2009 +0200
+
+    cfg80211: rework key operation
+    
+    This reworks the key operation in cfg80211, and now only
+    allows, from userspace, configuring keys (via nl80211)
+    after the connection has been established (in managed
+    mode), the IBSS been joined (in IBSS mode), at any time
+    (in AP[_VLAN] modes) or never for all the other modes.
+    
+    In order to do shared key authentication correctly, it
+    is now possible to give a WEP key to the AUTH command.
+    To configure static WEP keys, these are given to the
+    CONNECT or IBSS_JOIN command directly, for a userspace
+    SME it is assumed it will configure it properly after
+    the connection has been established.
+    
+    Since mac80211 used to check the default key in IBSS
+    mode to see whether or not the network is protected,
+    it needs an update in that area, as well as an update
+    to make use of the WEP key passed to auth() for shared
+    key authentication.
+    
+    Signed-off-by: Johannes Berg <johannes@sipsolutions.net>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/mac80211/util.c b/net/mac80211/util.c
+index 915e77769312..dbf66b52d38c 100644
+--- a/net/mac80211/util.c
++++ b/net/mac80211/util.c
+@@ -31,6 +31,7 @@
+ #include "mesh.h"
+ #include "wme.h"
+ #include "led.h"
++#include "wep.h"
+ 
+ /* privid for wiphys to determine whether they belong to us or not */
+ void *mac80211_wiphy_privid = &mac80211_wiphy_privid;
+@@ -804,12 +805,13 @@ u32 ieee80211_mandatory_rates(struct ieee80211_local *local,
+ 
+ void ieee80211_send_auth(struct ieee80211_sub_if_data *sdata,
+ 			 u16 transaction, u16 auth_alg,
+-			 u8 *extra, size_t extra_len,
+-			 const u8 *bssid, int encrypt)
++			 u8 *extra, size_t extra_len, const u8 *bssid,
++			 const u8 *key, u8 key_len, u8 key_idx)
+ {
+ 	struct ieee80211_local *local = sdata->local;
+ 	struct sk_buff *skb;
+ 	struct ieee80211_mgmt *mgmt;
++	int err;
+ 
+ 	skb = dev_alloc_skb(local->hw.extra_tx_headroom +
+ 			    sizeof(*mgmt) + 6 + extra_len);
+@@ -824,8 +826,6 @@ void ieee80211_send_auth(struct ieee80211_sub_if_data *sdata,
+ 	memset(mgmt, 0, 24 + 6);
+ 	mgmt->frame_control = cpu_to_le16(IEEE80211_FTYPE_MGMT |
+ 					  IEEE80211_STYPE_AUTH);
+-	if (encrypt)
+-		mgmt->frame_control |= cpu_to_le16(IEEE80211_FCTL_PROTECTED);
+ 	memcpy(mgmt->da, bssid, ETH_ALEN);
+ 	memcpy(mgmt->sa, sdata->dev->dev_addr, ETH_ALEN);
+ 	memcpy(mgmt->bssid, bssid, ETH_ALEN);
+@@ -835,7 +835,13 @@ void ieee80211_send_auth(struct ieee80211_sub_if_data *sdata,
+ 	if (extra)
+ 		memcpy(skb_put(skb, extra_len), extra, extra_len);
+ 
+-	ieee80211_tx_skb(sdata, skb, encrypt);
++	if (auth_alg == WLAN_AUTH_SHARED_KEY && transaction == 3) {
++		mgmt->frame_control |= cpu_to_le16(IEEE80211_FCTL_PROTECTED);
++		err = ieee80211_wep_encrypt(local, skb, key, key_len, key_idx);
++		WARN_ON(err);
++	}
++
++	ieee80211_tx_skb(sdata, skb, 0);
+ }
+ 
+ int ieee80211_build_preq_ies(struct ieee80211_local *local, u8 *buffer,

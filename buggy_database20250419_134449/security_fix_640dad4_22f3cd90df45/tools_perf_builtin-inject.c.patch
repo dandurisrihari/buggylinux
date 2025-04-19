@@ -1,0 +1,53 @@
+commit 640dad47988ec4b734d71934be103bb6e931279f
+Author: Adrian Hunter <adrian.hunter@intel.com>
+Date:   Mon Mar 7 16:44:38 2016 -0300
+
+    perf inject: Hit all DSOs for AUX data in JIT and other cases
+    
+    Currently, when injecting build ids, if there is AUX data then 'perf
+    inject' hits all DSOs because it is not known which DSOs the trace data
+    would hit.
+    
+    That needs to be done for JIT injection also, and in fact there is no
+    reason to distinguish what kind of injection is being done.  That is,
+    any time there is AUX data and the HEADER_BUID_ID feature flag is set,
+    and the AUX data is not being processed, then hit all DSOs.  This patch
+    does that.
+    
+    Signed-off-by: Adrian Hunter <adrian.hunter@intel.com>
+    Signed-off-by: Arnaldo Carvalho de Melo <acme@redhat.com>
+    Cc: Alexander Shishkin <alexander.shishkin@linux.intel.com>
+    Cc: David Ahern <dsahern@gmail.com>
+    Cc: Jiri Olsa <jolsa@redhat.com>
+    Cc: Namhyung Kim <namhyung@kernel.org>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Stephane Eranian <eranian@google.com>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Link: http://lkml.kernel.org/r/1457005856-6143-2-git-send-email-adrian.hunter@intel.com
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+diff --git a/tools/perf/builtin-inject.c b/tools/perf/builtin-inject.c
+index b38445f08c2f..c6a4f2f94ab1 100644
+--- a/tools/perf/builtin-inject.c
++++ b/tools/perf/builtin-inject.c
+@@ -679,12 +679,16 @@ static int __cmd_inject(struct perf_inject *inject)
+ 	ret = perf_session__process_events(session);
+ 
+ 	if (!file_out->is_pipe) {
+-		if (inject->build_ids) {
++		if (inject->build_ids)
+ 			perf_header__set_feat(&session->header,
+ 					      HEADER_BUILD_ID);
+-			if (inject->have_auxtrace)
+-				dsos__hit_all(session);
+-		}
++		/*
++		 * Keep all buildids when there is unprocessed AUX data because
++		 * it is not known which ones the AUX trace hits.
++		 */
++		if (perf_header__has_feat(&session->header, HEADER_BUILD_ID) &&
++		    inject->have_auxtrace && !inject->itrace_synth_opts.set)
++			dsos__hit_all(session);
+ 		/*
+ 		 * The AUX areas have been removed and replaced with
+ 		 * synthesized hardware events, so clear the feature flag and

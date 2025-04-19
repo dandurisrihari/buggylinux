@@ -1,0 +1,54 @@
+commit cccf748b810832cfab4dbb3ed4c7cf1a1ee35ad2
+Author: Avi Kivity <avi@qumranet.com>
+Date:   Mon Jan 22 20:40:39 2007 -0800
+
+    [PATCH] KVM: fix race between mmio reads and injected interrupts
+    
+    The kvm mmio read path looks like:
+    
+     1. guest read faults
+     2. kvm emulates read, calls emulator_read_emulated()
+     3. fails as a read requires userspace help
+     4. exit to userspace
+     5. userspace emulates read, kvm sets vcpu->mmio_read_completed
+     6. re-enter guest, fault again
+     7. kvm emulates read, calls emulator_read_emulated()
+     8. succeeds as vcpu->mmio_read_emulated is set
+     9. instruction completes and guest is resumed
+    
+    A problem surfaces if the userspace exit (step 5) also requests an interrupt
+    injection.  In that case, the guest does not re-execute the original
+    instruction, but the interrupt handler.  The next time an mmio read is
+    exectued (likely for a different address), step 3 will find
+    vcpu->mmio_read_completed set and return the value read for the original
+    instruction.
+    
+    The problem manifested itself in a few annoying ways:
+    - little squares appear randomly on console when switching virtual terminals
+    - ne2000 fails under nfs read load
+    - rtl8139 complains about "pci errors" even though the device model is
+      incapable of issuing them.
+    
+    Fix by skipping interrupt injection if an mmio read is pending.
+    
+    A better fix is to avoid re-entry into the guest, and re-emulating immediately
+    instead.  However that's a bit more complex.
+    
+    Signed-off-by: Avi Kivity <avi@qumranet.com>
+    Cc: Ingo Molnar <mingo@elte.hu>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/drivers/kvm/svm.c b/drivers/kvm/svm.c
+index 714f6a7841cd..7397bfbbcb1c 100644
+--- a/drivers/kvm/svm.c
++++ b/drivers/kvm/svm.c
+@@ -1407,7 +1407,8 @@ static int svm_vcpu_run(struct kvm_vcpu *vcpu, struct kvm_run *kvm_run)
+ 	int r;
+ 
+ again:
+-	do_interrupt_requests(vcpu, kvm_run);
++	if (!vcpu->mmio_read_completed)
++		do_interrupt_requests(vcpu, kvm_run);
+ 
+ 	clgi();

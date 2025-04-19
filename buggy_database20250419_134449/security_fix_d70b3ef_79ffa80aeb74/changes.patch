@@ -1,0 +1,134 @@
+diff --cc arch/x86/Kconfig.debug
+index 2fd3ebbb4e33,a5973f851750..a15893d17c55
+--- a/arch/x86/Kconfig.debug
++++ b/arch/x86/Kconfig.debug
+@@@ -332,16 -332,15 +332,27 @@@ config X86_DEBUG_STATIC_CPU_HA
+  
+  	  If unsure, say N.
+  
+ +config X86_DEBUG_FPU
+ +	bool "Debug the x86 FPU code"
+ +	depends on DEBUG_KERNEL
+ +	default y
+ +	---help---
+ +	  If this option is enabled then there will be extra sanity
+ +	  checks and (boot time) debug printouts added to the kernel.
+ +	  This debugging adds some small amount of runtime overhead
+ +	  to the kernel.
+ +
+ +	  If unsure, say N.
+ +
++ config PUNIT_ATOM_DEBUG
++ 	tristate "ATOM Punit debug driver"
++ 	select DEBUG_FS
++ 	select IOSF_MBI
++ 	---help---
++ 	  This is a debug driver, which gets the power states
++ 	  of all Punit North Complex devices. The power states of
++ 	  each device is exposed as part of the debugfs interface.
++ 	  The current power state can be read from
++ 	  /sys/kernel/debug/punit_atom/dev_power_state
++ 
+  endmenu
+diff --cc arch/x86/kernel/cpu/amd.c
+index 56cae1964a81,eb4f01269b5d..dd3a4baffe50
+--- a/arch/x86/kernel/cpu/amd.c
++++ b/arch/x86/kernel/cpu/amd.c
+@@@ -295,10 -288,10 +295,10 @@@ static int nearby_node(int apicid
+   *     Assumption: Number of cores in each internal node is the same.
+   * (2) AMD processors supporting compute units
+   */
+- #ifdef CONFIG_X86_HT
++ #ifdef CONFIG_SMP
+  static void amd_get_topology(struct cpuinfo_x86 *c)
+  {
+ -	u32 nodes, cores_per_cu = 1;
+ +	u32 cores_per_cu = 1;
+  	u8 node_id;
+  	int cpu = smp_processor_id();
+  
+diff --cc arch/x86/kernel/traps.c
+index 36cb15b7b367,de379366f6d1..f5791927aa64
+--- a/arch/x86/kernel/traps.c
++++ b/arch/x86/kernel/traps.c
+@@@ -769,20 -812,50 +768,8 @@@ dotraplinkage voi
+  do_spurious_interrupt_bug(struct pt_regs *regs, long error_code)
+  {
+  	conditional_sti(regs);
+- #if 0
+- 	/* No need to warn about this any longer. */
+- 	pr_info("Ignoring P6 Local APIC Spurious Interrupt Bug...\n");
+- #endif
+- }
+- 
+- asmlinkage __visible void __attribute__((weak)) smp_thermal_interrupt(void)
+- {
+- }
+- 
+- asmlinkage __visible void __attribute__((weak)) smp_threshold_interrupt(void)
+- {
+  }
+  
+ -/*
+ - * 'math_state_restore()' saves the current math information in the
+ - * old math state array, and gets the new ones from the current task
+ - *
+ - * Careful.. There are problems with IBM-designed IRQ13 behaviour.
+ - * Don't touch unless you *really* know how it works.
+ - *
+ - * Must be called with kernel preemption disabled (eg with local
+ - * local interrupts as in the case of do_device_not_available).
+ - */
+ -void math_state_restore(void)
+ -{
+ -	struct task_struct *tsk = current;
+ -
+ -	if (!tsk_used_math(tsk)) {
+ -		local_irq_enable();
+ -		/*
+ -		 * does a slab alloc which can sleep
+ -		 */
+ -		if (init_fpu(tsk)) {
+ -			/*
+ -			 * ran out of memory!
+ -			 */
+ -			do_group_exit(SIGKILL);
+ -			return;
+ -		}
+ -		local_irq_disable();
+ -	}
+ -
+ -	/* Avoid __kernel_fpu_begin() right after __thread_fpu_begin() */
+ -	kernel_fpu_disable();
+ -	__thread_fpu_begin(tsk);
+ -	if (unlikely(restore_fpu_checking(tsk))) {
+ -		fpu_reset_state(tsk);
+ -		force_sig_info(SIGSEGV, SEND_SIG_PRIV, tsk);
+ -	} else {
+ -		tsk->thread.fpu_counter++;
+ -	}
+ -	kernel_fpu_enable();
+ -}
+ -EXPORT_SYMBOL_GPL(math_state_restore);
+ -
+  dotraplinkage void
+  do_device_not_available(struct pt_regs *regs, long error_code)
+  {
+diff --cc tools/testing/selftests/x86/Makefile
+index 9b0d8baf2934,59d364aef1a8..caa60d56d7d1
+--- a/tools/testing/selftests/x86/Makefile
++++ b/tools/testing/selftests/x86/Makefile
+@@@ -4,11 -4,9 +4,11 @@@ include ../lib.m
+  
+  .PHONY: all all_32 all_64 warn_32bit_failure clean
+  
+- TARGETS_C_BOTHBITS := sigreturn single_step_syscall
++ TARGETS_C_BOTHBITS := sigreturn single_step_syscall sysret_ss_attrs
+ +TARGETS_C_32BIT_ONLY := entry_from_vm86
+  
+ -BINARIES_32 := $(TARGETS_C_BOTHBITS:%=%_32)
+ +TARGETS_C_32BIT_ALL := $(TARGETS_C_BOTHBITS) $(TARGETS_C_32BIT_ONLY)
+ +BINARIES_32 := $(TARGETS_C_32BIT_ALL:%=%_32)
+  BINARIES_64 := $(TARGETS_C_BOTHBITS:%=%_64)
+  
+  CFLAGS := -O2 -g -std=gnu99 -pthread -Wall

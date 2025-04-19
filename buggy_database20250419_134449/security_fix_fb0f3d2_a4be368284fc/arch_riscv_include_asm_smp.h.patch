@@ -1,0 +1,67 @@
+commit fb0f3d281b7f81a11e210783940f3798c4744179
+Author: Anup Patel <apatel@ventanamicro.com>
+Date:   Tue Mar 28 09:22:20 2023 +0530
+
+    RISC-V: Allow marking IPIs as suitable for remote FENCEs
+    
+    To do remote FENCEs (i.e. remote TLB flushes) using IPI calls on the
+    RISC-V kernel, we need hardware mechanism to directly inject IPI from
+    the supervisor mode (i.e. RISC-V kernel) instead of using SBI calls.
+    
+    The upcoming AIA IMSIC devices allow direct IPI injection from the
+    supervisor mode (i.e. RISC-V kernel). To support this, we extend the
+    riscv_ipi_set_virq_range() function so that IPI provider (i.e. irqchip
+    drivers can mark IPIs as suitable for remote FENCEs.
+    
+    Signed-off-by: Anup Patel <apatel@ventanamicro.com>
+    Reviewed-by: Atish Patra <atishp@rivosinc.com>
+    Acked-by: Palmer Dabbelt <palmer@rivosinc.com>
+    Signed-off-by: Marc Zyngier <maz@kernel.org>
+    Link: https://lore.kernel.org/r/20230328035223.1480939-5-apatel@ventanamicro.com
+
+diff --git a/arch/riscv/include/asm/smp.h b/arch/riscv/include/asm/smp.h
+index 4fe7a8854c2e..c4b77017ec58 100644
+--- a/arch/riscv/include/asm/smp.h
++++ b/arch/riscv/include/asm/smp.h
+@@ -16,6 +16,9 @@ struct seq_file;
+ extern unsigned long boot_cpu_hartid;
+ 
+ #ifdef CONFIG_SMP
++
++#include <linux/jump_label.h>
++
+ /*
+  * Mapping between linux logical cpu index and hartid.
+  */
+@@ -46,7 +49,12 @@ void riscv_ipi_disable(void);
+ bool riscv_ipi_have_virq_range(void);
+ 
+ /* Set the IPI interrupt numbers for arch (called by irqchip drivers) */
+-void riscv_ipi_set_virq_range(int virq, int nr);
++void riscv_ipi_set_virq_range(int virq, int nr, bool use_for_rfence);
++
++/* Check if we can use IPIs for remote FENCEs */
++DECLARE_STATIC_KEY_FALSE(riscv_ipi_for_rfence);
++#define riscv_use_ipi_for_rfence() \
++	static_branch_unlikely(&riscv_ipi_for_rfence)
+ 
+ /* Check other CPUs stop or not */
+ bool smp_crash_stop_failed(void);
+@@ -96,10 +104,16 @@ static inline bool riscv_ipi_have_virq_range(void)
+ 	return false;
+ }
+ 
+-static inline void riscv_ipi_set_virq_range(int virq, int nr)
++static inline void riscv_ipi_set_virq_range(int virq, int nr,
++					    bool use_for_rfence)
+ {
+ }
+ 
++static inline bool riscv_use_ipi_for_rfence(void)
++{
++	return false;
++}
++
+ #endif /* CONFIG_SMP */
+ 
+ #if defined(CONFIG_HOTPLUG_CPU) && (CONFIG_SMP)

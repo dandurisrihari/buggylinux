@@ -1,0 +1,68 @@
+commit eb4940d4adf590590a9d0c47e38d2799c2ff9670
+Author: Vlastimil Babka <vbabka@suse.cz>
+Date:   Fri Nov 4 13:57:11 2022 +0100
+
+    mm/slab: remove !CONFIG_TRACING variants of kmalloc_[node_]trace()
+    
+    For !CONFIG_TRACING kernels, the kmalloc() implementation tries (in cases where
+    the allocation size is build-time constant) to save a function call, by
+    inlining kmalloc_trace() to a kmem_cache_alloc() call.
+    
+    However since commit 6edf2576a6cc ("mm/slub: enable debugging memory wasting of
+    kmalloc") this path now fails to pass the original request size to be
+    eventually recorded (for kmalloc caches with debugging enabled).
+    
+    We could adjust the code to call __kmem_cache_alloc_node() as the
+    CONFIG_TRACING variant, but that would as a result inline a call with 5
+    parameters, bloating the kmalloc() call sites. The cost of extra function
+    call (to kmalloc_trace()) seems like a lesser evil.
+    
+    It also appears that the !CONFIG_TRACING variant is incompatible with upcoming
+    hardening efforts [1] so it's easier if we just remove it now. Kernels with no
+    tracing are rare these days and the benefit is dubious anyway.
+    
+    [1] https://lore.kernel.org/linux-mm/20221101222520.never.109-kees@kernel.org/T/#m20ecf14390e406247bde0ea9cce368f469c539ed
+    
+    Link: https://lore.kernel.org/all/097d8fba-bd10-a312-24a3-a4068c4f424c@suse.cz/
+    Suggested-by: Hyeonggon Yoo <42.hyeyoo@gmail.com>
+    Signed-off-by: Vlastimil Babka <vbabka@suse.cz>
+
+diff --git a/include/linux/slab.h b/include/linux/slab.h
+index 90877fcde70b..45efc6c553b8 100644
+--- a/include/linux/slab.h
++++ b/include/linux/slab.h
+@@ -470,35 +470,12 @@ void *__kmalloc_node(size_t size, gfp_t flags, int node) __assume_kmalloc_alignm
+ void *kmem_cache_alloc_node(struct kmem_cache *s, gfp_t flags, int node) __assume_slab_alignment
+ 									 __malloc;
+ 
+-#ifdef CONFIG_TRACING
+ void *kmalloc_trace(struct kmem_cache *s, gfp_t flags, size_t size)
+ 		    __assume_kmalloc_alignment __alloc_size(3);
+ 
+ void *kmalloc_node_trace(struct kmem_cache *s, gfp_t gfpflags,
+ 			 int node, size_t size) __assume_kmalloc_alignment
+ 						__alloc_size(4);
+-#else /* CONFIG_TRACING */
+-/* Save a function call when CONFIG_TRACING=n */
+-static __always_inline __alloc_size(3)
+-void *kmalloc_trace(struct kmem_cache *s, gfp_t flags, size_t size)
+-{
+-	void *ret = kmem_cache_alloc(s, flags);
+-
+-	ret = kasan_kmalloc(s, ret, size, flags);
+-	return ret;
+-}
+-
+-static __always_inline __alloc_size(4)
+-void *kmalloc_node_trace(struct kmem_cache *s, gfp_t gfpflags,
+-			 int node, size_t size)
+-{
+-	void *ret = kmem_cache_alloc_node(s, gfpflags, node);
+-
+-	ret = kasan_kmalloc(s, ret, size, gfpflags);
+-	return ret;
+-}
+-#endif /* CONFIG_TRACING */
+-
+ void *kmalloc_large(size_t size, gfp_t flags) __assume_page_alignment
+ 					      __alloc_size(1);

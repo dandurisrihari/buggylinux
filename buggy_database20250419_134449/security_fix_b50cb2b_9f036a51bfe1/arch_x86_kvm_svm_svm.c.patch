@@ -1,0 +1,59 @@
+commit b50cb2b1555d8714e12a566b9b49fcac56a04a3f
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Mon Sep 30 22:00:44 2024 -0700
+
+    KVM: x86: Use a dedicated flow for queueing re-injected exceptions
+    
+    Open code the filling of vcpu->arch.exception in kvm_requeue_exception()
+    instead of bouncing through kvm_multiple_exception(), as re-injection
+    doesn't actually share that much code with "normal" injection, e.g. the
+    VM-Exit interception check, payload delivery, and nested exception code
+    is all bypassed as those flows only apply during initial injection.
+    
+    When FRED comes along, the special casing will only get worse, as FRED
+    explicitly tracks nested exceptions and essentially delivers the payload
+    on the stack frame, i.e. re-injection will need more inputs, and normal
+    injection will have yet more code that needs to be bypassed when KVM is
+    re-injecting an exception.
+    
+    No functional change intended.
+    
+    Signed-off-by: Xin Li (Intel) <xin@zytor.com>
+    Tested-by: Shan Kang <shan.kang@intel.com>
+    Link: https://lore.kernel.org/r/20241001050110.3643764-2-xin@zytor.com
+    Signed-off-by: Sean Christopherson <seanjc@google.com>
+
+diff --git a/arch/x86/kvm/svm/svm.c b/arch/x86/kvm/svm/svm.c
+index 88dd61389a2d..6bd7e44380e0 100644
+--- a/arch/x86/kvm/svm/svm.c
++++ b/arch/x86/kvm/svm/svm.c
+@@ -4116,20 +4116,23 @@ static void svm_complete_interrupts(struct kvm_vcpu *vcpu)
+ 		vcpu->arch.nmi_injected = true;
+ 		svm->nmi_l1_to_l2 = nmi_l1_to_l2;
+ 		break;
+-	case SVM_EXITINTINFO_TYPE_EXEPT:
++	case SVM_EXITINTINFO_TYPE_EXEPT: {
++		u32 error_code = 0;
++
+ 		/*
+ 		 * Never re-inject a #VC exception.
+ 		 */
+ 		if (vector == X86_TRAP_VC)
+ 			break;
+ 
+-		if (exitintinfo & SVM_EXITINTINFO_VALID_ERR) {
+-			u32 err = svm->vmcb->control.exit_int_info_err;
+-			kvm_requeue_exception_e(vcpu, vector, err);
++		if (exitintinfo & SVM_EXITINTINFO_VALID_ERR)
++			error_code = svm->vmcb->control.exit_int_info_err;
+ 
+-		} else
+-			kvm_requeue_exception(vcpu, vector);
++		kvm_requeue_exception(vcpu, vector,
++				      exitintinfo & SVM_EXITINTINFO_VALID_ERR,
++				      error_code);
+ 		break;
++	}
+ 	case SVM_EXITINTINFO_TYPE_INTR:
+ 		kvm_queue_interrupt(vcpu, vector, false);
+ 		break;

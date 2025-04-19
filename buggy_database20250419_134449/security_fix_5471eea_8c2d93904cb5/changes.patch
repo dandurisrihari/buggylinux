@@ -1,0 +1,105 @@
+diff --git a/arch/x86/events/core.c b/arch/x86/events/core.c
+index 8e509325c2c3..c0167d52832e 100644
+--- a/arch/x86/events/core.c
++++ b/arch/x86/events/core.c
+@@ -1624,6 +1624,8 @@ static void x86_pmu_del(struct perf_event *event, int flags)
+ 	if (cpuc->txn_flags & PERF_PMU_TXN_ADD)
+ 		goto do_del;
+ 
++	__set_bit(event->hw.idx, cpuc->dirty);
++
+ 	/*
+ 	 * Not a TXN, therefore cleanup properly.
+ 	 */
+@@ -2472,6 +2474,31 @@ static int x86_pmu_event_init(struct perf_event *event)
+ 	return err;
+ }
+ 
++void perf_clear_dirty_counters(void)
++{
++	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
++	int i;
++
++	 /* Don't need to clear the assigned counter. */
++	for (i = 0; i < cpuc->n_events; i++)
++		__clear_bit(cpuc->assign[i], cpuc->dirty);
++
++	if (bitmap_empty(cpuc->dirty, X86_PMC_IDX_MAX))
++		return;
++
++	for_each_set_bit(i, cpuc->dirty, X86_PMC_IDX_MAX) {
++		/* Metrics and fake events don't have corresponding HW counters. */
++		if (is_metric_idx(i) || (i == INTEL_PMC_IDX_FIXED_VLBR))
++			continue;
++		else if (i >= INTEL_PMC_IDX_FIXED)
++			wrmsrl(MSR_ARCH_PERFMON_FIXED_CTR0 + (i - INTEL_PMC_IDX_FIXED), 0);
++		else
++			wrmsrl(x86_pmu_event_addr(i), 0);
++	}
++
++	bitmap_zero(cpuc->dirty, X86_PMC_IDX_MAX);
++}
++
+ static void x86_pmu_event_mapped(struct perf_event *event, struct mm_struct *mm)
+ {
+ 	if (!(event->hw.flags & PERF_X86_EVENT_RDPMC_ALLOWED))
+@@ -2495,7 +2522,6 @@ static void x86_pmu_event_mapped(struct perf_event *event, struct mm_struct *mm)
+ 
+ static void x86_pmu_event_unmapped(struct perf_event *event, struct mm_struct *mm)
+ {
+-
+ 	if (!(event->hw.flags & PERF_X86_EVENT_RDPMC_ALLOWED))
+ 		return;
+ 
+diff --git a/arch/x86/events/perf_event.h b/arch/x86/events/perf_event.h
+index 27fa85e7d4fd..d6003e08b055 100644
+--- a/arch/x86/events/perf_event.h
++++ b/arch/x86/events/perf_event.h
+@@ -229,6 +229,7 @@ struct cpu_hw_events {
+ 	 */
+ 	struct perf_event	*events[X86_PMC_IDX_MAX]; /* in counter order */
+ 	unsigned long		active_mask[BITS_TO_LONGS(X86_PMC_IDX_MAX)];
++	unsigned long		dirty[BITS_TO_LONGS(X86_PMC_IDX_MAX)];
+ 	int			enabled;
+ 
+ 	int			n_events; /* the # of events in the below arrays */
+diff --git a/arch/x86/include/asm/perf_event.h b/arch/x86/include/asm/perf_event.h
+index 544f41a179fb..8fc1b5003713 100644
+--- a/arch/x86/include/asm/perf_event.h
++++ b/arch/x86/include/asm/perf_event.h
+@@ -478,6 +478,7 @@ struct x86_pmu_lbr {
+ 
+ extern void perf_get_x86_pmu_capability(struct x86_pmu_capability *cap);
+ extern void perf_check_microcode(void);
++extern void perf_clear_dirty_counters(void);
+ extern int x86_perf_rdpmc_index(struct perf_event *event);
+ #else
+ static inline void perf_get_x86_pmu_capability(struct x86_pmu_capability *cap)
+diff --git a/arch/x86/mm/tlb.c b/arch/x86/mm/tlb.c
+index 78804680e923..cfe6b1e85fa6 100644
+--- a/arch/x86/mm/tlb.c
++++ b/arch/x86/mm/tlb.c
+@@ -14,6 +14,7 @@
+ #include <asm/nospec-branch.h>
+ #include <asm/cache.h>
+ #include <asm/apic.h>
++#include <asm/perf_event.h>
+ 
+ #include "mm_internal.h"
+ 
+@@ -404,9 +405,14 @@ static inline void cr4_update_pce_mm(struct mm_struct *mm)
+ {
+ 	if (static_branch_unlikely(&rdpmc_always_available_key) ||
+ 	    (!static_branch_unlikely(&rdpmc_never_available_key) &&
+-	     atomic_read(&mm->context.perf_rdpmc_allowed)))
++	     atomic_read(&mm->context.perf_rdpmc_allowed))) {
++		/*
++		 * Clear the existing dirty counters to
++		 * prevent the leak for an RDPMC task.
++		 */
++		perf_clear_dirty_counters();
+ 		cr4_set_bits_irqsoff(X86_CR4_PCE);
+-	else
++	} else
+ 		cr4_clear_bits_irqsoff(X86_CR4_PCE);
+ }

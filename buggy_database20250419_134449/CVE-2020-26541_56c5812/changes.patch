@@ -1,0 +1,160 @@
+diff --git a/certs/Kconfig b/certs/Kconfig
+index c94e93d8bccf..76e469b56a77 100644
+--- a/certs/Kconfig
++++ b/certs/Kconfig
+@@ -83,4 +83,13 @@ config SYSTEM_BLACKLIST_HASH_LIST
+ 	  wrapper to incorporate the list into the kernel.  Each <hash> should
+ 	  be a string of hex digits.
+ 
++config SYSTEM_REVOCATION_LIST
++	bool "Provide system-wide ring of revocation certificates"
++	depends on SYSTEM_BLACKLIST_KEYRING
++	depends on PKCS7_MESSAGE_PARSER=y
++	help
++	  If set, this allows revocation certificates to be stored in the
++	  blacklist keyring and implements a hook whereby a PKCS#7 message can
++	  be checked to see if it matches such a certificate.
++
+ endmenu
+diff --git a/certs/blacklist.c b/certs/blacklist.c
+index bffe4c6f4a9e..2b8644123d5f 100644
+--- a/certs/blacklist.c
++++ b/certs/blacklist.c
+@@ -145,6 +145,49 @@ int is_binary_blacklisted(const u8 *hash, size_t hash_len)
+ }
+ EXPORT_SYMBOL_GPL(is_binary_blacklisted);
+ 
++#ifdef CONFIG_SYSTEM_REVOCATION_LIST
++/**
++ * add_key_to_revocation_list - Add a revocation certificate to the blacklist
++ * @data: The data blob containing the certificate
++ * @size: The size of data blob
++ */
++int add_key_to_revocation_list(const char *data, size_t size)
++{
++	key_ref_t key;
++
++	key = key_create_or_update(make_key_ref(blacklist_keyring, true),
++				   "asymmetric",
++				   NULL,
++				   data,
++				   size,
++				   ((KEY_POS_ALL & ~KEY_POS_SETATTR) | KEY_USR_VIEW),
++				   KEY_ALLOC_NOT_IN_QUOTA | KEY_ALLOC_BUILT_IN);
++
++	if (IS_ERR(key)) {
++		pr_err("Problem with revocation key (%ld)\n", PTR_ERR(key));
++		return PTR_ERR(key);
++	}
++
++	return 0;
++}
++
++/**
++ * is_key_on_revocation_list - Determine if the key for a PKCS#7 message is revoked
++ * @pkcs7: The PKCS#7 message to check
++ */
++int is_key_on_revocation_list(struct pkcs7_message *pkcs7)
++{
++	int ret;
++
++	ret = pkcs7_validate_trust(pkcs7, blacklist_keyring);
++
++	if (ret == 0)
++		return -EKEYREJECTED;
++
++	return -ENOKEY;
++}
++#endif
++
+ /*
+  * Initialise the blacklist
+  */
+diff --git a/certs/blacklist.h b/certs/blacklist.h
+index 1efd6fa0dc60..51b320cf8574 100644
+--- a/certs/blacklist.h
++++ b/certs/blacklist.h
+@@ -1,3 +1,5 @@
+ #include <linux/kernel.h>
++#include <linux/errno.h>
++#include <crypto/pkcs7.h>
+ 
+ extern const char __initconst *const blacklist_hashes[];
+diff --git a/certs/system_keyring.c b/certs/system_keyring.c
+index 4b693da488f1..ed98754d5795 100644
+--- a/certs/system_keyring.c
++++ b/certs/system_keyring.c
+@@ -242,6 +242,12 @@ int verify_pkcs7_message_sig(const void *data, size_t len,
+ 			pr_devel("PKCS#7 platform keyring is not available\n");
+ 			goto error;
+ 		}
++
++		ret = is_key_on_revocation_list(pkcs7);
++		if (ret != -ENOKEY) {
++			pr_devel("PKCS#7 platform key is on revocation list\n");
++			goto error;
++		}
+ 	}
+ 	ret = pkcs7_validate_trust(pkcs7, trusted_keys);
+ 	if (ret < 0) {
+diff --git a/include/keys/system_keyring.h b/include/keys/system_keyring.h
+index fb8b07daa9d1..875e002a4180 100644
+--- a/include/keys/system_keyring.h
++++ b/include/keys/system_keyring.h
+@@ -31,6 +31,7 @@ extern int restrict_link_by_builtin_and_secondary_trusted(
+ #define restrict_link_by_builtin_and_secondary_trusted restrict_link_by_builtin_trusted
+ #endif
+ 
++extern struct pkcs7_message *pkcs7;
+ #ifdef CONFIG_SYSTEM_BLACKLIST_KEYRING
+ extern int mark_hash_blacklisted(const char *hash);
+ extern int is_hash_blacklisted(const u8 *hash, size_t hash_len,
+@@ -49,6 +50,20 @@ static inline int is_binary_blacklisted(const u8 *hash, size_t hash_len)
+ }
+ #endif
+ 
++#ifdef CONFIG_SYSTEM_REVOCATION_LIST
++extern int add_key_to_revocation_list(const char *data, size_t size);
++extern int is_key_on_revocation_list(struct pkcs7_message *pkcs7);
++#else
++static inline int add_key_to_revocation_list(const char *data, size_t size)
++{
++	return 0;
++}
++static inline int is_key_on_revocation_list(struct pkcs7_message *pkcs7)
++{
++	return -ENOKEY;
++}
++#endif
++
+ #ifdef CONFIG_IMA_BLACKLIST_KEYRING
+ extern struct key *ima_blacklist_keyring;
+ 
+diff --git a/security/integrity/platform_certs/keyring_handler.c b/security/integrity/platform_certs/keyring_handler.c
+index c5ba695c10e3..5604bd57c990 100644
+--- a/security/integrity/platform_certs/keyring_handler.c
++++ b/security/integrity/platform_certs/keyring_handler.c
+@@ -55,6 +55,15 @@ static __init void uefi_blacklist_binary(const char *source,
+ 	uefi_blacklist_hash(source, data, len, "bin:", 4);
+ }
+ 
++/*
++ * Add an X509 cert to the revocation list.
++ */
++static __init void uefi_revocation_list_x509(const char *source,
++					     const void *data, size_t len)
++{
++	add_key_to_revocation_list(data, len);
++}
++
+ /*
+  * Return the appropriate handler for particular signature list types found in
+  * the UEFI db and MokListRT tables.
+@@ -76,5 +85,7 @@ __init efi_element_handler_t get_handler_for_dbx(const efi_guid_t *sig_type)
+ 		return uefi_blacklist_x509_tbs;
+ 	if (efi_guidcmp(*sig_type, efi_cert_sha256_guid) == 0)
+ 		return uefi_blacklist_binary;
++	if (efi_guidcmp(*sig_type, efi_cert_x509_guid) == 0)
++		return uefi_revocation_list_x509;
+ 	return 0;
+ }

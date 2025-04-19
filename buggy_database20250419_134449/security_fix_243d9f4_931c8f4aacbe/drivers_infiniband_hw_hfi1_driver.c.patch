@@ -1,0 +1,59 @@
+commit 243d9f436f89f95c304011bd32485afc27581986
+Author: Don Hiatt <don.hiatt@intel.com>
+Date:   Mon Mar 20 17:26:20 2017 -0700
+
+    IB/hfi1: Add transmit fault injection feature
+    
+    Add ability to fault packets on transmit by opcode.
+    Dropping by packet can be achieved by setting the mask to 0.
+    
+    In order to drop non-verbs traffic we set PbcInsertHrc
+    to NONE (0x2). The packet will still be delivered to
+    the receiving node but a KHdrHCRCErr (KDETH packet
+    with a bad HCRC) will be triggered and the packet will
+    not be delivered to the correct context.
+    
+    In order to drop regular verbs traffic we set the
+    PbcTestEbp flag. The packet will still be delivered
+    to the receiving node but a 'late ebp error' will
+    be triggered and will be dropped.
+    
+    A global toggle (/sys/kernel/debug/hfi1/hfi1_X/fault_suppress_err)
+    has been added to suppress the error messages on the receive
+    node when a packet was faulted on the sending node.
+    
+    Reviewed-by: Dennis Dalessandro <dennis.dalessandro@intel.com>
+    Signed-off-by: Mike Marciniszyn <mike.marciniszyn@intel.com>
+    Signed-off-by: Don Hiatt <don.hiatt@intel.com>
+    Signed-off-by: Dennis Dalessandro <dennis.dalessandro@intel.com>
+    Signed-off-by: Doug Ledford <dledford@redhat.com>
+
+diff --git a/drivers/infiniband/hw/hfi1/driver.c b/drivers/infiniband/hw/hfi1/driver.c
+index c0b012f6e11c..64bdbcef5f05 100644
+--- a/drivers/infiniband/hw/hfi1/driver.c
++++ b/drivers/infiniband/hw/hfi1/driver.c
+@@ -1367,6 +1367,11 @@ int process_receive_ib(struct hfi1_packet *packet)
+ 			  packet->updegr,
+ 			  rhf_egr_index(packet->rhf));
+ 
++	if (unlikely(
++		 (hfi1_dbg_fault_suppress_err(&packet->rcd->dd->verbs_dev) &&
++		 (packet->rhf & RHF_DC_ERR))))
++		return RHF_RCV_CONTINUE;
++
+ 	if (unlikely(rhf_err_flags(packet->rhf))) {
+ 		handle_eflags(packet);
+ 		return RHF_RCV_CONTINUE;
+@@ -1402,6 +1407,12 @@ int process_receive_bypass(struct hfi1_packet *packet)
+ 
+ int process_receive_error(struct hfi1_packet *packet)
+ {
++	/* KHdrHCRCErr -- KDETH packet with a bad HCRC */
++	if (unlikely(
++		 hfi1_dbg_fault_suppress_err(&packet->rcd->dd->verbs_dev) &&
++		 rhf_rcv_type_err(packet->rhf) == 3))
++		return RHF_RCV_CONTINUE;
++
+ 	handle_eflags(packet);
+ 
+ 	if (unlikely(rhf_err_flags(packet->rhf)))

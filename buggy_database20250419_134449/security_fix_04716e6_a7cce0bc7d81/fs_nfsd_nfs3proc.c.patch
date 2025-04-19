@@ -1,0 +1,61 @@
+commit 04716e6621ff4abb422d64ba7b48718f52716a3e
+Author: J. Bruce Fields <bfields@fieldses.org>
+Date:   Thu Aug 7 13:00:20 2008 -0400
+
+    nfsd: permit unauthenticated stat of export root
+    
+    RFC 2623 section 2.3.2 permits the server to bypass gss authentication
+    checks for certain operations that a client may perform when mounting.
+    In the case of a client that doesn't have some form of credentials
+    available to it on boot, this allows it to perform the mount unattended.
+    (Presumably real file access won't be needed until a user with
+    credentials logs in.)
+    
+    Being slightly more lenient allows lots of old clients to access
+    krb5-only exports, with the only loss being a small amount of
+    information leaked about the root directory of the export.
+    
+    This affects only v2 and v3; v4 still requires authentication for all
+    access.
+    
+    Thanks to Peter Staubach testing against a Solaris client, which
+    suggesting addition of v3 getattr, to the list, and to Trond for noting
+    that doing so exposes no additional information.
+    
+    Signed-off-by: J. Bruce Fields <bfields@citi.umich.edu>
+    Cc: Peter Staubach <staubach@redhat.com>
+    Cc: Trond Myklebust <trond.myklebust@fys.uio.no>
+
+diff --git a/fs/nfsd/nfs3proc.c b/fs/nfsd/nfs3proc.c
+index 4d617ea28cfc..9dbd2eb91281 100644
+--- a/fs/nfsd/nfs3proc.c
++++ b/fs/nfsd/nfs3proc.c
+@@ -63,7 +63,8 @@ nfsd3_proc_getattr(struct svc_rqst *rqstp, struct nfsd_fhandle  *argp,
+ 		SVCFH_fmt(&argp->fh));
+ 
+ 	fh_copy(&resp->fh, &argp->fh);
+-	nfserr = fh_verify(rqstp, &resp->fh, 0, NFSD_MAY_NOP);
++	nfserr = fh_verify(rqstp, &resp->fh, 0,
++			NFSD_MAY_NOP | NFSD_MAY_BYPASS_GSS_ON_ROOT);
+ 	if (nfserr)
+ 		RETURN_STATUS(nfserr);
+ 
+@@ -530,7 +531,7 @@ nfsd3_proc_fsstat(struct svc_rqst * rqstp, struct nfsd_fhandle    *argp,
+ 	dprintk("nfsd: FSSTAT(3)   %s\n",
+ 				SVCFH_fmt(&argp->fh));
+ 
+-	nfserr = nfsd_statfs(rqstp, &argp->fh, &resp->stats);
++	nfserr = nfsd_statfs(rqstp, &argp->fh, &resp->stats, 0);
+ 	fh_put(&argp->fh);
+ 	RETURN_STATUS(nfserr);
+ }
+@@ -558,7 +559,8 @@ nfsd3_proc_fsinfo(struct svc_rqst * rqstp, struct nfsd_fhandle    *argp,
+ 	resp->f_maxfilesize = ~(u32) 0;
+ 	resp->f_properties = NFS3_FSF_DEFAULT;
+ 
+-	nfserr = fh_verify(rqstp, &argp->fh, 0, NFSD_MAY_NOP);
++	nfserr = fh_verify(rqstp, &argp->fh, 0,
++			NFSD_MAY_NOP | NFSD_MAY_BYPASS_GSS_ON_ROOT);
+ 
+ 	/* Check special features of the file system. May request
+ 	 * different read/write sizes for file systems known to have

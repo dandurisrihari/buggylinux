@@ -1,0 +1,199 @@
+commit 636a5d3625993c5ca59abc81794b9ded93cdb740
+Author: Jouni Malinen <jouni.malinen@atheros.com>
+Date:   Thu Mar 19 13:39:22 2009 +0200
+
+    nl80211: Add MLME primitives to support external SME
+    
+    This patch adds new nl80211 commands to allow user space to request
+    authentication and association (and also deauthentication and
+    disassociation). The commands are structured to allow separate
+    authentication and association steps, i.e., the interface between
+    kernel and user space is similar to the MLME SAP interface in IEEE
+    802.11 standard and an user space application takes the role of the
+    SME.
+    
+    The patch introduces MLME-AUTHENTICATE.request,
+    MLME-{,RE}ASSOCIATE.request, MLME-DEAUTHENTICATE.request, and
+    MLME-DISASSOCIATE.request primitives. The authentication and
+    association commands request the actual operations in two steps
+    (assuming the driver supports this; if not, separate authentication
+    step is skipped; this could end up being a separate "connect"
+    command).
+    
+    The initial implementation for mac80211 uses the current
+    net/mac80211/mlme.c for actual sending and processing of management
+    frames and the new nl80211 commands will just stop the current state
+    machine from moving automatically from authentication to association.
+    Future cleanup may move more of the MLME operations into cfg80211.
+    
+    The goal of this design is to provide more control of authentication and
+    association process to user space without having to move the full MLME
+    implementation. This should be enough to allow IEEE 802.11r FT protocol
+    and 802.11s SAE authentication to be implemented. Obviously, this will
+    also bring the extra benefit of not having to use WEXT for association
+    requests with mac80211. An example implementation of a user space SME
+    using the new nl80211 commands is available for wpa_supplicant.
+    
+    This patch is enough to get IEEE 802.11r FT protocol working with
+    over-the-air mechanism (over-the-DS will need additional MLME
+    primitives for handling the FT Action frames).
+    
+    Signed-off-by: Jouni Malinen <j@w1.fi>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/mac80211/cfg.c b/net/mac80211/cfg.c
+index 58693e52d458..223e536e8426 100644
+--- a/net/mac80211/cfg.c
++++ b/net/mac80211/cfg.c
+@@ -1300,6 +1300,142 @@ static int ieee80211_scan(struct wiphy *wiphy,
+ 	return ieee80211_request_scan(sdata, req);
+ }
+ 
++static int ieee80211_auth(struct wiphy *wiphy, struct net_device *dev,
++			  struct cfg80211_auth_request *req)
++{
++	struct ieee80211_sub_if_data *sdata;
++
++	if (!netif_running(dev))
++		return -ENETDOWN;
++
++	sdata = IEEE80211_DEV_TO_SUB_IF(dev);
++
++	if (sdata->vif.type != NL80211_IFTYPE_STATION)
++		return -EOPNOTSUPP;
++
++	switch (req->auth_type) {
++	case NL80211_AUTHTYPE_OPEN_SYSTEM:
++		sdata->u.mgd.auth_algs = IEEE80211_AUTH_ALG_OPEN;
++		break;
++	case NL80211_AUTHTYPE_SHARED_KEY:
++		sdata->u.mgd.auth_algs = IEEE80211_AUTH_ALG_SHARED_KEY;
++		break;
++	case NL80211_AUTHTYPE_FT:
++		sdata->u.mgd.auth_algs = IEEE80211_AUTH_ALG_FT;
++		break;
++	case NL80211_AUTHTYPE_NETWORK_EAP:
++		sdata->u.mgd.auth_algs = IEEE80211_AUTH_ALG_LEAP;
++		break;
++	default:
++		return -EOPNOTSUPP;
++	}
++
++	memcpy(sdata->u.mgd.bssid, req->peer_addr, ETH_ALEN);
++	sdata->u.mgd.flags &= ~IEEE80211_STA_AUTO_BSSID_SEL;
++	sdata->u.mgd.flags |= IEEE80211_STA_BSSID_SET;
++
++	/* TODO: req->chan */
++	sdata->u.mgd.flags |= IEEE80211_STA_AUTO_CHANNEL_SEL;
++
++	if (req->ssid) {
++		sdata->u.mgd.flags |= IEEE80211_STA_SSID_SET;
++		memcpy(sdata->u.mgd.ssid, req->ssid, req->ssid_len);
++		sdata->u.mgd.ssid_len = req->ssid_len;
++		sdata->u.mgd.flags &= ~IEEE80211_STA_AUTO_SSID_SEL;
++	}
++
++	kfree(sdata->u.mgd.sme_auth_ie);
++	sdata->u.mgd.sme_auth_ie = NULL;
++	sdata->u.mgd.sme_auth_ie_len = 0;
++	if (req->ie) {
++		sdata->u.mgd.sme_auth_ie = kmalloc(req->ie_len, GFP_KERNEL);
++		if (sdata->u.mgd.sme_auth_ie == NULL)
++			return -ENOMEM;
++		memcpy(sdata->u.mgd.sme_auth_ie, req->ie, req->ie_len);
++		sdata->u.mgd.sme_auth_ie_len = req->ie_len;
++	}
++
++	sdata->u.mgd.flags |= IEEE80211_STA_EXT_SME;
++	sdata->u.mgd.state = IEEE80211_STA_MLME_DIRECT_PROBE;
++	ieee80211_sta_req_auth(sdata);
++	return 0;
++}
++
++static int ieee80211_assoc(struct wiphy *wiphy, struct net_device *dev,
++			   struct cfg80211_assoc_request *req)
++{
++	struct ieee80211_sub_if_data *sdata;
++	int ret;
++
++	if (!netif_running(dev))
++		return -ENETDOWN;
++
++	sdata = IEEE80211_DEV_TO_SUB_IF(dev);
++
++	if (sdata->vif.type != NL80211_IFTYPE_STATION)
++		return -EOPNOTSUPP;
++
++	if (memcmp(sdata->u.mgd.bssid, req->peer_addr, ETH_ALEN) != 0 ||
++	    !(sdata->u.mgd.flags & IEEE80211_STA_AUTHENTICATED))
++		return -ENOLINK; /* not authenticated */
++
++	sdata->u.mgd.flags &= ~IEEE80211_STA_AUTO_BSSID_SEL;
++	sdata->u.mgd.flags |= IEEE80211_STA_BSSID_SET;
++
++	/* TODO: req->chan */
++	sdata->u.mgd.flags |= IEEE80211_STA_AUTO_CHANNEL_SEL;
++
++	if (req->ssid) {
++		sdata->u.mgd.flags |= IEEE80211_STA_SSID_SET;
++		memcpy(sdata->u.mgd.ssid, req->ssid, req->ssid_len);
++		sdata->u.mgd.ssid_len = req->ssid_len;
++		sdata->u.mgd.flags &= ~IEEE80211_STA_AUTO_SSID_SEL;
++	} else
++		sdata->u.mgd.flags |= IEEE80211_STA_AUTO_SSID_SEL;
++
++	ret = ieee80211_sta_set_extra_ie(sdata, req->ie, req->ie_len);
++	if (ret)
++		return ret;
++
++	sdata->u.mgd.flags |= IEEE80211_STA_EXT_SME;
++	sdata->u.mgd.state = IEEE80211_STA_MLME_ASSOCIATE;
++	ieee80211_sta_req_auth(sdata);
++	return 0;
++}
++
++static int ieee80211_deauth(struct wiphy *wiphy, struct net_device *dev,
++			    struct cfg80211_deauth_request *req)
++{
++	struct ieee80211_sub_if_data *sdata;
++
++	if (!netif_running(dev))
++		return -ENETDOWN;
++
++	sdata = IEEE80211_DEV_TO_SUB_IF(dev);
++	if (sdata->vif.type != NL80211_IFTYPE_STATION)
++		return -EOPNOTSUPP;
++
++	/* TODO: req->ie */
++	return ieee80211_sta_deauthenticate(sdata, req->reason_code);
++}
++
++static int ieee80211_disassoc(struct wiphy *wiphy, struct net_device *dev,
++			      struct cfg80211_disassoc_request *req)
++{
++	struct ieee80211_sub_if_data *sdata;
++
++	if (!netif_running(dev))
++		return -ENETDOWN;
++
++	sdata = IEEE80211_DEV_TO_SUB_IF(dev);
++
++	if (sdata->vif.type != NL80211_IFTYPE_STATION)
++		return -EOPNOTSUPP;
++
++	/* TODO: req->ie */
++	return ieee80211_sta_disassociate(sdata, req->reason_code);
++}
++
+ struct cfg80211_ops mac80211_config_ops = {
+ 	.add_virtual_intf = ieee80211_add_iface,
+ 	.del_virtual_intf = ieee80211_del_iface,
+@@ -1333,4 +1469,8 @@ struct cfg80211_ops mac80211_config_ops = {
+ 	.suspend = ieee80211_suspend,
+ 	.resume = ieee80211_resume,
+ 	.scan = ieee80211_scan,
++	.auth = ieee80211_auth,
++	.assoc = ieee80211_assoc,
++	.deauth = ieee80211_deauth,
++	.disassoc = ieee80211_disassoc,
+ };

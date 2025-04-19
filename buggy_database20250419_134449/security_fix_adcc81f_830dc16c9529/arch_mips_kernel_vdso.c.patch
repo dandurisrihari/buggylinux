@@ -1,0 +1,48 @@
+commit adcc81f148d733b7e8e641300c5590a2cdc13bf3
+Author: Paul Burton <paulburton@kernel.org>
+Date:   Thu Dec 20 17:45:43 2018 +0000
+
+    MIPS: math-emu: Write-protect delay slot emulation pages
+    
+    Mapping the delay slot emulation page as both writeable & executable
+    presents a security risk, in that if an exploit can write to & jump into
+    the page then it can be used as an easy way to execute arbitrary code.
+    
+    Prevent this by mapping the page read-only for userland, and using
+    access_process_vm() with the FOLL_FORCE flag to write to it from
+    mips_dsemul().
+    
+    This will likely be less efficient due to copy_to_user_page() performing
+    cache maintenance on a whole page, rather than a single line as in the
+    previous use of flush_cache_sigtramp(). However this delay slot
+    emulation code ought not to be running in any performance critical paths
+    anyway so this isn't really a problem, and we can probably do better in
+    copy_to_user_page() anyway in future.
+    
+    A major advantage of this approach is that the fix is small & simple to
+    backport to stable kernels.
+    
+    Reported-by: Andy Lutomirski <luto@kernel.org>
+    Signed-off-by: Paul Burton <paul.burton@mips.com>
+    Fixes: 432c6bacbd0c ("MIPS: Use per-mm page to execute branch delay slot instructions")
+    Cc: stable@vger.kernel.org # v4.8+
+    Cc: linux-mips@vger.kernel.org
+    Cc: linux-kernel@vger.kernel.org
+    Cc: Rich Felker <dalias@libc.org>
+    Cc: David Daney <david.daney@cavium.com>
+
+diff --git a/arch/mips/kernel/vdso.c b/arch/mips/kernel/vdso.c
+index 48a9c6b90e07..9df3ebdc7b0f 100644
+--- a/arch/mips/kernel/vdso.c
++++ b/arch/mips/kernel/vdso.c
+@@ -126,8 +126,8 @@ int arch_setup_additional_pages(struct linux_binprm *bprm, int uses_interp)
+ 
+ 	/* Map delay slot emulation page */
+ 	base = mmap_region(NULL, STACK_TOP, PAGE_SIZE,
+-			   VM_READ|VM_WRITE|VM_EXEC|
+-			   VM_MAYREAD|VM_MAYWRITE|VM_MAYEXEC,
++			   VM_READ | VM_EXEC |
++			   VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC,
+ 			   0, NULL);
+ 	if (IS_ERR_VALUE(base)) {
+ 		ret = base;

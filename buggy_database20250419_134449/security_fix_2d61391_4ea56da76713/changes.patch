@@ -1,0 +1,112 @@
+diff --git a/arch/x86/include/asm/kvm_host.h b/arch/x86/include/asm/kvm_host.h
+index 959d66b9be94..8109805b5429 100644
+--- a/arch/x86/include/asm/kvm_host.h
++++ b/arch/x86/include/asm/kvm_host.h
+@@ -1405,7 +1405,7 @@ struct kvm_x86_ops {
+ 	u32 (*get_interrupt_shadow)(struct kvm_vcpu *vcpu);
+ 	void (*patch_hypercall)(struct kvm_vcpu *vcpu,
+ 				unsigned char *hypercall_addr);
+-	void (*inject_irq)(struct kvm_vcpu *vcpu);
++	void (*inject_irq)(struct kvm_vcpu *vcpu, bool reinjected);
+ 	void (*inject_nmi)(struct kvm_vcpu *vcpu);
+ 	void (*queue_exception)(struct kvm_vcpu *vcpu);
+ 	void (*cancel_injection)(struct kvm_vcpu *vcpu);
+diff --git a/arch/x86/kvm/svm/svm.c b/arch/x86/kvm/svm/svm.c
+index 6248967d4a77..0f4d38e5ceab 100644
+--- a/arch/x86/kvm/svm/svm.c
++++ b/arch/x86/kvm/svm/svm.c
+@@ -3435,7 +3435,7 @@ static void svm_inject_nmi(struct kvm_vcpu *vcpu)
+ 	++vcpu->stat.nmi_injections;
+ }
+ 
+-static void svm_inject_irq(struct kvm_vcpu *vcpu)
++static void svm_inject_irq(struct kvm_vcpu *vcpu, bool reinjected)
+ {
+ 	struct vcpu_svm *svm = to_svm(vcpu);
+ 	u32 type;
+@@ -3449,7 +3449,8 @@ static void svm_inject_irq(struct kvm_vcpu *vcpu)
+ 		type = SVM_EVTINJ_TYPE_INTR;
+ 	}
+ 
+-	trace_kvm_inj_virq(vcpu->arch.interrupt.nr);
++	trace_kvm_inj_virq(vcpu->arch.interrupt.nr,
++			   vcpu->arch.interrupt.soft, reinjected);
+ 	++vcpu->stat.irq_injections;
+ 
+ 	svm->vmcb->control.event_inj = vcpu->arch.interrupt.nr |
+diff --git a/arch/x86/kvm/trace.h b/arch/x86/kvm/trace.h
+index 385436d12024..fd28dd40b813 100644
+--- a/arch/x86/kvm/trace.h
++++ b/arch/x86/kvm/trace.h
+@@ -333,18 +333,24 @@ TRACE_EVENT_KVM_EXIT(kvm_exit);
+  * Tracepoint for kvm interrupt injection:
+  */
+ TRACE_EVENT(kvm_inj_virq,
+-	TP_PROTO(unsigned int irq),
+-	TP_ARGS(irq),
++	TP_PROTO(unsigned int vector, bool soft, bool reinjected),
++	TP_ARGS(vector, soft, reinjected),
+ 
+ 	TP_STRUCT__entry(
+-		__field(	unsigned int,	irq		)
++		__field(	unsigned int,	vector		)
++		__field(	bool,		soft		)
++		__field(	bool,		reinjected	)
+ 	),
+ 
+ 	TP_fast_assign(
+-		__entry->irq		= irq;
++		__entry->vector		= vector;
++		__entry->soft		= soft;
++		__entry->reinjected	= reinjected;
+ 	),
+ 
+-	TP_printk("irq %u", __entry->irq)
++	TP_printk("%s 0x%x%s",
++		  __entry->soft ? "Soft/INTn" : "IRQ", __entry->vector,
++		  __entry->reinjected ? " [reinjected]" : "")
+ );
+ 
+ #define EXS(x) { x##_VECTOR, "#" #x }
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index e1aa14743cdb..9714ae95589f 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -4573,13 +4573,13 @@ static void vmx_enable_nmi_window(struct kvm_vcpu *vcpu)
+ 	exec_controls_setbit(to_vmx(vcpu), CPU_BASED_NMI_WINDOW_EXITING);
+ }
+ 
+-static void vmx_inject_irq(struct kvm_vcpu *vcpu)
++static void vmx_inject_irq(struct kvm_vcpu *vcpu, bool reinjected)
+ {
+ 	struct vcpu_vmx *vmx = to_vmx(vcpu);
+ 	uint32_t intr;
+ 	int irq = vcpu->arch.interrupt.nr;
+ 
+-	trace_kvm_inj_virq(irq);
++	trace_kvm_inj_virq(irq, vcpu->arch.interrupt.soft, reinjected);
+ 
+ 	++vcpu->stat.irq_injections;
+ 	if (vmx->rmode.vm86_active) {
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index c9f3ad89bf4c..501606e02688 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -9448,7 +9448,7 @@ static int inject_pending_event(struct kvm_vcpu *vcpu, bool *req_immediate_exit)
+ 			static_call(kvm_x86_inject_nmi)(vcpu);
+ 			can_inject = false;
+ 		} else if (vcpu->arch.interrupt.injected) {
+-			static_call(kvm_x86_inject_irq)(vcpu);
++			static_call(kvm_x86_inject_irq)(vcpu, true);
+ 			can_inject = false;
+ 		}
+ 	}
+@@ -9539,7 +9539,7 @@ static int inject_pending_event(struct kvm_vcpu *vcpu, bool *req_immediate_exit)
+ 			goto out;
+ 		if (r) {
+ 			kvm_queue_interrupt(vcpu, kvm_cpu_get_interrupt(vcpu), false);
+-			static_call(kvm_x86_inject_irq)(vcpu);
++			static_call(kvm_x86_inject_irq)(vcpu, false);
+ 			WARN_ON(static_call(kvm_x86_interrupt_allowed)(vcpu, true) < 0);
+ 		}
+ 		if (kvm_cpu_has_injectable_intr(vcpu))

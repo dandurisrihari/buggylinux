@@ -1,0 +1,54 @@
+diff --git a/arch/x86/kvm/svm/svm.c b/arch/x86/kvm/svm/svm.c
+index 30681633193e..fdea0994e94f 100644
+--- a/arch/x86/kvm/svm/svm.c
++++ b/arch/x86/kvm/svm/svm.c
+@@ -2357,11 +2357,8 @@ static int xsetbv_interception(struct vcpu_svm *svm)
+ 	u64 new_bv = kvm_read_edx_eax(&svm->vcpu);
+ 	u32 index = kvm_rcx_read(&svm->vcpu);
+ 
+-	if (kvm_set_xcr(&svm->vcpu, index, new_bv) == 0) {
+-		return kvm_skip_emulated_instruction(&svm->vcpu);
+-	}
+-
+-	return 1;
++	int err = kvm_set_xcr(&svm->vcpu, index, new_bv);
++	return kvm_complete_insn_gp(&svm->vcpu, err);
+ }
+ 
+ static int rdpru_interception(struct vcpu_svm *svm)
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index 0cd24ae2db08..d995f47a08ef 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -5223,9 +5223,8 @@ static int handle_xsetbv(struct kvm_vcpu *vcpu)
+ 	u64 new_bv = kvm_read_edx_eax(vcpu);
+ 	u32 index = kvm_rcx_read(vcpu);
+ 
+-	if (kvm_set_xcr(vcpu, index, new_bv) == 0)
+-		return kvm_skip_emulated_instruction(vcpu);
+-	return 1;
++	int err = kvm_set_xcr(vcpu, index, new_bv);
++	return kvm_complete_insn_gp(vcpu, err);
+ }
+ 
+ static int handle_apic_access(struct kvm_vcpu *vcpu)
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index a28068075f8b..912fc418ce99 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -986,12 +986,10 @@ static int __kvm_set_xcr(struct kvm_vcpu *vcpu, u32 index, u64 xcr)
+ 
+ int kvm_set_xcr(struct kvm_vcpu *vcpu, u32 index, u64 xcr)
+ {
+-	if (static_call(kvm_x86_get_cpl)(vcpu) != 0 ||
+-	    __kvm_set_xcr(vcpu, index, xcr)) {
+-		kvm_inject_gp(vcpu, 0);
+-		return 1;
+-	}
+-	return 0;
++	if (static_call(kvm_x86_get_cpl)(vcpu) == 0)
++		return __kvm_set_xcr(vcpu, index, xcr);
++
++	return 1;
+ }
+ EXPORT_SYMBOL_GPL(kvm_set_xcr);

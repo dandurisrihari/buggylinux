@@ -1,0 +1,45 @@
+commit d686026b1e6ed4ea27d630d8f54f9a694db088b2
+Author: Gustavo A. R. Silva <gustavo@embeddedor.com>
+Date:   Fri Dec 21 15:41:17 2018 -0600
+
+    phonet: af_phonet: Fix Spectre v1 vulnerability
+    
+    protocol is indirectly controlled by user-space, hence leading to
+    a potential exploitation of the Spectre variant 1 vulnerability.
+    
+    This issue was detected with the help of Smatch:
+    
+    net/phonet/af_phonet.c:48 phonet_proto_get() warn: potential spectre issue 'proto_tab' [w] (local cap)
+    
+    Fix this by sanitizing protocol before using it to index proto_tab.
+    
+    Notice that given that speculation windows are large, the policy is
+    to kill the speculation on the first load and not worry if it can be
+    completed with a dependent load/store [1].
+    
+    [1] https://marc.info/?l=linux-kernel&m=152449131114778&w=2
+    
+    Signed-off-by: Gustavo A. R. Silva <gustavo@embeddedor.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/phonet/af_phonet.c b/net/phonet/af_phonet.c
+index 3b0ef691f5b1..d4b2abd78858 100644
+--- a/net/phonet/af_phonet.c
++++ b/net/phonet/af_phonet.c
+@@ -34,6 +34,8 @@
+ #include <net/phonet/phonet.h>
+ #include <net/phonet/pn_dev.h>
+ 
++#include <linux/nospec.h>
++
+ /* Transport protocol registration */
+ static const struct phonet_protocol *proto_tab[PHONET_NPROTO] __read_mostly;
+ 
+@@ -43,6 +45,7 @@ static const struct phonet_protocol *phonet_proto_get(unsigned int protocol)
+ 
+ 	if (protocol >= PHONET_NPROTO)
+ 		return NULL;
++	protocol = array_index_nospec(protocol, PHONET_NPROTO);
+ 
+ 	rcu_read_lock();
+ 	pp = rcu_dereference(proto_tab[protocol]);

@@ -1,0 +1,55 @@
+commit 2f568dbd6b944c2e8c0c54b53c2211c23995e6a4
+Author: Christian König <christian.koenig@amd.com>
+Date:   Tue Feb 23 12:36:59 2016 +0100
+
+    drm/amdgpu: move get_user_pages out of amdgpu_ttm_tt_pin_userptr v6
+    
+    That avoids lock inversion between the BO reservation lock
+    and the anon_vma lock.
+    
+    v2:
+    * Changed amdgpu_bo_list_entry.user_pages to an array of pointers
+    * Lock mmap_sem only for get_user_pages
+    * Added invalidation of unbound userpointer BOs
+    * Fixed memory leak and page reference leak
+    
+    v3 (chk):
+    * Revert locking mmap_sem only for_get user_pages
+    * Revert adding invalidation of unbound userpointer BOs
+    * Sanitize and fix error handling
+    
+    v4 (chk):
+    * Init userpages pointer everywhere.
+    * Fix error handling when get_user_pages() fails.
+    * Add invalidation of unbound userpointer BOs again.
+    
+    v5 (chk):
+    * Add maximum number of tries.
+    
+    v6 (chk):
+    * Fix error handling when we run out of tries.
+    
+    Signed-off-by: Christian König <christian.koenig@amd.com>
+    Signed-off-by: Felix Kuehling <Felix.Kuehling@amd.com>
+    Reviewed-by: Felix Kuehling <Felix.Kuehling@amd.com> (v4)
+    Acked-by: Alex Deucher <alexander.deucher@amd.com>
+
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_vm.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_vm.c
+index a0896c761108..cc967b44f104 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_vm.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_vm.c
+@@ -95,6 +95,7 @@ void amdgpu_vm_get_pd_bo(struct amdgpu_vm *vm,
+ 	entry->priority = 0;
+ 	entry->tv.bo = &vm->page_directory->tbo;
+ 	entry->tv.shared = true;
++	entry->user_pages = NULL;
+ 	list_add(&entry->tv.head, validated);
+ }
+ 
+@@ -1186,6 +1187,7 @@ int amdgpu_vm_bo_map(struct amdgpu_device *adev,
+ 		entry->priority = 0;
+ 		entry->tv.bo = &entry->robj->tbo;
+ 		entry->tv.shared = true;
++		entry->user_pages = NULL;
+ 		vm->page_tables[pt_idx].addr = 0;
+ 	}

@@ -1,0 +1,117 @@
+commit e813e65038389b66d2f8dd87588694caf8dc2923
+Merge: ccaaaf6fe5a5 4cbc418a44d5
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Fri Jan 31 09:30:41 2020 -0800
+
+    Merge tag 'kvm-5.6-1' of git://git.kernel.org/pub/scm/virt/kvm/kvm
+    
+    Pull KVM updates from Paolo Bonzini:
+     "This is the first batch of KVM changes.
+    
+      ARM:
+       - cleanups and corner case fixes.
+    
+      PPC:
+       - Bugfixes
+    
+      x86:
+       - Support for mapping DAX areas with large nested page table entries.
+    
+       - Cleanups and bugfixes here too. A particularly important one is a
+         fix for FPU load when the thread has TIF_NEED_FPU_LOAD. There is
+         also a race condition which could be used in guest userspace to
+         exploit the guest kernel, for which the embargo expired today.
+    
+       - Fast path for IPI delivery vmexits, shaving about 200 clock cycles
+         from IPI latency.
+    
+       - Protect against "Spectre-v1/L1TF" (bring data in the cache via
+         speculative out of bound accesses, use L1TF on the sibling
+         hyperthread to read it), which unfortunately is an even bigger
+         whack-a-mole game than SpectreV1.
+    
+      Sean continues his mission to rewrite KVM. In addition to a sizable
+      number of x86 patches, this time he contributed a pretty large
+      refactoring of vCPU creation that affects all architectures but should
+      not have any visible effect.
+    
+      s390 will come next week together with some more x86 patches"
+    
+    * tag 'kvm-5.6-1' of git://git.kernel.org/pub/scm/virt/kvm/kvm: (204 commits)
+      x86/KVM: Clean up host's steal time structure
+      x86/KVM: Make sure KVM_VCPU_FLUSH_TLB flag is not missed
+      x86/kvm: Cache gfn to pfn translation
+      x86/kvm: Introduce kvm_(un)map_gfn()
+      x86/kvm: Be careful not to clear KVM_VCPU_FLUSH_TLB bit
+      KVM: PPC: Book3S PR: Fix -Werror=return-type build failure
+      KVM: PPC: Book3S HV: Release lock on page-out failure path
+      KVM: arm64: Treat emulated TVAL TimerValue as a signed 32-bit integer
+      KVM: arm64: pmu: Only handle supported event counters
+      KVM: arm64: pmu: Fix chained SW_INCR counters
+      KVM: arm64: pmu: Don't mark a counter as chained if the odd one is disabled
+      KVM: arm64: pmu: Don't increment SW_INCR if PMCR.E is unset
+      KVM: x86: Use a typedef for fastop functions
+      KVM: X86: Add 'else' to unify fastop and execute call path
+      KVM: x86: inline memslot_valid_for_gpte
+      KVM: x86/mmu: Use huge pages for DAX-backed files
+      KVM: x86/mmu: Remove lpage_is_disallowed() check from set_spte()
+      KVM: x86/mmu: Fold max_mapping_level() into kvm_mmu_hugepage_adjust()
+      KVM: x86/mmu: Zap any compound page when collapsing sptes
+      KVM: x86/mmu: Remove obsolete gfn restoration in FNAME(fetch)
+      ...
+
+diff --cc arch/x86/include/asm/vmx.h
+index 9fbba31be825,d716fe938fc0..d380b3b7ddd9
+--- a/arch/x86/include/asm/vmx.h
++++ b/arch/x86/include/asm/vmx.h
+@@@ -22,27 -19,27 +22,27 @@@
+  /*
+   * Definitions of Primary Processor-Based VM-Execution Controls.
+   */
+- #define CPU_BASED_VIRTUAL_INTR_PENDING          VMCS_CONTROL_BIT(VIRTUAL_INTR_PENDING)
+- #define CPU_BASED_USE_TSC_OFFSETING             VMCS_CONTROL_BIT(TSC_OFFSETTING)
+ -#define CPU_BASED_INTR_WINDOW_EXITING           0x00000004
+ -#define CPU_BASED_USE_TSC_OFFSETTING            0x00000008
+ -#define CPU_BASED_HLT_EXITING                   0x00000080
+ -#define CPU_BASED_INVLPG_EXITING                0x00000200
+ -#define CPU_BASED_MWAIT_EXITING                 0x00000400
+ -#define CPU_BASED_RDPMC_EXITING                 0x00000800
+ -#define CPU_BASED_RDTSC_EXITING                 0x00001000
+ -#define CPU_BASED_CR3_LOAD_EXITING		0x00008000
+ -#define CPU_BASED_CR3_STORE_EXITING		0x00010000
+ -#define CPU_BASED_CR8_LOAD_EXITING              0x00080000
+ -#define CPU_BASED_CR8_STORE_EXITING             0x00100000
+ -#define CPU_BASED_TPR_SHADOW                    0x00200000
+ -#define CPU_BASED_NMI_WINDOW_EXITING		0x00400000
+ -#define CPU_BASED_MOV_DR_EXITING                0x00800000
+ -#define CPU_BASED_UNCOND_IO_EXITING             0x01000000
+ -#define CPU_BASED_USE_IO_BITMAPS                0x02000000
+ -#define CPU_BASED_MONITOR_TRAP_FLAG             0x08000000
+ -#define CPU_BASED_USE_MSR_BITMAPS               0x10000000
+ -#define CPU_BASED_MONITOR_EXITING               0x20000000
+ -#define CPU_BASED_PAUSE_EXITING                 0x40000000
+ -#define CPU_BASED_ACTIVATE_SECONDARY_CONTROLS   0x80000000
+++#define CPU_BASED_INTR_WINDOW_EXITING           VMCS_CONTROL_BIT(VIRTUAL_INTR_PENDING)
+++#define CPU_BASED_USE_TSC_OFFSETTING            VMCS_CONTROL_BIT(TSC_OFFSETTING)
+ +#define CPU_BASED_HLT_EXITING                   VMCS_CONTROL_BIT(HLT_EXITING)
+ +#define CPU_BASED_INVLPG_EXITING                VMCS_CONTROL_BIT(INVLPG_EXITING)
+ +#define CPU_BASED_MWAIT_EXITING                 VMCS_CONTROL_BIT(MWAIT_EXITING)
+ +#define CPU_BASED_RDPMC_EXITING                 VMCS_CONTROL_BIT(RDPMC_EXITING)
+ +#define CPU_BASED_RDTSC_EXITING                 VMCS_CONTROL_BIT(RDTSC_EXITING)
+ +#define CPU_BASED_CR3_LOAD_EXITING		VMCS_CONTROL_BIT(CR3_LOAD_EXITING)
+ +#define CPU_BASED_CR3_STORE_EXITING		VMCS_CONTROL_BIT(CR3_STORE_EXITING)
+ +#define CPU_BASED_CR8_LOAD_EXITING              VMCS_CONTROL_BIT(CR8_LOAD_EXITING)
+ +#define CPU_BASED_CR8_STORE_EXITING             VMCS_CONTROL_BIT(CR8_STORE_EXITING)
+ +#define CPU_BASED_TPR_SHADOW                    VMCS_CONTROL_BIT(VIRTUAL_TPR)
+- #define CPU_BASED_VIRTUAL_NMI_PENDING		VMCS_CONTROL_BIT(VIRTUAL_NMI_PENDING)
+++#define CPU_BASED_NMI_WINDOW_EXITING		VMCS_CONTROL_BIT(VIRTUAL_NMI_PENDING)
+ +#define CPU_BASED_MOV_DR_EXITING                VMCS_CONTROL_BIT(MOV_DR_EXITING)
+ +#define CPU_BASED_UNCOND_IO_EXITING             VMCS_CONTROL_BIT(UNCOND_IO_EXITING)
+ +#define CPU_BASED_USE_IO_BITMAPS                VMCS_CONTROL_BIT(USE_IO_BITMAPS)
+ +#define CPU_BASED_MONITOR_TRAP_FLAG             VMCS_CONTROL_BIT(MONITOR_TRAP_FLAG)
+ +#define CPU_BASED_USE_MSR_BITMAPS               VMCS_CONTROL_BIT(USE_MSR_BITMAPS)
+ +#define CPU_BASED_MONITOR_EXITING               VMCS_CONTROL_BIT(MONITOR_EXITING)
+ +#define CPU_BASED_PAUSE_EXITING                 VMCS_CONTROL_BIT(PAUSE_EXITING)
+ +#define CPU_BASED_ACTIVATE_SECONDARY_CONTROLS   VMCS_CONTROL_BIT(SEC_CONTROLS)
+  
+  #define CPU_BASED_ALWAYSON_WITHOUT_TRUE_MSR	0x0401e172

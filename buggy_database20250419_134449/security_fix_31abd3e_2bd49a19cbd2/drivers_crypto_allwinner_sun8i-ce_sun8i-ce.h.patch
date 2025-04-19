@@ -1,0 +1,57 @@
+commit 31abd3eb3df6bd520fece598e31047a0f377953e
+Author: Ard Biesheuvel <ardb@kernel.org>
+Date:   Tue Jul 7 09:31:55 2020 +0300
+
+    crypto: sun8i-ce - permit asynchronous skcipher as fallback
+    
+    Even though the sun8i-ce driver implements asynchronous versions of
+    ecb(aes) and cbc(aes), the fallbacks it allocates are required to be
+    synchronous. Given that SIMD based software implementations are usually
+    asynchronous as well, even though they rarely complete asynchronously
+    (this typically only happens in cases where the request was made from
+    softirq context, while SIMD was already in use in the task context that
+    it interrupted), these implementations are disregarded, and either the
+    generic C version or another table based version implemented in assembler
+    is selected instead.
+    
+    Since falling back to synchronous AES is not only a performance issue, but
+    potentially a security issue as well (due to the fact that table based AES
+    is not time invariant), let's fix this, by allocating an ordinary skcipher
+    as the fallback, and invoke it with the completion routine that was given
+    to the outer request.
+    
+    Signed-off-by: Ard Biesheuvel <ardb@kernel.org>
+    Acked-by: Corentin Labbe <clabbe.montjoie@gmail.com>
+    Tested-by: Corentin Labbe <clabbe.montjoie@gmail.com>
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+diff --git a/drivers/crypto/allwinner/sun8i-ce/sun8i-ce.h b/drivers/crypto/allwinner/sun8i-ce/sun8i-ce.h
+index 0e9eac397e1b..963645fe4adb 100644
+--- a/drivers/crypto/allwinner/sun8i-ce/sun8i-ce.h
++++ b/drivers/crypto/allwinner/sun8i-ce/sun8i-ce.h
+@@ -181,12 +181,14 @@ struct sun8i_ce_dev {
+ 
+ /*
+  * struct sun8i_cipher_req_ctx - context for a skcipher request
+- * @op_dir:	direction (encrypt vs decrypt) for this request
+- * @flow:	the flow to use for this request
++ * @op_dir:		direction (encrypt vs decrypt) for this request
++ * @flow:		the flow to use for this request
++ * @fallback_req:	request struct for invoking the fallback skcipher TFM
+  */
+ struct sun8i_cipher_req_ctx {
+ 	u32 op_dir;
+ 	int flow;
++	struct skcipher_request fallback_req;   // keep at the end
+ };
+ 
+ /*
+@@ -202,7 +204,7 @@ struct sun8i_cipher_tfm_ctx {
+ 	u32 *key;
+ 	u32 keylen;
+ 	struct sun8i_ce_dev *ce;
+-	struct crypto_sync_skcipher *fallback_tfm;
++	struct crypto_skcipher *fallback_tfm;
+ };
+ 
+ /*

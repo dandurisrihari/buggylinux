@@ -1,0 +1,43 @@
+commit 291dc7c0996b09a7c58b2cf6e9cc3495123a607e
+Author: Jan Glauber <jan.glauber@gmail.com>
+Date:   Thu Mar 6 19:52:00 2008 +0800
+
+    [CRYPTO] sha512: Hardware acceleration for s390
+    
+    Exploit the System z10 hardware acceleration for SHA512.
+    
+    Signed-off-by: Jan Glauber <jang@linux.vnet.ibm.com>
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+diff --git a/arch/s390/crypto/sha_common.c b/arch/s390/crypto/sha_common.c
+index 80b6f2ba005e..9d6eb8c3d37e 100644
+--- a/arch/s390/crypto/sha_common.c
++++ b/arch/s390/crypto/sha_common.c
+@@ -59,12 +59,15 @@ void s390_sha_final(struct crypto_tfm *tfm, u8 *out)
+ 	struct s390_sha_ctx *ctx = crypto_tfm_ctx(tfm);
+ 	unsigned int bsize = crypto_tfm_alg_blocksize(tfm);
+ 	u64 bits;
+-	unsigned int index, end;
++	unsigned int index, end, plen;
+ 	int ret;
+ 
++	/* SHA-512 uses 128 bit padding length */
++	plen = (bsize > SHA256_BLOCK_SIZE) ? 16 : 8;
++
+ 	/* must perform manual padding */
+ 	index = ctx->count & (bsize - 1);
+-	end = (index < bsize - 8) ? bsize : (2 * bsize);
++	end = (index < bsize - plen) ? bsize : (2 * bsize);
+ 
+ 	/* start pad with 1 */
+ 	ctx->buf[index] = 0x80;
+@@ -73,6 +76,10 @@ void s390_sha_final(struct crypto_tfm *tfm, u8 *out)
+ 	/* pad with zeros */
+ 	memset(ctx->buf + index, 0x00, end - index - 8);
+ 
++	/*
++	 * Append message length. Well, SHA-512 wants a 128 bit lenght value,
++	 * nevertheless we use u64, should be enough for now...
++	 */
+ 	bits = ctx->count * 8;
+ 	memcpy(ctx->buf + end - 8, &bits, sizeof(bits));

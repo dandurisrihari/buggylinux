@@ -1,0 +1,102 @@
+commit 519783935451764b397f2a712de5ea778ff77fdf
+Author: Fei Li <sherrylf@linux.vnet.ibm.com>
+Date:   Fri Feb 17 17:06:26 2017 +0800
+
+    KVM: s390: introduce ais mode modify function
+    
+    Provide an interface for userspace to modify AIS
+    (adapter-interruption-suppression) mode state, and add documentation
+    for the interface. Allowed target modes are ALL-Interruptions mode
+    and SINGLE-Interruption mode.
+    
+    We introduce the 'simm' and 'nimm' fields in kvm_s390_float_interrupt
+    to store interruption modes for each ISC. Each bit in 'simm' and
+    'nimm' targets to one ISC, and collaboratively indicate three modes:
+    ALL-Interruptions, SINGLE-Interruption and NO-Interruptions. This
+    interface can initiate most transitions between the states; transition
+    from SINGLE-Interruption to NO-Interruptions via adapter interrupt
+    injection will be introduced in a following patch. The meaningful
+    combinations are as follows:
+    
+        interruption mode | simm bit | nimm bit
+        ------------------|----------|----------
+                 ALL      |    0     |     0
+               SINGLE     |    1     |     0
+                 NO       |    1     |     1
+    
+    Besides, add tracepoint to track AIS mode transitions.
+    
+    Co-Authored-By: Yi Min Zhao <zyimin@linux.vnet.ibm.com>
+    Signed-off-by: Yi Min Zhao <zyimin@linux.vnet.ibm.com>
+    Signed-off-by: Fei Li <sherrylf@linux.vnet.ibm.com>
+    Reviewed-by: Cornelia Huck <cornelia.huck@de.ibm.com>
+    Signed-off-by: Christian Borntraeger <borntraeger@de.ibm.com>
+
+diff --git a/arch/s390/kvm/interrupt.c b/arch/s390/kvm/interrupt.c
+index dba51ad62570..96b689e48c08 100644
+--- a/arch/s390/kvm/interrupt.c
++++ b/arch/s390/kvm/interrupt.c
+@@ -2152,6 +2152,45 @@ static int clear_io_irq(struct kvm *kvm, struct kvm_device_attr *attr)
+ 	return 0;
+ }
+ 
++static int modify_ais_mode(struct kvm *kvm, struct kvm_device_attr *attr)
++{
++	struct kvm_s390_float_interrupt *fi = &kvm->arch.float_int;
++	struct kvm_s390_ais_req req;
++	int ret = 0;
++
++	if (!fi->ais_enabled)
++		return -ENOTSUPP;
++
++	if (copy_from_user(&req, (void __user *)attr->addr, sizeof(req)))
++		return -EFAULT;
++
++	if (req.isc > MAX_ISC)
++		return -EINVAL;
++
++	trace_kvm_s390_modify_ais_mode(req.isc,
++				       (fi->simm & AIS_MODE_MASK(req.isc)) ?
++				       (fi->nimm & AIS_MODE_MASK(req.isc)) ?
++				       2 : KVM_S390_AIS_MODE_SINGLE :
++				       KVM_S390_AIS_MODE_ALL, req.mode);
++
++	mutex_lock(&fi->ais_lock);
++	switch (req.mode) {
++	case KVM_S390_AIS_MODE_ALL:
++		fi->simm &= ~AIS_MODE_MASK(req.isc);
++		fi->nimm &= ~AIS_MODE_MASK(req.isc);
++		break;
++	case KVM_S390_AIS_MODE_SINGLE:
++		fi->simm |= AIS_MODE_MASK(req.isc);
++		fi->nimm &= ~AIS_MODE_MASK(req.isc);
++		break;
++	default:
++		ret = -EINVAL;
++	}
++	mutex_unlock(&fi->ais_lock);
++
++	return ret;
++}
++
+ static int flic_set_attr(struct kvm_device *dev, struct kvm_device_attr *attr)
+ {
+ 	int r = 0;
+@@ -2188,6 +2227,9 @@ static int flic_set_attr(struct kvm_device *dev, struct kvm_device_attr *attr)
+ 	case KVM_DEV_FLIC_CLEAR_IO_IRQ:
+ 		r = clear_io_irq(dev->kvm, attr);
+ 		break;
++	case KVM_DEV_FLIC_AISM:
++		r = modify_ais_mode(dev->kvm, attr);
++		break;
+ 	default:
+ 		r = -EINVAL;
+ 	}
+@@ -2207,6 +2249,7 @@ static int flic_has_attr(struct kvm_device *dev,
+ 	case KVM_DEV_FLIC_ADAPTER_REGISTER:
+ 	case KVM_DEV_FLIC_ADAPTER_MODIFY:
+ 	case KVM_DEV_FLIC_CLEAR_IO_IRQ:
++	case KVM_DEV_FLIC_AISM:
+ 		return 0;
+ 	}
+ 	return -ENXIO;

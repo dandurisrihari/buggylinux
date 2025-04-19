@@ -1,0 +1,52 @@
+commit 17a9422de78c3a59b490b400f555635c477f1476
+Author: Alan Brady <alan.brady@intel.com>
+Date:   Wed Oct 11 14:49:43 2017 -0700
+
+    i40e/i40evf: don't trust VF to reset itself
+    
+    When using 'ethtool -L' on a VF to change number of requested queues
+    from PF, we shouldn't trust the VF to reset itself after making the
+    request.  Doing it that way opens the door for a potentially malicious
+    VF to do nasty things to the PF which should never be the case.
+    
+    This makes it such that after VF makes a successful request, PF will
+    then reset the VF to institute required changes.  Only if the request
+    fails will PF send a message back to VF letting it know the request was
+    unsuccessful.
+    
+    Testing-hints:
+    There should be no real functional changes.  This is simply hardening
+    against a potentially malicious VF.
+    
+    Signed-off-by: Alan Brady <alan.brady@intel.com>
+    Tested-by: Andrew Bowers <andrewx.bowers@intel.com>
+    Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+
+diff --git a/drivers/net/ethernet/intel/i40e/i40e_virtchnl_pf.c b/drivers/net/ethernet/intel/i40e/i40e_virtchnl_pf.c
+index ce0981e2f605..f8a794b72462 100644
+--- a/drivers/net/ethernet/intel/i40e/i40e_virtchnl_pf.c
++++ b/drivers/net/ethernet/intel/i40e/i40e_virtchnl_pf.c
+@@ -2045,8 +2045,9 @@ static int i40e_vc_disable_queues_msg(struct i40e_vf *vf, u8 *msg, u16 msglen)
+  * @msglen: msg length
+  *
+  * VFs get a default number of queues but can use this message to request a
+- * different number.  Will respond with either the number requested or the
+- * maximum we can support.
++ * different number.  If the request is successful, PF will reset the VF and
++ * return 0.  If unsuccessful, PF will send message informing VF of number of
++ * available queues and return result of sending VF a message.
+  **/
+ static int i40e_vc_request_queues_msg(struct i40e_vf *vf, u8 *msg, int msglen)
+ {
+@@ -2077,7 +2078,11 @@ static int i40e_vc_request_queues_msg(struct i40e_vf *vf, u8 *msg, int msglen)
+ 			 pf->queues_left);
+ 		vfres->num_queue_pairs = pf->queues_left + cur_pairs;
+ 	} else {
++		/* successful request */
+ 		vf->num_req_queues = req_pairs;
++		i40e_vc_notify_vf_reset(vf);
++		i40e_reset_vf(vf, false);
++		return 0;
+ 	}
+ 
+ 	return i40e_vc_send_msg_to_vf(vf, VIRTCHNL_OP_REQUEST_QUEUES, 0,

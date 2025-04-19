@@ -1,0 +1,127 @@
+commit f473e5f467f6049370575390b08dc42131315d60
+Author: Mukesh Ojha <quic_mojha@quicinc.com>
+Date:   Tue Jul 17 12:01:29 2018 +0530
+
+    time: Fix extra sleeptime injection when suspend fails
+    
+    Currently, there exists a corner case assuming when there is
+    only one clocksource e.g RTC, and system failed to go to
+    suspend mode. While resume rtc_resume() injects the sleeptime
+    as timekeeping_rtc_skipresume() returned 'false' (default value
+    of sleeptime_injected) due to which we can see mismatch in
+    timestamps.
+    
+    This issue can also come in a system where more than one
+    clocksource are present and very first suspend fails.
+    
+    Success case:
+    ------------
+                                            {sleeptime_injected=false}
+    rtc_suspend() => timekeeping_suspend() => timekeeping_resume() =>
+    
+    (sleeptime injected)
+     rtc_resume()
+    
+    Failure case:
+    ------------
+             {failure in sleep path} {sleeptime_injected=false}
+    rtc_suspend()     =>          rtc_resume()
+    
+    {sleeptime injected again which was not required as the suspend failed}
+    
+    Fix this by handling the boolean logic properly.
+    
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Ingo Molnar <mingo@kernel.org>
+    Cc: Miroslav Lichvar <mlichvar@redhat.com>
+    Cc: Richard Cochran <richardcochran@gmail.com>
+    Cc: Prarit Bhargava <prarit@redhat.com>
+    Cc: Stephen Boyd <sboyd@kernel.org>
+    Originally-by: Thomas Gleixner <tglx@linutronix.de>
+    Signed-off-by: Mukesh Ojha <mojha@codeaurora.org>
+    Signed-off-by: John Stultz <john.stultz@linaro.org>
+
+diff --git a/kernel/time/timekeeping.c b/kernel/time/timekeeping.c
+index 7033ac1fee65..19414b16cf9e 100644
+--- a/kernel/time/timekeeping.c
++++ b/kernel/time/timekeeping.c
+@@ -1519,8 +1519,20 @@ void __weak read_boot_clock64(struct timespec64 *ts)
+ 	ts->tv_nsec = 0;
+ }
+ 
+-/* Flag for if timekeeping_resume() has injected sleeptime */
+-static bool sleeptime_injected;
++/*
++ * Flag reflecting whether timekeeping_resume() has injected sleeptime.
++ *
++ * The flag starts of false and is only set when a suspend reaches
++ * timekeeping_suspend(), timekeeping_resume() sets it to false when the
++ * timekeeper clocksource is not stopping across suspend and has been
++ * used to update sleep time. If the timekeeper clocksource has stopped
++ * then the flag stays true and is used by the RTC resume code to decide
++ * whether sleeptime must be injected and if so the flag gets false then.
++ *
++ * If a suspend fails before reaching timekeeping_resume() then the flag
++ * stays false and prevents erroneous sleeptime injection.
++ */
++static bool suspend_timing_needed;
+ 
+ /* Flag for if there is a persistent clock on this platform */
+ static bool persistent_clock_exists;
+@@ -1619,7 +1631,7 @@ static void __timekeeping_inject_sleeptime(struct timekeeper *tk,
+  */
+ bool timekeeping_rtc_skipresume(void)
+ {
+-	return sleeptime_injected;
++	return !suspend_timing_needed;
+ }
+ 
+ /**
+@@ -1655,6 +1667,8 @@ void timekeeping_inject_sleeptime64(const struct timespec64 *delta)
+ 	raw_spin_lock_irqsave(&timekeeper_lock, flags);
+ 	write_seqcount_begin(&tk_core.seq);
+ 
++	suspend_timing_needed = false;
++
+ 	timekeeping_forward_now(tk);
+ 
+ 	__timekeeping_inject_sleeptime(tk, delta);
+@@ -1679,8 +1693,8 @@ void timekeeping_resume(void)
+ 	unsigned long flags;
+ 	struct timespec64 ts_new, ts_delta;
+ 	u64 cycle_now;
++	bool inject_sleeptime = false;
+ 
+-	sleeptime_injected = false;
+ 	read_persistent_clock64(&ts_new);
+ 
+ 	clockevents_resume();
+@@ -1710,14 +1724,16 @@ void timekeeping_resume(void)
+ 					      tk->tkr_mono.mask);
+ 		nsec = mul_u64_u32_shr(cyc_delta, clock->mult, clock->shift);
+ 		ts_delta = ns_to_timespec64(nsec);
+-		sleeptime_injected = true;
++		inject_sleeptime = true;
+ 	} else if (timespec64_compare(&ts_new, &timekeeping_suspend_time) > 0) {
+ 		ts_delta = timespec64_sub(ts_new, timekeeping_suspend_time);
+-		sleeptime_injected = true;
++		inject_sleeptime = true;
+ 	}
+ 
+-	if (sleeptime_injected)
++	if (inject_sleeptime) {
++		suspend_timing_needed = false;
+ 		__timekeeping_inject_sleeptime(tk, &ts_delta);
++	}
+ 
+ 	/* Re-base the last cycle value */
+ 	tk->tkr_mono.cycle_last = cycle_now;
+@@ -1752,6 +1768,8 @@ int timekeeping_suspend(void)
+ 	if (timekeeping_suspend_time.tv_sec || timekeeping_suspend_time.tv_nsec)
+ 		persistent_clock_exists = true;
+ 
++	suspend_timing_needed = true;
++
+ 	raw_spin_lock_irqsave(&timekeeper_lock, flags);
+ 	write_seqcount_begin(&tk_core.seq);
+ 	timekeeping_forward_now(tk);

@@ -1,0 +1,38 @@
+commit f74f94140fa50f768e61d626de4c146502b9102d
+Author: Paolo Bonzini <pbonzini@redhat.com>
+Date:   Thu Apr 23 13:22:27 2020 -0400
+
+    KVM: SVM: introduce nested_run_pending
+    
+    We want to inject vmexits immediately from svm_check_nested_events,
+    so that the interrupt/NMI window requests happen in inject_pending_event
+    right after it returns.
+    
+    This however has the same issue as in vmx_check_nested_events, so
+    introduce a nested_run_pending flag with the exact same purpose
+    of delaying vmexit injection after the vmentry.
+    
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/svm/nested.c b/arch/x86/kvm/svm/nested.c
+index 1429f506fe9e..7a724ea3d994 100644
+--- a/arch/x86/kvm/svm/nested.c
++++ b/arch/x86/kvm/svm/nested.c
+@@ -414,6 +414,7 @@ int nested_svm_vmrun(struct vcpu_svm *svm)
+ 
+ 	copy_vmcb_control_area(hsave, vmcb);
+ 
++	svm->nested.nested_run_pending = 1;
+ 	enter_svm_guest_mode(svm, vmcb_gpa, nested_vmcb, &map);
+ 
+ 	if (!nested_svm_vmrun_msrpm(svm)) {
+@@ -815,7 +816,8 @@ static int svm_check_nested_events(struct kvm_vcpu *vcpu)
+ {
+ 	struct vcpu_svm *svm = to_svm(vcpu);
+ 	bool block_nested_events =
+-		kvm_event_needs_reinjection(vcpu) || svm->nested.exit_required;
++		kvm_event_needs_reinjection(vcpu) || svm->nested.exit_required ||
++		svm->nested.nested_run_pending;
+ 
+ 	if (kvm_cpu_has_interrupt(vcpu) && nested_exit_on_intr(svm)) {
+ 		if (block_nested_events)

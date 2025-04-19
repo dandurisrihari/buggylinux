@@ -1,0 +1,47 @@
+commit 745ff82199b1d68585040a36f2f8c3a7987274cd
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Wed Feb 26 17:25:36 2025 -0800
+
+    KVM: SVM: Require AP's "requested" SEV_FEATURES to match KVM's view
+    
+    When handling an "AP Create" event, return an error if the "requested" SEV
+    features for the vCPU don't exactly match KVM's view of the VM-scoped
+    features.  There is no known use case for heterogeneous SEV features across
+    vCPUs, and while KVM can't actually enforce an exact match since the value
+    in RAX isn't guaranteed to match what the guest shoved into the VMSA, KVM
+    can at least avoid knowingly letting the guest run in an unsupported state.
+    
+    E.g. if a VM is created with DebugSwap disabled, KVM will intercept #DBs
+    and DRs for all vCPUs, even if an AP is "created" with DebugSwap enabled in
+    its VMSA.
+    
+    Note, the GHCB spec only "requires" that "AP use the same interrupt
+    injection mechanism as the BSP", but given the disaster that is DebugSwap
+    and SEV_FEATURES in general, it's safe to say that AMD didn't consider all
+    possible complications with mismatching features between the BSP and APs.
+    
+    Opportunistically fold the check into the relevant request flavors; the
+    "request < AP_DESTROY" check is just a bizarre way of implementing the
+    AP_CREATE_ON_INIT => AP_CREATE fallthrough.
+    
+    Fixes: e366f92ea99e ("KVM: SEV: Support SEV-SNP AP Creation NAE event")
+    Reviewed-by: Tom Lendacky <thomas.lendacky@amd.com>
+    Reviewed-by: Pankaj Gupta <pankaj.gupta@amd.com>
+    Link: https://lore.kernel.org/r/20250227012541.3234589-6-seanjc@google.com
+    Signed-off-by: Sean Christopherson <seanjc@google.com>
+
+diff --git a/arch/x86/include/asm/svm.h b/arch/x86/include/asm/svm.h
+index 12a9dde1e842..9b7fa99ae951 100644
+--- a/arch/x86/include/asm/svm.h
++++ b/arch/x86/include/asm/svm.h
+@@ -291,10 +291,6 @@ static_assert((X2AVIC_MAX_PHYSICAL_ID & AVIC_PHYSICAL_MAX_INDEX_MASK) == X2AVIC_
+ #define SVM_SEV_FEAT_ALTERNATE_INJECTION		BIT(4)
+ #define SVM_SEV_FEAT_DEBUG_SWAP				BIT(5)
+ 
+-#define SVM_SEV_FEAT_INT_INJ_MODES		\
+-	(SVM_SEV_FEAT_RESTRICTED_INJECTION |	\
+-	 SVM_SEV_FEAT_ALTERNATE_INJECTION)
+-
+ struct vmcb_seg {
+ 	u16 selector;
+ 	u16 attrib;

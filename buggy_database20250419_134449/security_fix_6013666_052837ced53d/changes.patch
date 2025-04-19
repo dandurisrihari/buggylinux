@@ -1,0 +1,203 @@
+diff --git a/tools/perf/builtin-inject.c b/tools/perf/builtin-inject.c
+index 452a75fe68e5..14d6c88fed76 100644
+--- a/tools/perf/builtin-inject.c
++++ b/tools/perf/builtin-inject.c
+@@ -853,10 +853,12 @@ int cmd_inject(int argc, const char **argv)
+ 		.output = {
+ 			.path = "-",
+ 			.mode = PERF_DATA_MODE_WRITE,
++			.use_stdio = true,
+ 		},
+ 	};
+ 	struct perf_data data = {
+ 		.mode = PERF_DATA_MODE_READ,
++		.use_stdio = true,
+ 	};
+ 	int ret;
+ 
+diff --git a/tools/perf/util/data.c b/tools/perf/util/data.c
+index c47aa34fdc0a..05bbcb663c41 100644
+--- a/tools/perf/util/data.c
++++ b/tools/perf/util/data.c
+@@ -174,8 +174,21 @@ static bool check_pipe(struct perf_data *data)
+ 			is_pipe = true;
+ 	}
+ 
+-	if (is_pipe)
+-		data->file.fd = fd;
++	if (is_pipe) {
++		if (data->use_stdio) {
++			const char *mode;
++
++			mode = perf_data__is_read(data) ? "r" : "w";
++			data->file.fptr = fdopen(fd, mode);
++
++			if (data->file.fptr == NULL) {
++				data->file.fd = fd;
++				data->use_stdio = false;
++			}
++		} else {
++			data->file.fd = fd;
++		}
++	}
+ 
+ 	return data->is_pipe = is_pipe;
+ }
+@@ -334,6 +347,9 @@ int perf_data__open(struct perf_data *data)
+ 	if (check_pipe(data))
+ 		return 0;
+ 
++	/* currently it allows stdio for pipe only */
++	data->use_stdio = false;
++
+ 	if (!data->path)
+ 		data->path = "perf.data";
+ 
+@@ -353,7 +369,21 @@ void perf_data__close(struct perf_data *data)
+ 		perf_data__close_dir(data);
+ 
+ 	zfree(&data->file.path);
+-	close(data->file.fd);
++
++	if (data->use_stdio)
++		fclose(data->file.fptr);
++	else
++		close(data->file.fd);
++}
++
++ssize_t perf_data__read(struct perf_data *data, void *buf, size_t size)
++{
++	if (data->use_stdio) {
++		if (fread(buf, size, 1, data->file.fptr) == 1)
++			return size;
++		return feof(data->file.fptr) ? 0 : -1;
++	}
++	return readn(data->file.fd, buf, size);
+ }
+ 
+ ssize_t perf_data_file__write(struct perf_data_file *file,
+@@ -365,6 +395,11 @@ ssize_t perf_data_file__write(struct perf_data_file *file,
+ ssize_t perf_data__write(struct perf_data *data,
+ 			      void *buf, size_t size)
+ {
++	if (data->use_stdio) {
++		if (fwrite(buf, size, 1, data->file.fptr) == 1)
++			return size;
++		return -1;
++	}
+ 	return perf_data_file__write(&data->file, buf, size);
+ }
+ 
+diff --git a/tools/perf/util/data.h b/tools/perf/util/data.h
+index 75947ef6bc17..c563fcbb0288 100644
+--- a/tools/perf/util/data.h
++++ b/tools/perf/util/data.h
+@@ -2,6 +2,7 @@
+ #ifndef __PERF_DATA_H
+ #define __PERF_DATA_H
+ 
++#include <stdio.h>
+ #include <stdbool.h>
+ 
+ enum perf_data_mode {
+@@ -16,7 +17,10 @@ enum perf_dir_version {
+ 
+ struct perf_data_file {
+ 	char		*path;
+-	int		 fd;
++	union {
++		int	 fd;
++		FILE	*fptr;
++	};
+ 	unsigned long	 size;
+ };
+ 
+@@ -26,6 +30,7 @@ struct perf_data {
+ 	bool			 is_pipe;
+ 	bool			 is_dir;
+ 	bool			 force;
++	bool			 use_stdio;
+ 	enum perf_data_mode	 mode;
+ 
+ 	struct {
+@@ -62,11 +67,15 @@ static inline bool perf_data__is_single_file(struct perf_data *data)
+ 
+ static inline int perf_data__fd(struct perf_data *data)
+ {
++	if (data->use_stdio)
++		return fileno(data->file.fptr);
++
+ 	return data->file.fd;
+ }
+ 
+ int perf_data__open(struct perf_data *data);
+ void perf_data__close(struct perf_data *data);
++ssize_t perf_data__read(struct perf_data *data, void *buf, size_t size);
+ ssize_t perf_data__write(struct perf_data *data,
+ 			      void *buf, size_t size);
+ ssize_t perf_data_file__write(struct perf_data_file *file,
+diff --git a/tools/perf/util/header.c b/tools/perf/util/header.c
+index 598285a21dad..b9171bd11fe6 100644
+--- a/tools/perf/util/header.c
++++ b/tools/perf/util/header.c
+@@ -3647,7 +3647,8 @@ static int perf_file_section__process(struct perf_file_section *section,
+ }
+ 
+ static int perf_file_header__read_pipe(struct perf_pipe_file_header *header,
+-				       struct perf_header *ph, int fd,
++				       struct perf_header *ph,
++				       struct perf_data* data,
+ 				       bool repipe)
+ {
+ 	struct feat_fd ff = {
+@@ -3656,7 +3657,7 @@ static int perf_file_header__read_pipe(struct perf_pipe_file_header *header,
+ 	};
+ 	ssize_t ret;
+ 
+-	ret = readn(fd, header, sizeof(*header));
++	ret = perf_data__read(data, header, sizeof(*header));
+ 	if (ret <= 0)
+ 		return -1;
+ 
+@@ -3679,8 +3680,7 @@ static int perf_header__read_pipe(struct perf_session *session)
+ 	struct perf_header *header = &session->header;
+ 	struct perf_pipe_file_header f_header;
+ 
+-	if (perf_file_header__read_pipe(&f_header, header,
+-					perf_data__fd(session->data),
++	if (perf_file_header__read_pipe(&f_header, header, session->data,
+ 					session->repipe) < 0) {
+ 		pr_debug("incompatible file format\n");
+ 		return -EINVAL;
+diff --git a/tools/perf/util/session.c b/tools/perf/util/session.c
+index 098080287c68..5cc722b6fe7c 100644
+--- a/tools/perf/util/session.c
++++ b/tools/perf/util/session.c
+@@ -1937,7 +1937,6 @@ static int __perf_session__process_pipe_events(struct perf_session *session)
+ {
+ 	struct ordered_events *oe = &session->ordered_events;
+ 	struct perf_tool *tool = session->tool;
+-	int fd = perf_data__fd(session->data);
+ 	union perf_event *event;
+ 	uint32_t size, cur_size = 0;
+ 	void *buf = NULL;
+@@ -1957,7 +1956,8 @@ static int __perf_session__process_pipe_events(struct perf_session *session)
+ 	ordered_events__set_copy_on_queue(oe, true);
+ more:
+ 	event = buf;
+-	err = readn(fd, event, sizeof(struct perf_event_header));
++	err = perf_data__read(session->data, event,
++			      sizeof(struct perf_event_header));
+ 	if (err <= 0) {
+ 		if (err == 0)
+ 			goto done;
+@@ -1989,7 +1989,8 @@ static int __perf_session__process_pipe_events(struct perf_session *session)
+ 	p += sizeof(struct perf_event_header);
+ 
+ 	if (size - sizeof(struct perf_event_header)) {
+-		err = readn(fd, p, size - sizeof(struct perf_event_header));
++		err = perf_data__read(session->data, p,
++				      size - sizeof(struct perf_event_header));
+ 		if (err <= 0) {
+ 			if (err == 0) {
+ 				pr_err("unexpected end of event stream\n");

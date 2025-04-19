@@ -1,0 +1,230 @@
+diff --git a/arch/arm64/include/asm/asm_pointer_auth.h b/arch/arm64/include/asm/asm_pointer_auth.h
+index c85540a911d3..52dead2a8640 100644
+--- a/arch/arm64/include/asm/asm_pointer_auth.h
++++ b/arch/arm64/include/asm/asm_pointer_auth.h
+@@ -60,6 +60,28 @@ alternative_if ARM64_HAS_ADDRESS_AUTH
+ alternative_else_nop_endif
+ 	.endm
+ 
++	.macro __ptrauth_keys_init_cpu tsk, tmp1, tmp2, tmp3
++	mrs	\tmp1, id_aa64isar1_el1
++	ubfx	\tmp1, \tmp1, #ID_AA64ISAR1_APA_SHIFT, #8
++	cbz	\tmp1, .Lno_addr_auth\@
++	mov_q	\tmp1, (SCTLR_ELx_ENIA | SCTLR_ELx_ENIB | \
++			SCTLR_ELx_ENDA | SCTLR_ELx_ENDB)
++	mrs	\tmp2, sctlr_el1
++	orr	\tmp2, \tmp2, \tmp1
++	msr	sctlr_el1, \tmp2
++	__ptrauth_keys_install_kernel_nosync \tsk, \tmp1, \tmp2, \tmp3
++	isb
++.Lno_addr_auth\@:
++	.endm
++
++	.macro ptrauth_keys_init_cpu tsk, tmp1, tmp2, tmp3
++alternative_if_not ARM64_HAS_ADDRESS_AUTH
++	b	.Lno_addr_auth\@
++alternative_else_nop_endif
++	__ptrauth_keys_init_cpu \tsk, \tmp1, \tmp2, \tmp3
++.Lno_addr_auth\@:
++	.endm
++
+ #else /* CONFIG_ARM64_PTR_AUTH */
+ 
+ 	.macro ptrauth_keys_install_user tsk, tmp1, tmp2, tmp3
+diff --git a/arch/arm64/include/asm/smp.h b/arch/arm64/include/asm/smp.h
+index 40d5ba029615..ea268d88b6f7 100644
+--- a/arch/arm64/include/asm/smp.h
++++ b/arch/arm64/include/asm/smp.h
+@@ -23,14 +23,6 @@
+ #define CPU_STUCK_REASON_52_BIT_VA	(UL(1) << CPU_STUCK_REASON_SHIFT)
+ #define CPU_STUCK_REASON_NO_GRAN	(UL(2) << CPU_STUCK_REASON_SHIFT)
+ 
+-/* Possible options for __cpu_setup */
+-/* Option to setup primary cpu */
+-#define ARM64_CPU_BOOT_PRIMARY		(1)
+-/* Option to setup secondary cpus */
+-#define ARM64_CPU_BOOT_SECONDARY	(2)
+-/* Option to setup cpus for different cpu run time services */
+-#define ARM64_CPU_RUNTIME		(3)
+-
+ #ifndef __ASSEMBLY__
+ 
+ #include <asm/percpu.h>
+@@ -96,9 +88,6 @@ asmlinkage void secondary_start_kernel(void);
+ struct secondary_data {
+ 	void *stack;
+ 	struct task_struct *task;
+-#ifdef CONFIG_ARM64_PTR_AUTH
+-	struct ptrauth_keys_kernel ptrauth_key;
+-#endif
+ 	long status;
+ };
+ 
+diff --git a/arch/arm64/kernel/asm-offsets.c b/arch/arm64/kernel/asm-offsets.c
+index 9981a0a5a87f..890ddd67b8bf 100644
+--- a/arch/arm64/kernel/asm-offsets.c
++++ b/arch/arm64/kernel/asm-offsets.c
+@@ -92,9 +92,6 @@ int main(void)
+   BLANK();
+   DEFINE(CPU_BOOT_STACK,	offsetof(struct secondary_data, stack));
+   DEFINE(CPU_BOOT_TASK,		offsetof(struct secondary_data, task));
+-#ifdef CONFIG_ARM64_PTR_AUTH
+-  DEFINE(CPU_BOOT_PTRAUTH_KEY,	offsetof(struct secondary_data, ptrauth_key));
+-#endif
+   BLANK();
+ #ifdef CONFIG_KVM_ARM_HOST
+   DEFINE(VCPU_CONTEXT,		offsetof(struct kvm_vcpu, arch.ctxt));
+diff --git a/arch/arm64/kernel/head.S b/arch/arm64/kernel/head.S
+index 57a91032b4c2..dc2b441d4ed8 100644
+--- a/arch/arm64/kernel/head.S
++++ b/arch/arm64/kernel/head.S
+@@ -13,6 +13,7 @@
+ #include <linux/init.h>
+ #include <linux/irqchip/arm-gic-v3.h>
+ 
++#include <asm/asm_pointer_auth.h>
+ #include <asm/assembler.h>
+ #include <asm/boot.h>
+ #include <asm/ptrace.h>
+@@ -118,7 +119,6 @@ SYM_CODE_START(stext)
+ 	 * On return, the CPU will be ready for the MMU to be turned on and
+ 	 * the TCR will have been set.
+ 	 */
+-	mov	x0, #ARM64_CPU_BOOT_PRIMARY
+ 	bl	__cpu_setup			// initialise processor
+ 	b	__primary_switch
+ SYM_CODE_END(stext)
+@@ -417,6 +417,10 @@ SYM_FUNC_START_LOCAL(__primary_switched)
+ 	adr_l	x5, init_task
+ 	msr	sp_el0, x5			// Save thread_info
+ 
++#ifdef CONFIG_ARM64_PTR_AUTH
++	__ptrauth_keys_init_cpu	x5, x6, x7, x8
++#endif
++
+ 	adr_l	x8, vectors			// load VBAR_EL1 with virtual
+ 	msr	vbar_el1, x8			// vector table address
+ 	isb
+@@ -717,7 +721,6 @@ SYM_FUNC_START_LOCAL(secondary_startup)
+ 	 * Common entry point for secondary CPUs.
+ 	 */
+ 	bl	__cpu_secondary_check52bitva
+-	mov	x0, #ARM64_CPU_BOOT_SECONDARY
+ 	bl	__cpu_setup			// initialise processor
+ 	adrp	x1, swapper_pg_dir
+ 	bl	__enable_mmu
+@@ -739,6 +742,11 @@ SYM_FUNC_START_LOCAL(__secondary_switched)
+ 	msr	sp_el0, x2
+ 	mov	x29, #0
+ 	mov	x30, #0
++
++#ifdef CONFIG_ARM64_PTR_AUTH
++	ptrauth_keys_init_cpu x2, x3, x4, x5
++#endif
++
+ 	b	secondary_start_kernel
+ SYM_FUNC_END(__secondary_switched)
+ 
+diff --git a/arch/arm64/kernel/sleep.S b/arch/arm64/kernel/sleep.S
+index 7b2f2e650c44..56b1fe9bfaa0 100644
+--- a/arch/arm64/kernel/sleep.S
++++ b/arch/arm64/kernel/sleep.S
+@@ -100,7 +100,6 @@ ENDPROC(__cpu_suspend_enter)
+ 	.pushsection ".idmap.text", "awx"
+ ENTRY(cpu_resume)
+ 	bl	el2_setup		// if in EL2 drop to EL1 cleanly
+-	mov	x0, #ARM64_CPU_RUNTIME
+ 	bl	__cpu_setup
+ 	/* enable the MMU early - so we can access sleep_save_stash by va */
+ 	adrp	x1, swapper_pg_dir
+diff --git a/arch/arm64/kernel/smp.c b/arch/arm64/kernel/smp.c
+index 061f60fe452f..d6d337d036f0 100644
+--- a/arch/arm64/kernel/smp.c
++++ b/arch/arm64/kernel/smp.c
+@@ -114,10 +114,6 @@ int __cpu_up(unsigned int cpu, struct task_struct *idle)
+ 	 */
+ 	secondary_data.task = idle;
+ 	secondary_data.stack = task_stack_page(idle) + THREAD_SIZE;
+-#if defined(CONFIG_ARM64_PTR_AUTH)
+-	secondary_data.ptrauth_key.apia.lo = idle->thread.keys_kernel.apia.lo;
+-	secondary_data.ptrauth_key.apia.hi = idle->thread.keys_kernel.apia.hi;
+-#endif
+ 	update_cpu_boot_status(CPU_MMU_OFF);
+ 	__flush_dcache_area(&secondary_data, sizeof(secondary_data));
+ 
+@@ -140,10 +136,6 @@ int __cpu_up(unsigned int cpu, struct task_struct *idle)
+ 	pr_crit("CPU%u: failed to come online\n", cpu);
+ 	secondary_data.task = NULL;
+ 	secondary_data.stack = NULL;
+-#if defined(CONFIG_ARM64_PTR_AUTH)
+-	secondary_data.ptrauth_key.apia.lo = 0;
+-	secondary_data.ptrauth_key.apia.hi = 0;
+-#endif
+ 	__flush_dcache_area(&secondary_data, sizeof(secondary_data));
+ 	status = READ_ONCE(secondary_data.status);
+ 	if (status == CPU_MMU_OFF)
+diff --git a/arch/arm64/mm/proc.S b/arch/arm64/mm/proc.S
+index 0401342741e6..7d3bf1afba0c 100644
+--- a/arch/arm64/mm/proc.S
++++ b/arch/arm64/mm/proc.S
+@@ -386,8 +386,6 @@ SYM_FUNC_END(idmap_kpti_install_ng_mappings)
+  *
+  *	Initialise the processor for turning the MMU on.
+  *
+- * Input:
+- *	x0 with a flag ARM64_CPU_BOOT_PRIMARY/ARM64_CPU_BOOT_SECONDARY/ARM64_CPU_RUNTIME.
+  * Output:
+  *	Return in x0 the value of the SCTLR_EL1 register.
+  */
+@@ -446,51 +444,9 @@ SYM_FUNC_START(__cpu_setup)
+ 1:
+ #endif	/* CONFIG_ARM64_HW_AFDBM */
+ 	msr	tcr_el1, x10
+-	mov	x1, x0
+ 	/*
+ 	 * Prepare SCTLR
+ 	 */
+ 	mov_q	x0, SCTLR_EL1_SET
+-
+-#ifdef CONFIG_ARM64_PTR_AUTH
+-	/* No ptrauth setup for run time cpus */
+-	cmp	x1, #ARM64_CPU_RUNTIME
+-	b.eq	3f
+-
+-	/* Check if the CPU supports ptrauth */
+-	mrs	x2, id_aa64isar1_el1
+-	ubfx	x2, x2, #ID_AA64ISAR1_APA_SHIFT, #8
+-	cbz	x2, 3f
+-
+-	/*
+-	 * The primary cpu keys are reset here and can be
+-	 * re-initialised with some proper values later.
+-	 */
+-	msr_s	SYS_APIAKEYLO_EL1, xzr
+-	msr_s	SYS_APIAKEYHI_EL1, xzr
+-
+-	/* Just enable ptrauth for primary cpu */
+-	cmp	x1, #ARM64_CPU_BOOT_PRIMARY
+-	b.eq	2f
+-
+-	/* if !system_supports_address_auth() then skip enable */
+-alternative_if_not ARM64_HAS_ADDRESS_AUTH
+-	b	3f
+-alternative_else_nop_endif
+-
+-	/* Install ptrauth key for secondary cpus */
+-	adr_l	x2, secondary_data
+-	ldr	x3, [x2, #CPU_BOOT_TASK]	// get secondary_data.task
+-	cbz	x3, 2f				// check for slow booting cpus
+-	ldp	x3, x4, [x2, #CPU_BOOT_PTRAUTH_KEY]
+-	msr_s	SYS_APIAKEYLO_EL1, x3
+-	msr_s	SYS_APIAKEYHI_EL1, x4
+-
+-2:	/* Enable ptrauth instructions */
+-	ldr	x2, =SCTLR_ELx_ENIA | SCTLR_ELx_ENIB | \
+-		     SCTLR_ELx_ENDA | SCTLR_ELx_ENDB
+-	orr	x0, x0, x2
+-3:
+-#endif
+ 	ret					// return to head.S
+ SYM_FUNC_END(__cpu_setup)

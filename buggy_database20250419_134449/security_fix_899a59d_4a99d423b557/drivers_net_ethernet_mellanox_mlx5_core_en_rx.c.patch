@@ -1,0 +1,81 @@
+commit 899a59d301bc0ccd312dd23d58899cfbbc94bead
+Author: Ilan Tayari <ilant@mellanox.com>
+Date:   Mon Jun 19 14:04:36 2017 +0300
+
+    net/mlx5e: IPSec, Add Innova IPSec offload RX data path
+    
+    In RX data path, the hardware prepends a special metadata ethertype
+    which indicates that the packet underwent decryption, and the result of
+    the authentication check.
+    
+    Communicate this to the stack in skb->sp.
+    
+    Make wqe_size large enough to account for the injected metadata.
+    
+    Support only Linked-list RQ type.
+    
+    IPSec offload RX packets may have useful CHECKSUM_COMPLETE information,
+    which the stack may not be able to use yet.
+    
+    Signed-off-by: Ilan Tayari <ilant@mellanox.com>
+    Signed-off-by: Yossi Kuperman <yossiku@mellanox.com>
+    Signed-off-by: Yevgeny Kliteynik <kliteyn@mellanox.com>
+    Signed-off-by: Boris Pismenny <borisp@mellanox.com>
+    Signed-off-by: Saeed Mahameed <saeedm@mellanox.com>
+
+diff --git a/drivers/net/ethernet/mellanox/mlx5/core/en_rx.c b/drivers/net/ethernet/mellanox/mlx5/core/en_rx.c
+index 574a96279340..325b2c8c1c6d 100644
+--- a/drivers/net/ethernet/mellanox/mlx5/core/en_rx.c
++++ b/drivers/net/ethernet/mellanox/mlx5/core/en_rx.c
+@@ -41,6 +41,7 @@
+ #include "eswitch.h"
+ #include "en_rep.h"
+ #include "ipoib/ipoib.h"
++#include "en_accel/ipsec_rxtx.h"
+ 
+ static inline bool mlx5e_rx_hw_stamp(struct mlx5e_tstamp *tstamp)
+ {
+@@ -1183,3 +1184,43 @@ void mlx5i_handle_rx_cqe(struct mlx5e_rq *rq, struct mlx5_cqe64 *cqe)
+ }
+ 
+ #endif /* CONFIG_MLX5_CORE_IPOIB */
++
++#ifdef CONFIG_MLX5_EN_IPSEC
++
++void mlx5e_ipsec_handle_rx_cqe(struct mlx5e_rq *rq, struct mlx5_cqe64 *cqe)
++{
++	struct mlx5e_wqe_frag_info *wi;
++	struct mlx5e_rx_wqe *wqe;
++	__be16 wqe_counter_be;
++	struct sk_buff *skb;
++	u16 wqe_counter;
++	u32 cqe_bcnt;
++
++	wqe_counter_be = cqe->wqe_counter;
++	wqe_counter    = be16_to_cpu(wqe_counter_be);
++	wqe            = mlx5_wq_ll_get_wqe(&rq->wq, wqe_counter);
++	wi             = &rq->wqe.frag_info[wqe_counter];
++	cqe_bcnt       = be32_to_cpu(cqe->byte_cnt);
++
++	skb = skb_from_cqe(rq, cqe, wi, cqe_bcnt);
++	if (unlikely(!skb)) {
++		/* a DROP, save the page-reuse checks */
++		mlx5e_free_rx_wqe(rq, wi);
++		goto wq_ll_pop;
++	}
++	skb = mlx5e_ipsec_handle_rx_skb(rq->netdev, skb);
++	if (unlikely(!skb)) {
++		mlx5e_free_rx_wqe(rq, wi);
++		goto wq_ll_pop;
++	}
++
++	mlx5e_complete_rx_cqe(rq, cqe, cqe_bcnt, skb);
++	napi_gro_receive(rq->cq.napi, skb);
++
++	mlx5e_free_rx_wqe_reuse(rq, wi);
++wq_ll_pop:
++	mlx5_wq_ll_pop(&rq->wq, wqe_counter_be,
++		       &wqe->next.next_wqe_index);
++}
++
++#endif /* CONFIG_MLX5_EN_IPSEC */

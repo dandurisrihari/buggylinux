@@ -1,0 +1,57 @@
+commit fa4983862e506d395acc1b8d14dbebf63acc2e82
+Author: Weston Andros Adamson <dros@primarydata.com>
+Date:   Thu Sep 5 15:09:50 2024 -0400
+
+    nfsd: add LOCALIO support
+    
+    Add server support for bypassing NFS for localhost reads, writes, and
+    commits. This is only useful when both the client and server are
+    running on the same host.
+    
+    If nfsd_open_local_fh() fails then the NFS client will both retry and
+    fallback to normal network-based read, write and commit operations if
+    localio is no longer supported.
+    
+    Care is taken to ensure the same NFS security mechanisms are used
+    (authentication, etc) regardless of whether localio or regular NFS
+    access is used.  The auth_domain established as part of the traditional
+    NFS client access to the NFS server is also used for localio.  Store
+    auth_domain for localio in nfsd_uuid_t and transfer it to the client
+    if it is local to the server.
+    
+    Relative to containers, localio gives the client access to the network
+    namespace the server has.  This is required to allow the client to
+    access the server's per-namespace nfsd_net struct.
+    
+    This commit also introduces the use of NFSD's percpu_ref to interlock
+    nfsd_destroy_serv and nfsd_open_local_fh, to ensure nn->nfsd_serv is
+    not destroyed while in use by nfsd_open_local_fh and other LOCALIO
+    client code.
+    
+    CONFIG_NFS_LOCALIO enables NFS server support for LOCALIO.
+    
+    Signed-off-by: Weston Andros Adamson <dros@primarydata.com>
+    Signed-off-by: Trond Myklebust <trond.myklebust@hammerspace.com>
+    Co-developed-by: Mike Snitzer <snitzer@kernel.org>
+    Signed-off-by: Mike Snitzer <snitzer@kernel.org>
+    Co-developed-by: NeilBrown <neilb@suse.de>
+    Signed-off-by: NeilBrown <neilb@suse.de>
+    Reviewed-by: Jeff Layton <jlayton@kernel.org>
+    Acked-by: Chuck Lever <chuck.lever@oracle.com>
+    Signed-off-by: Anna Schumaker <anna.schumaker@oracle.com>
+
+diff --git a/fs/nfsd/netns.h b/fs/nfsd/netns.h
+index a228b9d6a6e1..26f7b34d1a03 100644
+--- a/fs/nfsd/netns.h
++++ b/fs/nfsd/netns.h
+@@ -217,6 +217,10 @@ struct nfsd_net {
+ 	/* last time an admin-revoke happened for NFSv4.0 */
+ 	time64_t		nfs40_last_revoke;
+ 
++#if IS_ENABLED(CONFIG_NFS_LOCALIO)
++	/* Local clients to be invalidated when net is shut down */
++	struct list_head	local_clients;
++#endif
+ };
+ 
+ /* Simple check to find out if a given net was properly initialized */

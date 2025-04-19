@@ -1,0 +1,49 @@
+commit af6b63741cc4e4dfd575d06beb333b11a8a6e0c0
+Author: Johannes Berg <johannes@sipsolutions.net>
+Date:   Wed Dec 23 13:15:35 2009 +0100
+
+    mac80211: generalise work handling
+    
+    In order to use auth/assoc for different purposes
+    other than MLME, it needs to be split up. For other
+    purposes, a generic work handling (potentially on
+    another channel) will be useful.
+    
+    To achieve that, this patch moves much of the MLME
+    work handling out of mlme into a new work API. The
+    API can currently handle probing a specific AP,
+    authentication and association. The MLME previously
+    handled probe/authentication as one step and will
+    continue to do so, but they are separate in the new
+    work handling.
+    
+    Work items are RCU-managed to be able to check for
+    existence of an item for a specific frame in the RX
+    path, but they can be re-used which the MLME right
+    now will do for its combined probe/auth step.
+    
+    Signed-off-by: Johannes Berg <johannes@sipsolutions.net>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/mac80211/rx.c b/net/mac80211/rx.c
+index f60dfca52196..bfcf09eb64b4 100644
+--- a/net/mac80211/rx.c
++++ b/net/mac80211/rx.c
+@@ -1945,6 +1945,7 @@ ieee80211_rx_h_mgmt(struct ieee80211_rx_data *rx)
+ {
+ 	struct ieee80211_sub_if_data *sdata = rx->sdata;
+ 	struct ieee80211_mgmt *mgmt = (struct ieee80211_mgmt *) rx->skb->data;
++	ieee80211_rx_result rxs;
+ 
+ 	if (!(rx->flags & IEEE80211_RX_RA_MATCH))
+ 		return RX_DROP_MONITOR;
+@@ -1952,6 +1953,10 @@ ieee80211_rx_h_mgmt(struct ieee80211_rx_data *rx)
+ 	if (ieee80211_drop_unencrypted(rx, mgmt->frame_control))
+ 		return RX_DROP_MONITOR;
+ 
++	rxs = ieee80211_work_rx_mgmt(rx->sdata, rx->skb);
++	if (rxs != RX_CONTINUE)
++		return rxs;
++
+ 	if (ieee80211_vif_is_mesh(&sdata->vif))
+ 		return ieee80211_mesh_rx_mgmt(sdata, rx->skb);

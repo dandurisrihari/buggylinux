@@ -1,0 +1,58 @@
+diff --git a/include/linux/filter.h b/include/linux/filter.h
+index c99bc3df2d28..9107ee1de66f 100644
+--- a/include/linux/filter.h
++++ b/include/linux/filter.h
+@@ -887,14 +887,15 @@ bpf_ctx_narrow_access_offset(u32 off, u32 size, u32 size_default)
+ 
+ #define bpf_classic_proglen(fprog) (fprog->len * sizeof(fprog->filter[0]))
+ 
+-static inline void bpf_prog_lock_ro(struct bpf_prog *fp)
++static inline int __must_check bpf_prog_lock_ro(struct bpf_prog *fp)
+ {
+ #ifndef CONFIG_BPF_JIT_ALWAYS_ON
+ 	if (!fp->jited) {
+ 		set_vm_flush_reset_perms(fp);
+-		set_memory_ro((unsigned long)fp, fp->pages);
++		return set_memory_ro((unsigned long)fp, fp->pages);
+ 	}
+ #endif
++	return 0;
+ }
+ 
+ static inline void bpf_jit_binary_lock_ro(struct bpf_binary_header *hdr)
+diff --git a/kernel/bpf/core.c b/kernel/bpf/core.c
+index 696bc55de8e8..63f100def31b 100644
+--- a/kernel/bpf/core.c
++++ b/kernel/bpf/core.c
+@@ -2403,7 +2403,9 @@ struct bpf_prog *bpf_prog_select_runtime(struct bpf_prog *fp, int *err)
+ 	}
+ 
+ finalize:
+-	bpf_prog_lock_ro(fp);
++	*err = bpf_prog_lock_ro(fp);
++	if (*err)
++		return fp;
+ 
+ 	/* The tail call compatibility check can only be done at
+ 	 * this late stage as we need to determine, if we deal
+diff --git a/kernel/bpf/verifier.c b/kernel/bpf/verifier.c
+index 7b208e5d38f6..de7813947981 100644
+--- a/kernel/bpf/verifier.c
++++ b/kernel/bpf/verifier.c
+@@ -19263,10 +19263,14 @@ static int jit_subprogs(struct bpf_verifier_env *env)
+ 	 * bpf_prog_load will add the kallsyms for the main program.
+ 	 */
+ 	for (i = 1; i < env->subprog_cnt; i++) {
+-		bpf_prog_lock_ro(func[i]);
+-		bpf_prog_kallsyms_add(func[i]);
++		err = bpf_prog_lock_ro(func[i]);
++		if (err)
++			goto out_free;
+ 	}
+ 
++	for (i = 1; i < env->subprog_cnt; i++)
++		bpf_prog_kallsyms_add(func[i]);
++
+ 	/* Last step: make now unused interpreter insns from main
+ 	 * prog consistent for later dump requests, so they can
+ 	 * later look the same as if they were interpreted only.

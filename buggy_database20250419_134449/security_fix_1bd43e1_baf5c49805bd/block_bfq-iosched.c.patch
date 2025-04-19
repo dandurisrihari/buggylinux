@@ -1,0 +1,69 @@
+commit 1bd43e19de1b99179b9beb92b14697e113326d00
+Author: Davide Zini <davidezini2@gmail.com>
+Date:   Tue Jan 3 15:55:03 2023 +0100
+
+    block, bfq: balance I/O injection among underutilized actuators
+    
+    Upon the invocation of its dispatch function, BFQ returns the next I/O
+    request of the in-service bfq_queue, unless some exception holds. One
+    such exception is that there is some underutilized actuator, different
+    from the actuator for which the in-service queue contains I/O, and
+    that some other bfq_queue happens to contain I/O for such an
+    actuator. In this case, the next I/O request of the latter bfq_queue,
+    and not of the in-service bfq_queue, is returned (I/O is injected from
+    that bfq_queue). To find such an actuator, a linear scan, in
+    increasing index order, is performed among actuators.
+    
+    Performing a linear scan entails a prioritization among actuators: an
+    underutilized actuator may be considered for injection only if all
+    actuators with a lower index are currently fully utilized, or if there
+    is no pending I/O for any lower-index actuator that happens to be
+    underutilized.
+    
+    This commits breaks this prioritization and tends to distribute
+    injection uniformly across actuators. This is obtained by adding the
+    following condition to the linear scan: even if an actuator A is
+    underutilized, A is however skipped if its load is higher than that of
+    the next actuator.
+    
+    Reviewed-by: Damien Le Moal <damien.lemoal@opensource.wdc.com>
+    Signed-off-by: Paolo Valente <paolo.valente@linaro.org>
+    Signed-off-by: Davide Zini <davidezini2@gmail.com>
+    Link: https://lore.kernel.org/r/20230103145503.71712-9-paolo.valente@linaro.org
+    Signed-off-by: Jens Axboe <axboe@kernel.dk>
+
+diff --git a/block/bfq-iosched.c b/block/bfq-iosched.c
+index d42a229b5a86..815b884d6c5a 100644
+--- a/block/bfq-iosched.c
++++ b/block/bfq-iosched.c
+@@ -4767,10 +4767,16 @@ bfq_find_active_bfqq_for_actuator(struct bfq_data *bfqd, int idx)
+ 
+ /*
+  * Perform a linear scan of each actuator, until an actuator is found
+- * for which the following two conditions hold: the load of the
+- * actuator is below the threshold (see comments on actuator_load_threshold
+- * for details), and there is a queue that contains I/O for that
+- * actuator. On success, return that queue.
++ * for which the following three conditions hold: the load of the
++ * actuator is below the threshold (see comments on
++ * actuator_load_threshold for details) and lower than that of the
++ * next actuator (comments on this extra condition below), and there
++ * is a queue that contains I/O for that actuator. On success, return
++ * that queue.
++ *
++ * Performing a plain linear scan entails a prioritization among
++ * actuators. The extra condition above breaks this prioritization and
++ * tends to distribute injection uniformly across actuators.
+  */
+ static struct bfq_queue *
+ bfq_find_bfqq_for_underused_actuator(struct bfq_data *bfqd)
+@@ -4778,7 +4784,9 @@ bfq_find_bfqq_for_underused_actuator(struct bfq_data *bfqd)
+ 	int i;
+ 
+ 	for (i = 0 ; i < bfqd->num_actuators; i++) {
+-		if (bfqd->rq_in_driver[i] < bfqd->actuator_load_threshold) {
++		if (bfqd->rq_in_driver[i] < bfqd->actuator_load_threshold &&
++		    (i == bfqd->num_actuators - 1 ||
++		     bfqd->rq_in_driver[i] < bfqd->rq_in_driver[i+1])) {
+ 			struct bfq_queue *bfqq =
+ 				bfq_find_active_bfqq_for_actuator(bfqd, i);

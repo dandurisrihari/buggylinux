@@ -1,0 +1,99 @@
+diff --git a/Documentation/admin-guide/kernel-parameters.txt b/Documentation/admin-guide/kernel-parameters.txt
+index efc7aa7a0670..560d4dc66f02 100644
+--- a/Documentation/admin-guide/kernel-parameters.txt
++++ b/Documentation/admin-guide/kernel-parameters.txt
+@@ -816,6 +816,17 @@
+ 	disable=	[IPV6]
+ 			See Documentation/networking/ipv6.txt.
+ 
++	hardened_usercopy=
++                        [KNL] Under CONFIG_HARDENED_USERCOPY, whether
++                        hardening is enabled for this boot. Hardened
++                        usercopy checking is used to protect the kernel
++                        from reading or writing beyond known memory
++                        allocation boundaries as a proactive defense
++                        against bounds-checking flaws in the kernel's
++                        copy_to_user()/copy_from_user() interface.
++                on      Perform hardened usercopy checks (default).
++                off     Disable hardened usercopy checks.
++
+ 	disable_radix	[PPC]
+ 			Disable RADIX MMU mode on POWER9
+ 
+diff --git a/include/linux/jump_label.h b/include/linux/jump_label.h
+index b46b541c67c4..1a0b6f17a5d6 100644
+--- a/include/linux/jump_label.h
++++ b/include/linux/jump_label.h
+@@ -299,12 +299,18 @@ struct static_key_false {
+ #define DEFINE_STATIC_KEY_TRUE(name)	\
+ 	struct static_key_true name = STATIC_KEY_TRUE_INIT
+ 
++#define DEFINE_STATIC_KEY_TRUE_RO(name)	\
++	struct static_key_true name __ro_after_init = STATIC_KEY_TRUE_INIT
++
+ #define DECLARE_STATIC_KEY_TRUE(name)	\
+ 	extern struct static_key_true name
+ 
+ #define DEFINE_STATIC_KEY_FALSE(name)	\
+ 	struct static_key_false name = STATIC_KEY_FALSE_INIT
+ 
++#define DEFINE_STATIC_KEY_FALSE_RO(name)	\
++	struct static_key_false name __ro_after_init = STATIC_KEY_FALSE_INIT
++
+ #define DECLARE_STATIC_KEY_FALSE(name)	\
+ 	extern struct static_key_false name
+ 
+diff --git a/mm/usercopy.c b/mm/usercopy.c
+index e9e9325f7638..852eb4e53f06 100644
+--- a/mm/usercopy.c
++++ b/mm/usercopy.c
+@@ -20,6 +20,8 @@
+ #include <linux/sched/task.h>
+ #include <linux/sched/task_stack.h>
+ #include <linux/thread_info.h>
++#include <linux/atomic.h>
++#include <linux/jump_label.h>
+ #include <asm/sections.h>
+ 
+ /*
+@@ -240,6 +242,8 @@ static inline void check_heap_object(const void *ptr, unsigned long n,
+ 	}
+ }
+ 
++static DEFINE_STATIC_KEY_FALSE_RO(bypass_usercopy_checks);
++
+ /*
+  * Validates that the given object is:
+  * - not bogus address
+@@ -248,6 +252,9 @@ static inline void check_heap_object(const void *ptr, unsigned long n,
+  */
+ void __check_object_size(const void *ptr, unsigned long n, bool to_user)
+ {
++	if (static_branch_unlikely(&bypass_usercopy_checks))
++		return;
++
+ 	/* Skip all tests if size is zero. */
+ 	if (!n)
+ 		return;
+@@ -279,3 +286,21 @@ void __check_object_size(const void *ptr, unsigned long n, bool to_user)
+ 	check_kernel_text_object((const unsigned long)ptr, n, to_user);
+ }
+ EXPORT_SYMBOL(__check_object_size);
++
++static bool enable_checks __initdata = true;
++
++static int __init parse_hardened_usercopy(char *str)
++{
++	return strtobool(str, &enable_checks);
++}
++
++__setup("hardened_usercopy=", parse_hardened_usercopy);
++
++static int __init set_hardened_usercopy(void)
++{
++	if (enable_checks == false)
++		static_branch_enable(&bypass_usercopy_checks);
++	return 1;
++}
++
++late_initcall(set_hardened_usercopy);

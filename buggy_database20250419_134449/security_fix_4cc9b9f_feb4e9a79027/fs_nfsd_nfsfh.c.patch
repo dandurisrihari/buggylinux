@@ -1,0 +1,55 @@
+commit 4cc9b9f2bf4dfe13fe573da978e626e2248df388
+Author: NeilBrown <neilb@suse.de>
+Date:   Fri Oct 18 08:42:31 2024 +1100
+
+    nfsd: refine and rename NFSD_MAY_LOCK
+    
+    NFSD_MAY_LOCK means a few different things.
+    - it means that GSS is not required.
+    - it means that with NFSEXP_NOAUTHNLM, authentication is not required
+    - it means that OWNER_OVERRIDE is allowed.
+    
+    None of these are specific to locking, they are specific to the NLM
+    protocol.
+    So:
+     - rename to NFSD_MAY_NLM
+     - set NFSD_MAY_OWNER_OVERRIDE and NFSD_MAY_BYPASS_GSS in nlm_fopen()
+       so that NFSD_MAY_NLM doesn't need to imply these.
+     - move the test on NFSEXP_NOAUTHNLM out of nfsd_permission() and
+       into fh_verify where other special-case tests on the MAY flags
+       happen.  nfsd_permission() can be called from other places than
+       fh_verify(), but none of these will have NFSD_MAY_NLM.
+    
+    Signed-off-by: NeilBrown <neilb@suse.de>
+    Signed-off-by: Chuck Lever <chuck.lever@oracle.com>
+
+diff --git a/fs/nfsd/nfsfh.c b/fs/nfsd/nfsfh.c
+index cbb046f88eec..871de925a3df 100644
+--- a/fs/nfsd/nfsfh.c
++++ b/fs/nfsd/nfsfh.c
+@@ -363,13 +363,10 @@ __fh_verify(struct svc_rqst *rqstp,
+ 	if (error)
+ 		goto out;
+ 
+-	/*
+-	 * pseudoflavor restrictions are not enforced on NLM,
+-	 * which clients virtually always use auth_sys for,
+-	 * even while using RPCSEC_GSS for NFS.
+-	 */
+-	if (access & NFSD_MAY_LOCK)
+-		goto skip_pseudoflavor_check;
++	if ((access & NFSD_MAY_NLM) && (exp->ex_flags & NFSEXP_NOAUTHNLM))
++		/* NLM is allowed to fully bypass authentication */
++		goto out;
++
+ 	if (access & NFSD_MAY_BYPASS_GSS)
+ 		may_bypass_gss = true;
+ 	/*
+@@ -385,7 +382,6 @@ __fh_verify(struct svc_rqst *rqstp,
+ 	if (error)
+ 		goto out;
+ 
+-skip_pseudoflavor_check:
+ 	/* Finally, check access permissions. */
+ 	error = nfsd_permission(cred, exp, dentry, access);
+ out:

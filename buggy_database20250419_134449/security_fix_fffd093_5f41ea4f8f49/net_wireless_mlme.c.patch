@@ -1,0 +1,81 @@
+commit fffd0934b9390f34bec45762192b7edd3b12b4b5
+Author: Johannes Berg <johannes@sipsolutions.net>
+Date:   Wed Jul 8 14:22:54 2009 +0200
+
+    cfg80211: rework key operation
+    
+    This reworks the key operation in cfg80211, and now only
+    allows, from userspace, configuring keys (via nl80211)
+    after the connection has been established (in managed
+    mode), the IBSS been joined (in IBSS mode), at any time
+    (in AP[_VLAN] modes) or never for all the other modes.
+    
+    In order to do shared key authentication correctly, it
+    is now possible to give a WEP key to the AUTH command.
+    To configure static WEP keys, these are given to the
+    CONNECT or IBSS_JOIN command directly, for a userspace
+    SME it is assumed it will configure it properly after
+    the connection has been established.
+    
+    Since mac80211 used to check the default key in IBSS
+    mode to see whether or not the network is protected,
+    it needs an update in that area, as well as an update
+    to make use of the WEP key passed to auth() for shared
+    key authentication.
+    
+    Signed-off-by: Johannes Berg <johannes@sipsolutions.net>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/wireless/mlme.c b/net/wireless/mlme.c
+index 1b2ca1fea7a1..8e4ce2fdf862 100644
+--- a/net/wireless/mlme.c
++++ b/net/wireless/mlme.c
+@@ -328,7 +328,8 @@ int __cfg80211_mlme_auth(struct cfg80211_registered_device *rdev,
+ 			 enum nl80211_auth_type auth_type,
+ 			 const u8 *bssid,
+ 			 const u8 *ssid, int ssid_len,
+-			 const u8 *ie, int ie_len)
++			 const u8 *ie, int ie_len,
++			 const u8 *key, int key_len, int key_idx)
+ {
+ 	struct wireless_dev *wdev = dev->ieee80211_ptr;
+ 	struct cfg80211_auth_request req;
+@@ -337,6 +338,10 @@ int __cfg80211_mlme_auth(struct cfg80211_registered_device *rdev,
+ 
+ 	ASSERT_WDEV_LOCK(wdev);
+ 
++	if (auth_type == NL80211_AUTHTYPE_SHARED_KEY)
++		if (!key || !key_len || key_idx < 0 || key_idx > 4)
++			return -EINVAL;
++
+ 	if (wdev->current_bss &&
+ 	    memcmp(bssid, wdev->current_bss->pub.bssid, ETH_ALEN) == 0)
+ 		return -EALREADY;
+@@ -359,6 +364,9 @@ int __cfg80211_mlme_auth(struct cfg80211_registered_device *rdev,
+ 	req.auth_type = auth_type;
+ 	req.bss = cfg80211_get_bss(&rdev->wiphy, chan, bssid, ssid, ssid_len,
+ 				   WLAN_CAPABILITY_ESS, WLAN_CAPABILITY_ESS);
++	req.key = key;
++	req.key_len = key_len;
++	req.key_idx = key_idx;
+ 	if (!req.bss)
+ 		return -ENOENT;
+ 
+@@ -396,13 +404,15 @@ int cfg80211_mlme_auth(struct cfg80211_registered_device *rdev,
+ 		       struct net_device *dev, struct ieee80211_channel *chan,
+ 		       enum nl80211_auth_type auth_type, const u8 *bssid,
+ 		       const u8 *ssid, int ssid_len,
+-		       const u8 *ie, int ie_len)
++		       const u8 *ie, int ie_len,
++		       const u8 *key, int key_len, int key_idx)
+ {
+ 	int err;
+ 
+ 	wdev_lock(dev->ieee80211_ptr);
+ 	err = __cfg80211_mlme_auth(rdev, dev, chan, auth_type, bssid,
+-				   ssid, ssid_len, ie, ie_len);
++				   ssid, ssid_len, ie, ie_len,
++				   key, key_len, key_idx);
+ 	wdev_unlock(dev->ieee80211_ptr);
+ 
+ 	return err;

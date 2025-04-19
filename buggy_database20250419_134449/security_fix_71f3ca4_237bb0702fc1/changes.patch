@@ -1,0 +1,607 @@
+diff --git a/include/trace/events/rxrpc.h b/include/trace/events/rxrpc.h
+index 58732202e9f0..75a5d8bf50e1 100644
+--- a/include/trace/events/rxrpc.h
++++ b/include/trace/events/rxrpc.h
+@@ -107,14 +107,14 @@ TRACE_EVENT(rxrpc_call,
+ 	    );
+ 
+ TRACE_EVENT(rxrpc_skb,
+-	    TP_PROTO(struct sk_buff *skb, int op, int usage, int mod_count,
+-		     const void *where),
++	    TP_PROTO(struct sk_buff *skb, enum rxrpc_skb_trace op,
++		     int usage, int mod_count, const void *where),
+ 
+ 	    TP_ARGS(skb, op, usage, mod_count, where),
+ 
+ 	    TP_STRUCT__entry(
+ 		    __field(struct sk_buff *,		skb		)
+-		    __field(int,			op		)
++		    __field(enum rxrpc_skb_trace,	op		)
+ 		    __field(int,			usage		)
+ 		    __field(int,			mod_count	)
+ 		    __field(const void *,		where		)
+@@ -130,11 +130,7 @@ TRACE_EVENT(rxrpc_skb,
+ 
+ 	    TP_printk("s=%p %s u=%d m=%d p=%pSR",
+ 		      __entry->skb,
+-		      (__entry->op == 0 ? "NEW" :
+-		       __entry->op == 1 ? "SEE" :
+-		       __entry->op == 2 ? "GET" :
+-		       __entry->op == 3 ? "FRE" :
+-		       "PUR"),
++		      rxrpc_skb_traces[__entry->op],
+ 		      __entry->usage,
+ 		      __entry->mod_count,
+ 		      __entry->where)
+diff --git a/net/rxrpc/af_rxrpc.c b/net/rxrpc/af_rxrpc.c
+index 09f81befc705..8dbf7bed2cc4 100644
+--- a/net/rxrpc/af_rxrpc.c
++++ b/net/rxrpc/af_rxrpc.c
+@@ -45,7 +45,7 @@ u32 rxrpc_epoch;
+ atomic_t rxrpc_debug_id;
+ 
+ /* count of skbs currently in use */
+-atomic_t rxrpc_n_skbs;
++atomic_t rxrpc_n_tx_skbs, rxrpc_n_rx_skbs;
+ 
+ struct workqueue_struct *rxrpc_workqueue;
+ 
+@@ -867,7 +867,8 @@ static void __exit af_rxrpc_exit(void)
+ 	proto_unregister(&rxrpc_proto);
+ 	rxrpc_destroy_all_calls();
+ 	rxrpc_destroy_all_connections();
+-	ASSERTCMP(atomic_read(&rxrpc_n_skbs), ==, 0);
++	ASSERTCMP(atomic_read(&rxrpc_n_tx_skbs), ==, 0);
++	ASSERTCMP(atomic_read(&rxrpc_n_rx_skbs), ==, 0);
+ 	rxrpc_destroy_all_locals();
+ 
+ 	remove_proc_entry("rxrpc_conns", init_net.proc_net);
+diff --git a/net/rxrpc/ar-internal.h b/net/rxrpc/ar-internal.h
+index a17341d2df3d..034f525f2235 100644
+--- a/net/rxrpc/ar-internal.h
++++ b/net/rxrpc/ar-internal.h
+@@ -520,6 +520,7 @@ struct rxrpc_call {
+ 	rxrpc_seq_t		rx_expect_next;	/* Expected next packet sequence number */
+ 	u8			rx_winsize;	/* Size of Rx window */
+ 	u8			tx_winsize;	/* Maximum size of Tx window */
++	bool			tx_phase;	/* T if transmission phase, F if receive phase */
+ 	u8			nr_jumbo_bad;	/* Number of jumbo dups/exceeds-windows */
+ 
+ 	/* receive-phase ACK management */
+@@ -534,6 +535,27 @@ struct rxrpc_call {
+ 	rxrpc_serial_t		acks_latest;	/* serial number of latest ACK received */
+ };
+ 
++enum rxrpc_skb_trace {
++	rxrpc_skb_rx_cleaned,
++	rxrpc_skb_rx_freed,
++	rxrpc_skb_rx_got,
++	rxrpc_skb_rx_lost,
++	rxrpc_skb_rx_received,
++	rxrpc_skb_rx_rotated,
++	rxrpc_skb_rx_purged,
++	rxrpc_skb_rx_seen,
++	rxrpc_skb_tx_cleaned,
++	rxrpc_skb_tx_freed,
++	rxrpc_skb_tx_got,
++	rxrpc_skb_tx_lost,
++	rxrpc_skb_tx_new,
++	rxrpc_skb_tx_rotated,
++	rxrpc_skb_tx_seen,
++	rxrpc_skb__nr_trace
++};
++
++extern const char rxrpc_skb_traces[rxrpc_skb__nr_trace][7];
++
+ enum rxrpc_conn_trace {
+ 	rxrpc_conn_new_client,
+ 	rxrpc_conn_new_service,
+@@ -642,7 +664,7 @@ extern const char *rxrpc_acks(u8 reason);
+ /*
+  * af_rxrpc.c
+  */
+-extern atomic_t rxrpc_n_skbs;
++extern atomic_t rxrpc_n_tx_skbs, rxrpc_n_rx_skbs;
+ extern u32 rxrpc_epoch;
+ extern atomic_t rxrpc_debug_id;
+ extern struct workqueue_struct *rxrpc_workqueue;
+@@ -1000,10 +1022,11 @@ int rxrpc_do_sendmsg(struct rxrpc_sock *, struct msghdr *, size_t);
+  */
+ void rxrpc_kernel_data_consumed(struct rxrpc_call *, struct sk_buff *);
+ void rxrpc_packet_destructor(struct sk_buff *);
+-void rxrpc_new_skb(struct sk_buff *);
+-void rxrpc_see_skb(struct sk_buff *);
+-void rxrpc_get_skb(struct sk_buff *);
+-void rxrpc_free_skb(struct sk_buff *);
++void rxrpc_new_skb(struct sk_buff *, enum rxrpc_skb_trace);
++void rxrpc_see_skb(struct sk_buff *, enum rxrpc_skb_trace);
++void rxrpc_get_skb(struct sk_buff *, enum rxrpc_skb_trace);
++void rxrpc_free_skb(struct sk_buff *, enum rxrpc_skb_trace);
++void rxrpc_lose_skb(struct sk_buff *, enum rxrpc_skb_trace);
+ void rxrpc_purge_queue(struct sk_buff_head *);
+ 
+ /*
+diff --git a/net/rxrpc/call_event.c b/net/rxrpc/call_event.c
+index f0cabc48a1b7..7d1b99824ed9 100644
+--- a/net/rxrpc/call_event.c
++++ b/net/rxrpc/call_event.c
+@@ -170,7 +170,7 @@ static void rxrpc_resend(struct rxrpc_call *call)
+ 			continue;
+ 
+ 		skb = call->rxtx_buffer[ix];
+-		rxrpc_see_skb(skb);
++		rxrpc_see_skb(skb, rxrpc_skb_tx_seen);
+ 		sp = rxrpc_skb(skb);
+ 
+ 		if (annotation == RXRPC_TX_ANNO_UNACK) {
+@@ -199,7 +199,7 @@ static void rxrpc_resend(struct rxrpc_call *call)
+ 			continue;
+ 
+ 		skb = call->rxtx_buffer[ix];
+-		rxrpc_get_skb(skb);
++		rxrpc_get_skb(skb, rxrpc_skb_tx_got);
+ 		spin_unlock_bh(&call->lock);
+ 		sp = rxrpc_skb(skb);
+ 
+@@ -211,7 +211,7 @@ static void rxrpc_resend(struct rxrpc_call *call)
+ 
+ 		if (rxrpc_send_data_packet(call->conn, skb) < 0) {
+ 			call->resend_at = now + 2;
+-			rxrpc_free_skb(skb);
++			rxrpc_free_skb(skb, rxrpc_skb_tx_freed);
+ 			return;
+ 		}
+ 
+@@ -219,7 +219,7 @@ static void rxrpc_resend(struct rxrpc_call *call)
+ 			rxrpc_expose_client_call(call);
+ 		sp->resend_at = now + rxrpc_resend_timeout;
+ 
+-		rxrpc_free_skb(skb);
++		rxrpc_free_skb(skb, rxrpc_skb_tx_freed);
+ 		spin_lock_bh(&call->lock);
+ 
+ 		/* We need to clear the retransmit state, but there are two
+diff --git a/net/rxrpc/call_object.c b/net/rxrpc/call_object.c
+index 54f30482a7fd..f50a6094e198 100644
+--- a/net/rxrpc/call_object.c
++++ b/net/rxrpc/call_object.c
+@@ -182,6 +182,7 @@ static struct rxrpc_call *rxrpc_alloc_client_call(struct sockaddr_rxrpc *srx,
+ 		return ERR_PTR(-ENOMEM);
+ 	call->state = RXRPC_CALL_CLIENT_AWAIT_CONN;
+ 	call->service_id = srx->srx_service;
++	call->tx_phase = true;
+ 
+ 	_leave(" = %p", call);
+ 	return call;
+@@ -458,7 +459,9 @@ void rxrpc_release_call(struct rxrpc_sock *rx, struct rxrpc_call *call)
+ 		rxrpc_disconnect_call(call);
+ 
+ 	for (i = 0; i < RXRPC_RXTX_BUFF_SIZE; i++) {
+-		rxrpc_free_skb(call->rxtx_buffer[i]);
++		rxrpc_free_skb(call->rxtx_buffer[i],
++			       (call->tx_phase ? rxrpc_skb_tx_cleaned :
++				rxrpc_skb_rx_cleaned));
+ 		call->rxtx_buffer[i] = NULL;
+ 	}
+ 
+@@ -552,9 +555,11 @@ void rxrpc_cleanup_call(struct rxrpc_call *call)
+ 
+ 	/* Clean up the Rx/Tx buffer */
+ 	for (i = 0; i < RXRPC_RXTX_BUFF_SIZE; i++)
+-		rxrpc_free_skb(call->rxtx_buffer[i]);
++		rxrpc_free_skb(call->rxtx_buffer[i],
++			       (call->tx_phase ? rxrpc_skb_tx_cleaned :
++				rxrpc_skb_rx_cleaned));
+ 
+-	rxrpc_free_skb(call->tx_pending);
++	rxrpc_free_skb(call->tx_pending, rxrpc_skb_tx_cleaned);
+ 
+ 	call_rcu(&call->rcu, rxrpc_rcu_destroy_call);
+ }
+diff --git a/net/rxrpc/conn_event.c b/net/rxrpc/conn_event.c
+index 9b19c51831aa..75a15a4c74c3 100644
+--- a/net/rxrpc/conn_event.c
++++ b/net/rxrpc/conn_event.c
+@@ -388,7 +388,7 @@ void rxrpc_process_connection(struct work_struct *work)
+ 	/* go through the conn-level event packets, releasing the ref on this
+ 	 * connection that each one has when we've finished with it */
+ 	while ((skb = skb_dequeue(&conn->rx_queue))) {
+-		rxrpc_see_skb(skb);
++		rxrpc_see_skb(skb, rxrpc_skb_rx_seen);
+ 		ret = rxrpc_process_event(conn, skb, &abort_code);
+ 		switch (ret) {
+ 		case -EPROTO:
+@@ -399,7 +399,7 @@ void rxrpc_process_connection(struct work_struct *work)
+ 			goto requeue_and_leave;
+ 		case -ECONNABORTED:
+ 		default:
+-			rxrpc_free_skb(skb);
++			rxrpc_free_skb(skb, rxrpc_skb_rx_freed);
+ 			break;
+ 		}
+ 	}
+@@ -416,7 +416,7 @@ void rxrpc_process_connection(struct work_struct *work)
+ protocol_error:
+ 	if (rxrpc_abort_connection(conn, -ret, abort_code) < 0)
+ 		goto requeue_and_leave;
+-	rxrpc_free_skb(skb);
++	rxrpc_free_skb(skb, rxrpc_skb_rx_freed);
+ 	_leave(" [EPROTO]");
+ 	goto out;
+ }
+diff --git a/net/rxrpc/input.c b/net/rxrpc/input.c
+index b690220533c6..84bb16d47b85 100644
+--- a/net/rxrpc/input.c
++++ b/net/rxrpc/input.c
+@@ -50,7 +50,7 @@ static void rxrpc_rotate_tx_window(struct rxrpc_call *call, rxrpc_seq_t to)
+ 		call->tx_hard_ack++;
+ 		ix = call->tx_hard_ack & RXRPC_RXTX_BUFF_MASK;
+ 		skb = call->rxtx_buffer[ix];
+-		rxrpc_see_skb(skb);
++		rxrpc_see_skb(skb, rxrpc_skb_tx_rotated);
+ 		call->rxtx_buffer[ix] = NULL;
+ 		call->rxtx_annotations[ix] = 0;
+ 		skb->next = list;
+@@ -66,7 +66,7 @@ static void rxrpc_rotate_tx_window(struct rxrpc_call *call, rxrpc_seq_t to)
+ 		skb = list;
+ 		list = skb->next;
+ 		skb->next = NULL;
+-		rxrpc_free_skb(skb);
++		rxrpc_free_skb(skb, rxrpc_skb_tx_freed);
+ 	}
+ }
+ 
+@@ -99,6 +99,7 @@ static bool rxrpc_end_tx_phase(struct rxrpc_call *call, const char *abort_why)
+ 	default:
+ 		break;
+ 	case RXRPC_CALL_CLIENT_AWAIT_REPLY:
++		call->tx_phase = false;
+ 		call->state = RXRPC_CALL_CLIENT_RECV_REPLY;
+ 		break;
+ 	case RXRPC_CALL_SERVER_AWAIT_ACK:
+@@ -278,7 +279,7 @@ static void rxrpc_input_data(struct rxrpc_call *call, struct sk_buff *skb,
+ 	 * Barriers against rxrpc_recvmsg_data() and rxrpc_rotate_rx_window()
+ 	 * and also rxrpc_fill_out_ack().
+ 	 */
+-	rxrpc_get_skb(skb);
++	rxrpc_get_skb(skb, rxrpc_skb_rx_got);
+ 	call->rxtx_annotations[ix] = annotation;
+ 	smp_wmb();
+ 	call->rxtx_buffer[ix] = skb;
+@@ -691,13 +692,13 @@ void rxrpc_data_ready(struct sock *udp_sk)
+ 		return;
+ 	}
+ 
+-	rxrpc_new_skb(skb);
++	rxrpc_new_skb(skb, rxrpc_skb_rx_received);
+ 
+ 	_net("recv skb %p", skb);
+ 
+ 	/* we'll probably need to checksum it (didn't call sock_recvmsg) */
+ 	if (skb_checksum_complete(skb)) {
+-		rxrpc_free_skb(skb);
++		rxrpc_free_skb(skb, rxrpc_skb_rx_freed);
+ 		__UDP_INC_STATS(&init_net, UDP_MIB_INERRORS, 0);
+ 		_leave(" [CSUM failed]");
+ 		return;
+@@ -821,7 +822,7 @@ void rxrpc_data_ready(struct sock *udp_sk)
+ discard_unlock:
+ 	rcu_read_unlock();
+ discard:
+-	rxrpc_free_skb(skb);
++	rxrpc_free_skb(skb, rxrpc_skb_rx_freed);
+ out:
+ 	trace_rxrpc_rx_done(0, 0);
+ 	return;
+diff --git a/net/rxrpc/local_event.c b/net/rxrpc/local_event.c
+index f073e932500e..190f68bd9e27 100644
+--- a/net/rxrpc/local_event.c
++++ b/net/rxrpc/local_event.c
+@@ -90,7 +90,7 @@ void rxrpc_process_local_events(struct rxrpc_local *local)
+ 	if (skb) {
+ 		struct rxrpc_skb_priv *sp = rxrpc_skb(skb);
+ 
+-		rxrpc_see_skb(skb);
++		rxrpc_see_skb(skb, rxrpc_skb_rx_seen);
+ 		_debug("{%d},{%u}", local->debug_id, sp->hdr.type);
+ 
+ 		switch (sp->hdr.type) {
+@@ -107,7 +107,7 @@ void rxrpc_process_local_events(struct rxrpc_local *local)
+ 			break;
+ 		}
+ 
+-		rxrpc_free_skb(skb);
++		rxrpc_free_skb(skb, rxrpc_skb_rx_freed);
+ 	}
+ 
+ 	_leave("");
+diff --git a/net/rxrpc/misc.c b/net/rxrpc/misc.c
+index c7065d893d1e..026e1f2e83ff 100644
+--- a/net/rxrpc/misc.c
++++ b/net/rxrpc/misc.c
+@@ -102,6 +102,24 @@ const char *rxrpc_acks(u8 reason)
+ 	return str[reason];
+ }
+ 
++const char rxrpc_skb_traces[rxrpc_skb__nr_trace][7] = {
++	[rxrpc_skb_rx_cleaned]		= "Rx CLN",
++	[rxrpc_skb_rx_freed]		= "Rx FRE",
++	[rxrpc_skb_rx_got]		= "Rx GOT",
++	[rxrpc_skb_rx_lost]		= "Rx *L*",
++	[rxrpc_skb_rx_received]		= "Rx RCV",
++	[rxrpc_skb_rx_purged]		= "Rx PUR",
++	[rxrpc_skb_rx_rotated]		= "Rx ROT",
++	[rxrpc_skb_rx_seen]		= "Rx SEE",
++	[rxrpc_skb_tx_cleaned]		= "Tx CLN",
++	[rxrpc_skb_tx_freed]		= "Tx FRE",
++	[rxrpc_skb_tx_got]		= "Tx GOT",
++	[rxrpc_skb_tx_lost]		= "Tx *L*",
++	[rxrpc_skb_tx_new]		= "Tx NEW",
++	[rxrpc_skb_tx_rotated]		= "Tx ROT",
++	[rxrpc_skb_tx_seen]		= "Tx SEE",
++};
++
+ const char rxrpc_conn_traces[rxrpc_conn__nr_trace][4] = {
+ 	[rxrpc_conn_new_client]		= "NWc",
+ 	[rxrpc_conn_new_service]	= "NWs",
+diff --git a/net/rxrpc/output.c b/net/rxrpc/output.c
+index 2c9daeadce87..a2cad5ce7416 100644
+--- a/net/rxrpc/output.c
++++ b/net/rxrpc/output.c
+@@ -324,7 +324,7 @@ void rxrpc_reject_packets(struct rxrpc_local *local)
+ 	whdr.type = RXRPC_PACKET_TYPE_ABORT;
+ 
+ 	while ((skb = skb_dequeue(&local->reject_queue))) {
+-		rxrpc_see_skb(skb);
++		rxrpc_see_skb(skb, rxrpc_skb_rx_seen);
+ 		sp = rxrpc_skb(skb);
+ 
+ 		if (rxrpc_extract_addr_from_skb(&srx, skb) == 0) {
+@@ -343,7 +343,7 @@ void rxrpc_reject_packets(struct rxrpc_local *local)
+ 			kernel_sendmsg(local->socket, &msg, iov, 2, size);
+ 		}
+ 
+-		rxrpc_free_skb(skb);
++		rxrpc_free_skb(skb, rxrpc_skb_rx_freed);
+ 	}
+ 
+ 	_leave("");
+diff --git a/net/rxrpc/peer_event.c b/net/rxrpc/peer_event.c
+index 9e0725f5652b..18276e7cb9e0 100644
+--- a/net/rxrpc/peer_event.c
++++ b/net/rxrpc/peer_event.c
+@@ -155,11 +155,11 @@ void rxrpc_error_report(struct sock *sk)
+ 		_leave("UDP socket errqueue empty");
+ 		return;
+ 	}
+-	rxrpc_new_skb(skb);
++	rxrpc_new_skb(skb, rxrpc_skb_rx_received);
+ 	serr = SKB_EXT_ERR(skb);
+ 	if (!skb->len && serr->ee.ee_origin == SO_EE_ORIGIN_TIMESTAMPING) {
+ 		_leave("UDP empty message");
+-		rxrpc_free_skb(skb);
++		rxrpc_free_skb(skb, rxrpc_skb_rx_freed);
+ 		return;
+ 	}
+ 
+@@ -169,7 +169,7 @@ void rxrpc_error_report(struct sock *sk)
+ 		peer = NULL;
+ 	if (!peer) {
+ 		rcu_read_unlock();
+-		rxrpc_free_skb(skb);
++		rxrpc_free_skb(skb, rxrpc_skb_rx_freed);
+ 		_leave(" [no peer]");
+ 		return;
+ 	}
+@@ -179,7 +179,7 @@ void rxrpc_error_report(struct sock *sk)
+ 	     serr->ee.ee_code == ICMP_FRAG_NEEDED)) {
+ 		rxrpc_adjust_mtu(peer, serr);
+ 		rcu_read_unlock();
+-		rxrpc_free_skb(skb);
++		rxrpc_free_skb(skb, rxrpc_skb_rx_freed);
+ 		rxrpc_put_peer(peer);
+ 		_leave(" [MTU update]");
+ 		return;
+@@ -187,7 +187,7 @@ void rxrpc_error_report(struct sock *sk)
+ 
+ 	rxrpc_store_error(peer, serr);
+ 	rcu_read_unlock();
+-	rxrpc_free_skb(skb);
++	rxrpc_free_skb(skb, rxrpc_skb_rx_freed);
+ 
+ 	/* The ref we obtained is passed off to the work item */
+ 	rxrpc_queue_work(&peer->error_distributor);
+diff --git a/net/rxrpc/recvmsg.c b/net/rxrpc/recvmsg.c
+index 79e65668bc58..6ba4af5a8d95 100644
+--- a/net/rxrpc/recvmsg.c
++++ b/net/rxrpc/recvmsg.c
+@@ -155,6 +155,7 @@ static void rxrpc_end_rx_phase(struct rxrpc_call *call)
+ 		break;
+ 
+ 	case RXRPC_CALL_SERVER_RECV_REQUEST:
++		call->tx_phase = true;
+ 		call->state = RXRPC_CALL_SERVER_ACK_REQUEST;
+ 		break;
+ 	default:
+@@ -185,7 +186,7 @@ static void rxrpc_rotate_rx_window(struct rxrpc_call *call)
+ 	hard_ack++;
+ 	ix = hard_ack & RXRPC_RXTX_BUFF_MASK;
+ 	skb = call->rxtx_buffer[ix];
+-	rxrpc_see_skb(skb);
++	rxrpc_see_skb(skb, rxrpc_skb_rx_rotated);
+ 	sp = rxrpc_skb(skb);
+ 	flags = sp->hdr.flags;
+ 	serial = sp->hdr.serial;
+@@ -197,7 +198,7 @@ static void rxrpc_rotate_rx_window(struct rxrpc_call *call)
+ 	/* Barrier against rxrpc_input_data(). */
+ 	smp_store_release(&call->rx_hard_ack, hard_ack);
+ 
+-	rxrpc_free_skb(skb);
++	rxrpc_free_skb(skb, rxrpc_skb_rx_freed);
+ 
+ 	_debug("%u,%u,%02x", hard_ack, top, flags);
+ 	trace_rxrpc_receive(call, rxrpc_receive_rotate, serial, hard_ack);
+@@ -317,7 +318,7 @@ static int rxrpc_recvmsg_data(struct socket *sock, struct rxrpc_call *call,
+ 			break;
+ 		}
+ 		smp_rmb();
+-		rxrpc_see_skb(skb);
++		rxrpc_see_skb(skb, rxrpc_skb_rx_seen);
+ 		sp = rxrpc_skb(skb);
+ 
+ 		if (!(flags & MSG_PEEK))
+diff --git a/net/rxrpc/sendmsg.c b/net/rxrpc/sendmsg.c
+index 28d8f73cf11d..6a39ee97a0b7 100644
+--- a/net/rxrpc/sendmsg.c
++++ b/net/rxrpc/sendmsg.c
+@@ -100,7 +100,7 @@ static void rxrpc_queue_packet(struct rxrpc_call *call, struct sk_buff *skb,
+ 	ASSERTCMP(seq, ==, call->tx_top + 1);
+ 
+ 	ix = seq & RXRPC_RXTX_BUFF_MASK;
+-	rxrpc_get_skb(skb);
++	rxrpc_get_skb(skb, rxrpc_skb_tx_got);
+ 	call->rxtx_annotations[ix] = RXRPC_TX_ANNO_UNACK;
+ 	smp_wmb();
+ 	call->rxtx_buffer[ix] = skb;
+@@ -146,7 +146,7 @@ static void rxrpc_queue_packet(struct rxrpc_call *call, struct sk_buff *skb,
+ 		rxrpc_instant_resend(call, ix);
+ 	}
+ 
+-	rxrpc_free_skb(skb);
++	rxrpc_free_skb(skb, rxrpc_skb_tx_freed);
+ 	_leave("");
+ }
+ 
+@@ -201,7 +201,7 @@ static int rxrpc_send_data(struct rxrpc_sock *rx,
+ 
+ 	skb = call->tx_pending;
+ 	call->tx_pending = NULL;
+-	rxrpc_see_skb(skb);
++	rxrpc_see_skb(skb, rxrpc_skb_tx_seen);
+ 
+ 	copied = 0;
+ 	do {
+@@ -242,7 +242,7 @@ static int rxrpc_send_data(struct rxrpc_sock *rx,
+ 			if (!skb)
+ 				goto maybe_error;
+ 
+-			rxrpc_new_skb(skb);
++			rxrpc_new_skb(skb, rxrpc_skb_tx_new);
+ 
+ 			_debug("ALLOC SEND %p", skb);
+ 
+@@ -352,7 +352,7 @@ static int rxrpc_send_data(struct rxrpc_sock *rx,
+ 	return ret;
+ 
+ call_terminated:
+-	rxrpc_free_skb(skb);
++	rxrpc_free_skb(skb, rxrpc_skb_tx_freed);
+ 	_leave(" = %d", -call->error);
+ 	return -call->error;
+ 
+diff --git a/net/rxrpc/skbuff.c b/net/rxrpc/skbuff.c
+index 620d9ccaf3c1..5154cbf7e540 100644
+--- a/net/rxrpc/skbuff.c
++++ b/net/rxrpc/skbuff.c
+@@ -18,54 +18,76 @@
+ #include <net/af_rxrpc.h>
+ #include "ar-internal.h"
+ 
++#define select_skb_count(op) (op >= rxrpc_skb_tx_cleaned ? &rxrpc_n_tx_skbs : &rxrpc_n_rx_skbs)
++
+ /*
+- * Note the existence of a new-to-us socket buffer (allocated or dequeued).
++ * Note the allocation or reception of a socket buffer.
+  */
+-void rxrpc_new_skb(struct sk_buff *skb)
++void rxrpc_new_skb(struct sk_buff *skb, enum rxrpc_skb_trace op)
+ {
+ 	const void *here = __builtin_return_address(0);
+-	int n = atomic_inc_return(&rxrpc_n_skbs);
+-	trace_rxrpc_skb(skb, 0, atomic_read(&skb->users), n, here);
++	int n = atomic_inc_return(select_skb_count(op));
++	trace_rxrpc_skb(skb, op, atomic_read(&skb->users), n, here);
+ }
+ 
+ /*
+  * Note the re-emergence of a socket buffer from a queue or buffer.
+  */
+-void rxrpc_see_skb(struct sk_buff *skb)
++void rxrpc_see_skb(struct sk_buff *skb, enum rxrpc_skb_trace op)
+ {
+ 	const void *here = __builtin_return_address(0);
+ 	if (skb) {
+-		int n = atomic_read(&rxrpc_n_skbs);
+-		trace_rxrpc_skb(skb, 1, atomic_read(&skb->users), n, here);
++		int n = atomic_read(select_skb_count(op));
++		trace_rxrpc_skb(skb, op, atomic_read(&skb->users), n, here);
+ 	}
+ }
+ 
+ /*
+  * Note the addition of a ref on a socket buffer.
+  */
+-void rxrpc_get_skb(struct sk_buff *skb)
++void rxrpc_get_skb(struct sk_buff *skb, enum rxrpc_skb_trace op)
+ {
+ 	const void *here = __builtin_return_address(0);
+-	int n = atomic_inc_return(&rxrpc_n_skbs);
+-	trace_rxrpc_skb(skb, 2, atomic_read(&skb->users), n, here);
++	int n = atomic_inc_return(select_skb_count(op));
++	trace_rxrpc_skb(skb, op, atomic_read(&skb->users), n, here);
+ 	skb_get(skb);
+ }
+ 
+ /*
+  * Note the destruction of a socket buffer.
+  */
+-void rxrpc_free_skb(struct sk_buff *skb)
++void rxrpc_free_skb(struct sk_buff *skb, enum rxrpc_skb_trace op)
+ {
+ 	const void *here = __builtin_return_address(0);
+ 	if (skb) {
+ 		int n;
+ 		CHECK_SLAB_OKAY(&skb->users);
+-		n = atomic_dec_return(&rxrpc_n_skbs);
+-		trace_rxrpc_skb(skb, 3, atomic_read(&skb->users), n, here);
++		n = atomic_dec_return(select_skb_count(op));
++		trace_rxrpc_skb(skb, op, atomic_read(&skb->users), n, here);
+ 		kfree_skb(skb);
+ 	}
+ }
+ 
++/*
++ * Note the injected loss of a socket buffer.
++ */
++void rxrpc_lose_skb(struct sk_buff *skb, enum rxrpc_skb_trace op)
++{
++	const void *here = __builtin_return_address(0);
++	if (skb) {
++		int n;
++		CHECK_SLAB_OKAY(&skb->users);
++		if (op == rxrpc_skb_tx_lost) {
++			n = atomic_read(select_skb_count(op));
++			trace_rxrpc_skb(skb, op, atomic_read(&skb->users), n, here);
++		} else {
++			n = atomic_dec_return(select_skb_count(op));
++			trace_rxrpc_skb(skb, op, atomic_read(&skb->users), n, here);
++			kfree_skb(skb);
++		}
++	}
++}
++
+ /*
+  * Clear a queue of socket buffers.
+  */
+@@ -74,8 +96,9 @@ void rxrpc_purge_queue(struct sk_buff_head *list)
+ 	const void *here = __builtin_return_address(0);
+ 	struct sk_buff *skb;
+ 	while ((skb = skb_dequeue((list))) != NULL) {
+-		int n = atomic_dec_return(&rxrpc_n_skbs);
+-		trace_rxrpc_skb(skb, 4, atomic_read(&skb->users), n, here);
++		int n = atomic_dec_return(select_skb_count(rxrpc_skb_rx_purged));
++		trace_rxrpc_skb(skb, rxrpc_skb_rx_purged,
++				atomic_read(&skb->users), n, here);
+ 		kfree_skb(skb);
+ 	}
+ }

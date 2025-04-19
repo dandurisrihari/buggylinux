@@ -1,0 +1,71 @@
+commit 4ad3278df6fe2b0852b00d5757fc2ccd8e92c26e
+Author: Pawan Gupta <pawan.kumar.gupta@linux.intel.com>
+Date:   Fri Jul 8 13:36:09 2022 -0700
+
+    x86/speculation: Disable RRSBA behavior
+    
+    Some Intel processors may use alternate predictors for RETs on
+    RSB-underflow. This condition may be vulnerable to Branch History
+    Injection (BHI) and intramode-BTI.
+    
+    Kernel earlier added spectre_v2 mitigation modes (eIBRS+Retpolines,
+    eIBRS+LFENCE, Retpolines) which protect indirect CALLs and JMPs against
+    such attacks. However, on RSB-underflow, RET target prediction may
+    fallback to alternate predictors. As a result, RET's predicted target
+    may get influenced by branch history.
+    
+    A new MSR_IA32_SPEC_CTRL bit (RRSBA_DIS_S) controls this fallback
+    behavior when in kernel mode. When set, RETs will not take predictions
+    from alternate predictors, hence mitigating RETs as well. Support for
+    this is enumerated by CPUID.7.2.EDX[RRSBA_CTRL] (bit2).
+    
+    For spectre v2 mitigation, when a user selects a mitigation that
+    protects indirect CALLs and JMPs against BHI and intramode-BTI, set
+    RRSBA_DIS_S also to protect RETs for RSB-underflow case.
+    
+    Signed-off-by: Pawan Gupta <pawan.kumar.gupta@linux.intel.com>
+    Signed-off-by: Borislav Petkov <bp@suse.de>
+
+diff --git a/arch/x86/kernel/cpu/bugs.c b/arch/x86/kernel/cpu/bugs.c
+index d26c57d98b98..0dd04713434b 100644
+--- a/arch/x86/kernel/cpu/bugs.c
++++ b/arch/x86/kernel/cpu/bugs.c
+@@ -1318,6 +1318,22 @@ static enum spectre_v2_mitigation __init spectre_v2_select_retpoline(void)
+ 	return SPECTRE_V2_RETPOLINE;
+ }
+ 
++/* Disable in-kernel use of non-RSB RET predictors */
++static void __init spec_ctrl_disable_kernel_rrsba(void)
++{
++	u64 ia32_cap;
++
++	if (!boot_cpu_has(X86_FEATURE_RRSBA_CTRL))
++		return;
++
++	ia32_cap = x86_read_arch_cap_msr();
++
++	if (ia32_cap & ARCH_CAP_RRSBA) {
++		x86_spec_ctrl_base |= SPEC_CTRL_RRSBA_DIS_S;
++		write_spec_ctrl_current(x86_spec_ctrl_base, true);
++	}
++}
++
+ static void __init spectre_v2_select_mitigation(void)
+ {
+ 	enum spectre_v2_mitigation_cmd cmd = spectre_v2_parse_cmdline();
+@@ -1412,6 +1428,16 @@ static void __init spectre_v2_select_mitigation(void)
+ 		break;
+ 	}
+ 
++	/*
++	 * Disable alternate RSB predictions in kernel when indirect CALLs and
++	 * JMPs gets protection against BHI and Intramode-BTI, but RET
++	 * prediction from a non-RSB predictor is still a risk.
++	 */
++	if (mode == SPECTRE_V2_EIBRS_LFENCE ||
++	    mode == SPECTRE_V2_EIBRS_RETPOLINE ||
++	    mode == SPECTRE_V2_RETPOLINE)
++		spec_ctrl_disable_kernel_rrsba();
++
+ 	spectre_v2_enabled = mode;
+ 	pr_info("%s\n", spectre_v2_strings[mode]);

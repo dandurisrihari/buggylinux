@@ -1,0 +1,91 @@
+diff --git a/fs/f2fs/data.c b/fs/f2fs/data.c
+index acb531788c43..b0781edc9ada 100644
+--- a/fs/f2fs/data.c
++++ b/fs/f2fs/data.c
+@@ -173,7 +173,7 @@ static struct bio *__bio_alloc(struct f2fs_sb_info *sbi, block_t blk_addr,
+ {
+ 	struct bio *bio;
+ 
+-	bio = f2fs_bio_alloc(npages);
++	bio = f2fs_bio_alloc(sbi, npages, true);
+ 
+ 	f2fs_target_device(sbi, blk_addr, bio);
+ 	bio->bi_end_io = is_read ? f2fs_read_end_io : f2fs_write_end_io;
+@@ -473,7 +473,7 @@ static struct bio *f2fs_grab_read_bio(struct inode *inode, block_t blkaddr,
+ 		f2fs_wait_on_block_writeback(sbi, blkaddr);
+ 	}
+ 
+-	bio = bio_alloc(GFP_KERNEL, min_t(int, nr_pages, BIO_MAX_PAGES));
++	bio = f2fs_bio_alloc(sbi, min_t(int, nr_pages, BIO_MAX_PAGES), false);
+ 	if (!bio) {
+ 		if (ctx)
+ 			fscrypt_release_ctx(ctx);
+diff --git a/fs/f2fs/f2fs.h b/fs/f2fs/f2fs.h
+index 7ef3193db438..d89728c946a9 100644
+--- a/fs/f2fs/f2fs.h
++++ b/fs/f2fs/f2fs.h
+@@ -47,6 +47,7 @@ enum {
+ 	FAULT_KMALLOC,
+ 	FAULT_PAGE_ALLOC,
+ 	FAULT_PAGE_GET,
++	FAULT_ALLOC_BIO,
+ 	FAULT_ALLOC_NID,
+ 	FAULT_ORPHAN,
+ 	FAULT_BLOCK,
+@@ -1898,15 +1899,25 @@ static inline void *f2fs_kmem_cache_alloc(struct kmem_cache *cachep,
+ 	return entry;
+ }
+ 
+-static inline struct bio *f2fs_bio_alloc(int npages)
++static inline struct bio *f2fs_bio_alloc(struct f2fs_sb_info *sbi,
++						int npages, bool no_fail)
+ {
+ 	struct bio *bio;
+ 
+-	/* No failure on bio allocation */
+-	bio = bio_alloc(GFP_NOIO, npages);
+-	if (!bio)
+-		bio = bio_alloc(GFP_NOIO | __GFP_NOFAIL, npages);
+-	return bio;
++	if (no_fail) {
++		/* No failure on bio allocation */
++		bio = bio_alloc(GFP_NOIO, npages);
++		if (!bio)
++			bio = bio_alloc(GFP_NOIO | __GFP_NOFAIL, npages);
++		return bio;
++	}
++#ifdef CONFIG_F2FS_FAULT_INJECTION
++	if (time_to_inject(sbi, FAULT_ALLOC_BIO)) {
++		f2fs_show_injection_info(FAULT_ALLOC_BIO);
++		return NULL;
++	}
++#endif
++	return bio_alloc(GFP_KERNEL, npages);
+ }
+ 
+ static inline void f2fs_radix_tree_insert(struct radix_tree_root *root,
+diff --git a/fs/f2fs/segment.c b/fs/f2fs/segment.c
+index 46dfbca61b35..5c3293afeb8e 100644
+--- a/fs/f2fs/segment.c
++++ b/fs/f2fs/segment.c
+@@ -511,7 +511,7 @@ void f2fs_balance_fs_bg(struct f2fs_sb_info *sbi)
+ static int __submit_flush_wait(struct f2fs_sb_info *sbi,
+ 				struct block_device *bdev)
+ {
+-	struct bio *bio = f2fs_bio_alloc(0);
++	struct bio *bio = f2fs_bio_alloc(sbi, 0, true);
+ 	int ret;
+ 
+ 	bio->bi_opf = REQ_OP_WRITE | REQ_SYNC | REQ_PREFLUSH;
+diff --git a/fs/f2fs/super.c b/fs/f2fs/super.c
+index 4a5af8398f0c..96e145c34ba2 100644
+--- a/fs/f2fs/super.c
++++ b/fs/f2fs/super.c
+@@ -45,6 +45,7 @@ char *fault_name[FAULT_MAX] = {
+ 	[FAULT_KMALLOC]		= "kmalloc",
+ 	[FAULT_PAGE_ALLOC]	= "page alloc",
+ 	[FAULT_PAGE_GET]	= "page get",
++	[FAULT_ALLOC_BIO]	= "alloc bio",
+ 	[FAULT_ALLOC_NID]	= "alloc nid",
+ 	[FAULT_ORPHAN]		= "orphan",
+ 	[FAULT_BLOCK]		= "no more block",

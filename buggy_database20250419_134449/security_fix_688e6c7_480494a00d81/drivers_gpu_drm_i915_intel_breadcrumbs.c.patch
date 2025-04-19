@@ -1,0 +1,486 @@
+commit 688e6c7258164de86d626e8e983ca8d28015c263
+Author: Chris Wilson <chris@chris-wilson.co.uk>
+Date:   Fri Jul 1 17:23:15 2016 +0100
+
+    drm/i915: Slaughter the thundering i915_wait_request herd
+    
+    One particularly stressful scenario consists of many independent tasks
+    all competing for GPU time and waiting upon the results (e.g. realtime
+    transcoding of many, many streams). One bottleneck in particular is that
+    each client waits on its own results, but every client is woken up after
+    every batchbuffer - hence the thunder of hooves as then every client must
+    do its heavyweight dance to read a coherent seqno to see if it is the
+    lucky one.
+    
+    Ideally, we only want one client to wake up after the interrupt and
+    check its request for completion. Since the requests must retire in
+    order, we can select the first client on the oldest request to be woken.
+    Once that client has completed his wait, we can then wake up the
+    next client and so on. However, all clients then incur latency as every
+    process in the chain may be delayed for scheduling - this may also then
+    cause some priority inversion. To reduce the latency, when a client
+    is added or removed from the list, we scan the tree for completed
+    seqno and wake up all the completed waiters in parallel.
+    
+    Using igt/benchmarks/gem_latency, we can demonstrate this effect. The
+    benchmark measures the number of GPU cycles between completion of a
+    batch and the client waking up from a call to wait-ioctl. With many
+    concurrent waiters, with each on a different request, we observe that
+    the wakeup latency before the patch scales nearly linearly with the
+    number of waiters (before external factors kick in making the scaling much
+    worse). After applying the patch, we can see that only the single waiter
+    for the request is being woken up, providing a constant wakeup latency
+    for every operation. However, the situation is not quite as rosy for
+    many waiters on the same request, though to the best of my knowledge this
+    is much less likely in practice. Here, we can observe that the
+    concurrent waiters incur extra latency from being woken up by the
+    solitary bottom-half, rather than directly by the interrupt. This
+    appears to be scheduler induced (having discounted adverse effects from
+    having a rbtree walk/erase in the wakeup path), each additional
+    wake_up_process() costs approximately 1us on big core. Another effect of
+    performing the secondary wakeups from the first bottom-half is the
+    incurred delay this imposes on high priority threads - rather than
+    immediately returning to userspace and leaving the interrupt handler to
+    wake the others.
+    
+    To offset the delay incurred with additional waiters on a request, we
+    could use a hybrid scheme that did a quick read in the interrupt handler
+    and dequeued all the completed waiters (incurring the overhead in the
+    interrupt handler, not the best plan either as we then incur GPU
+    submission latency) but we would still have to wake up the bottom-half
+    every time to do the heavyweight slow read. Or we could only kick the
+    waiters on the seqno with the same priority as the current task (i.e. in
+    the realtime waiter scenario, only it is woken up immediately by the
+    interrupt and simply queues the next waiter before returning to userspace,
+    minimising its delay at the expense of the chain, and also reducing
+    contention on its scheduler runqueue). This is effective at avoid long
+    pauses in the interrupt handler and at avoiding the extra latency in
+    realtime/high-priority waiters.
+    
+    v2: Convert from a kworker per engine into a dedicated kthread for the
+    bottom-half.
+    v3: Rename request members and tweak comments.
+    v4: Use a per-engine spinlock in the breadcrumbs bottom-half.
+    v5: Fix race in locklessly checking waiter status and kicking the task on
+    adding a new waiter.
+    v6: Fix deciding when to force the timer to hide missing interrupts.
+    v7: Move the bottom-half from the kthread to the first client process.
+    v8: Reword a few comments
+    v9: Break the busy loop when the interrupt is unmasked or has fired.
+    v10: Comments, unnecessary churn, better debugging from Tvrtko
+    v11: Wake all completed waiters on removing the current bottom-half to
+    reduce the latency of waking up a herd of clients all waiting on the
+    same request.
+    v12: Rearrange missed-interrupt fault injection so that it works with
+    igt/drv_missed_irq_hang
+    v13: Rename intel_breadcrumb and friends to intel_wait in preparation
+    for signal handling.
+    v14: RCU commentary, assert_spin_locked
+    v15: Hide BUG_ON behind the compiler; report on gem_latency findings.
+    v16: Sort seqno-groups by priority so that first-waiter has the highest
+    task priority (and so avoid priority inversion).
+    v17: Add waiters to post-mortem GPU hang state.
+    v18: Return early for a completed wait after acquiring the spinlock.
+    Avoids adding ourselves to the tree if the is already complete, and
+    skips the awkward question of why we don't do completion wakeups for
+    waits earlier than or equal to ourselves.
+    v19: Prepare for init_breadcrumbs to fail. Later patches may want to
+    allocate during init, so be prepared to propagate back the error code.
+    
+    Testcase: igt/gem_concurrent_blit
+    Testcase: igt/benchmarks/gem_latency
+    Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Cc: "Rogozhkin, Dmitry V" <dmitry.v.rogozhkin@intel.com>
+    Cc: "Gong, Zhipeng" <zhipeng.gong@intel.com>
+    Cc: Tvrtko Ursulin <tvrtko.ursulin@linux.intel.com>
+    Cc: Dave Gordon <david.s.gordon@intel.com>
+    Cc: "Goel, Akash" <akash.goel@intel.com>
+    Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@linux.intel.com> #v18
+    Link: http://patchwork.freedesktop.org/patch/msgid/1467390209-3576-6-git-send-email-chris@chris-wilson.co.uk
+
+diff --git a/drivers/gpu/drm/i915/intel_breadcrumbs.c b/drivers/gpu/drm/i915/intel_breadcrumbs.c
+new file mode 100644
+index 000000000000..a3bbf2d90dce
+--- /dev/null
++++ b/drivers/gpu/drm/i915/intel_breadcrumbs.c
+@@ -0,0 +1,380 @@
++/*
++ * Copyright © 2015 Intel Corporation
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ *
++ */
++
++#include "i915_drv.h"
++
++static void intel_breadcrumbs_fake_irq(unsigned long data)
++{
++	struct intel_engine_cs *engine = (struct intel_engine_cs *)data;
++
++	/*
++	 * The timer persists in case we cannot enable interrupts,
++	 * or if we have previously seen seqno/interrupt incoherency
++	 * ("missed interrupt" syndrome). Here the worker will wake up
++	 * every jiffie in order to kick the oldest waiter to do the
++	 * coherent seqno check.
++	 */
++	rcu_read_lock();
++	if (intel_engine_wakeup(engine))
++		mod_timer(&engine->breadcrumbs.fake_irq, jiffies + 1);
++	rcu_read_unlock();
++}
++
++static void irq_enable(struct intel_engine_cs *engine)
++{
++	WARN_ON(!engine->irq_get(engine));
++}
++
++static void irq_disable(struct intel_engine_cs *engine)
++{
++	engine->irq_put(engine);
++}
++
++static bool __intel_breadcrumbs_enable_irq(struct intel_breadcrumbs *b)
++{
++	struct intel_engine_cs *engine =
++		container_of(b, struct intel_engine_cs, breadcrumbs);
++	struct drm_i915_private *i915 = engine->i915;
++	bool irq_posted = false;
++
++	assert_spin_locked(&b->lock);
++	if (b->rpm_wakelock)
++		return false;
++
++	/* Since we are waiting on a request, the GPU should be busy
++	 * and should have its own rpm reference. For completeness,
++	 * record an rpm reference for ourselves to cover the
++	 * interrupt we unmask.
++	 */
++	intel_runtime_pm_get_noresume(i915);
++	b->rpm_wakelock = true;
++
++	/* No interrupts? Kick the waiter every jiffie! */
++	if (intel_irqs_enabled(i915)) {
++		if (!test_bit(engine->id, &i915->gpu_error.test_irq_rings)) {
++			irq_enable(engine);
++			irq_posted = true;
++		}
++		b->irq_enabled = true;
++	}
++
++	if (!b->irq_enabled ||
++	    test_bit(engine->id, &i915->gpu_error.missed_irq_rings))
++		mod_timer(&b->fake_irq, jiffies + 1);
++
++	return irq_posted;
++}
++
++static void __intel_breadcrumbs_disable_irq(struct intel_breadcrumbs *b)
++{
++	struct intel_engine_cs *engine =
++		container_of(b, struct intel_engine_cs, breadcrumbs);
++
++	assert_spin_locked(&b->lock);
++	if (!b->rpm_wakelock)
++		return;
++
++	if (b->irq_enabled) {
++		irq_disable(engine);
++		b->irq_enabled = false;
++	}
++
++	intel_runtime_pm_put(engine->i915);
++	b->rpm_wakelock = false;
++}
++
++static inline struct intel_wait *to_wait(struct rb_node *node)
++{
++	return container_of(node, struct intel_wait, node);
++}
++
++static inline void __intel_breadcrumbs_finish(struct intel_breadcrumbs *b,
++					      struct intel_wait *wait)
++{
++	assert_spin_locked(&b->lock);
++
++	/* This request is completed, so remove it from the tree, mark it as
++	 * complete, and *then* wake up the associated task.
++	 */
++	rb_erase(&wait->node, &b->waiters);
++	RB_CLEAR_NODE(&wait->node);
++
++	wake_up_process(wait->tsk); /* implicit smp_wmb() */
++}
++
++static bool __intel_engine_add_wait(struct intel_engine_cs *engine,
++				    struct intel_wait *wait)
++{
++	struct intel_breadcrumbs *b = &engine->breadcrumbs;
++	struct rb_node **p, *parent, *completed;
++	bool first;
++	u32 seqno;
++
++	/* Insert the request into the retirement ordered list
++	 * of waiters by walking the rbtree. If we are the oldest
++	 * seqno in the tree (the first to be retired), then
++	 * set ourselves as the bottom-half.
++	 *
++	 * As we descend the tree, prune completed branches since we hold the
++	 * spinlock we know that the first_waiter must be delayed and can
++	 * reduce some of the sequential wake up latency if we take action
++	 * ourselves and wake up the completed tasks in parallel. Also, by
++	 * removing stale elements in the tree, we may be able to reduce the
++	 * ping-pong between the old bottom-half and ourselves as first-waiter.
++	 */
++	first = true;
++	parent = NULL;
++	completed = NULL;
++	seqno = engine->get_seqno(engine);
++
++	 /* If the request completed before we managed to grab the spinlock,
++	  * return now before adding ourselves to the rbtree. We let the
++	  * current bottom-half handle any pending wakeups and instead
++	  * try and get out of the way quickly.
++	  */
++	if (i915_seqno_passed(seqno, wait->seqno)) {
++		RB_CLEAR_NODE(&wait->node);
++		return first;
++	}
++
++	p = &b->waiters.rb_node;
++	while (*p) {
++		parent = *p;
++		if (wait->seqno == to_wait(parent)->seqno) {
++			/* We have multiple waiters on the same seqno, select
++			 * the highest priority task (that with the smallest
++			 * task->prio) to serve as the bottom-half for this
++			 * group.
++			 */
++			if (wait->tsk->prio > to_wait(parent)->tsk->prio) {
++				p = &parent->rb_right;
++				first = false;
++			} else {
++				p = &parent->rb_left;
++			}
++		} else if (i915_seqno_passed(wait->seqno,
++					     to_wait(parent)->seqno)) {
++			p = &parent->rb_right;
++			if (i915_seqno_passed(seqno, to_wait(parent)->seqno))
++				completed = parent;
++			else
++				first = false;
++		} else {
++			p = &parent->rb_left;
++		}
++	}
++	rb_link_node(&wait->node, parent, p);
++	rb_insert_color(&wait->node, &b->waiters);
++	GEM_BUG_ON(!first && !b->tasklet);
++
++	if (completed) {
++		struct rb_node *next = rb_next(completed);
++
++		GEM_BUG_ON(!next && !first);
++		if (next && next != &wait->node) {
++			GEM_BUG_ON(first);
++			b->first_wait = to_wait(next);
++			smp_store_mb(b->tasklet, b->first_wait->tsk);
++			/* As there is a delay between reading the current
++			 * seqno, processing the completed tasks and selecting
++			 * the next waiter, we may have missed the interrupt
++			 * and so need for the next bottom-half to wakeup.
++			 *
++			 * Also as we enable the IRQ, we may miss the
++			 * interrupt for that seqno, so we have to wake up
++			 * the next bottom-half in order to do a coherent check
++			 * in case the seqno passed.
++			 */
++			__intel_breadcrumbs_enable_irq(b);
++			wake_up_process(to_wait(next)->tsk);
++		}
++
++		do {
++			struct intel_wait *crumb = to_wait(completed);
++			completed = rb_prev(completed);
++			__intel_breadcrumbs_finish(b, crumb);
++		} while (completed);
++	}
++
++	if (first) {
++		GEM_BUG_ON(rb_first(&b->waiters) != &wait->node);
++		b->first_wait = wait;
++		smp_store_mb(b->tasklet, wait->tsk);
++		first = __intel_breadcrumbs_enable_irq(b);
++	}
++	GEM_BUG_ON(!b->tasklet);
++	GEM_BUG_ON(!b->first_wait);
++	GEM_BUG_ON(rb_first(&b->waiters) != &b->first_wait->node);
++
++	return first;
++}
++
++bool intel_engine_add_wait(struct intel_engine_cs *engine,
++			   struct intel_wait *wait)
++{
++	struct intel_breadcrumbs *b = &engine->breadcrumbs;
++	bool first;
++
++	spin_lock(&b->lock);
++	first = __intel_engine_add_wait(engine, wait);
++	spin_unlock(&b->lock);
++
++	return first;
++}
++
++void intel_engine_enable_fake_irq(struct intel_engine_cs *engine)
++{
++	mod_timer(&engine->breadcrumbs.fake_irq, jiffies + 1);
++}
++
++static inline bool chain_wakeup(struct rb_node *rb, int priority)
++{
++	return rb && to_wait(rb)->tsk->prio <= priority;
++}
++
++void intel_engine_remove_wait(struct intel_engine_cs *engine,
++			      struct intel_wait *wait)
++{
++	struct intel_breadcrumbs *b = &engine->breadcrumbs;
++
++	/* Quick check to see if this waiter was already decoupled from
++	 * the tree by the bottom-half to avoid contention on the spinlock
++	 * by the herd.
++	 */
++	if (RB_EMPTY_NODE(&wait->node))
++		return;
++
++	spin_lock(&b->lock);
++
++	if (RB_EMPTY_NODE(&wait->node))
++		goto out_unlock;
++
++	if (b->first_wait == wait) {
++		struct rb_node *next;
++		const int priority = wait->tsk->prio;
++
++		GEM_BUG_ON(b->tasklet != wait->tsk);
++
++		/* We are the current bottom-half. Find the next candidate,
++		 * the first waiter in the queue on the remaining oldest
++		 * request. As multiple seqnos may complete in the time it
++		 * takes us to wake up and find the next waiter, we have to
++		 * wake up that waiter for it to perform its own coherent
++		 * completion check.
++		 */
++		next = rb_next(&wait->node);
++		if (chain_wakeup(next, priority)) {
++			/* If the next waiter is already complete,
++			 * wake it up and continue onto the next waiter. So
++			 * if have a small herd, they will wake up in parallel
++			 * rather than sequentially, which should reduce
++			 * the overall latency in waking all the completed
++			 * clients.
++			 *
++			 * However, waking up a chain adds extra latency to
++			 * the first_waiter. This is undesirable if that
++			 * waiter is a high priority task.
++			 */
++			u32 seqno = engine->get_seqno(engine);
++
++			while (i915_seqno_passed(seqno, to_wait(next)->seqno)) {
++				struct rb_node *n = rb_next(next);
++
++				__intel_breadcrumbs_finish(b, to_wait(next));
++				next = n;
++				if (!chain_wakeup(next, priority))
++					break;
++			}
++		}
++
++		if (next) {
++			/* In our haste, we may have completed the first waiter
++			 * before we enabled the interrupt. Do so now as we
++			 * have a second waiter for a future seqno. Afterwards,
++			 * we have to wake up that waiter in case we missed
++			 * the interrupt, or if we have to handle an
++			 * exception rather than a seqno completion.
++			 */
++			b->first_wait = to_wait(next);
++			smp_store_mb(b->tasklet, b->first_wait->tsk);
++			if (b->first_wait->seqno != wait->seqno)
++				__intel_breadcrumbs_enable_irq(b);
++			wake_up_process(b->tasklet);
++		} else {
++			b->first_wait = NULL;
++			WRITE_ONCE(b->tasklet, NULL);
++			__intel_breadcrumbs_disable_irq(b);
++		}
++	} else {
++		GEM_BUG_ON(rb_first(&b->waiters) == &wait->node);
++	}
++
++	GEM_BUG_ON(RB_EMPTY_NODE(&wait->node));
++	rb_erase(&wait->node, &b->waiters);
++
++out_unlock:
++	GEM_BUG_ON(b->first_wait == wait);
++	GEM_BUG_ON(rb_first(&b->waiters) !=
++		   (b->first_wait ? &b->first_wait->node : NULL));
++	GEM_BUG_ON(!b->tasklet ^ RB_EMPTY_ROOT(&b->waiters));
++	spin_unlock(&b->lock);
++}
++
++int intel_engine_init_breadcrumbs(struct intel_engine_cs *engine)
++{
++	struct intel_breadcrumbs *b = &engine->breadcrumbs;
++
++	spin_lock_init(&b->lock);
++	setup_timer(&b->fake_irq,
++		    intel_breadcrumbs_fake_irq,
++		    (unsigned long)engine);
++
++	return 0;
++}
++
++void intel_engine_fini_breadcrumbs(struct intel_engine_cs *engine)
++{
++	struct intel_breadcrumbs *b = &engine->breadcrumbs;
++
++	del_timer_sync(&b->fake_irq);
++}
++
++unsigned int intel_kick_waiters(struct drm_i915_private *i915)
++{
++	struct intel_engine_cs *engine;
++	unsigned int mask = 0;
++
++	/* To avoid the task_struct disappearing beneath us as we wake up
++	 * the process, we must first inspect the task_struct->state under the
++	 * RCU lock, i.e. as we call wake_up_process() we must be holding the
++	 * rcu_read_lock().
++	 */
++	rcu_read_lock();
++	for_each_engine(engine, i915)
++		if (unlikely(intel_engine_wakeup(engine)))
++			mask |= intel_engine_flag(engine);
++	rcu_read_unlock();
++
++	return mask;
++}

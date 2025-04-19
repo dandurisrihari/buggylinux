@@ -1,0 +1,137 @@
+diff --git a/fs/bcachefs/io_read.c b/fs/bcachefs/io_read.c
+index 70e5c5a32d01..d39f321b51fc 100644
+--- a/fs/bcachefs/io_read.c
++++ b/fs/bcachefs/io_read.c
+@@ -27,6 +27,12 @@
+ 
+ #include <linux/sched/mm.h>
+ 
++#ifdef CONFIG_BCACHEFS_DEBUG
++static unsigned bch2_read_corrupt_ratio;
++module_param_named(read_corrupt_ratio, bch2_read_corrupt_ratio, uint, 0644);
++MODULE_PARM_DESC(read_corrupt_ratio, "");
++#endif
++
+ #ifndef CONFIG_BCACHEFS_NO_LATENCY_ACCT
+ 
+ static bool bch2_target_congested(struct bch_fs *c, u16 target)
+@@ -688,6 +694,8 @@ static void __bch2_read_endio(struct work_struct *work)
+ 		src->bi_iter			= rbio->bvec_iter;
+ 	}
+ 
++	bch2_maybe_corrupt_bio(src, bch2_read_corrupt_ratio);
++
+ 	csum = bch2_checksum_bio(c, crc.csum_type, nonce, src);
+ 	bool csum_good = !bch2_crc_cmp(csum, rbio->pick.crc.csum) || c->opts.no_data_io;
+ 
+diff --git a/fs/bcachefs/io_write.c b/fs/bcachefs/io_write.c
+index dbfcb28f003d..48befbae0226 100644
+--- a/fs/bcachefs/io_write.c
++++ b/fs/bcachefs/io_write.c
+@@ -34,6 +34,12 @@
+ #include <linux/random.h>
+ #include <linux/sched/mm.h>
+ 
++#ifdef CONFIG_BCACHEFS_DEBUG
++static unsigned bch2_write_corrupt_ratio;
++module_param_named(write_corrupt_ratio, bch2_write_corrupt_ratio, uint, 0644);
++MODULE_PARM_DESC(write_corrupt_ratio, "");
++#endif
++
+ #ifndef CONFIG_BCACHEFS_NO_LATENCY_ACCT
+ 
+ static inline void bch2_congested_acct(struct bch_dev *ca, u64 io_latency,
+@@ -1005,6 +1011,15 @@ static int bch2_write_extent(struct bch_write_op *op, struct write_point *wp,
+ 		bounce = true;
+ 	}
+ 
++#ifdef CONFIG_BCACHEFS_DEBUG
++	unsigned write_corrupt_ratio = READ_ONCE(bch2_write_corrupt_ratio);
++	if (!bounce && write_corrupt_ratio) {
++		dst = bch2_write_bio_alloc(c, wp, src,
++					   &page_alloc_failed,
++					   ec_buf);
++		bounce = true;
++	}
++#endif
+ 	saved_iter = dst->bi_iter;
+ 
+ 	do {
+@@ -1114,6 +1129,14 @@ static int bch2_write_extent(struct bch_write_op *op, struct write_point *wp,
+ 
+ 		init_append_extent(op, wp, version, crc);
+ 
++#ifdef CONFIG_BCACHEFS_DEBUG
++		if (write_corrupt_ratio) {
++			swap(dst->bi_iter.bi_size, dst_len);
++			bch2_maybe_corrupt_bio(dst, write_corrupt_ratio);
++			swap(dst->bi_iter.bi_size, dst_len);
++		}
++#endif
++
+ 		if (dst != src)
+ 			bio_advance(dst, dst_len);
+ 		bio_advance(src, src_len);
+@@ -1394,6 +1417,7 @@ static void bch2_nocow_write(struct bch_write_op *op)
+ 		bio->bi_private	= &op->cl;
+ 		bio->bi_opf |= REQ_OP_WRITE;
+ 		closure_get(&op->cl);
++
+ 		bch2_submit_wbio_replicas(to_wbio(bio), c, BCH_DATA_user,
+ 					  op->insert_keys.top, true);
+ 
+diff --git a/fs/bcachefs/util.c b/fs/bcachefs/util.c
+index a7edbcca1a84..553de8d8e3e5 100644
+--- a/fs/bcachefs/util.c
++++ b/fs/bcachefs/util.c
+@@ -704,6 +704,27 @@ void memcpy_from_bio(void *dst, struct bio *src, struct bvec_iter src_iter)
+ 	}
+ }
+ 
++#ifdef CONFIG_BCACHEFS_DEBUG
++void bch2_corrupt_bio(struct bio *bio)
++{
++	struct bvec_iter iter;
++	struct bio_vec bv;
++	unsigned offset = get_random_u32_below(bio->bi_iter.bi_size / sizeof(u64));
++
++	bio_for_each_segment(bv, bio, iter) {
++		unsigned u64s = bv.bv_len / sizeof(u64);
++
++		if (offset < u64s) {
++			u64 *segment = bvec_kmap_local(&bv);
++			segment[offset] = get_random_u64();
++			kunmap_local(segment);
++			return;
++		}
++		offset -= u64s;
++	}
++}
++#endif
++
+ #if 0
+ void eytzinger1_test(void)
+ {
+diff --git a/fs/bcachefs/util.h b/fs/bcachefs/util.h
+index f4a4783219d9..d41e133acc4d 100644
+--- a/fs/bcachefs/util.h
++++ b/fs/bcachefs/util.h
+@@ -406,6 +406,18 @@ u64 bch2_get_random_u64_below(u64);
+ void memcpy_to_bio(struct bio *, struct bvec_iter, const void *);
+ void memcpy_from_bio(void *, struct bio *, struct bvec_iter);
+ 
++#ifdef CONFIG_BCACHEFS_DEBUG
++void bch2_corrupt_bio(struct bio *);
++
++static inline void bch2_maybe_corrupt_bio(struct bio *bio, unsigned ratio)
++{
++	if (ratio && !get_random_u32_below(ratio))
++		bch2_corrupt_bio(bio);
++}
++#else
++#define bch2_maybe_corrupt_bio(...)	do {} while (0)
++#endif
++
+ static inline void memcpy_u64s_small(void *dst, const void *src,
+ 				     unsigned u64s)
+ {

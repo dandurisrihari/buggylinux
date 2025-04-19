@@ -1,0 +1,65 @@
+commit 7c82b3b308f9ca24852e3b0ee963b9eae128b78a
+Author: Alexander Atanasov <alexander.atanasov@virtuozzo.com>
+Date:   Tue Sep 20 15:11:11 2022 +0300
+
+    mm: Make failslab writable again
+    
+    In (060807f841ac mm, slub: make remaining slub_debug related attributes
+    read-only) failslab was made read-only.
+    I think it became a collateral victim to the two other options for which
+    the reasons are perfectly valid.
+    Here is why:
+     - sanity_checks and trace are slab internal debug options,
+       failslab is used for fault injection.
+     - for fault injections, which by presumption are random, it
+       does not matter if it is not set atomically. And you need to
+       set atleast one more option to trigger fault injection.
+     - in a testing scenario you may need to change it at runtime
+       example: module loading - you test all allocations limited
+       by the space option. Then you move to test only your module's
+       own slabs.
+     - when set by command line flags it effectively disables all
+       cache merges.
+    
+    Cc: Vlastimil Babka <vbabka@suse.cz>
+    Cc: Andrew Morton <akpm@linux-foundation.org>
+    Cc: Kees Cook <keescook@chromium.org>
+    Cc: Roman Gushchin <guro@fb.com>
+    Cc: Christoph Lameter <cl@linux.com>
+    Cc: Jann Horn <jannh@google.com>
+    Cc: Vijayanand Jitta <vjitta@codeaurora.org>
+    Cc: David Rientjes <rientjes@google.com>
+    Cc: Joonsoo Kim <iamjoonsoo.kim@lge.com>
+    Cc: Pekka Enberg <penberg@kernel.org>
+    Link: http://lkml.kernel.org/r/20200610163135.17364-5-vbabka@suse.cz
+    
+    Signed-off-by: Alexander Atanasov <alexander.atanasov@virtuozzo.com>
+    Signed-off-by: Vlastimil Babka <vbabka@suse.cz>
+
+diff --git a/mm/slub.c b/mm/slub.c
+index f162683f3006..3fc7d861d1f2 100644
+--- a/mm/slub.c
++++ b/mm/slub.c
+@@ -5586,7 +5586,21 @@ static ssize_t failslab_show(struct kmem_cache *s, char *buf)
+ {
+ 	return sysfs_emit(buf, "%d\n", !!(s->flags & SLAB_FAILSLAB));
+ }
+-SLAB_ATTR_RO(failslab);
++
++static ssize_t failslab_store(struct kmem_cache *s, const char *buf,
++				size_t length)
++{
++	if (s->refcount > 1)
++		return -EINVAL;
++
++	if (buf[0] == '1')
++		WRITE_ONCE(s->flags, s->flags | SLAB_FAILSLAB);
++	else
++		WRITE_ONCE(s->flags, s->flags & ~SLAB_FAILSLAB);
++
++	return length;
++}
++SLAB_ATTR(failslab);
+ #endif
+ 
+ static ssize_t shrink_show(struct kmem_cache *s, char *buf)

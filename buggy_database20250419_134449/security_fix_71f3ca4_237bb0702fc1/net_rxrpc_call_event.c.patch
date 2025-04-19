@@ -1,0 +1,66 @@
+commit 71f3ca408fd43b586c02480768a503af075b247e
+Author: David Howells <dhowells@redhat.com>
+Date:   Sat Sep 17 10:49:14 2016 +0100
+
+    rxrpc: Improve skb tracing
+    
+    Improve sk_buff tracing within AF_RXRPC by the following means:
+    
+     (1) Use an enum to note the event type rather than plain integers and use
+         an array of event names rather than a big multi ?: list.
+    
+     (2) Distinguish Rx from Tx packets and account them separately.  This
+         requires the call phase to be tracked so that we know what we might
+         find in rxtx_buffer[].
+    
+     (3) Add a parameter to rxrpc_{new,see,get,free}_skb() to indicate the
+         event type.
+    
+     (4) A pair of 'rotate' events are added to indicate packets that are about
+         to be rotated out of the Rx and Tx windows.
+    
+     (5) A pair of 'lost' events are added, along with rxrpc_lose_skb() for
+         packet loss injection recording.
+    
+    Signed-off-by: David Howells <dhowells@redhat.com>
+
+diff --git a/net/rxrpc/call_event.c b/net/rxrpc/call_event.c
+index f0cabc48a1b7..7d1b99824ed9 100644
+--- a/net/rxrpc/call_event.c
++++ b/net/rxrpc/call_event.c
+@@ -170,7 +170,7 @@ static void rxrpc_resend(struct rxrpc_call *call)
+ 			continue;
+ 
+ 		skb = call->rxtx_buffer[ix];
+-		rxrpc_see_skb(skb);
++		rxrpc_see_skb(skb, rxrpc_skb_tx_seen);
+ 		sp = rxrpc_skb(skb);
+ 
+ 		if (annotation == RXRPC_TX_ANNO_UNACK) {
+@@ -199,7 +199,7 @@ static void rxrpc_resend(struct rxrpc_call *call)
+ 			continue;
+ 
+ 		skb = call->rxtx_buffer[ix];
+-		rxrpc_get_skb(skb);
++		rxrpc_get_skb(skb, rxrpc_skb_tx_got);
+ 		spin_unlock_bh(&call->lock);
+ 		sp = rxrpc_skb(skb);
+ 
+@@ -211,7 +211,7 @@ static void rxrpc_resend(struct rxrpc_call *call)
+ 
+ 		if (rxrpc_send_data_packet(call->conn, skb) < 0) {
+ 			call->resend_at = now + 2;
+-			rxrpc_free_skb(skb);
++			rxrpc_free_skb(skb, rxrpc_skb_tx_freed);
+ 			return;
+ 		}
+ 
+@@ -219,7 +219,7 @@ static void rxrpc_resend(struct rxrpc_call *call)
+ 			rxrpc_expose_client_call(call);
+ 		sp->resend_at = now + rxrpc_resend_timeout;
+ 
+-		rxrpc_free_skb(skb);
++		rxrpc_free_skb(skb, rxrpc_skb_tx_freed);
+ 		spin_lock_bh(&call->lock);
+ 
+ 		/* We need to clear the retransmit state, but there are two

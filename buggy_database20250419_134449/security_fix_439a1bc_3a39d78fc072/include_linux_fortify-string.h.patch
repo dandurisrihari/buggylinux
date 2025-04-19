@@ -1,0 +1,53 @@
+commit 439a1bcac648fe9b59210cde8991fb2acf37bdab
+Author: Kees Cook <kees@kernel.org>
+Date:   Mon Sep 19 15:53:13 2022 -0700
+
+    fortify: Use __builtin_dynamic_object_size() when available
+    
+    Since the commits starting with c37495d6254c ("slab: add __alloc_size
+    attributes for better bounds checking"), the compilers have runtime
+    allocation size hints available in some places. This was immediately
+    available to CONFIG_UBSAN_BOUNDS, but CONFIG_FORTIFY_SOURCE needed
+    updating to explicitly make use of the hints via the associated
+    __builtin_dynamic_object_size() helper. Detect and use the builtin when
+    it is available, increasing the accuracy of the mitigation. When runtime
+    sizes are not available, __builtin_dynamic_object_size() falls back to
+    __builtin_object_size(), leaving the existing bounds checking unchanged.
+    
+    Additionally update the VMALLOC_LINEAR_OVERFLOW LKDTM test to make the
+    hint invisible, otherwise the architectural defense is not exercised
+    (the buffer overflow is detected in the memset() rather than when it
+    crosses the edge of the allocation).
+    
+    Cc: Arnd Bergmann <arnd@arndb.de>
+    Cc: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+    Cc: Nick Desaulniers <ndesaulniers@google.com>
+    Cc: Nathan Chancellor <nathan@kernel.org>
+    Cc: Tom Rix <trix@redhat.com>
+    Cc: linux-hardening@vger.kernel.org
+    Cc: llvm@lists.linux.dev
+    Reviewed-by: Miguel Ojeda <ojeda@kernel.org> # include/linux/compiler_attributes.h
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+
+diff --git a/include/linux/fortify-string.h b/include/linux/fortify-string.h
+index 7cad8bb031e9..c9de1f59ee80 100644
+--- a/include/linux/fortify-string.h
++++ b/include/linux/fortify-string.h
+@@ -90,10 +90,17 @@ extern char *__underlying_strncpy(char *p, const char *q, __kernel_size_t size)
+  * size, rather than struct size), but there remain some stragglers using
+  * type 0 that will be converted in the future.
+  */
++#if __has_builtin(__builtin_dynamic_object_size)
++#define POS			__pass_dynamic_object_size(1)
++#define POS0			__pass_dynamic_object_size(0)
++#define __struct_size(p)	__builtin_dynamic_object_size(p, 0)
++#define __member_size(p)	__builtin_dynamic_object_size(p, 1)
++#else
+ #define POS			__pass_object_size(1)
+ #define POS0			__pass_object_size(0)
+ #define __struct_size(p)	__builtin_object_size(p, 0)
+ #define __member_size(p)	__builtin_object_size(p, 1)
++#endif
+ 
+ #define __compiletime_lessthan(bounds, length)	(	\
+ 	__builtin_constant_p((bounds) < (length)) &&	\

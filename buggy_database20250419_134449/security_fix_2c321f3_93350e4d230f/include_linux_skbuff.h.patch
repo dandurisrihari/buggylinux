@@ -1,0 +1,107 @@
+commit 2c321f3f70bc284510598f712b702ce8d60c4d14
+Author: Suren Baghdasaryan <surenb@google.com>
+Date:   Sun Apr 14 19:07:31 2024 -0700
+
+    mm: change inlined allocation helpers to account at the call site
+    
+    Main goal of memory allocation profiling patchset is to provide accounting
+    that is cheap enough to run in production.  To achieve that we inject
+    counters using codetags at the allocation call sites to account every time
+    allocation is made.  This injection allows us to perform accounting
+    efficiently because injected counters are immediately available as opposed
+    to the alternative methods, such as using _RET_IP_, which would require
+    counter lookup and appropriate locking that makes accounting much more
+    expensive.  This method requires all allocation functions to inject
+    separate counters at their call sites so that their callers can be
+    individually accounted.  Counter injection is implemented by allocation
+    hooks which should wrap all allocation functions.
+    
+    Inlined functions which perform allocations but do not use allocation
+    hooks are directly charged for the allocations they perform.  In most
+    cases these functions are just specialized allocation wrappers used from
+    multiple places to allocate objects of a specific type.  It would be more
+    useful to do the accounting at their call sites instead.  Instrument these
+    helpers to do accounting at the call site.  Simple inlined allocation
+    wrappers are converted directly into macros.  More complex allocators or
+    allocators with documentation are converted into _noprof versions and
+    allocation hooks are added.  This allows memory allocation profiling
+    mechanism to charge allocations to the callers of these functions.
+    
+    Link: https://lkml.kernel.org/r/20240415020731.1152108-1-surenb@google.com
+    Signed-off-by: Suren Baghdasaryan <surenb@google.com>
+    Acked-by: Jan Kara <jack@suse.cz>               [jbd2]
+    Cc: Anna Schumaker <anna@kernel.org>
+    Cc: Arnd Bergmann <arnd@arndb.de>
+    Cc: Benjamin Tissoires <benjamin.tissoires@redhat.com>
+    Cc: Christoph Lameter <cl@linux.com>
+    Cc: David Rientjes <rientjes@google.com>
+    Cc: David S. Miller <davem@davemloft.net>
+    Cc: Dennis Zhou <dennis@kernel.org>
+    Cc: Eric Dumazet <edumazet@google.com>
+    Cc: Herbert Xu <herbert@gondor.apana.org.au>
+    Cc: Jakub Kicinski <kuba@kernel.org>
+    Cc: Jakub Sitnicki <jakub@cloudflare.com>
+    Cc: Jiri Kosina <jikos@kernel.org>
+    Cc: Joerg Roedel <joro@8bytes.org>
+    Cc: Joonsoo Kim <iamjoonsoo.kim@lge.com>
+    Cc: Kent Overstreet <kent.overstreet@linux.dev>
+    Cc: Matthew Wilcox (Oracle) <willy@infradead.org>
+    Cc: Paolo Abeni <pabeni@redhat.com>
+    Cc: Pekka Enberg <penberg@kernel.org>
+    Cc: Tejun Heo <tj@kernel.org>
+    Cc: Theodore Ts'o <tytso@mit.edu>
+    Cc: Trond Myklebust <trond.myklebust@hammerspace.com>
+    Cc: Vlastimil Babka <vbabka@suse.cz>
+    Cc: Will Deacon <will@kernel.org>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+
+diff --git a/include/linux/skbuff.h b/include/linux/skbuff.h
+index 9d24aec064e8..b72920c9887b 100644
+--- a/include/linux/skbuff.h
++++ b/include/linux/skbuff.h
+@@ -3371,7 +3371,7 @@ void __napi_kfree_skb(struct sk_buff *skb, enum skb_drop_reason reason);
+  *
+  * %NULL is returned if there is no free memory.
+ */
+-static inline struct page *__dev_alloc_pages(gfp_t gfp_mask,
++static inline struct page *__dev_alloc_pages_noprof(gfp_t gfp_mask,
+ 					     unsigned int order)
+ {
+ 	/* This piece of code contains several assumptions.
+@@ -3384,13 +3384,11 @@ static inline struct page *__dev_alloc_pages(gfp_t gfp_mask,
+ 	 */
+ 	gfp_mask |= __GFP_COMP | __GFP_MEMALLOC;
+ 
+-	return alloc_pages_node(NUMA_NO_NODE, gfp_mask, order);
++	return alloc_pages_node_noprof(NUMA_NO_NODE, gfp_mask, order);
+ }
++#define __dev_alloc_pages(...)	alloc_hooks(__dev_alloc_pages_noprof(__VA_ARGS__))
+ 
+-static inline struct page *dev_alloc_pages(unsigned int order)
+-{
+-	return __dev_alloc_pages(GFP_ATOMIC | __GFP_NOWARN, order);
+-}
++#define dev_alloc_pages(_order) __dev_alloc_pages(GFP_ATOMIC | __GFP_NOWARN, _order)
+ 
+ /**
+  * __dev_alloc_page - allocate a page for network Rx
+@@ -3400,15 +3398,13 @@ static inline struct page *dev_alloc_pages(unsigned int order)
+  *
+  * %NULL is returned if there is no free memory.
+  */
+-static inline struct page *__dev_alloc_page(gfp_t gfp_mask)
++static inline struct page *__dev_alloc_page_noprof(gfp_t gfp_mask)
+ {
+-	return __dev_alloc_pages(gfp_mask, 0);
++	return __dev_alloc_pages_noprof(gfp_mask, 0);
+ }
++#define __dev_alloc_page(...)	alloc_hooks(__dev_alloc_page_noprof(__VA_ARGS__))
+ 
+-static inline struct page *dev_alloc_page(void)
+-{
+-	return dev_alloc_pages(0);
+-}
++#define dev_alloc_page()	dev_alloc_pages(0)
+ 
+ /**
+  * dev_page_is_reusable - check whether a page can be reused for network Rx

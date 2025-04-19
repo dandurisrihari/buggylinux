@@ -1,0 +1,74 @@
+commit 0a1f085061e79aa911475d5420f05698bc6b62eb
+Author: Mats Randgaard <matrandg@cisco.com>
+Date:   Tue Dec 6 08:24:28 2016 -0200
+
+    [media] tc358743: Disable HDCP with "manual HDCP authentication" bit
+    
+    Originally Toshiba told us that the only way to disable HDCP was to
+    set the receiver in repeater mode, that would make the authentication
+    fail because of missing software support. It has worked fine with all
+    the sources we and our customers has used, until it was reported
+    problems with Apple MacBook (Retina, 12-inch, Early 2015)
+    (https://support.apple.com/kb/SP712?locale=en_US&viewlocale=en_US)
+    with Apple A1612 USB type-C multiport adapter
+    (http://www.apple.com/shop/product/MJ1K2AM/A/usb-c-digital-av-multiport-adapter)
+    
+    Finally Toshiba came up with a hidden bit that is named "Manual HDCP
+    authentication". In this patch the original "repeater mode" concept is
+    removed, and the new bit is set instead.
+    
+    With his patch HDCP is disabled when connected to the Apple MacBook
+    and all other sources we have tested so far. The Apple MacBook is
+    constantly trying to authenticate, but fails and continues to transmit
+    unencrypted video.
+    
+    Signed-off-by: Mats Randgaard <matrandg@cisco.com>
+    Signed-off-by: Hans Verkuil <hans.verkuil@cisco.com>
+    Signed-off-by: Mauro Carvalho Chehab <mchehab@s-opensource.com>
+
+diff --git a/drivers/media/i2c/tc358743.c b/drivers/media/i2c/tc358743.c
+index a35aaf8e08e7..257969a31baf 100644
+--- a/drivers/media/i2c/tc358743.c
++++ b/drivers/media/i2c/tc358743.c
+@@ -368,29 +368,21 @@ static void tc358743_set_hdmi_hdcp(struct v4l2_subdev *sd, bool enable)
+ 	v4l2_dbg(2, debug, sd, "%s: %s\n", __func__, enable ?
+ 				"enable" : "disable");
+ 
+-	i2c_wr8_and_or(sd, HDCP_REG1,
+-			~(MASK_AUTH_UNAUTH_SEL | MASK_AUTH_UNAUTH),
+-			MASK_AUTH_UNAUTH_SEL_16_FRAMES | MASK_AUTH_UNAUTH_AUTO);
++	if (enable) {
++		i2c_wr8_and_or(sd, HDCP_REG3, ~KEY_RD_CMD, KEY_RD_CMD);
+ 
+-	i2c_wr8_and_or(sd, HDCP_REG2, ~MASK_AUTO_P3_RESET,
+-			SET_AUTO_P3_RESET_FRAMES(0x0f));
++		i2c_wr8_and_or(sd, HDCP_MODE, ~MASK_MANUAL_AUTHENTICATION, 0);
+ 
+-	/* HDCP is disabled by configuring the receiver as HDCP repeater. The
+-	 * repeater mode require software support to work, so HDCP
+-	 * authentication will fail.
+-	 */
+-	i2c_wr8_and_or(sd, HDCP_REG3, ~KEY_RD_CMD, enable ? KEY_RD_CMD : 0);
+-	i2c_wr8_and_or(sd, HDCP_MODE, ~(MASK_AUTO_CLR | MASK_MODE_RST_TN),
+-			enable ?  (MASK_AUTO_CLR | MASK_MODE_RST_TN) : 0);
++		i2c_wr8_and_or(sd, HDCP_REG1, 0xff,
++				MASK_AUTH_UNAUTH_SEL_16_FRAMES |
++				MASK_AUTH_UNAUTH_AUTO);
+ 
+-	/* Apple MacBook Pro gen.8 has a bug that makes it freeze every fifth
+-	 * second when HDCP is disabled, but the MAX_EXCED bit is handled
+-	 * correctly and HDCP is disabled on the HDMI output.
+-	 */
+-	i2c_wr8_and_or(sd, BSTATUS1, ~MASK_MAX_EXCED,
+-			enable ? 0 : MASK_MAX_EXCED);
+-	i2c_wr8_and_or(sd, BCAPS, ~(MASK_REPEATER | MASK_READY),
+-			enable ? 0 : MASK_REPEATER | MASK_READY);
++		i2c_wr8_and_or(sd, HDCP_REG2, ~MASK_AUTO_P3_RESET,
++				SET_AUTO_P3_RESET_FRAMES(0x0f));
++	} else {
++		i2c_wr8_and_or(sd, HDCP_MODE, ~MASK_MANUAL_AUTHENTICATION,
++				MASK_MANUAL_AUTHENTICATION);
++	}
+ }
+ 
+ static void tc358743_disable_edid(struct v4l2_subdev *sd)

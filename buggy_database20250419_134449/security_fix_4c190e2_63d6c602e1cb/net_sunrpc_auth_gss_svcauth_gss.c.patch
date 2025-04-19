@@ -1,0 +1,64 @@
+commit 4c190e2f913f038c9c91ee63b59cd037260ba353
+Author: Jeff Layton <jlayton@kernel.org>
+Date:   Wed Feb 6 08:28:55 2013 -0500
+
+    sunrpc: trim off trailing checksum before returning decrypted or integrity authenticated buffer
+    
+    When GSSAPI integrity signatures are in use, or when we're using GSSAPI
+    privacy with the v2 token format, there is a trailing checksum on the
+    xdr_buf that is returned.
+    
+    It's checked during the authentication stage, and afterward nothing
+    cares about it. Ordinarily, it's not a problem since the XDR code
+    generally ignores it, but it will be when we try to compute a checksum
+    over the buffer to help prevent XID collisions in the duplicate reply
+    cache.
+    
+    Fix the code to trim off the checksums after verifying them. Note that
+    in unwrap_integ_data, we must avoid trying to reverify the checksum if
+    the request was deferred since it will no longer be present when it's
+    revisited.
+    
+    Signed-off-by: Jeff Layton <jlayton@redhat.com>
+
+diff --git a/net/sunrpc/auth_gss/svcauth_gss.c b/net/sunrpc/auth_gss/svcauth_gss.c
+index 73e957386600..a5b41e2ac25a 100644
+--- a/net/sunrpc/auth_gss/svcauth_gss.c
++++ b/net/sunrpc/auth_gss/svcauth_gss.c
+@@ -817,13 +817,17 @@ read_u32_from_xdr_buf(struct xdr_buf *buf, int base, u32 *obj)
+  *	The server uses base of head iovec as read pointer, while the
+  *	client uses separate pointer. */
+ static int
+-unwrap_integ_data(struct xdr_buf *buf, u32 seq, struct gss_ctx *ctx)
++unwrap_integ_data(struct svc_rqst *rqstp, struct xdr_buf *buf, u32 seq, struct gss_ctx *ctx)
+ {
+ 	int stat = -EINVAL;
+ 	u32 integ_len, maj_stat;
+ 	struct xdr_netobj mic;
+ 	struct xdr_buf integ_buf;
+ 
++	/* Did we already verify the signature on the original pass through? */
++	if (rqstp->rq_deferred)
++		return 0;
++
+ 	integ_len = svc_getnl(&buf->head[0]);
+ 	if (integ_len & 3)
+ 		return stat;
+@@ -846,6 +850,8 @@ unwrap_integ_data(struct xdr_buf *buf, u32 seq, struct gss_ctx *ctx)
+ 		goto out;
+ 	if (svc_getnl(&buf->head[0]) != seq)
+ 		goto out;
++	/* trim off the mic at the end before returning */
++	xdr_buf_trim(buf, mic.len + 4);
+ 	stat = 0;
+ out:
+ 	kfree(mic.data);
+@@ -1190,7 +1196,7 @@ svcauth_gss_accept(struct svc_rqst *rqstp, __be32 *authp)
+ 			/* placeholders for length and seq. number: */
+ 			svc_putnl(resv, 0);
+ 			svc_putnl(resv, 0);
+-			if (unwrap_integ_data(&rqstp->rq_arg,
++			if (unwrap_integ_data(rqstp, &rqstp->rq_arg,
+ 					gc->gc_seq, rsci->mechctx))
+ 				goto garbage_args;
+ 			break;

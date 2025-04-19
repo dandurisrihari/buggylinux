@@ -1,0 +1,131 @@
+commit 7cd8d1f8475d83c8871917430a2daf362c68e742
+Author: ZhaoLong Wang <wangzhaolong1@huawei.com>
+Date:   Tue Dec 26 09:01:11 2023 +0800
+
+    ubi: Add six fault injection type for testing
+    
+    This commit adds six fault injection type for testing to cover the
+    abnormal path of the UBI driver.
+    
+    Inject the following faults when the UBI reads the LEB:
+     +----------------------------+-----------------------------------+
+     |    Interface name          |       emulate behavior            |
+     +----------------------------+-----------------------------------+
+     |  emulate_eccerr            | ECC error                         |
+     +----------------------------+-----------------------------------+
+     |  emulate_read_failure      | read failure                      |
+     |----------------------------+-----------------------------------+
+     |  emulate_io_ff             | read content as all FF            |
+     |----------------------------+-----------------------------------+
+     |  emulate_io_ff_bitflips    | content FF with MTD err reported  |
+     +----------------------------+-----------------------------------+
+     |  emulate_bad_hdr           | bad leb header                    |
+     |----------------------------+-----------------------------------+
+     |  emulate_bad_hdr_ebadmsg   | bad header with ECC err           |
+     +----------------------------+-----------------------------------+
+    
+    Signed-off-by: ZhaoLong Wang <wangzhaolong1@huawei.com>
+    Reviewed-by: Zhihao Cheng <chengzhihao1@huawei.com>
+    Signed-off-by: Richard Weinberger <richard@nod.at>
+
+diff --git a/drivers/mtd/ubi/io.c b/drivers/mtd/ubi/io.c
+index fb70f5227f18..a4999bce435f 100644
+--- a/drivers/mtd/ubi/io.c
++++ b/drivers/mtd/ubi/io.c
+@@ -195,7 +195,19 @@ int ubi_io_read(const struct ubi_device *ubi, void *buf, int pnum, int offset,
+ 
+ 		if (ubi_dbg_is_bitflip(ubi)) {
+ 			dbg_gen("bit-flip (emulated)");
+-			err = UBI_IO_BITFLIPS;
++			return UBI_IO_BITFLIPS;
++		}
++
++		if (ubi_dbg_is_read_failure(ubi, MASK_READ_FAILURE)) {
++			ubi_warn(ubi, "cannot read %d bytes from PEB %d:%d (emulated)",
++				 len, pnum, offset);
++			return -EIO;
++		}
++
++		if (ubi_dbg_is_eccerr(ubi)) {
++			ubi_warn(ubi, "ECC error (emulated) while reading %d bytes from PEB %d:%d, read %zd bytes",
++				 len, pnum, offset, read);
++			return -EBADMSG;
+ 		}
+ 	}
+ 
+@@ -782,7 +794,36 @@ int ubi_io_read_ec_hdr(struct ubi_device *ubi, int pnum,
+ 	 * If there was %-EBADMSG, but the header CRC is still OK, report about
+ 	 * a bit-flip to force scrubbing on this PEB.
+ 	 */
+-	return read_err ? UBI_IO_BITFLIPS : 0;
++	if (read_err)
++		return UBI_IO_BITFLIPS;
++
++	if (ubi_dbg_is_read_failure(ubi, MASK_READ_FAILURE_EC)) {
++		ubi_warn(ubi, "cannot read EC header from PEB %d (emulated)",
++			 pnum);
++		return -EIO;
++	}
++
++	if (ubi_dbg_is_ff(ubi, MASK_IO_FF_EC)) {
++		ubi_warn(ubi, "bit-all-ff (emulated)");
++		return UBI_IO_FF;
++	}
++
++	if (ubi_dbg_is_ff_bitflips(ubi, MASK_IO_FF_BITFLIPS_EC)) {
++		ubi_warn(ubi, "bit-all-ff with error reported by MTD driver (emulated)");
++		return UBI_IO_FF_BITFLIPS;
++	}
++
++	if (ubi_dbg_is_bad_hdr(ubi, MASK_BAD_HDR_EC)) {
++		ubi_warn(ubi, "bad_hdr (emulated)");
++		return UBI_IO_BAD_HDR;
++	}
++
++	if (ubi_dbg_is_bad_hdr_ebadmsg(ubi, MASK_BAD_HDR_EBADMSG_EC)) {
++		ubi_warn(ubi, "bad_hdr with ECC error (emulated)");
++		return UBI_IO_BAD_HDR_EBADMSG;
++	}
++
++	return 0;
+ }
+ 
+ /**
+@@ -1032,7 +1073,36 @@ int ubi_io_read_vid_hdr(struct ubi_device *ubi, int pnum,
+ 		return -EINVAL;
+ 	}
+ 
+-	return read_err ? UBI_IO_BITFLIPS : 0;
++	if (read_err)
++		return UBI_IO_BITFLIPS;
++
++	if (ubi_dbg_is_read_failure(ubi, MASK_READ_FAILURE_VID)) {
++		ubi_warn(ubi, "cannot read VID header from PEB %d (emulated)",
++			 pnum);
++		return -EIO;
++	}
++
++	if (ubi_dbg_is_ff(ubi, MASK_IO_FF_VID)) {
++		ubi_warn(ubi, "bit-all-ff (emulated)");
++		return UBI_IO_FF;
++	}
++
++	if (ubi_dbg_is_ff_bitflips(ubi, MASK_IO_FF_BITFLIPS_VID)) {
++		ubi_warn(ubi, "bit-all-ff with error reported by MTD driver (emulated)");
++		return UBI_IO_FF_BITFLIPS;
++	}
++
++	if (ubi_dbg_is_bad_hdr(ubi, MASK_BAD_HDR_VID)) {
++		ubi_warn(ubi, "bad_hdr (emulated)");
++		return UBI_IO_BAD_HDR;
++	}
++
++	if (ubi_dbg_is_bad_hdr_ebadmsg(ubi, MASK_BAD_HDR_EBADMSG_VID)) {
++		ubi_warn(ubi, "bad_hdr with ECC error (emulated)");
++		return UBI_IO_BAD_HDR_EBADMSG;
++	}
++
++	return 0;
+ }
+ 
+ /**

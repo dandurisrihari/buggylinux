@@ -1,0 +1,57 @@
+commit 69371801f929ff4b3c846a45b9d49db631897cd9
+Author: Johannes Berg <johannes.berg@intel.com>
+Date:   Fri Sep 2 16:11:14 2022 +0200
+
+    wifi: mac80211: fix locking in auth/assoc timeout
+    
+    If we hit an authentication or association timeout, we only
+    release the chanctx for the deflink, and the other link(s)
+    are released later by ieee80211_vif_set_links(), but we're
+    not locking this correctly.
+    
+    Fix the locking here while releasing the channels and links.
+    
+    Change-Id: I9e08c1a5434592bdc75253c1abfa6c788f9f39b1
+    Fixes: 81151ce462e5 ("wifi: mac80211: support MLO authentication/association with one link")
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+diff --git a/net/mac80211/mlme.c b/net/mac80211/mlme.c
+index 4c40f0427e88..5265d2b6db12 100644
+--- a/net/mac80211/mlme.c
++++ b/net/mac80211/mlme.c
+@@ -3420,11 +3420,11 @@ static void ieee80211_destroy_auth_data(struct ieee80211_sub_if_data *sdata,
+ 		ieee80211_link_info_change_notify(sdata, &sdata->deflink,
+ 						  BSS_CHANGED_BSSID);
+ 		sdata->u.mgd.flags = 0;
++
+ 		mutex_lock(&sdata->local->mtx);
+ 		ieee80211_link_release_channel(&sdata->deflink);
+-		mutex_unlock(&sdata->local->mtx);
+-
+ 		ieee80211_vif_set_links(sdata, 0);
++		mutex_unlock(&sdata->local->mtx);
+ 	}
+ 
+ 	cfg80211_put_bss(sdata->local->hw.wiphy, auth_data->bss);
+@@ -3462,10 +3462,6 @@ static void ieee80211_destroy_assoc_data(struct ieee80211_sub_if_data *sdata,
+ 		sdata->u.mgd.flags = 0;
+ 		sdata->vif.bss_conf.mu_mimo_owner = false;
+ 
+-		mutex_lock(&sdata->local->mtx);
+-		ieee80211_link_release_channel(&sdata->deflink);
+-		mutex_unlock(&sdata->local->mtx);
+-
+ 		if (status != ASSOC_REJECTED) {
+ 			struct cfg80211_assoc_failure data = {
+ 				.timeout = status == ASSOC_TIMEOUT,
+@@ -3484,7 +3480,10 @@ static void ieee80211_destroy_assoc_data(struct ieee80211_sub_if_data *sdata,
+ 			cfg80211_assoc_failure(sdata->dev, &data);
+ 		}
+ 
++		mutex_lock(&sdata->local->mtx);
++		ieee80211_link_release_channel(&sdata->deflink);
+ 		ieee80211_vif_set_links(sdata, 0);
++		mutex_unlock(&sdata->local->mtx);
+ 	}
+ 
+ 	kfree(assoc_data);

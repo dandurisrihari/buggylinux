@@ -1,0 +1,59 @@
+commit fffd0934b9390f34bec45762192b7edd3b12b4b5
+Author: Johannes Berg <johannes@sipsolutions.net>
+Date:   Wed Jul 8 14:22:54 2009 +0200
+
+    cfg80211: rework key operation
+    
+    This reworks the key operation in cfg80211, and now only
+    allows, from userspace, configuring keys (via nl80211)
+    after the connection has been established (in managed
+    mode), the IBSS been joined (in IBSS mode), at any time
+    (in AP[_VLAN] modes) or never for all the other modes.
+    
+    In order to do shared key authentication correctly, it
+    is now possible to give a WEP key to the AUTH command.
+    To configure static WEP keys, these are given to the
+    CONNECT or IBSS_JOIN command directly, for a userspace
+    SME it is assumed it will configure it properly after
+    the connection has been established.
+    
+    Since mac80211 used to check the default key in IBSS
+    mode to see whether or not the network is protected,
+    it needs an update in that area, as well as an update
+    to make use of the WEP key passed to auth() for shared
+    key authentication.
+    
+    Signed-off-by: Johannes Berg <johannes@sipsolutions.net>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/wireless/core.c b/net/wireless/core.c
+index 1a78b3c70cf2..97cc5968b7d6 100644
+--- a/net/wireless/core.c
++++ b/net/wireless/core.c
+@@ -666,14 +666,10 @@ static int cfg80211_netdev_notifier_call(struct notifier_block * nb,
+ 		wdev_lock(wdev);
+ 		switch (wdev->iftype) {
+ 		case NL80211_IFTYPE_ADHOC:
+-			if (wdev->wext.ibss.ssid_len)
+-				__cfg80211_join_ibss(rdev, dev,
+-						     &wdev->wext.ibss);
++			cfg80211_ibss_wext_join(rdev, wdev);
+ 			break;
+ 		case NL80211_IFTYPE_STATION:
+-			if (wdev->wext.connect.ssid_len)
+-				__cfg80211_connect(rdev, dev,
+-						   &wdev->wext.connect);
++			cfg80211_mgd_wext_connect(rdev, wdev);
+ 			break;
+ 		default:
+ 			break;
+@@ -690,6 +686,9 @@ static int cfg80211_netdev_notifier_call(struct notifier_block * nb,
+ 		}
+ 		mutex_unlock(&rdev->devlist_mtx);
+ 		mutex_destroy(&wdev->mtx);
++#ifdef CONFIG_WIRELESS_EXT
++		kfree(wdev->wext.keys);
++#endif
+ 		break;
+ 	case NETDEV_PRE_UP:
+ 		if (!(wdev->wiphy->interface_modes & BIT(wdev->iftype)))

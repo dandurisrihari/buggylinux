@@ -1,0 +1,71 @@
+commit 71ae8aac3e198c6f3577cb7ad3a17f6128e97bfa
+Author: Francesco Fusco <ffusco@redhat.com>
+Date:   Thu Dec 12 16:09:05 2013 +0100
+
+    lib: introduce arch optimized hash library
+    
+    We introduce a new hashing library that is meant to be used in
+    the contexts where speed is more important than uniformity of the
+    hashed values. The hash library leverages architecture specific
+    implementation to achieve high performance and fall backs to
+    jhash() for the generic case.
+    
+    On Intel-based x86 architectures, the library can exploit the crc32l
+    instruction, part of the Intel SSE4.2 instruction set, if the
+    instruction is supported by the processor. This implementation
+    is twice as fast as the jhash() implementation on an i7 processor.
+    
+    Additional architectures, such as Arm64 provide instructions for
+    accelerating the computation of CRC, so they could be added as well
+    in follow-up work.
+    
+    Signed-off-by: Francesco Fusco <ffusco@redhat.com>
+    Signed-off-by: Daniel Borkmann <dborkman@redhat.com>
+    Signed-off-by: Thomas Graf <tgraf@redhat.com>
+    Cc: linux-kernel@vger.kernel.org
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/lib/hash.c b/lib/hash.c
+new file mode 100644
+index 000000000000..b89f06a2d606
+--- /dev/null
++++ b/lib/hash.c
+@@ -0,0 +1,38 @@
++/* General purpose hashing library
++ *
++ * That's a start of a kernel hashing library, which can be extended
++ * with further algorithms in future. arch_fast_hash{2,}() will
++ * eventually resolve to an architecture optimized implementation.
++ *
++ * Copyright 2013 Francesco Fusco <ffusco@redhat.com>
++ * Copyright 2013 Daniel Borkmann <dborkman@redhat.com>
++ * Copyright 2013 Thomas Graf <tgraf@redhat.com>
++ * Licensed under the GNU General Public License, version 2.0 (GPLv2)
++ */
++
++#include <linux/jhash.h>
++#include <linux/hash.h>
++
++static struct fast_hash_ops arch_hash_ops __read_mostly = {
++	.hash  = jhash,
++	.hash2 = jhash2,
++};
++
++u32 arch_fast_hash(const void *data, u32 len, u32 seed)
++{
++	return arch_hash_ops.hash(data, len, seed);
++}
++EXPORT_SYMBOL_GPL(arch_fast_hash);
++
++u32 arch_fast_hash2(const u32 *data, u32 len, u32 seed)
++{
++	return arch_hash_ops.hash2(data, len, seed);
++}
++EXPORT_SYMBOL_GPL(arch_fast_hash2);
++
++static int __init hashlib_init(void)
++{
++	setup_arch_fast_hash(&arch_hash_ops);
++	return 0;
++}
++early_initcall(hashlib_init);

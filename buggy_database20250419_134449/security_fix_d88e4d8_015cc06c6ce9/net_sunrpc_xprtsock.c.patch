@@ -1,0 +1,64 @@
+commit d88e4d82efc7aca47f1e31808717c9718e466d93
+Author: NeilBrown <neilb@suse.com>
+Date:   Thu Aug 4 16:24:28 2016 +1000
+
+    SUNRPC: disable the use of IPv6 temporary addresses.
+    
+    If the net.ipv6.conf.*.use_temp_addr sysctl is set to '2',
+    then TCP connections over IPv6 will prefer a 'private' source
+    address.
+    These eventually expire and become invalid, typically after a week,
+    but the time is configurable.
+    
+    When the local address becomes invalid the client will not be able to
+    receive replies from the server.  Eventually the connection will timeout
+    or break and a new connection will be established, but this can take
+    half an hour (typically TCP connection break time).
+    
+    RFC 4941, which describes private IPv6 addresses, acknowledges that some
+    applications might not work well with them and that the application may
+    explicitly a request non-temporary (i.e. "public") address.
+    
+    I believe this is correct for SUNRPC clients.  Without this change, a
+    client will occasionally experience a long delay if private addresses
+    have been enabled.
+    
+    The privacy offered by private addresses is of little value for an NFS
+    server which requires client authentication.
+    
+    For NFSv3 this will often not be a problem because idle connections are
+    closed after 5 minutes.  For NFSv4 connections never go idle due to the
+    period RENEW (or equivalent) request.
+    
+    Signed-off-by: NeilBrown <neilb@suse.com>
+    Signed-off-by: Trond Myklebust <trond.myklebust@primarydata.com>
+
+diff --git a/net/sunrpc/xprtsock.c b/net/sunrpc/xprtsock.c
+index c6b1d48c4319..bf79212fdbf8 100644
+--- a/net/sunrpc/xprtsock.c
++++ b/net/sunrpc/xprtsock.c
+@@ -2236,6 +2236,7 @@ static int xs_tcp_finish_connecting(struct rpc_xprt *xprt, struct socket *sock)
+ 		unsigned int keepcnt = xprt->timeout->to_retries + 1;
+ 		unsigned int opt_on = 1;
+ 		unsigned int timeo;
++		unsigned int addr_pref = IPV6_PREFER_SRC_PUBLIC;
+ 
+ 		/* TCP Keepalive options */
+ 		kernel_setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE,
+@@ -2247,6 +2248,16 @@ static int xs_tcp_finish_connecting(struct rpc_xprt *xprt, struct socket *sock)
+ 		kernel_setsockopt(sock, SOL_TCP, TCP_KEEPCNT,
+ 				(char *)&keepcnt, sizeof(keepcnt));
+ 
++		/* Avoid temporary address, they are bad for long-lived
++		 * connections such as NFS mounts.
++		 * RFC4941, section 3.6 suggests that:
++		 *    Individual applications, which have specific
++		 *    knowledge about the normal duration of connections,
++		 *    MAY override this as appropriate.
++		 */
++		kernel_setsockopt(sock, SOL_IPV6, IPV6_ADDR_PREFERENCES,
++				(char *)&addr_pref, sizeof(addr_pref));
++
+ 		/* TCP user timeout (see RFC5482) */
+ 		timeo = jiffies_to_msecs(xprt->timeout->to_initval) *
+ 			(xprt->timeout->to_retries + 1);

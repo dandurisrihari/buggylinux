@@ -1,0 +1,118 @@
+commit a048a07d7f4535baa4cbad6bc024f175317ab938
+Author: Nicholas Piggin <npiggin@gmail.com>
+Date:   Tue May 22 09:00:00 2018 +1000
+
+    powerpc/64s: Add support for a store forwarding barrier at kernel entry/exit
+    
+    On some CPUs we can prevent a vulnerability related to store-to-load
+    forwarding by preventing store forwarding between privilege domains,
+    by inserting a barrier in kernel entry and exit paths.
+    
+    This is known to be the case on at least Power7, Power8 and Power9
+    powerpc CPUs.
+    
+    Barriers must be inserted generally before the first load after moving
+    to a higher privilege, and after the last store before moving to a
+    lower privilege, HV and PR privilege transitions must be protected.
+    
+    Barriers are added as patch sections, with all kernel/hypervisor entry
+    points patched, and the exit points to lower privilge levels patched
+    similarly to the RFI flush patching.
+    
+    Firmware advertisement is not implemented yet, so CPU flush types
+    are hard coded.
+    
+    Thanks to Michal Suchánek for bug fixes and review.
+    
+    Signed-off-by: Nicholas Piggin <npiggin@gmail.com>
+    Signed-off-by: Mauricio Faria de Oliveira <mauricfo@linux.vnet.ibm.com>
+    Signed-off-by: Michael Neuling <mikey@neuling.org>
+    Signed-off-by: Michal Suchánek <msuchanek@suse.de>
+    Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/arch/powerpc/include/asm/exception-64s.h b/arch/powerpc/include/asm/exception-64s.h
+index 471b2274fbeb..c40b4380951c 100644
+--- a/arch/powerpc/include/asm/exception-64s.h
++++ b/arch/powerpc/include/asm/exception-64s.h
+@@ -74,6 +74,27 @@
+  */
+ #define EX_R3		EX_DAR
+ 
++#define STF_ENTRY_BARRIER_SLOT						\
++	STF_ENTRY_BARRIER_FIXUP_SECTION;				\
++	nop;								\
++	nop;								\
++	nop
++
++#define STF_EXIT_BARRIER_SLOT						\
++	STF_EXIT_BARRIER_FIXUP_SECTION;					\
++	nop;								\
++	nop;								\
++	nop;								\
++	nop;								\
++	nop;								\
++	nop
++
++/*
++ * r10 must be free to use, r13 must be paca
++ */
++#define INTERRUPT_TO_KERNEL						\
++	STF_ENTRY_BARRIER_SLOT
++
+ /*
+  * Macros for annotating the expected destination of (h)rfid
+  *
+@@ -90,16 +111,19 @@
+ 	rfid
+ 
+ #define RFI_TO_USER							\
++	STF_EXIT_BARRIER_SLOT;						\
+ 	RFI_FLUSH_SLOT;							\
+ 	rfid;								\
+ 	b	rfi_flush_fallback
+ 
+ #define RFI_TO_USER_OR_KERNEL						\
++	STF_EXIT_BARRIER_SLOT;						\
+ 	RFI_FLUSH_SLOT;							\
+ 	rfid;								\
+ 	b	rfi_flush_fallback
+ 
+ #define RFI_TO_GUEST							\
++	STF_EXIT_BARRIER_SLOT;						\
+ 	RFI_FLUSH_SLOT;							\
+ 	rfid;								\
+ 	b	rfi_flush_fallback
+@@ -108,21 +132,25 @@
+ 	hrfid
+ 
+ #define HRFI_TO_USER							\
++	STF_EXIT_BARRIER_SLOT;						\
+ 	RFI_FLUSH_SLOT;							\
+ 	hrfid;								\
+ 	b	hrfi_flush_fallback
+ 
+ #define HRFI_TO_USER_OR_KERNEL						\
++	STF_EXIT_BARRIER_SLOT;						\
+ 	RFI_FLUSH_SLOT;							\
+ 	hrfid;								\
+ 	b	hrfi_flush_fallback
+ 
+ #define HRFI_TO_GUEST							\
++	STF_EXIT_BARRIER_SLOT;						\
+ 	RFI_FLUSH_SLOT;							\
+ 	hrfid;								\
+ 	b	hrfi_flush_fallback
+ 
+ #define HRFI_TO_UNKNOWN							\
++	STF_EXIT_BARRIER_SLOT;						\
+ 	RFI_FLUSH_SLOT;							\
+ 	hrfid;								\
+ 	b	hrfi_flush_fallback
+@@ -254,6 +282,7 @@ END_FTR_SECTION_NESTED(ftr,ftr,943)
+ #define __EXCEPTION_PROLOG_1_PRE(area)					\
+ 	OPT_SAVE_REG_TO_PACA(area+EX_PPR, r9, CPU_FTR_HAS_PPR);		\
+ 	OPT_SAVE_REG_TO_PACA(area+EX_CFAR, r10, CPU_FTR_CFAR);		\
++	INTERRUPT_TO_KERNEL;						\
+ 	SAVE_CTR(r10, area);						\
+ 	mfcr	r9;

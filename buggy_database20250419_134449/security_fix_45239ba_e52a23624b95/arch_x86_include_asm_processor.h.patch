@@ -1,0 +1,59 @@
+commit 45239ba39a5279e9efc671774e2eef29df4d2484
+Author: Pawan Gupta <pawan.kumar.gupta@linux.intel.com>
+Date:   Fri Oct 25 12:14:58 2024 -0500
+
+    x86/cpu: Add CPU type to struct cpuinfo_topology
+    
+    Sometimes it is required to take actions based on if a CPU is a performance or
+    efficiency core. As an example, intel_pstate driver uses the Intel core-type
+    to determine CPU scaling. Also, some CPU vulnerabilities only affect
+    a specific CPU type, like RFDS only affects Intel Atom. Hybrid systems that
+    have variants P+E, P-only(Core) and E-only(Atom), it is not straightforward to
+    identify which variant is affected by a type specific vulnerability.
+    
+    Such processors do have CPUID field that can uniquely identify them. Like,
+    P+E, P-only and E-only enumerates CPUID.1A.CORE_TYPE identification, while P+E
+    additionally enumerates CPUID.7.HYBRID. Based on this information, it is
+    possible for boot CPU to identify if a system has mixed CPU types.
+    
+    Add a new field hw_cpu_type to struct cpuinfo_topology that stores the
+    hardware specific CPU type. This saves the overhead of IPIs to get the CPU
+    type of a different CPU. CPU type is populated early in the boot process,
+    before vulnerabilities are enumerated.
+    
+    Signed-off-by: Pawan Gupta <pawan.kumar.gupta@linux.intel.com>
+    Co-developed-by: Mario Limonciello <mario.limonciello@amd.com>
+    Signed-off-by: Mario Limonciello <mario.limonciello@amd.com>
+    Signed-off-by: Borislav Petkov (AMD) <bp@alien8.de>
+    Acked-by: Dave Hansen <dave.hansen@linux.intel.com>
+    Link: https://lore.kernel.org/r/20241025171459.1093-5-mario.limonciello@amd.com
+
+diff --git a/arch/x86/include/asm/processor.h b/arch/x86/include/asm/processor.h
+index 4a686f0e5dbf..c0975815980c 100644
+--- a/arch/x86/include/asm/processor.h
++++ b/arch/x86/include/asm/processor.h
+@@ -105,6 +105,24 @@ struct cpuinfo_topology {
+ 	// Cache level topology IDs
+ 	u32			llc_id;
+ 	u32			l2c_id;
++
++	// Hardware defined CPU-type
++	union {
++		u32		cpu_type;
++		struct {
++			// CPUID.1A.EAX[23-0]
++			u32	intel_native_model_id	:24;
++			// CPUID.1A.EAX[31-24]
++			u32	intel_type		:8;
++		};
++		struct {
++			// CPUID 0x80000026.EBX
++			u32	amd_num_processors	:16,
++				amd_power_eff_ranking	:8,
++				amd_native_model_id	:4,
++				amd_type		:4;
++		};
++	};
+ };
+ 
+ struct cpuinfo_x86 {

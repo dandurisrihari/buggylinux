@@ -1,0 +1,163 @@
+commit f67986b0119c048c6537cdc93da511f7ffdb2338
+Author: Alan Previn <alan.previn.teres.alexis@intel.com>
+Date:   Thu Dec 8 10:05:42 2022 -0800
+
+    drm/i915/pxp: Promote pxp subsystem to top-level of i915
+    
+    Starting with MTL, there will be two GT-tiles, a render and media
+    tile. PXP as a service for supporting workloads with protected
+    contexts and protected buffers can be subscribed by process
+    workloads on any tile. However, depending on the platform,
+    only one of the tiles is used for control events pertaining to PXP
+    operation (such as creating the arbitration session and session
+    tear-down).
+    
+    PXP as a global feature is accessible via batch buffer instructions
+    on any engine/tile and the coherency across tiles is handled implicitly
+    by the HW. In fact, for the foreseeable future, we are expecting this
+    single-control-tile for the PXP subsystem.
+    
+    In MTL, it's the standalone media tile (not the root tile) because
+    it contains the VDBOX and KCR engine (among the assets PXP relies on
+    for those events).
+    
+    Looking at the current code design, each tile is represented by the
+    intel_gt structure while the intel_pxp structure currently hangs off the
+    intel_gt structure.
+    
+    Keeping the intel_pxp structure within the intel_gt structure makes some
+    internal functionalities more straight forward but adds code complexity to
+    code readability and maintainibility to many external-to-pxp subsystems
+    which may need to pick the correct intel_gt structure. An example of this
+    would be the intel_pxp_is_active or intel_pxp_is_enabled functionality
+    which should be viewed as a global level inquiry, not a per-gt inquiry.
+    
+    That said, this series promotes the intel_pxp structure into the
+    drm_i915_private structure making it a top-level subsystem and the PXP
+    subsystem will select the control gt internally and keep a pointer to
+    it for internal reference.
+    
+    This promotion comes with two noteworthy changes:
+    
+    1. Exported pxp functions that are called by external subsystems
+       (such as intel_pxp_enabled/active) will have to check implicitly
+       if i915->pxp is valid as that structure will not be allocated
+       for HW that doesn't support PXP.
+    
+    2. Since GT is now considered a soft-dependency of PXP we are
+       ensuring that GT init happens before PXP init and vice versa
+       for fini. This causes a minor ordering change whereby we previously
+       called intel_pxp_suspend after intel_uc_suspend but now is before
+       i915_gem_suspend_late but the change is required for correct
+       dependency flows. Additionally, this re-order change doesn't
+       have any impact because at that point in either case, the top level
+       entry to i915 won't observe any PXP events (since the GPU was
+       quiesced during suspend_prepare). Also, any PXP event doesn't
+       really matter when we disable the PXP HW (global GT irqs are
+       already off anyway, so even if there was a bug that generated
+       spurious events we wouldn't see it and we would just clean it
+       up on resume which is okay since the default fallback action
+       for PXP would be to keep the sessions off at this suspend stage).
+    
+    Changes from prior revs:
+      v11: - Reformat a comment (Tvrtko).
+      v10: - Change the code flow for intel_pxp_init to make it more
+             cleaner and readible with better comments explaining the
+             difference between full-PXP-feature vs the partial-teelink
+             inits depending on the platform. Additionally, only do
+             the pxp allocation when we are certain the subsystem is
+             needed. (Tvrtko).
+       v9: - Cosmetic cleanups in supported/enabled/active. (Daniele).
+           - Add comments for intel_pxp_init and pxp_get_ctrl_gt that
+             explain the functional flow for when PXP is not supported
+             but the backend-assets are needed for HuC authentication
+             (Daniele and Tvrtko).
+           - Fix two remaining functions that are accessible outside
+             PXP that need to be checking pxp ptrs before using them:
+             intel_pxp_irq_handler and intel_pxp_huc_load_and_auth
+             (Tvrtko and Daniele).
+           - User helper macro in pxp-debugfs (Tvrtko).
+       v8: - Remove pxp_to_gt macro (Daniele).
+           - Fix a bug in pxp_get_ctrl_gt for the case of MTL and we don't
+             support GSC-FW on it. (Daniele).
+           - Leave i915->pxp as NULL if we dont support PXP and in line
+             with that, do additional validity check on i915->pxp for
+             intel_pxp_is_supported/enabled/active (Daniele).
+           - Remove unncessary include header from intel_gt_debugfs.c
+             and check drm_minor i915->drm.primary (Daniele).
+           - Other cosmetics / minor issues / more comments on suspend
+             flow order change (Daniele).
+       v7: - Drop i915_dev_to_pxp and in intel_pxp_init use 'i915->pxp'
+             through out instead of local variable newpxp. (Rodrigo)
+           - In the case intel_pxp_fini is called during driver unload but
+             after i915 loading failed without pxp being allocated, check
+             i915->pxp before referencing it. (Alan)
+       v6: - Remove HAS_PXP macro and replace it with intel_pxp_is_supported
+             because : [1] introduction of 'ctrl_gt' means we correct this
+             for MTL's upcoming series now. [2] Also, this has little impact
+             globally as its only used by PXP-internal callers at the moment.
+           - Change intel_pxp_init/fini to take in i915 as its input to avoid
+             ptr-to-ptr in init/fini calls.(Jani).
+           - Remove the backpointer from pxp->i915 since we can use
+             pxp->ctrl_gt->i915 if we need it. (Rodrigo).
+       v5: - Switch from series to single patch (Rodrigo).
+           - change function name from pxp_get_kcr_owner_gt to
+             pxp_get_ctrl_gt.
+           - Fix CI BAT failure by removing redundant call to intel_pxp_fini
+             from driver-remove.
+           - NOTE: remaining open still persists on using ptr-to-ptr
+             and back-ptr.
+       v4: - Instead of maintaining intel_pxp as an intel_gt structure member
+             and creating a number of convoluted helpers that takes in i915 as
+             input and redirects to the correct intel_gt or takes any intel_gt
+             and internally replaces with the correct intel_gt, promote it to
+             be a top-level i915 structure.
+       v3: - Rename gt level helper functions to "intel_pxp_is_enabled/
+             supported/ active_on_gt" (Daniele)
+           - Upgrade _gt_supports_pxp to replace what was intel_gtpxp_is
+             supported as the new intel_pxp_is_supported_on_gt to check for
+             PXP feature support vs the tee support for huc authentication.
+             Fix pxp-debugfs-registration to use only the former to decide
+             support. (Daniele)
+           - Couple minor optimizations.
+       v2: - Avoid introduction of new device info or gt variables and use
+             existing checks / macros to differentiate the correct GT->PXP
+             control ownership (Daniele Ceraolo Spurio)
+           - Don't reuse the updated global-checkers for per-GT callers (such
+             as other files within PXP) to avoid unnecessary GT-reparsing,
+             expose a replacement helper like the prior ones. (Daniele).
+       v1: - Add one more patch to the series for the intel_pxp suspend/resume
+             for similar refactoring
+    
+    References: https://patchwork.freedesktop.org/patch/msgid/20221202011407.4068371-1-alan.previn.teres.alexis@intel.com
+    Signed-off-by: Alan Previn <alan.previn.teres.alexis@intel.com>
+    Reviewed-by: Daniele Ceraolo Spurio <daniele.ceraolospurio@intel.com>
+    Acked-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+    Signed-off-by: Daniele Ceraolo Spurio <daniele.ceraolospurio@intel.com>
+    Link: https://patchwork.freedesktop.org/patch/msgid/20221208180542.998148-1-alan.previn.teres.alexis@intel.com
+
+diff --git a/drivers/gpu/drm/i915/pxp/intel_pxp_types.h b/drivers/gpu/drm/i915/pxp/intel_pxp_types.h
+index f74b1e11a505..7dc5f08d1583 100644
+--- a/drivers/gpu/drm/i915/pxp/intel_pxp_types.h
++++ b/drivers/gpu/drm/i915/pxp/intel_pxp_types.h
+@@ -12,12 +12,20 @@
+ #include <linux/workqueue.h>
+ 
+ struct intel_context;
++struct intel_gt;
+ struct i915_pxp_component;
++struct drm_i915_private;
+ 
+ /**
+  * struct intel_pxp - pxp state
+  */
+ struct intel_pxp {
++	/**
++	 * @ctrl_gt: poiner to the tile that owns the controls for PXP subsystem assets that
++	 * the VDBOX, the KCR engine (and GSC CS depending on the platform)
++	 */
++	struct intel_gt *ctrl_gt;
++
+ 	/**
+ 	 * @pxp_component: i915_pxp_component struct of the bound mei_pxp
+ 	 * module. Only set and cleared inside component bind/unbind functions,

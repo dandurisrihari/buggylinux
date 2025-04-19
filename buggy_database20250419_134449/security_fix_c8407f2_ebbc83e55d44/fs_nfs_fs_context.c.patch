@@ -1,0 +1,161 @@
+commit c8407f2e560c53c4c73e77cb5604c8a408dbe7f7
+Author: Chuck Lever <chuck.lever@oracle.com>
+Date:   Wed Jun 7 10:00:09 2023 -0400
+
+    NFS: Add an "xprtsec=" NFS mount option
+    
+    After some discussion, we decided that controlling transport layer
+    security policy should be separate from the setting for the user
+    authentication flavor. To accomplish this, add a new NFS mount
+    option to select a transport layer security policy for RPC
+    operations associated with the mount point.
+    
+      xprtsec=none     - Transport layer security is forced off.
+    
+      xprtsec=tls      - Establish an encryption-only TLS session. If
+                         the initial handshake fails, the mount fails.
+                         If TLS is not available on a reconnect, drop
+                         the connection and try again.
+    
+      xprtsec=mtls     - Both sides authenticate and an encrypted
+                         session is created. If the initial handshake
+                         fails, the mount fails. If TLS is not available
+                         on a reconnect, drop the connection and try
+                         again.
+    
+    To support client peer authentication (mtls), the handshake daemon
+    will have configurable default authentication material (certificate
+    or pre-shared key). In the future, mount options can be added that
+    can provide this material on a per-mount basis.
+    
+    Updates to mount.nfs (to support xprtsec=auto) and nfs(5) will be
+    sent under separate cover.
+    
+    Signed-off-by: Chuck Lever <chuck.lever@oracle.com>
+    Signed-off-by: Trond Myklebust <trond.myklebust@hammerspace.com>
+
+diff --git a/fs/nfs/fs_context.c b/fs/nfs/fs_context.c
+index 5626d358ee2e..853e8d609bb3 100644
+--- a/fs/nfs/fs_context.c
++++ b/fs/nfs/fs_context.c
+@@ -18,6 +18,9 @@
+ #include <linux/nfs_fs.h>
+ #include <linux/nfs_mount.h>
+ #include <linux/nfs4_mount.h>
++
++#include <net/handshake.h>
++
+ #include "nfs.h"
+ #include "internal.h"
+ 
+@@ -88,6 +91,7 @@ enum nfs_param {
+ 	Opt_vers,
+ 	Opt_wsize,
+ 	Opt_write,
++	Opt_xprtsec,
+ };
+ 
+ enum {
+@@ -194,6 +198,7 @@ static const struct fs_parameter_spec nfs_fs_parameters[] = {
+ 	fsparam_string("vers",		Opt_vers),
+ 	fsparam_enum  ("write",		Opt_write, nfs_param_enums_write),
+ 	fsparam_u32   ("wsize",		Opt_wsize),
++	fsparam_string("xprtsec",	Opt_xprtsec),
+ 	{}
+ };
+ 
+@@ -267,6 +272,20 @@ static const struct constant_table nfs_secflavor_tokens[] = {
+ 	{}
+ };
+ 
++enum {
++	Opt_xprtsec_none,
++	Opt_xprtsec_tls,
++	Opt_xprtsec_mtls,
++	nr__Opt_xprtsec
++};
++
++static const struct constant_table nfs_xprtsec_policies[] = {
++	{ "none",	Opt_xprtsec_none },
++	{ "tls",	Opt_xprtsec_tls },
++	{ "mtls",	Opt_xprtsec_mtls },
++	{}
++};
++
+ /*
+  * Sanity-check a server address provided by the mount command.
+  *
+@@ -320,9 +339,21 @@ static int nfs_validate_transport_protocol(struct fs_context *fc,
+ 	default:
+ 		ctx->nfs_server.protocol = XPRT_TRANSPORT_TCP;
+ 	}
++
++	if (ctx->xprtsec.policy != RPC_XPRTSEC_NONE)
++		switch (ctx->nfs_server.protocol) {
++		case XPRT_TRANSPORT_TCP:
++			ctx->nfs_server.protocol = XPRT_TRANSPORT_TCP_TLS;
++			break;
++		default:
++			goto out_invalid_xprtsec_policy;
++	}
++
+ 	return 0;
+ out_invalid_transport_udp:
+ 	return nfs_invalf(fc, "NFS: Unsupported transport protocol udp");
++out_invalid_xprtsec_policy:
++	return nfs_invalf(fc, "NFS: Transport does not support xprtsec");
+ }
+ 
+ /*
+@@ -430,6 +461,29 @@ static int nfs_parse_security_flavors(struct fs_context *fc,
+ 	return 0;
+ }
+ 
++static int nfs_parse_xprtsec_policy(struct fs_context *fc,
++				    struct fs_parameter *param)
++{
++	struct nfs_fs_context *ctx = nfs_fc2context(fc);
++
++	trace_nfs_mount_assign(param->key, param->string);
++
++	switch (lookup_constant(nfs_xprtsec_policies, param->string, -1)) {
++	case Opt_xprtsec_none:
++		ctx->xprtsec.policy = RPC_XPRTSEC_NONE;
++		break;
++	case Opt_xprtsec_tls:
++		ctx->xprtsec.policy = RPC_XPRTSEC_TLS_ANON;
++		break;
++	case Opt_xprtsec_mtls:
++		ctx->xprtsec.policy = RPC_XPRTSEC_TLS_X509;
++		break;
++	default:
++		return nfs_invalf(fc, "NFS: Unrecognized transport security policy");
++	}
++	return 0;
++}
++
+ static int nfs_parse_version_string(struct fs_context *fc,
+ 				    const char *string)
+ {
+@@ -696,6 +750,11 @@ static int nfs_fs_context_parse_param(struct fs_context *fc,
+ 		if (ret < 0)
+ 			return ret;
+ 		break;
++	case Opt_xprtsec:
++		ret = nfs_parse_xprtsec_policy(fc, param);
++		if (ret < 0)
++			return ret;
++		break;
+ 
+ 	case Opt_proto:
+ 		if (!param->string)
+@@ -1574,6 +1633,9 @@ static int nfs_init_fs_context(struct fs_context *fc)
+ 		ctx->selected_flavor	= RPC_AUTH_MAXFLAVOR;
+ 		ctx->minorversion	= 0;
+ 		ctx->need_mount		= true;
++		ctx->xprtsec.policy	= RPC_XPRTSEC_NONE;
++		ctx->xprtsec.cert_serial	= TLS_NO_CERT;
++		ctx->xprtsec.privkey_serial	= TLS_NO_PRIVKEY;
+ 
+ 		fc->s_iflags		|= SB_I_STABLE_WRITES;
+ 	}

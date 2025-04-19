@@ -1,0 +1,45 @@
+commit 680b3648ba89c44ac8d0316f78a0d6e147b88809
+Author: Gleb Natapov <gleb@redhat.com>
+Date:   Mon Aug 24 11:54:26 2009 +0300
+
+    KVM: Drop kvm->irq_lock lock from irq injection path
+    
+    The only thing it protects now is interrupt injection into lapic and
+    this can work lockless. Even now with kvm->irq_lock in place access
+    to lapic is not entirely serialized since vcpu access doesn't take
+    kvm->irq_lock.
+    
+    Signed-off-by: Gleb Natapov <gleb@redhat.com>
+    Signed-off-by: Avi Kivity <avi@redhat.com>
+
+diff --git a/virt/kvm/irq_comm.c b/virt/kvm/irq_comm.c
+index fadf4408a820..15a83b93566d 100644
+--- a/virt/kvm/irq_comm.c
++++ b/virt/kvm/irq_comm.c
+@@ -82,8 +82,6 @@ int kvm_irq_delivery_to_apic(struct kvm *kvm, struct kvm_lapic *src,
+ 	int i, r = -1;
+ 	struct kvm_vcpu *vcpu, *lowest = NULL;
+ 
+-	WARN_ON(!mutex_is_locked(&kvm->irq_lock));
+-
+ 	if (irq->dest_mode == 0 && irq->dest_id == 0xff &&
+ 			kvm_is_dm_lowest_prio(irq))
+ 		printk(KERN_INFO "kvm: apic: phys broadcast and lowest prio\n");
+@@ -138,7 +136,7 @@ static int kvm_set_msi(struct kvm_kernel_irq_routing_entry *e,
+ 	return kvm_irq_delivery_to_apic(kvm, NULL, &irq);
+ }
+ 
+-/* This should be called with the kvm->irq_lock mutex held
++/*
+  * Return value:
+  *  < 0   Interrupt was ignored (masked or not delivered for other reasons)
+  *  = 0   Interrupt was coalesced (previous irq is still pending)
+@@ -153,8 +151,6 @@ int kvm_set_irq(struct kvm *kvm, int irq_source_id, u32 irq, int level)
+ 
+ 	trace_kvm_set_irq(irq, level, irq_source_id);
+ 
+-	WARN_ON(!mutex_is_locked(&kvm->irq_lock));
+-
+ 	/* Not possible to detect if the guest uses the PIC or the
+ 	 * IOAPIC.  So set the bit in both. The guest will ignore
+ 	 * writes to the unused one.

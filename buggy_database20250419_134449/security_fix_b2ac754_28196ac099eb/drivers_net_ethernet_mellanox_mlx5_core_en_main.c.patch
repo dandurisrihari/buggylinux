@@ -1,0 +1,61 @@
+commit b2ac7541e3777f325c49d900550c9e3dd10c0eda
+Author: Raed Salem <raeds@mellanox.com>
+Date:   Thu Oct 24 16:11:28 2019 +0300
+
+    net/mlx5e: IPsec: Add Connect-X IPsec Rx data path offload
+    
+    On receive flow inspect received packets for IPsec offload indication
+    using the cqe, for IPsec offloaded packets propagate offload status
+    and stack handle to stack for further processing.
+    
+    Supported statuses:
+    - Offload ok.
+    - Authentication failure.
+    - Bad trailer indication.
+    
+    Connect-X IPsec does not use mlx5e_ipsec_handle_rx_cqe.
+    
+    For RX only offload, we see the BW gain. Below is the iperf3
+    performance report on two server of 24 cores Intel(R) Xeon(R)
+    CPU E5-2620 v3 @ 2.40GHz with ConnectX6-DX.
+    We use one thread per IPsec tunnel.
+    
+    ---------------------------------------------------------------------
+    Mode          |  Num tunnel | BW     | Send CPU util | Recv CPU util
+                  |             | (Gbps) | (Average %)   | (Average %)
+    ---------------------------------------------------------------------
+    Cryto offload | 1           | 4.6    | 4.2           | 14.5
+    ---------------------------------------------------------------------
+    Cryto offload | 24          | 38     | 73            | 63
+    ---------------------------------------------------------------------
+    Non-offload   | 1           | 4      | 4             | 13
+    ---------------------------------------------------------------------
+    Non-offload   | 24          | 23     | 52            | 67
+    
+    Signed-off-by: Raed Salem <raeds@mellanox.com>
+    Reviewed-by: Boris Pismenny <borisp@mellanox.com>
+    Reviewed-by: Tariq Toukan <tariqt@mellanox.com>
+    Signed-off-by: Saeed Mahameed <saeedm@mellanox.com>
+
+diff --git a/drivers/net/ethernet/mellanox/mlx5/core/en_main.c b/drivers/net/ethernet/mellanox/mlx5/core/en_main.c
+index 4e5d83f6334a..88ea1908cb14 100644
+--- a/drivers/net/ethernet/mellanox/mlx5/core/en_main.c
++++ b/drivers/net/ethernet/mellanox/mlx5/core/en_main.c
+@@ -65,6 +65,7 @@
+ #include "en/hv_vhca_stats.h"
+ #include "en/devlink.h"
+ #include "lib/mlx5.h"
++#include "fpga/ipsec.h"
+ 
+ bool mlx5e_check_fragmented_striding_rq_cap(struct mlx5_core_dev *mdev)
+ {
+@@ -496,7 +497,8 @@ static int mlx5e_alloc_rq(struct mlx5e_channel *c,
+ 		rq->dealloc_wqe = mlx5e_dealloc_rx_wqe;
+ 
+ #ifdef CONFIG_MLX5_EN_IPSEC
+-		if (c->priv->ipsec)
++		if ((mlx5_fpga_ipsec_device_caps(mdev) & MLX5_ACCEL_IPSEC_CAP_DEVICE) &&
++		    c->priv->ipsec)
+ 			rq->handle_rx_cqe = mlx5e_ipsec_handle_rx_cqe;
+ 		else
+ #endif

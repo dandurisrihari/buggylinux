@@ -1,0 +1,66 @@
+commit f9d29946c56734e954459bc9a0e688a8ae9b4cbf
+Author: David Windsor <dave@nullcore.net>
+Date:   Sat Jun 10 22:50:41 2017 -0400
+
+    fork: Define usercopy region in thread_stack slab caches
+    
+    In support of usercopy hardening, this patch defines a region in the
+    thread_stack slab caches in which userspace copy operations are allowed.
+    Since the entire thread_stack needs to be available to userspace, the
+    entire slab contents are whitelisted. Note that the slab-based thread
+    stack is only present on systems with THREAD_SIZE < PAGE_SIZE and
+    !CONFIG_VMAP_STACK.
+    
+    cache object allocation:
+        kernel/fork.c:
+            alloc_thread_stack_node(...):
+                return kmem_cache_alloc_node(thread_stack_cache, ...)
+    
+            dup_task_struct(...):
+                ...
+                stack = alloc_thread_stack_node(...)
+                ...
+                tsk->stack = stack;
+    
+            copy_process(...):
+                ...
+                dup_task_struct(...)
+    
+            _do_fork(...):
+                ...
+                copy_process(...)
+    
+    This region is known as the slab cache's usercopy region. Slab caches
+    can now check that each dynamically sized copy operation involving
+    cache-managed memory falls entirely within the slab's usercopy region.
+    
+    This patch is modified from Brad Spengler/PaX Team's PAX_USERCOPY
+    whitelisting code in the last public patch of grsecurity/PaX based on my
+    understanding of the code. Changes or omissions from the original code are
+    mine and don't reflect the original grsecurity/PaX code.
+    
+    Signed-off-by: David Windsor <dave@nullcore.net>
+    [kees: adjust commit log, split patch, provide usage trace]
+    Cc: Ingo Molnar <mingo@kernel.org>
+    Cc: Andrew Morton <akpm@linux-foundation.org>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Andy Lutomirski <luto@kernel.org>
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+    Acked-by: Rik van Riel <riel@redhat.com>
+
+diff --git a/kernel/fork.c b/kernel/fork.c
+index 82f2a0441d3b..0e086af148f2 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -282,8 +282,9 @@ static void free_thread_stack(struct task_struct *tsk)
+ 
+ void thread_stack_cache_init(void)
+ {
+-	thread_stack_cache = kmem_cache_create("thread_stack", THREAD_SIZE,
+-					      THREAD_SIZE, 0, NULL);
++	thread_stack_cache = kmem_cache_create_usercopy("thread_stack",
++					THREAD_SIZE, THREAD_SIZE, 0, 0,
++					THREAD_SIZE, NULL);
+ 	BUG_ON(thread_stack_cache == NULL);
+ }
+ # endif

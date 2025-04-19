@@ -1,0 +1,395 @@
+diff --git a/arch/s390/kvm/diag.c b/arch/s390/kvm/diag.c
+index f5d4416ebfed..a390687feb13 100644
+--- a/arch/s390/kvm/diag.c
++++ b/arch/s390/kvm/diag.c
+@@ -15,6 +15,7 @@
+ #include <linux/kvm_host.h>
+ #include "kvm-s390.h"
+ #include "trace.h"
++#include "trace-s390.h"
+ 
+ static int diag_release_pages(struct kvm_vcpu *vcpu)
+ {
+@@ -99,6 +100,7 @@ static int __diag_ipl_functions(struct kvm_vcpu *vcpu)
+ 	vcpu->run->exit_reason = KVM_EXIT_S390_RESET;
+ 	VCPU_EVENT(vcpu, 3, "requesting userspace resets %llx",
+ 	  vcpu->run->s390_reset_flags);
++	trace_kvm_s390_request_resets(vcpu->run->s390_reset_flags);
+ 	return -EREMOTE;
+ }
+ 
+diff --git a/arch/s390/kvm/intercept.c b/arch/s390/kvm/intercept.c
+index db541d62c771..22798ec33fd1 100644
+--- a/arch/s390/kvm/intercept.c
++++ b/arch/s390/kvm/intercept.c
+@@ -20,6 +20,7 @@
+ #include "kvm-s390.h"
+ #include "gaccess.h"
+ #include "trace.h"
++#include "trace-s390.h"
+ 
+ static int handle_lctlg(struct kvm_vcpu *vcpu)
+ {
+@@ -138,6 +139,8 @@ static int handle_stop(struct kvm_vcpu *vcpu)
+ 	vcpu->stat.exit_stop_request++;
+ 	spin_lock_bh(&vcpu->arch.local_int.lock);
+ 
++	trace_kvm_s390_stop_request(vcpu->arch.local_int.action_bits);
++
+ 	if (vcpu->arch.local_int.action_bits & ACTION_RELOADVCPU_ON_STOP) {
+ 		vcpu->arch.local_int.action_bits &= ~ACTION_RELOADVCPU_ON_STOP;
+ 		rc = SIE_INTERCEPT_RERUNVCPU;
+diff --git a/arch/s390/kvm/interrupt.c b/arch/s390/kvm/interrupt.c
+index b7bc1aac8ed2..7556231fb073 100644
+--- a/arch/s390/kvm/interrupt.c
++++ b/arch/s390/kvm/interrupt.c
+@@ -19,6 +19,7 @@
+ #include <asm/uaccess.h>
+ #include "kvm-s390.h"
+ #include "gaccess.h"
++#include "trace-s390.h"
+ 
+ static int psw_extint_disabled(struct kvm_vcpu *vcpu)
+ {
+@@ -130,6 +131,8 @@ static void __do_deliver_interrupt(struct kvm_vcpu *vcpu,
+ 	case KVM_S390_INT_EMERGENCY:
+ 		VCPU_EVENT(vcpu, 4, "%s", "interrupt: sigp emerg");
+ 		vcpu->stat.deliver_emergency_signal++;
++		trace_kvm_s390_deliver_interrupt(vcpu->vcpu_id, inti->type,
++						 inti->emerg.code, 0);
+ 		rc = put_guest_u16(vcpu, __LC_EXT_INT_CODE, 0x1201);
+ 		if (rc == -EFAULT)
+ 			exception = 1;
+@@ -152,6 +155,8 @@ static void __do_deliver_interrupt(struct kvm_vcpu *vcpu,
+ 	case KVM_S390_INT_EXTERNAL_CALL:
+ 		VCPU_EVENT(vcpu, 4, "%s", "interrupt: sigp ext call");
+ 		vcpu->stat.deliver_external_call++;
++		trace_kvm_s390_deliver_interrupt(vcpu->vcpu_id, inti->type,
++						 inti->extcall.code, 0);
+ 		rc = put_guest_u16(vcpu, __LC_EXT_INT_CODE, 0x1202);
+ 		if (rc == -EFAULT)
+ 			exception = 1;
+@@ -175,6 +180,8 @@ static void __do_deliver_interrupt(struct kvm_vcpu *vcpu,
+ 		VCPU_EVENT(vcpu, 4, "interrupt: sclp parm:%x",
+ 			   inti->ext.ext_params);
+ 		vcpu->stat.deliver_service_signal++;
++		trace_kvm_s390_deliver_interrupt(vcpu->vcpu_id, inti->type,
++						 inti->ext.ext_params, 0);
+ 		rc = put_guest_u16(vcpu, __LC_EXT_INT_CODE, 0x2401);
+ 		if (rc == -EFAULT)
+ 			exception = 1;
+@@ -198,6 +205,9 @@ static void __do_deliver_interrupt(struct kvm_vcpu *vcpu,
+ 		VCPU_EVENT(vcpu, 4, "interrupt: virtio parm:%x,parm64:%llx",
+ 			   inti->ext.ext_params, inti->ext.ext_params2);
+ 		vcpu->stat.deliver_virtio_interrupt++;
++		trace_kvm_s390_deliver_interrupt(vcpu->vcpu_id, inti->type,
++						 inti->ext.ext_params,
++						 inti->ext.ext_params2);
+ 		rc = put_guest_u16(vcpu, __LC_EXT_INT_CODE, 0x2603);
+ 		if (rc == -EFAULT)
+ 			exception = 1;
+@@ -229,6 +239,8 @@ static void __do_deliver_interrupt(struct kvm_vcpu *vcpu,
+ 	case KVM_S390_SIGP_STOP:
+ 		VCPU_EVENT(vcpu, 4, "%s", "interrupt: cpu stop");
+ 		vcpu->stat.deliver_stop_signal++;
++		trace_kvm_s390_deliver_interrupt(vcpu->vcpu_id, inti->type,
++						 0, 0);
+ 		__set_intercept_indicator(vcpu, inti);
+ 		break;
+ 
+@@ -236,12 +248,16 @@ static void __do_deliver_interrupt(struct kvm_vcpu *vcpu,
+ 		VCPU_EVENT(vcpu, 4, "interrupt: set prefix to %x",
+ 			   inti->prefix.address);
+ 		vcpu->stat.deliver_prefix_signal++;
++		trace_kvm_s390_deliver_interrupt(vcpu->vcpu_id, inti->type,
++						 inti->prefix.address, 0);
+ 		kvm_s390_set_prefix(vcpu, inti->prefix.address);
+ 		break;
+ 
+ 	case KVM_S390_RESTART:
+ 		VCPU_EVENT(vcpu, 4, "%s", "interrupt: cpu restart");
+ 		vcpu->stat.deliver_restart_signal++;
++		trace_kvm_s390_deliver_interrupt(vcpu->vcpu_id, inti->type,
++						 0, 0);
+ 		rc = copy_to_guest(vcpu, offsetof(struct _lowcore,
+ 		  restart_old_psw), &vcpu->arch.sie_block->gpsw, sizeof(psw_t));
+ 		if (rc == -EFAULT)
+@@ -259,6 +275,8 @@ static void __do_deliver_interrupt(struct kvm_vcpu *vcpu,
+ 			   inti->pgm.code,
+ 			   table[vcpu->arch.sie_block->ipa >> 14]);
+ 		vcpu->stat.deliver_program_int++;
++		trace_kvm_s390_deliver_interrupt(vcpu->vcpu_id, inti->type,
++						 inti->pgm.code, 0);
+ 		rc = put_guest_u16(vcpu, __LC_PGM_INT_CODE, inti->pgm.code);
+ 		if (rc == -EFAULT)
+ 			exception = 1;
+@@ -515,6 +533,7 @@ int kvm_s390_inject_program_int(struct kvm_vcpu *vcpu, u16 code)
+ 	inti->pgm.code = code;
+ 
+ 	VCPU_EVENT(vcpu, 3, "inject: program check %d (from kernel)", code);
++	trace_kvm_s390_inject_vcpu(vcpu->vcpu_id, inti->type, code, 0, 1);
+ 	spin_lock_bh(&li->lock);
+ 	list_add(&inti->list, &li->list);
+ 	atomic_set(&li->active, 1);
+@@ -556,6 +575,8 @@ int kvm_s390_inject_vm(struct kvm *kvm,
+ 		kfree(inti);
+ 		return -EINVAL;
+ 	}
++	trace_kvm_s390_inject_vm(s390int->type, s390int->parm, s390int->parm64,
++				 2);
+ 
+ 	mutex_lock(&kvm->lock);
+ 	fi = &kvm->arch.float_int;
+@@ -621,6 +642,8 @@ int kvm_s390_inject_vcpu(struct kvm_vcpu *vcpu,
+ 		kfree(inti);
+ 		return -EINVAL;
+ 	}
++	trace_kvm_s390_inject_vcpu(vcpu->vcpu_id, s390int->type, s390int->parm,
++				   s390int->parm64, 2);
+ 
+ 	mutex_lock(&vcpu->kvm->lock);
+ 	li = &vcpu->arch.local_int;
+diff --git a/arch/s390/kvm/kvm-s390.c b/arch/s390/kvm/kvm-s390.c
+index 4613602e123e..e83df7f0fedd 100644
+--- a/arch/s390/kvm/kvm-s390.c
++++ b/arch/s390/kvm/kvm-s390.c
+@@ -34,6 +34,7 @@
+ 
+ #define CREATE_TRACE_POINTS
+ #include "trace.h"
++#include "trace-s390.h"
+ 
+ #define VCPU_STAT(x) offsetof(struct kvm_vcpu, stat.x), KVM_STAT_VCPU
+ 
+@@ -245,6 +246,7 @@ int kvm_arch_init_vm(struct kvm *kvm, unsigned long type)
+ void kvm_arch_vcpu_destroy(struct kvm_vcpu *vcpu)
+ {
+ 	VCPU_EVENT(vcpu, 3, "%s", "free cpu");
++	trace_kvm_s390_destroy_vcpu(vcpu->vcpu_id);
+ 	if (!kvm_is_ucontrol(vcpu->kvm)) {
+ 		clear_bit(63 - vcpu->vcpu_id,
+ 			  (unsigned long *) &vcpu->kvm->arch.sca->mcn);
+@@ -420,6 +422,7 @@ struct kvm_vcpu *kvm_arch_vcpu_create(struct kvm *kvm,
+ 		goto out_free_sie_block;
+ 	VM_EVENT(kvm, 3, "create cpu %d at %p, sie block at %p", id, vcpu,
+ 		 vcpu->arch.sie_block);
++	trace_kvm_s390_create_vcpu(id, vcpu, vcpu->arch.sie_block);
+ 
+ 	return vcpu;
+ out_free_sie_block:
+diff --git a/arch/s390/kvm/trace-s390.h b/arch/s390/kvm/trace-s390.h
+new file mode 100644
+index 000000000000..90fdf85b5ff7
+--- /dev/null
++++ b/arch/s390/kvm/trace-s390.h
+@@ -0,0 +1,210 @@
++#if !defined(_TRACE_KVMS390_H) || defined(TRACE_HEADER_MULTI_READ)
++#define _TRACE_KVMS390_H
++
++#include <linux/tracepoint.h>
++
++#undef TRACE_SYSTEM
++#define TRACE_SYSTEM kvm-s390
++#define TRACE_INCLUDE_PATH .
++#undef TRACE_INCLUDE_FILE
++#define TRACE_INCLUDE_FILE trace-s390
++
++/*
++ * Trace point for the creation of the kvm instance.
++ */
++TRACE_EVENT(kvm_s390_create_vm,
++	    TP_PROTO(unsigned long type),
++	    TP_ARGS(type),
++
++	    TP_STRUCT__entry(
++		    __field(unsigned long, type)
++		    ),
++
++	    TP_fast_assign(
++		    __entry->type = type;
++		    ),
++
++	    TP_printk("create vm%s",
++		      __entry->type & KVM_VM_S390_UCONTROL ? " (UCONTROL)" : "")
++	);
++
++/*
++ * Trace points for creation and destruction of vpcus.
++ */
++TRACE_EVENT(kvm_s390_create_vcpu,
++	    TP_PROTO(unsigned int id, struct kvm_vcpu *vcpu,
++		     struct kvm_s390_sie_block *sie_block),
++	    TP_ARGS(id, vcpu, sie_block),
++
++	    TP_STRUCT__entry(
++		    __field(unsigned int, id)
++		    __field(struct kvm_vcpu *, vcpu)
++		    __field(struct kvm_s390_sie_block *, sie_block)
++		    ),
++
++	    TP_fast_assign(
++		    __entry->id = id;
++		    __entry->vcpu = vcpu;
++		    __entry->sie_block = sie_block;
++		    ),
++
++	    TP_printk("create cpu %d at %p, sie block at %p", __entry->id,
++		      __entry->vcpu, __entry->sie_block)
++	);
++
++TRACE_EVENT(kvm_s390_destroy_vcpu,
++	    TP_PROTO(unsigned int id),
++	    TP_ARGS(id),
++
++	    TP_STRUCT__entry(
++		    __field(unsigned int, id)
++		    ),
++
++	    TP_fast_assign(
++		    __entry->id = id;
++		    ),
++
++	    TP_printk("destroy cpu %d", __entry->id)
++	);
++
++/*
++ * Trace points for injection of interrupts, either per machine or
++ * per vcpu.
++ */
++
++#define kvm_s390_int_type						\
++	{KVM_S390_SIGP_STOP, "sigp stop"},				\
++	{KVM_S390_PROGRAM_INT, "program interrupt"},			\
++	{KVM_S390_SIGP_SET_PREFIX, "sigp set prefix"},			\
++	{KVM_S390_RESTART, "sigp restart"},				\
++	{KVM_S390_INT_VIRTIO, "virtio interrupt"},			\
++	{KVM_S390_INT_SERVICE, "sclp interrupt"},			\
++	{KVM_S390_INT_EMERGENCY, "sigp emergency"},			\
++	{KVM_S390_INT_EXTERNAL_CALL, "sigp ext call"}
++
++TRACE_EVENT(kvm_s390_inject_vm,
++	    TP_PROTO(__u64 type, __u32 parm, __u64 parm64, int who),
++	    TP_ARGS(type, parm, parm64, who),
++
++	    TP_STRUCT__entry(
++		    __field(__u32, inttype)
++		    __field(__u32, parm)
++		    __field(__u64, parm64)
++		    __field(int, who)
++		    ),
++
++	    TP_fast_assign(
++		    __entry->inttype = type & 0x00000000ffffffff;
++		    __entry->parm = parm;
++		    __entry->parm64 = parm64;
++		    __entry->who = who;
++		    ),
++
++	    TP_printk("inject%s: type:%x (%s) parm:%x parm64:%llx",
++		      (__entry->who == 1) ? " (from kernel)" :
++		      (__entry->who == 2) ? " (from user)" : "",
++		      __entry->inttype,
++		      __print_symbolic(__entry->inttype, kvm_s390_int_type),
++		      __entry->parm, __entry->parm64)
++	);
++
++TRACE_EVENT(kvm_s390_inject_vcpu,
++	    TP_PROTO(unsigned int id, __u64 type, __u32 parm, __u64 parm64, \
++		     int who),
++	    TP_ARGS(id, type, parm, parm64, who),
++
++	    TP_STRUCT__entry(
++		    __field(int, id)
++		    __field(__u32, inttype)
++		    __field(__u32, parm)
++		    __field(__u64, parm64)
++		    __field(int, who)
++		    ),
++
++	    TP_fast_assign(
++		    __entry->id = id;
++		    __entry->inttype = type & 0x00000000ffffffff;
++		    __entry->parm = parm;
++		    __entry->parm64 = parm64;
++		    __entry->who = who;
++		    ),
++
++	    TP_printk("inject%s (vcpu %d): type:%x (%s) parm:%x parm64:%llx",
++		      (__entry->who == 1) ? " (from kernel)" :
++		      (__entry->who == 2) ? " (from user)" : "",
++		      __entry->id, __entry->inttype,
++		      __print_symbolic(__entry->inttype, kvm_s390_int_type),
++		      __entry->parm, __entry->parm64)
++	);
++
++/*
++ * Trace point for the actual delivery of interrupts.
++ */
++TRACE_EVENT(kvm_s390_deliver_interrupt,
++	    TP_PROTO(unsigned int id, __u64 type, __u32 data0, __u64 data1),
++	    TP_ARGS(id, type, data0, data1),
++
++	    TP_STRUCT__entry(
++		    __field(int, id)
++		    __field(__u32, inttype)
++		    __field(__u32, data0)
++		    __field(__u64, data1)
++		    ),
++
++	    TP_fast_assign(
++		    __entry->id = id;
++		    __entry->inttype = type & 0x00000000ffffffff;
++		    __entry->data0 = data0;
++		    __entry->data1 = data1;
++		    ),
++
++	    TP_printk("deliver interrupt (vcpu %d): type:%x (%s) "	\
++		      "data:%08x %016llx",
++		      __entry->id, __entry->inttype,
++		      __print_symbolic(__entry->inttype, kvm_s390_int_type),
++		      __entry->data0, __entry->data1)
++	);
++
++/*
++ * Trace point for resets that may be requested from userspace.
++ */
++TRACE_EVENT(kvm_s390_request_resets,
++	    TP_PROTO(__u64 resets),
++	    TP_ARGS(resets),
++
++	    TP_STRUCT__entry(
++		    __field(__u64, resets)
++		    ),
++
++	    TP_fast_assign(
++		    __entry->resets = resets;
++		    ),
++
++	    TP_printk("requesting userspace resets %llx",
++		      __entry->resets)
++	);
++
++/*
++ * Trace point for a vcpu's stop requests.
++ */
++TRACE_EVENT(kvm_s390_stop_request,
++	    TP_PROTO(unsigned int action_bits),
++	    TP_ARGS(action_bits),
++
++	    TP_STRUCT__entry(
++		    __field(unsigned int, action_bits)
++		    ),
++
++	    TP_fast_assign(
++		    __entry->action_bits = action_bits;
++		    ),
++
++	    TP_printk("stop request, action_bits = %08x",
++		      __entry->action_bits)
++	);
++
++
++#endif /* _TRACE_KVMS390_H */
++
++/* This part must be outside protection */
++#include <trace/define_trace.h>

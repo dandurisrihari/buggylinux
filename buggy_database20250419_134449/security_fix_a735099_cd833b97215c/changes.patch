@@ -1,0 +1,198 @@
+diff --git a/tools/arch/arm64/include/uapi/asm/kvm.h b/tools/arch/arm64/include/uapi/asm/kvm.h
+index 97c3478ee6e7..7b7ac0f6cec9 100644
+--- a/tools/arch/arm64/include/uapi/asm/kvm.h
++++ b/tools/arch/arm64/include/uapi/asm/kvm.h
+@@ -35,6 +35,7 @@
+ #include <linux/psci.h>
+ #include <linux/types.h>
+ #include <asm/ptrace.h>
++#include <asm/sve_context.h>
+ 
+ #define __KVM_HAVE_GUEST_DEBUG
+ #define __KVM_HAVE_IRQ_LINE
+@@ -102,6 +103,9 @@ struct kvm_regs {
+ #define KVM_ARM_VCPU_EL1_32BIT		1 /* CPU running a 32bit VM */
+ #define KVM_ARM_VCPU_PSCI_0_2		2 /* CPU uses PSCI v0.2 */
+ #define KVM_ARM_VCPU_PMU_V3		3 /* Support guest PMUv3 */
++#define KVM_ARM_VCPU_SVE		4 /* enable SVE for this CPU */
++#define KVM_ARM_VCPU_PTRAUTH_ADDRESS	5 /* VCPU uses address authentication */
++#define KVM_ARM_VCPU_PTRAUTH_GENERIC	6 /* VCPU uses generic authentication */
+ 
+ struct kvm_vcpu_init {
+ 	__u32 target;
+@@ -226,6 +230,45 @@ struct kvm_vcpu_events {
+ 					 KVM_REG_ARM_FW | ((r) & 0xffff))
+ #define KVM_REG_ARM_PSCI_VERSION	KVM_REG_ARM_FW_REG(0)
+ 
++/* SVE registers */
++#define KVM_REG_ARM64_SVE		(0x15 << KVM_REG_ARM_COPROC_SHIFT)
++
++/* Z- and P-regs occupy blocks at the following offsets within this range: */
++#define KVM_REG_ARM64_SVE_ZREG_BASE	0
++#define KVM_REG_ARM64_SVE_PREG_BASE	0x400
++#define KVM_REG_ARM64_SVE_FFR_BASE	0x600
++
++#define KVM_ARM64_SVE_NUM_ZREGS		__SVE_NUM_ZREGS
++#define KVM_ARM64_SVE_NUM_PREGS		__SVE_NUM_PREGS
++
++#define KVM_ARM64_SVE_MAX_SLICES	32
++
++#define KVM_REG_ARM64_SVE_ZREG(n, i)					\
++	(KVM_REG_ARM64 | KVM_REG_ARM64_SVE | KVM_REG_ARM64_SVE_ZREG_BASE | \
++	 KVM_REG_SIZE_U2048 |						\
++	 (((n) & (KVM_ARM64_SVE_NUM_ZREGS - 1)) << 5) |			\
++	 ((i) & (KVM_ARM64_SVE_MAX_SLICES - 1)))
++
++#define KVM_REG_ARM64_SVE_PREG(n, i)					\
++	(KVM_REG_ARM64 | KVM_REG_ARM64_SVE | KVM_REG_ARM64_SVE_PREG_BASE | \
++	 KVM_REG_SIZE_U256 |						\
++	 (((n) & (KVM_ARM64_SVE_NUM_PREGS - 1)) << 5) |			\
++	 ((i) & (KVM_ARM64_SVE_MAX_SLICES - 1)))
++
++#define KVM_REG_ARM64_SVE_FFR(i)					\
++	(KVM_REG_ARM64 | KVM_REG_ARM64_SVE | KVM_REG_ARM64_SVE_FFR_BASE | \
++	 KVM_REG_SIZE_U256 |						\
++	 ((i) & (KVM_ARM64_SVE_MAX_SLICES - 1)))
++
++#define KVM_ARM64_SVE_VQ_MIN __SVE_VQ_MIN
++#define KVM_ARM64_SVE_VQ_MAX __SVE_VQ_MAX
++
++/* Vector lengths pseudo-register: */
++#define KVM_REG_ARM64_SVE_VLS		(KVM_REG_ARM64 | KVM_REG_ARM64_SVE | \
++					 KVM_REG_SIZE_U512 | 0xffff)
++#define KVM_ARM64_SVE_VLS_WORDS	\
++	((KVM_ARM64_SVE_VQ_MAX - KVM_ARM64_SVE_VQ_MIN) / 64 + 1)
++
+ /* Device Control API: ARM VGIC */
+ #define KVM_DEV_ARM_VGIC_GRP_ADDR	0
+ #define KVM_DEV_ARM_VGIC_GRP_DIST_REGS	1
+diff --git a/tools/arch/powerpc/include/uapi/asm/kvm.h b/tools/arch/powerpc/include/uapi/asm/kvm.h
+index 26ca425f4c2c..b0f72dea8b11 100644
+--- a/tools/arch/powerpc/include/uapi/asm/kvm.h
++++ b/tools/arch/powerpc/include/uapi/asm/kvm.h
+@@ -482,6 +482,8 @@ struct kvm_ppc_cpu_char {
+ #define  KVM_REG_PPC_ICP_PPRI_SHIFT	16	/* pending irq priority */
+ #define  KVM_REG_PPC_ICP_PPRI_MASK	0xff
+ 
++#define KVM_REG_PPC_VP_STATE	(KVM_REG_PPC | KVM_REG_SIZE_U128 | 0x8d)
++
+ /* Device control API: PPC-specific devices */
+ #define KVM_DEV_MPIC_GRP_MISC		1
+ #define   KVM_DEV_MPIC_BASE_ADDR	0	/* 64-bit */
+@@ -677,4 +679,48 @@ struct kvm_ppc_cpu_char {
+ #define  KVM_XICS_PRESENTED		(1ULL << 43)
+ #define  KVM_XICS_QUEUED		(1ULL << 44)
+ 
++/* POWER9 XIVE Native Interrupt Controller */
++#define KVM_DEV_XIVE_GRP_CTRL		1
++#define   KVM_DEV_XIVE_RESET		1
++#define   KVM_DEV_XIVE_EQ_SYNC		2
++#define KVM_DEV_XIVE_GRP_SOURCE		2	/* 64-bit source identifier */
++#define KVM_DEV_XIVE_GRP_SOURCE_CONFIG	3	/* 64-bit source identifier */
++#define KVM_DEV_XIVE_GRP_EQ_CONFIG	4	/* 64-bit EQ identifier */
++#define KVM_DEV_XIVE_GRP_SOURCE_SYNC	5       /* 64-bit source identifier */
++
++/* Layout of 64-bit XIVE source attribute values */
++#define KVM_XIVE_LEVEL_SENSITIVE	(1ULL << 0)
++#define KVM_XIVE_LEVEL_ASSERTED		(1ULL << 1)
++
++/* Layout of 64-bit XIVE source configuration attribute values */
++#define KVM_XIVE_SOURCE_PRIORITY_SHIFT	0
++#define KVM_XIVE_SOURCE_PRIORITY_MASK	0x7
++#define KVM_XIVE_SOURCE_SERVER_SHIFT	3
++#define KVM_XIVE_SOURCE_SERVER_MASK	0xfffffff8ULL
++#define KVM_XIVE_SOURCE_MASKED_SHIFT	32
++#define KVM_XIVE_SOURCE_MASKED_MASK	0x100000000ULL
++#define KVM_XIVE_SOURCE_EISN_SHIFT	33
++#define KVM_XIVE_SOURCE_EISN_MASK	0xfffffffe00000000ULL
++
++/* Layout of 64-bit EQ identifier */
++#define KVM_XIVE_EQ_PRIORITY_SHIFT	0
++#define KVM_XIVE_EQ_PRIORITY_MASK	0x7
++#define KVM_XIVE_EQ_SERVER_SHIFT	3
++#define KVM_XIVE_EQ_SERVER_MASK		0xfffffff8ULL
++
++/* Layout of EQ configuration values (64 bytes) */
++struct kvm_ppc_xive_eq {
++	__u32 flags;
++	__u32 qshift;
++	__u64 qaddr;
++	__u32 qtoggle;
++	__u32 qindex;
++	__u8  pad[40];
++};
++
++#define KVM_XIVE_EQ_ALWAYS_NOTIFY	0x00000001
++
++#define KVM_XIVE_TIMA_PAGE_OFFSET	0
++#define KVM_XIVE_ESB_PAGE_OFFSET	4
++
+ #endif /* __LINUX_KVM_POWERPC_H */
+diff --git a/tools/arch/s390/include/uapi/asm/kvm.h b/tools/arch/s390/include/uapi/asm/kvm.h
+index 09652eabe769..47104e5b47fd 100644
+--- a/tools/arch/s390/include/uapi/asm/kvm.h
++++ b/tools/arch/s390/include/uapi/asm/kvm.h
+@@ -153,7 +153,9 @@ struct kvm_s390_vm_cpu_subfunc {
+ 	__u8 ppno[16];		/* with MSA5 */
+ 	__u8 kma[16];		/* with MSA8 */
+ 	__u8 kdsa[16];		/* with MSA9 */
+-	__u8 reserved[1792];
++	__u8 sortl[32];		/* with STFLE.150 */
++	__u8 dfltcc[32];	/* with STFLE.151 */
++	__u8 reserved[1728];
+ };
+ 
+ /* kvm attributes for crypto */
+diff --git a/tools/include/uapi/linux/kvm.h b/tools/include/uapi/linux/kvm.h
+index 6d4ea4b6c922..2fe12b40d503 100644
+--- a/tools/include/uapi/linux/kvm.h
++++ b/tools/include/uapi/linux/kvm.h
+@@ -986,8 +986,13 @@ struct kvm_ppc_resize_hpt {
+ #define KVM_CAP_HYPERV_ENLIGHTENED_VMCS 163
+ #define KVM_CAP_EXCEPTION_PAYLOAD 164
+ #define KVM_CAP_ARM_VM_IPA_SIZE 165
+-#define KVM_CAP_MANUAL_DIRTY_LOG_PROTECT 166
++#define KVM_CAP_MANUAL_DIRTY_LOG_PROTECT 166 /* Obsolete */
+ #define KVM_CAP_HYPERV_CPUID 167
++#define KVM_CAP_MANUAL_DIRTY_LOG_PROTECT2 168
++#define KVM_CAP_PPC_IRQ_XIVE 169
++#define KVM_CAP_ARM_SVE 170
++#define KVM_CAP_ARM_PTRAUTH_ADDRESS 171
++#define KVM_CAP_ARM_PTRAUTH_GENERIC 172
+ 
+ #ifdef KVM_CAP_IRQ_ROUTING
+ 
+@@ -1145,6 +1150,7 @@ struct kvm_dirty_tlb {
+ #define KVM_REG_SIZE_U256	0x0050000000000000ULL
+ #define KVM_REG_SIZE_U512	0x0060000000000000ULL
+ #define KVM_REG_SIZE_U1024	0x0070000000000000ULL
++#define KVM_REG_SIZE_U2048	0x0080000000000000ULL
+ 
+ struct kvm_reg_list {
+ 	__u64 n; /* number of regs */
+@@ -1211,6 +1217,8 @@ enum kvm_device_type {
+ #define KVM_DEV_TYPE_ARM_VGIC_V3	KVM_DEV_TYPE_ARM_VGIC_V3
+ 	KVM_DEV_TYPE_ARM_VGIC_ITS,
+ #define KVM_DEV_TYPE_ARM_VGIC_ITS	KVM_DEV_TYPE_ARM_VGIC_ITS
++	KVM_DEV_TYPE_XIVE,
++#define KVM_DEV_TYPE_XIVE		KVM_DEV_TYPE_XIVE
+ 	KVM_DEV_TYPE_MAX,
+ };
+ 
+@@ -1434,12 +1442,15 @@ struct kvm_enc_region {
+ #define KVM_GET_NESTED_STATE         _IOWR(KVMIO, 0xbe, struct kvm_nested_state)
+ #define KVM_SET_NESTED_STATE         _IOW(KVMIO,  0xbf, struct kvm_nested_state)
+ 
+-/* Available with KVM_CAP_MANUAL_DIRTY_LOG_PROTECT */
++/* Available with KVM_CAP_MANUAL_DIRTY_LOG_PROTECT_2 */
+ #define KVM_CLEAR_DIRTY_LOG          _IOWR(KVMIO, 0xc0, struct kvm_clear_dirty_log)
+ 
+ /* Available with KVM_CAP_HYPERV_CPUID */
+ #define KVM_GET_SUPPORTED_HV_CPUID _IOWR(KVMIO, 0xc1, struct kvm_cpuid2)
+ 
++/* Available with KVM_CAP_ARM_SVE */
++#define KVM_ARM_VCPU_FINALIZE	  _IOW(KVMIO,  0xc2, int)
++
+ /* Secure Encrypted Virtualization command */
+ enum sev_cmd_id {
+ 	/* Guest initialization commands */

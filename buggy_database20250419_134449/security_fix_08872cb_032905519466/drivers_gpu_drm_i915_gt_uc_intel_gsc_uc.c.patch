@@ -1,0 +1,63 @@
+commit 08872cb13a715e2e963533f18f4aec2bcb145201
+Author: Daniele Ceraolo Spurio <daniele.ceraolospurio@intel.com>
+Date:   Wed May 31 16:54:13 2023 -0700
+
+    drm/i915/mtl/huc: auth HuC via GSC
+    
+    The full authentication via the GSC requires an heci packet submission
+    to the GSC FW via the GSC CS. The GSC has new PXP command for this
+    (literally called NEW_HUC_AUTH).
+    The intel_huc_auth function is also updated to handle both authentication
+    types.
+    
+    v2: check that the GuC auth for clear media has completed before
+        proceding with the full auth
+    
+    v3: use a define for the object size (Alan)
+    
+    Signed-off-by: Daniele Ceraolo Spurio <daniele.ceraolospurio@intel.com>
+    Cc: Alan Previn <alan.previn.teres.alexis@intel.com>
+    Reviewed-by: Alan Previn <alan.previn.teres.alexis@intel.com>
+    Link: https://patchwork.freedesktop.org/patch/msgid/20230531235415.1467475-6-daniele.ceraolospurio@intel.com
+
+diff --git a/drivers/gpu/drm/i915/gt/uc/intel_gsc_uc.c b/drivers/gpu/drm/i915/gt/uc/intel_gsc_uc.c
+index b26f493f86fa..c659cc01f32f 100644
+--- a/drivers/gpu/drm/i915/gt/uc/intel_gsc_uc.c
++++ b/drivers/gpu/drm/i915/gt/uc/intel_gsc_uc.c
+@@ -29,13 +29,32 @@ static void gsc_work(struct work_struct *work)
+ 
+ 	if (actions & GSC_ACTION_FW_LOAD) {
+ 		ret = intel_gsc_uc_fw_upload(gsc);
+-		if (ret == -EEXIST) /* skip proxy if not a new load */
+-			actions &= ~GSC_ACTION_FW_LOAD;
+-		else if (ret)
++		if (!ret)
++			/* setup proxy on a new load */
++			actions |= GSC_ACTION_SW_PROXY;
++		else if (ret != -EEXIST)
+ 			goto out_put;
++
++		/*
++		 * The HuC auth can be done both before or after the proxy init;
++		 * if done after, a proxy request will be issued and must be
++		 * serviced before the authentication can complete.
++		 * Since this worker also handles proxy requests, we can't
++		 * perform an action that requires the proxy from within it and
++		 * then stall waiting for it, because we'd be blocking the
++		 * service path. Therefore, it is easier for us to load HuC
++		 * first and do proxy later. The GSC will ack the HuC auth and
++		 * then send the HuC proxy request as part of the proxy init
++		 * flow.
++		 * Note that we can only do the GSC auth if the GuC auth was
++		 * successful.
++		 */
++		if (intel_uc_uses_huc(&gt->uc) &&
++		    intel_huc_is_authenticated(&gt->uc.huc, INTEL_HUC_AUTH_BY_GUC))
++			intel_huc_auth(&gt->uc.huc, INTEL_HUC_AUTH_BY_GSC);
+ 	}
+ 
+-	if (actions & (GSC_ACTION_FW_LOAD | GSC_ACTION_SW_PROXY)) {
++	if (actions & GSC_ACTION_SW_PROXY) {
+ 		if (!intel_gsc_uc_fw_init_done(gsc)) {
+ 			gt_err(gt, "Proxy request received with GSC not loaded!\n");
+ 			goto out_put;

@@ -1,0 +1,50 @@
+commit 2d3fbbb391e280724f7f7804ab00ff61cf1b6a4c
+Author: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+Date:   Thu May 10 22:22:46 2007 -0700
+
+    Add hard_irq_disable()
+    
+    Some architectures, like powerpc, implement lazy disabling of interrupts.
+    That means that on those, local_irq_disable() doesn't actually disable
+    interrupts on the CPU, but only sets some per CPU flag which cause them to be
+    disabled only if an interrupt actually occurs.
+    
+    However, in some cases, such as stop_machine, we really want interrupts to be
+    fully disabled.  For example, I have code using stop machine to do ECC error
+    injection, used to verify operations of the ECC hardware, that sort of thing.
+    It really needs to make sure that nothing is actually writing to memory while
+    the injection happens.  Similar examples can be found in other low level bits
+    and pieces.
+    
+    This patch implements a generic hard_irq_disable() function which is meant to
+    be called -after- local_irq_disable() and ensures that interrupts are fully
+    disabled on that CPU.  The default implementation is a nop, though powerpc
+    does already provide an appropriate one.
+    
+    Signed-off-by: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+    Cc: Rusty Russell <rusty@rustcorp.com.au>
+    Cc: Paul Mackerras <paulus@samba.org>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/include/linux/interrupt.h b/include/linux/interrupt.h
+index f7b01b9a35b3..5323f6275854 100644
+--- a/include/linux/interrupt.h
++++ b/include/linux/interrupt.h
+@@ -241,6 +241,16 @@ static inline void __deprecated save_and_cli(unsigned long *x)
+ #define save_and_cli(x)	save_and_cli(&x)
+ #endif /* CONFIG_SMP */
+ 
++/* Some architectures might implement lazy enabling/disabling of
++ * interrupts. In some cases, such as stop_machine, we might want
++ * to ensure that after a local_irq_disable(), interrupts have
++ * really been disabled in hardware. Such architectures need to
++ * implement the following hook.
++ */
++#ifndef hard_irq_disable
++#define hard_irq_disable()	do { } while(0)
++#endif
++
+ /* PLEASE, avoid to allocate new softirqs, if you need not _really_ high
+    frequency threaded job scheduling. For almost all the purposes
+    tasklets are more than enough. F.e. all serial device BHs et

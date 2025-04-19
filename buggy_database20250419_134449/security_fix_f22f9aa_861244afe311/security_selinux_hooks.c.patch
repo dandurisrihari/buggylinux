@@ -1,0 +1,137 @@
+commit f22f9aaf6c3d92ebd5ad9e67acc03afebaaeb289
+Author: Paul Moore <paul@paul-moore.com>
+Date:   Fri Mar 17 12:43:07 2023 -0400
+
+    selinux: remove the runtime disable functionality
+    
+    After working with the larger SELinux-based distros for several
+    years, we're finally at a place where we can disable the SELinux
+    runtime disable functionality.  The existing kernel deprecation
+    notice explains the functionality and why we want to remove it:
+    
+      The selinuxfs "disable" node allows SELinux to be disabled at
+      runtime prior to a policy being loaded into the kernel.  If
+      disabled via this mechanism, SELinux will remain disabled until
+      the system is rebooted.
+    
+      The preferred method of disabling SELinux is via the "selinux=0"
+      boot parameter, but the selinuxfs "disable" node was created to
+      make it easier for systems with primitive bootloaders that did not
+      allow for easy modification of the kernel command line.
+      Unfortunately, allowing for SELinux to be disabled at runtime makes
+      it difficult to secure the kernel's LSM hooks using the
+      "__ro_after_init" feature.
+    
+    It is that last sentence, mentioning the '__ro_after_init' hardening,
+    which is the real motivation for this change, and if you look at the
+    diffstat you'll see that the impact of this patch reaches across all
+    the different LSMs, helping prevent tampering at the LSM hook level.
+    
+    From a SELinux perspective, it is important to note that if you
+    continue to disable SELinux via "/etc/selinux/config" it may appear
+    that SELinux is disabled, but it is simply in an uninitialized state.
+    If you load a policy with `load_policy -i`, you will see SELinux
+    come alive just as if you had loaded the policy during early-boot.
+    
+    It is also worth noting that the "/sys/fs/selinux/disable" file is
+    always writable now, regardless of the Kconfig settings, but writing
+    to the file has no effect on the system, other than to display an
+    error on the console if a non-zero/true value is written.
+    
+    Finally, in the several years where we have been working on
+    deprecating this functionality, there has only been one instance of
+    someone mentioning any user visible breakage.  In this particular
+    case it was an individual's kernel test system, and the workaround
+    documented in the deprecation notice ("selinux=0" on the kernel
+    command line) resolved the issue without problem.
+    
+    Acked-by: Casey Schaufler <casey@schaufler-ca.com>
+    Signed-off-by: Paul Moore <paul@paul-moore.com>
+
+diff --git a/security/selinux/hooks.c b/security/selinux/hooks.c
+index 9a58971f9a16..79b4890e9936 100644
+--- a/security/selinux/hooks.c
++++ b/security/selinux/hooks.c
+@@ -6769,7 +6769,7 @@ static void selinux_bpf_prog_free(struct bpf_prog_aux *aux)
+ }
+ #endif
+ 
+-struct lsm_blob_sizes selinux_blob_sizes __lsm_ro_after_init = {
++struct lsm_blob_sizes selinux_blob_sizes __ro_after_init = {
+ 	.lbs_cred = sizeof(struct task_security_struct),
+ 	.lbs_file = sizeof(struct file_security_struct),
+ 	.lbs_inode = sizeof(struct inode_security_struct),
+@@ -6905,7 +6905,7 @@ static int selinux_uring_cmd(struct io_uring_cmd *ioucmd)
+  * safely. Breaking the ordering rules above might lead to NULL pointer derefs
+  * when disabling SELinux at runtime.
+  */
+-static struct security_hook_list selinux_hooks[] __lsm_ro_after_init = {
++static struct security_hook_list selinux_hooks[] __ro_after_init = {
+ 	LSM_HOOK_INIT(binder_set_context_mgr, selinux_binder_set_context_mgr),
+ 	LSM_HOOK_INIT(binder_transaction, selinux_binder_transaction),
+ 	LSM_HOOK_INIT(binder_transfer_binder, selinux_binder_transfer_binder),
+@@ -7253,7 +7253,6 @@ DEFINE_LSM(selinux) = {
+ };
+ 
+ #if defined(CONFIG_NETFILTER)
+-
+ static const struct nf_hook_ops selinux_nf_ops[] = {
+ 	{
+ 		.hook =		selinux_ip_postroute,
+@@ -7328,56 +7327,4 @@ static int __init selinux_nf_ip_init(void)
+ 	return 0;
+ }
+ __initcall(selinux_nf_ip_init);
+-
+-#ifdef CONFIG_SECURITY_SELINUX_DISABLE
+-static void selinux_nf_ip_exit(void)
+-{
+-	pr_debug("SELinux:  Unregistering netfilter hooks\n");
+-
+-	unregister_pernet_subsys(&selinux_net_ops);
+-}
+-#endif
+-
+-#else /* CONFIG_NETFILTER */
+-
+-#ifdef CONFIG_SECURITY_SELINUX_DISABLE
+-#define selinux_nf_ip_exit()
+-#endif
+-
+ #endif /* CONFIG_NETFILTER */
+-
+-#ifdef CONFIG_SECURITY_SELINUX_DISABLE
+-int selinux_disable(void)
+-{
+-	if (selinux_initialized()) {
+-		/* Not permitted after initial policy load. */
+-		return -EINVAL;
+-	}
+-
+-	if (selinux_disabled()) {
+-		/* Only do this once. */
+-		return -EINVAL;
+-	}
+-
+-	selinux_mark_disabled();
+-
+-	pr_info("SELinux:  Disabled at runtime.\n");
+-
+-	/*
+-	 * Unregister netfilter hooks.
+-	 * Must be done before security_delete_hooks() to avoid breaking
+-	 * runtime disable.
+-	 */
+-	selinux_nf_ip_exit();
+-
+-	security_delete_hooks(selinux_hooks, ARRAY_SIZE(selinux_hooks));
+-
+-	/* Try to destroy the avc node cache */
+-	avc_disable();
+-
+-	/* Unregister selinuxfs. */
+-	exit_sel_fs();
+-
+-	return 0;
+-}
+-#endif

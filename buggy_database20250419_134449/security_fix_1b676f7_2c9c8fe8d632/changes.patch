@@ -1,0 +1,161 @@
+diff --git a/drivers/mmc/core/core.c b/drivers/mmc/core/core.c
+index b27b94078c21..eb3069dfea8e 100644
+--- a/drivers/mmc/core/core.c
++++ b/drivers/mmc/core/core.c
+@@ -24,6 +24,8 @@
+ #include <linux/regulator/consumer.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/suspend.h>
++#include <linux/fault-inject.h>
++#include <linux/random.h>
+ 
+ #include <linux/mmc/card.h>
+ #include <linux/mmc/host.h>
+@@ -83,6 +85,43 @@ static void mmc_flush_scheduled_work(void)
+ 	flush_workqueue(workqueue);
+ }
+ 
++#ifdef CONFIG_FAIL_MMC_REQUEST
++
++/*
++ * Internal function. Inject random data errors.
++ * If mmc_data is NULL no errors are injected.
++ */
++static void mmc_should_fail_request(struct mmc_host *host,
++				    struct mmc_request *mrq)
++{
++	struct mmc_command *cmd = mrq->cmd;
++	struct mmc_data *data = mrq->data;
++	static const int data_errors[] = {
++		-ETIMEDOUT,
++		-EILSEQ,
++		-EIO,
++	};
++
++	if (!data)
++		return;
++
++	if (cmd->error || data->error ||
++	    !should_fail(&host->fail_mmc_request, data->blksz * data->blocks))
++		return;
++
++	data->error = data_errors[random32() % ARRAY_SIZE(data_errors)];
++	data->bytes_xfered = (random32() % (data->bytes_xfered >> 9)) << 9;
++}
++
++#else /* CONFIG_FAIL_MMC_REQUEST */
++
++static inline void mmc_should_fail_request(struct mmc_host *host,
++					   struct mmc_request *mrq)
++{
++}
++
++#endif /* CONFIG_FAIL_MMC_REQUEST */
++
+ /**
+  *	mmc_request_done - finish processing an MMC request
+  *	@host: MMC host which completed request
+@@ -109,6 +148,8 @@ void mmc_request_done(struct mmc_host *host, struct mmc_request *mrq)
+ 		cmd->error = 0;
+ 		host->ops->request(host, mrq);
+ 	} else {
++		mmc_should_fail_request(host, mrq);
++
+ 		led_trigger_event(host->led, LED_OFF);
+ 
+ 		pr_debug("%s: req done (CMD%u): %d: %08x %08x %08x %08x\n",
+diff --git a/drivers/mmc/core/debugfs.c b/drivers/mmc/core/debugfs.c
+index 998797ed67a6..5acd707699c9 100644
+--- a/drivers/mmc/core/debugfs.c
++++ b/drivers/mmc/core/debugfs.c
+@@ -12,6 +12,7 @@
+ #include <linux/seq_file.h>
+ #include <linux/slab.h>
+ #include <linux/stat.h>
++#include <linux/fault-inject.h>
+ 
+ #include <linux/mmc/card.h>
+ #include <linux/mmc/host.h>
+@@ -158,6 +159,23 @@ static int mmc_clock_opt_set(void *data, u64 val)
+ 	return 0;
+ }
+ 
++#ifdef CONFIG_FAIL_MMC_REQUEST
++
++static DECLARE_FAULT_ATTR(fail_mmc_request);
++
++#ifdef KERNEL
++/*
++ * Internal function. Pass the boot param fail_mmc_request to
++ * the setup fault injection attributes routine.
++ */
++static int __init setup_fail_mmc_request(char *str)
++{
++	return setup_fault_attr(&fail_mmc_request, str);
++}
++__setup("fail_mmc_request=", setup_fail_mmc_request);
++#endif /* KERNEL */
++#endif /* CONFIG_FAIL_MMC_REQUEST */
++
+ DEFINE_SIMPLE_ATTRIBUTE(mmc_clock_fops, mmc_clock_opt_get, mmc_clock_opt_set,
+ 	"%llu\n");
+ 
+@@ -187,6 +205,13 @@ void mmc_add_host_debugfs(struct mmc_host *host)
+ 	if (!debugfs_create_u32("clk_delay", (S_IRUSR | S_IWUSR),
+ 				root, &host->clk_delay))
+ 		goto err_node;
++#endif
++#ifdef CONFIG_FAIL_MMC_REQUEST
++	host->fail_mmc_request = fail_mmc_request;
++	if (IS_ERR(fault_create_debugfs_attr("fail_mmc_request",
++					     root,
++					     &host->fail_mmc_request)))
++		goto err_node;
+ #endif
+ 	return;
+ 
+diff --git a/include/linux/mmc/host.h b/include/linux/mmc/host.h
+index 1d09562ccf73..4c4bddf5ef61 100644
+--- a/include/linux/mmc/host.h
++++ b/include/linux/mmc/host.h
+@@ -12,6 +12,7 @@
+ 
+ #include <linux/leds.h>
+ #include <linux/sched.h>
++#include <linux/fault-inject.h>
+ 
+ #include <linux/mmc/core.h>
+ #include <linux/mmc/pm.h>
+@@ -302,6 +303,10 @@ struct mmc_host {
+ 
+ 	struct mmc_async_req	*areq;		/* active async req */
+ 
++#ifdef CONFIG_FAIL_MMC_REQUEST
++	struct fault_attr	fail_mmc_request;
++#endif
++
+ 	unsigned long		private[0] ____cacheline_aligned;
+ };
+ 
+diff --git a/lib/Kconfig.debug b/lib/Kconfig.debug
+index c0cb9c4bc46d..1c7dbbf9e449 100644
+--- a/lib/Kconfig.debug
++++ b/lib/Kconfig.debug
+@@ -1070,6 +1070,17 @@ config FAIL_IO_TIMEOUT
+ 	  Only works with drivers that use the generic timeout handling,
+ 	  for others it wont do anything.
+ 
++config FAIL_MMC_REQUEST
++	bool "Fault-injection capability for MMC IO"
++	select DEBUG_FS
++	depends on FAULT_INJECTION && MMC
++	help
++	  Provide fault-injection capability for MMC IO.
++	  This will make the mmc core return data errors. This is
++	  useful to test the error handling in the mmc block device
++	  and to test how the mmc host driver handles retries from
++	  the block device.
++
+ config FAULT_INJECTION_DEBUG_FS
+ 	bool "Debugfs entries for fault-injection capabilities"
+ 	depends on FAULT_INJECTION && SYSFS && DEBUG_FS

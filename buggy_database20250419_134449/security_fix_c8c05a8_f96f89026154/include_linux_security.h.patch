@@ -1,0 +1,152 @@
+commit c8c05a8eec6f1258f6d5cb71a44ee5dc1e989b63
+Author: Catherine Zhang <cxzhang@watson.ibm.com>
+Date:   Thu Jun 8 23:39:49 2006 -0700
+
+    [LSM-IPsec]: SELinux Authorize
+    
+    This patch contains a fix for the previous patch that adds security
+    contexts to IPsec policies and security associations.  In the previous
+    patch, no authorization (besides the check for write permissions to
+    SAD and SPD) is required to delete IPsec policies and security
+    assocations with security contexts.  Thus a user authorized to change
+    SAD and SPD can bypass the IPsec policy authorization by simply
+    deleteing policies with security contexts.  To fix this security hole,
+    an additional authorization check is added for removing security
+    policies and security associations with security contexts.
+    
+    Note that if no security context is supplied on add or present on
+    policy to be deleted, the SELinux module allows the change
+    unconditionally.  The hook is called on deletion when no context is
+    present, which we may want to change.  At present, I left it up to the
+    module.
+    
+    LSM changes:
+    
+    The patch adds two new LSM hooks: xfrm_policy_delete and
+    xfrm_state_delete.  The new hooks are necessary to authorize deletion
+    of IPsec policies that have security contexts.  The existing hooks
+    xfrm_policy_free and xfrm_state_free lack the context to do the
+    authorization, so I decided to split authorization of deletion and
+    memory management of security data, as is typical in the LSM
+    interface.
+    
+    Use:
+    
+    The new delete hooks are checked when xfrm_policy or xfrm_state are
+    deleted by either the xfrm_user interface (xfrm_get_policy,
+    xfrm_del_sa) or the pfkey interface (pfkey_spddelete, pfkey_delete).
+    
+    SELinux changes:
+    
+    The new policy_delete and state_delete functions are added.
+    
+    Signed-off-by: Catherine Zhang <cxzhang@watson.ibm.com>
+    Signed-off-by: Trent Jaeger <tjaeger@cse.psu.edu>
+    Acked-by: James Morris <jmorris@namei.org>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/include/linux/security.h b/include/linux/security.h
+index 1bab48f6aeac..14c9bd050607 100644
+--- a/include/linux/security.h
++++ b/include/linux/security.h
+@@ -805,31 +805,37 @@ struct swap_info_struct;
+  *	used by the XFRM system.
+  *	@sec_ctx contains the security context information being provided by
+  *	the user-level policy update program (e.g., setkey).
+- *	Allocate a security structure to the xp->selector.security field.
++ *	Allocate a security structure to the xp->security field.
+  *	The security field is initialized to NULL when the xfrm_policy is
+  *	allocated.
+  *	Return 0 if operation was successful (memory to allocate, legal context)
+  * @xfrm_policy_clone_security:
+  *	@old contains an existing xfrm_policy in the SPD.
+  *	@new contains a new xfrm_policy being cloned from old.
+- *	Allocate a security structure to the new->selector.security field
+- *	that contains the information from the old->selector.security field.
++ *	Allocate a security structure to the new->security field
++ *	that contains the information from the old->security field.
+  *	Return 0 if operation was successful (memory to allocate).
+  * @xfrm_policy_free_security:
+  *	@xp contains the xfrm_policy
+- *	Deallocate xp->selector.security.
++ *	Deallocate xp->security.
++ * @xfrm_policy_delete_security:
++ *	@xp contains the xfrm_policy.
++ *	Authorize deletion of xp->security.
+  * @xfrm_state_alloc_security:
+  *	@x contains the xfrm_state being added to the Security Association
+  *	Database by the XFRM system.
+  *	@sec_ctx contains the security context information being provided by
+  *	the user-level SA generation program (e.g., setkey or racoon).
+- *	Allocate a security structure to the x->sel.security field.  The
++ *	Allocate a security structure to the x->security field.  The
+  *	security field is initialized to NULL when the xfrm_state is
+  *	allocated.
+  *	Return 0 if operation was successful (memory to allocate, legal context).
+  * @xfrm_state_free_security:
+  *	@x contains the xfrm_state.
+- *	Deallocate x>sel.security.
++ *	Deallocate x->security.
++ * @xfrm_state_delete_security:
++ *	@x contains the xfrm_state.
++ *	Authorize deletion of x->security.
+  * @xfrm_policy_lookup:
+  *	@xp contains the xfrm_policy for which the access control is being
+  *	checked.
+@@ -1298,8 +1304,10 @@ struct security_operations {
+ 	int (*xfrm_policy_alloc_security) (struct xfrm_policy *xp, struct xfrm_user_sec_ctx *sec_ctx);
+ 	int (*xfrm_policy_clone_security) (struct xfrm_policy *old, struct xfrm_policy *new);
+ 	void (*xfrm_policy_free_security) (struct xfrm_policy *xp);
++	int (*xfrm_policy_delete_security) (struct xfrm_policy *xp);
+ 	int (*xfrm_state_alloc_security) (struct xfrm_state *x, struct xfrm_user_sec_ctx *sec_ctx);
+ 	void (*xfrm_state_free_security) (struct xfrm_state *x);
++	int (*xfrm_state_delete_security) (struct xfrm_state *x);
+ 	int (*xfrm_policy_lookup)(struct xfrm_policy *xp, u32 sk_sid, u8 dir);
+ #endif	/* CONFIG_SECURITY_NETWORK_XFRM */
+ 
+@@ -2934,11 +2942,21 @@ static inline void security_xfrm_policy_free(struct xfrm_policy *xp)
+ 	security_ops->xfrm_policy_free_security(xp);
+ }
+ 
++static inline int security_xfrm_policy_delete(struct xfrm_policy *xp)
++{
++	return security_ops->xfrm_policy_delete_security(xp);
++}
++
+ static inline int security_xfrm_state_alloc(struct xfrm_state *x, struct xfrm_user_sec_ctx *sec_ctx)
+ {
+ 	return security_ops->xfrm_state_alloc_security(x, sec_ctx);
+ }
+ 
++static inline int security_xfrm_state_delete(struct xfrm_state *x)
++{
++	return security_ops->xfrm_state_delete_security(x);
++}
++
+ static inline void security_xfrm_state_free(struct xfrm_state *x)
+ {
+ 	security_ops->xfrm_state_free_security(x);
+@@ -2963,6 +2981,11 @@ static inline void security_xfrm_policy_free(struct xfrm_policy *xp)
+ {
+ }
+ 
++static inline int security_xfrm_policy_delete(struct xfrm_policy *xp)
++{
++	return 0;
++}
++
+ static inline int security_xfrm_state_alloc(struct xfrm_state *x, struct xfrm_user_sec_ctx *sec_ctx)
+ {
+ 	return 0;
+@@ -2972,6 +2995,11 @@ static inline void security_xfrm_state_free(struct xfrm_state *x)
+ {
+ }
+ 
++static inline int security_xfrm_state_delete(struct xfrm_policy *xp)
++{
++	return 0;
++}
++
+ static inline int security_xfrm_policy_lookup(struct xfrm_policy *xp, u32 sk_sid, u8 dir)
+ {
+ 	return 0;

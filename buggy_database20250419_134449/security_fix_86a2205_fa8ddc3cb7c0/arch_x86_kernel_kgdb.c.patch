@@ -1,0 +1,76 @@
+commit 86a22057127d1c0462a18901421bf1ff89491392
+Author: Nadav Amit <nadav.amit@gmail.com>
+Date:   Thu Apr 25 17:11:28 2019 -0700
+
+    x86/kgdb: Avoid redundant comparison of patched code
+    
+    text_poke() already ensures that the written value is the correct one
+    and fails if that is not the case. There is no need for an additional
+    comparison. Remove it.
+    
+    Signed-off-by: Nadav Amit <namit@vmware.com>
+    Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+    Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+    Cc: <akpm@linux-foundation.org>
+    Cc: <ard.biesheuvel@linaro.org>
+    Cc: <deneen.t.dock@intel.com>
+    Cc: <kernel-hardening@lists.openwall.com>
+    Cc: <kristen@linux.intel.com>
+    Cc: <linux_dti@icloud.com>
+    Cc: <will.deacon@arm.com>
+    Cc: Andy Lutomirski <luto@kernel.org>
+    Cc: Borislav Petkov <bp@alien8.de>
+    Cc: Dave Hansen <dave.hansen@linux.intel.com>
+    Cc: H. Peter Anvin <hpa@zytor.com>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Cc: Rik van Riel <riel@surriel.com>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Link: https://lkml.kernel.org/r/20190426001143.4983-9-namit@vmware.com
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+diff --git a/arch/x86/kernel/kgdb.c b/arch/x86/kernel/kgdb.c
+index 2b203ee5b879..13b13311b792 100644
+--- a/arch/x86/kernel/kgdb.c
++++ b/arch/x86/kernel/kgdb.c
+@@ -747,7 +747,6 @@ void kgdb_arch_set_pc(struct pt_regs *regs, unsigned long ip)
+ int kgdb_arch_set_breakpoint(struct kgdb_bkpt *bpt)
+ {
+ 	int err;
+-	char opc[BREAK_INSTR_SIZE];
+ 
+ 	bpt->type = BP_BREAKPOINT;
+ 	err = probe_kernel_read(bpt->saved_instr, (char *)bpt->bpt_addr,
+@@ -766,11 +765,6 @@ int kgdb_arch_set_breakpoint(struct kgdb_bkpt *bpt)
+ 		return -EBUSY;
+ 	text_poke_kgdb((void *)bpt->bpt_addr, arch_kgdb_ops.gdb_bpt_instr,
+ 		       BREAK_INSTR_SIZE);
+-	err = probe_kernel_read(opc, (char *)bpt->bpt_addr, BREAK_INSTR_SIZE);
+-	if (err)
+-		return err;
+-	if (memcmp(opc, arch_kgdb_ops.gdb_bpt_instr, BREAK_INSTR_SIZE))
+-		return -EINVAL;
+ 	bpt->type = BP_POKE_BREAKPOINT;
+ 
+ 	return err;
+@@ -778,9 +772,6 @@ int kgdb_arch_set_breakpoint(struct kgdb_bkpt *bpt)
+ 
+ int kgdb_arch_remove_breakpoint(struct kgdb_bkpt *bpt)
+ {
+-	int err;
+-	char opc[BREAK_INSTR_SIZE];
+-
+ 	if (bpt->type != BP_POKE_BREAKPOINT)
+ 		goto knl_write;
+ 	/*
+@@ -791,10 +782,7 @@ int kgdb_arch_remove_breakpoint(struct kgdb_bkpt *bpt)
+ 		goto knl_write;
+ 	text_poke_kgdb((void *)bpt->bpt_addr, bpt->saved_instr,
+ 		       BREAK_INSTR_SIZE);
+-	err = probe_kernel_read(opc, (char *)bpt->bpt_addr, BREAK_INSTR_SIZE);
+-	if (err || memcmp(opc, bpt->saved_instr, BREAK_INSTR_SIZE))
+-		goto knl_write;
+-	return err;
++	return 0;
+ 
+ knl_write:
+ 	return probe_kernel_write((char *)bpt->bpt_addr,

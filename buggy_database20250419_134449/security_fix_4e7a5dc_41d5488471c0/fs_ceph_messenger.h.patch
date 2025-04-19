@@ -1,0 +1,48 @@
+commit 4e7a5dcd1bbab6560fbc8ada29a840e7a20ed7bc
+Author: Sage Weil <sage@newdream.net>
+Date:   Wed Nov 18 16:19:57 2009 -0800
+
+    ceph: negotiate authentication protocol; implement AUTH_NONE protocol
+    
+    When we open a monitor session, we send an initial AUTH message listing
+    the auth protocols we support, our entity name, and (possibly) a previously
+    assigned global_id.  The monitor chooses a protocol and responds with an
+    initial message.
+    
+    Initially implement AUTH_NONE, a dummy protocol that provides no security,
+    but works within the new framework.  It generates 'authorizers' that are
+    used when connecting to (mds, osd) services that simply state our entity
+    name and global_id.
+    
+    This is a wire protocol change.
+    
+    Signed-off-by: Sage Weil <sage@newdream.net>
+
+diff --git a/fs/ceph/messenger.h b/fs/ceph/messenger.h
+index 4bd85c36308e..f9c9f6487302 100644
+--- a/fs/ceph/messenger.h
++++ b/fs/ceph/messenger.h
+@@ -26,6 +26,12 @@ struct ceph_connection_operations {
+ 	/* handle an incoming message. */
+ 	void (*dispatch) (struct ceph_connection *con, struct ceph_msg *m);
+ 
++	/* authorize an outgoing connection */
++	int (*get_authorizer) (struct ceph_connection *con,
++			       void **buf, int *len, int *proto,
++			       void **reply_buf, int *reply_len, int force_new);
++	int (*verify_authorizer_reply) (struct ceph_connection *con, int len);
++
+ 	/* protocol version mismatch */
+ 	void (*bad_proto) (struct ceph_connection *con);
+ 
+@@ -144,6 +150,10 @@ struct ceph_connection {
+ 				 attempt for this connection, client */
+ 	u32 peer_global_seq;  /* peer's global seq for this connection */
+ 
++	int auth_retry;       /* true if we need a newer authorizer */
++	void *auth_reply_buf;   /* where to put the authorizer reply */
++	int auth_reply_buf_len;
++
+ 	/* out queue */
+ 	struct mutex out_mutex;
+ 	struct list_head out_queue;

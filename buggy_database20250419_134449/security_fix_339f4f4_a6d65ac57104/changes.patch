@@ -1,0 +1,145 @@
+diff --git a/drivers/s390/scsi/zfcp_def.h b/drivers/s390/scsi/zfcp_def.h
+index 6c6374ba1807..e1c6b6e05a75 100644
+--- a/drivers/s390/scsi/zfcp_def.h
++++ b/drivers/s390/scsi/zfcp_def.h
+@@ -73,6 +73,7 @@ struct zfcp_reqlist;
+ 
+ /* adapter status */
+ #define ZFCP_STATUS_ADAPTER_QDIOUP		0x00000002
++#define ZFCP_STATUS_ADAPTER_SIOSL_ISSUED	0x00000004
+ #define ZFCP_STATUS_ADAPTER_XCONFIG_OK		0x00000008
+ #define ZFCP_STATUS_ADAPTER_HOST_CON_INIT	0x00000010
+ #define ZFCP_STATUS_ADAPTER_ERP_PENDING		0x00000100
+diff --git a/drivers/s390/scsi/zfcp_ext.h b/drivers/s390/scsi/zfcp_ext.h
+index de0925f25dcc..3b93239c6f69 100644
+--- a/drivers/s390/scsi/zfcp_ext.h
++++ b/drivers/s390/scsi/zfcp_ext.h
+@@ -152,6 +152,7 @@ extern int zfcp_qdio_sbals_from_sg(struct zfcp_qdio *, struct zfcp_qdio_req *,
+ 				   struct scatterlist *);
+ extern int zfcp_qdio_open(struct zfcp_qdio *);
+ extern void zfcp_qdio_close(struct zfcp_qdio *);
++extern void zfcp_qdio_siosl(struct zfcp_adapter *);
+ 
+ /* zfcp_scsi.c */
+ extern struct zfcp_data zfcp_data;
+diff --git a/drivers/s390/scsi/zfcp_fsf.c b/drivers/s390/scsi/zfcp_fsf.c
+index f9be5d60d92a..9d1d7d1842ce 100644
+--- a/drivers/s390/scsi/zfcp_fsf.c
++++ b/drivers/s390/scsi/zfcp_fsf.c
+@@ -21,6 +21,7 @@
+ static void zfcp_fsf_request_timeout_handler(unsigned long data)
+ {
+ 	struct zfcp_adapter *adapter = (struct zfcp_adapter *) data;
++	zfcp_qdio_siosl(adapter);
+ 	zfcp_erp_adapter_reopen(adapter, ZFCP_STATUS_COMMON_ERP_FAILED,
+ 				"fsrth_1", NULL);
+ }
+@@ -326,6 +327,7 @@ static void zfcp_fsf_fsfstatus_qual_eval(struct zfcp_fsf_req *req)
+ 		dev_err(&req->adapter->ccw_device->dev,
+ 			"The FCP adapter reported a problem "
+ 			"that cannot be recovered\n");
++		zfcp_qdio_siosl(req->adapter);
+ 		zfcp_erp_adapter_shutdown(req->adapter, 0, "fsfsqe1", req);
+ 		break;
+ 	}
+@@ -416,6 +418,7 @@ static void zfcp_fsf_protstatus_eval(struct zfcp_fsf_req *req)
+ 		dev_err(&adapter->ccw_device->dev,
+ 			"0x%x is not a valid transfer protocol status\n",
+ 			qtcb->prefix.prot_status);
++		zfcp_qdio_siosl(adapter);
+ 		zfcp_erp_adapter_shutdown(adapter, 0, "fspse_9", req);
+ 	}
+ 	req->status |= ZFCP_STATUS_FSFREQ_ERROR;
+@@ -2485,13 +2488,15 @@ void zfcp_fsf_reqid_check(struct zfcp_qdio *qdio, int sbal_idx)
+ 		req_id = (unsigned long) sbale->addr;
+ 		fsf_req = zfcp_reqlist_find_rm(adapter->req_list, req_id);
+ 
+-		if (!fsf_req)
++		if (!fsf_req) {
+ 			/*
+ 			 * Unknown request means that we have potentially memory
+ 			 * corruption and must stop the machine immediately.
+ 			 */
++			zfcp_qdio_siosl(adapter);
+ 			panic("error: unknown req_id (%lx) on adapter %s.\n",
+ 			      req_id, dev_name(&adapter->ccw_device->dev));
++		}
+ 
+ 		fsf_req->qdio_req.sbal_response = sbal_idx;
+ 		zfcp_fsf_req_complete(fsf_req);
+diff --git a/drivers/s390/scsi/zfcp_qdio.c b/drivers/s390/scsi/zfcp_qdio.c
+index aceced8ec7e4..b2635759721c 100644
+--- a/drivers/s390/scsi/zfcp_qdio.c
++++ b/drivers/s390/scsi/zfcp_qdio.c
+@@ -30,12 +30,15 @@ static int zfcp_qdio_buffers_enqueue(struct qdio_buffer **sbal)
+ 	return 0;
+ }
+ 
+-static void zfcp_qdio_handler_error(struct zfcp_qdio *qdio, char *id)
++static void zfcp_qdio_handler_error(struct zfcp_qdio *qdio, char *id,
++				    unsigned int qdio_err)
+ {
+ 	struct zfcp_adapter *adapter = qdio->adapter;
+ 
+ 	dev_warn(&adapter->ccw_device->dev, "A QDIO problem occurred\n");
+ 
++	if (qdio_err & QDIO_ERROR_SLSB_STATE)
++		zfcp_qdio_siosl(adapter);
+ 	zfcp_erp_adapter_reopen(adapter,
+ 				ZFCP_STATUS_ADAPTER_LINK_UNPLUGGED |
+ 				ZFCP_STATUS_COMMON_ERP_FAILED, id, NULL);
+@@ -74,7 +77,7 @@ static void zfcp_qdio_int_req(struct ccw_device *cdev, unsigned int qdio_err,
+ 
+ 	if (unlikely(qdio_err)) {
+ 		zfcp_dbf_hba_qdio(qdio->adapter->dbf, qdio_err, idx, count);
+-		zfcp_qdio_handler_error(qdio, "qdireq1");
++		zfcp_qdio_handler_error(qdio, "qdireq1", qdio_err);
+ 		return;
+ 	}
+ 
+@@ -95,7 +98,7 @@ static void zfcp_qdio_int_resp(struct ccw_device *cdev, unsigned int qdio_err,
+ 
+ 	if (unlikely(qdio_err)) {
+ 		zfcp_dbf_hba_qdio(qdio->adapter->dbf, qdio_err, idx, count);
+-		zfcp_qdio_handler_error(qdio, "qdires1");
++		zfcp_qdio_handler_error(qdio, "qdires1", qdio_err);
+ 		return;
+ 	}
+ 
+@@ -361,6 +364,9 @@ int zfcp_qdio_open(struct zfcp_qdio *qdio)
+ 	if (atomic_read(&adapter->status) & ZFCP_STATUS_ADAPTER_QDIOUP)
+ 		return -EIO;
+ 
++	atomic_clear_mask(ZFCP_STATUS_ADAPTER_SIOSL_ISSUED,
++			  &qdio->adapter->status);
++
+ 	zfcp_qdio_setup_init_data(&init_data, qdio);
+ 
+ 	if (qdio_establish(&init_data))
+@@ -440,3 +446,26 @@ int zfcp_qdio_setup(struct zfcp_adapter *adapter)
+ 	return 0;
+ }
+ 
++/**
++ * zfcp_qdio_siosl - Trigger logging in FCP channel
++ * @adapter: The zfcp_adapter where to trigger logging
++ *
++ * Call the cio siosl function to trigger hardware logging.  This
++ * wrapper function sets a flag to ensure hardware logging is only
++ * triggered once before going through qdio shutdown.
++ *
++ * The triggers are always run from qdio tasklet context, so no
++ * additional synchronization is necessary.
++ */
++void zfcp_qdio_siosl(struct zfcp_adapter *adapter)
++{
++	int rc;
++
++	if (atomic_read(&adapter->status) & ZFCP_STATUS_ADAPTER_SIOSL_ISSUED)
++		return;
++
++	rc = ccw_device_siosl(adapter->ccw_device);
++	if (!rc)
++		atomic_set_mask(ZFCP_STATUS_ADAPTER_SIOSL_ISSUED,
++				&adapter->status);
++}

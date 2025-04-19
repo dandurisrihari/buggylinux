@@ -1,0 +1,72 @@
+diff --git a/fs/fcntl.c b/fs/fcntl.c
+index 3b01b646e528..0491da3b28c3 100644
+--- a/fs/fcntl.c
++++ b/fs/fcntl.c
+@@ -741,10 +741,21 @@ static void send_sigio_to_task(struct task_struct *p,
+ 			si.si_signo = signum;
+ 			si.si_errno = 0;
+ 		        si.si_code  = reason;
++			/*
++			 * Posix definies POLL_IN and friends to be signal
++			 * specific si_codes for SIG_POLL.  Linux extended
++			 * these si_codes to other signals in a way that is
++			 * ambiguous if other signals also have signal
++			 * specific si_codes.  In that case use SI_SIGIO instead
++			 * to remove the ambiguity.
++			 */
++			if (sig_specific_sicodes(signum))
++				si.si_code = SI_SIGIO;
++
+ 			/* Make sure we are called with one of the POLL_*
+ 			   reasons, otherwise we could leak kernel stack into
+ 			   userspace.  */
+-			BUG_ON((reason & __SI_MASK) != __SI_POLL);
++			BUG_ON((reason < POLL_IN) || ((reason - POLL_IN) >= NSIGPOLL));
+ 			if (reason - POLL_IN >= NSIGPOLL)
+ 				si.si_band  = ~0L;
+ 			else
+diff --git a/include/linux/signal.h b/include/linux/signal.h
+index e2678b5dbb21..c97cc20369c0 100644
+--- a/include/linux/signal.h
++++ b/include/linux/signal.h
+@@ -380,10 +380,18 @@ int unhandled_signal(struct task_struct *tsk, int sig);
+         rt_sigmask(SIGCONT)   |  rt_sigmask(SIGCHLD)   | \
+ 	rt_sigmask(SIGWINCH)  |  rt_sigmask(SIGURG)    )
+ 
++#define SIG_SPECIFIC_SICODES_MASK (\
++	rt_sigmask(SIGILL)    |  rt_sigmask(SIGFPE)    | \
++	rt_sigmask(SIGSEGV)   |  rt_sigmask(SIGBUS)    | \
++	rt_sigmask(SIGTRAP)   |  rt_sigmask(SIGCHLD)   | \
++	rt_sigmask(SIGPOLL)   |  rt_sigmask(SIGSYS)    | \
++	SIGEMT_MASK                                    )
++
+ #define sig_kernel_only(sig)		siginmask(sig, SIG_KERNEL_ONLY_MASK)
+ #define sig_kernel_coredump(sig)	siginmask(sig, SIG_KERNEL_COREDUMP_MASK)
+ #define sig_kernel_ignore(sig)		siginmask(sig, SIG_KERNEL_IGNORE_MASK)
+ #define sig_kernel_stop(sig)		siginmask(sig, SIG_KERNEL_STOP_MASK)
++#define sig_specific_sicodes(sig)	siginmask(sig, SIG_SPECIFIC_SICODES_MASK)
+ 
+ #define sig_fatal(t, signr) \
+ 	(!siginmask(signr, SIG_KERNEL_IGNORE_MASK|SIG_KERNEL_STOP_MASK) && \
+diff --git a/include/uapi/asm-generic/siginfo.h b/include/uapi/asm-generic/siginfo.h
+index 9c4eca6b374a..9e956ea94d57 100644
+--- a/include/uapi/asm-generic/siginfo.h
++++ b/include/uapi/asm-generic/siginfo.h
+@@ -184,7 +184,7 @@ typedef struct siginfo {
+ #define SI_TIMER __SI_CODE(__SI_TIMER,-2) /* sent by timer expiration */
+ #define SI_MESGQ __SI_CODE(__SI_MESGQ,-3) /* sent by real time mesq state change */
+ #define SI_ASYNCIO	-4		/* sent by AIO completion */
+-#define SI_SIGIO	-5		/* sent by queued SIGIO */
++#define SI_SIGIO __SI_CODE(__SI_POLL,-5) /* sent by queued SIGIO */
+ #define SI_TKILL	-6		/* sent by tkill system call */
+ #define SI_DETHREAD	-7		/* sent by execve() killing subsidiary threads */
+ 
+@@ -259,7 +259,7 @@ typedef struct siginfo {
+ #define NSIGCHLD	6
+ 
+ /*
+- * SIGPOLL si_codes
++ * SIGPOLL (or any other signal without signal specific si_codes) si_codes
+  */
+ #define POLL_IN		(__SI_POLL|1)	/* data input available */
+ #define POLL_OUT	(__SI_POLL|2)	/* output buffers available */

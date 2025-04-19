@@ -1,0 +1,58 @@
+commit 65178db42a02c7984f711614546e97e9952d8e01
+Author: Bryan Schumaker <bjschuma@netapp.com>
+Date:   Tue Nov 1 13:35:21 2011 -0400
+
+    NFSD: Added fault injection
+    
+    Fault injection on the NFS server makes it easier to test the client's
+    state manager and recovery threads.  Simulating errors on the server is
+    easier than finding the right conditions that cause them naturally.
+    
+    This patch uses debugfs to add a simple framework for fault injection to
+    the server.  This framework is a config option, and can be enabled
+    through CONFIG_NFSD_FAULT_INJECTION.  Assuming you have debugfs mounted
+    to /sys/debug, a set of files will be created in /sys/debug/nfsd/.
+    Writing to any of these files will cause the corresponding action and
+    write a log entry to dmesg.
+    
+    Signed-off-by: Bryan Schumaker <bjschuma@netapp.com>
+    Signed-off-by: J. Bruce Fields <bfields@redhat.com>
+
+diff --git a/fs/nfsd/nfsctl.c b/fs/nfsd/nfsctl.c
+index c45a2ea4a090..b2e8093ebc21 100644
+--- a/fs/nfsd/nfsctl.c
++++ b/fs/nfsd/nfsctl.c
+@@ -18,6 +18,7 @@
+ #include "idmap.h"
+ #include "nfsd.h"
+ #include "cache.h"
++#include "fault_inject.h"
+ 
+ /*
+  *	We have a single directory with several nodes in it.
+@@ -1131,6 +1132,9 @@ static int __init init_nfsd(void)
+ 	retval = nfs4_state_init(); /* nfs4 locking state */
+ 	if (retval)
+ 		return retval;
++	retval = nfsd_fault_inject_init(); /* nfsd fault injection controls */
++	if (retval)
++		goto out_free_slabs;
+ 	nfsd_stat_init();	/* Statistics */
+ 	retval = nfsd_reply_cache_init();
+ 	if (retval)
+@@ -1161,6 +1165,8 @@ static int __init init_nfsd(void)
+ 	nfsd_reply_cache_shutdown();
+ out_free_stat:
+ 	nfsd_stat_shutdown();
++	nfsd_fault_inject_cleanup();
++out_free_slabs:
+ 	nfsd4_free_slabs();
+ 	return retval;
+ }
+@@ -1175,6 +1181,7 @@ static void __exit exit_nfsd(void)
+ 	nfsd_lockd_shutdown();
+ 	nfsd_idmap_shutdown();
+ 	nfsd4_free_slabs();
++	nfsd_fault_inject_cleanup();
+ 	unregister_filesystem(&nfsd_fs_type);
+ }

@@ -1,0 +1,58 @@
+diff --cc arch/x86/kernel/kvm.c
+index 233c77d056c9,d9995931ea18..08320b0b2b27
+--- a/arch/x86/kernel/kvm.c
++++ b/arch/x86/kernel/kvm.c
+@@@ -232,18 -235,13 +235,13 @@@ EXPORT_SYMBOL_GPL(kvm_read_and_reset_ap
+  
+  noinstr bool __kvm_handle_async_pf(struct pt_regs *regs, u32 token)
+  {
+- 	u32 reason = kvm_read_and_reset_apf_flags();
++ 	u32 flags = kvm_read_and_reset_apf_flags();
+ -	bool rcu_exit;
+ +	irqentry_state_t state;
+  
+- 	switch (reason) {
+- 	case KVM_PV_REASON_PAGE_NOT_PRESENT:
+- 	case KVM_PV_REASON_PAGE_READY:
+- 		break;
+- 	default:
++ 	if (!flags)
+  		return false;
+- 	}
+  
+ -	rcu_exit = idtentry_enter_cond_rcu(regs);
+ +	state = irqentry_enter(regs);
+  	instrumentation_begin();
+  
+  	/*
+@@@ -268,6 -266,27 +266,27 @@@
+  	return true;
+  }
+  
++ DEFINE_IDTENTRY_SYSVEC(sysvec_kvm_asyncpf_interrupt)
++ {
++ 	struct pt_regs *old_regs = set_irq_regs(regs);
++ 	u32 token;
+ -	bool rcu_exit;
+++	irqentry_state_t state;
++ 
+ -	rcu_exit = idtentry_enter_cond_rcu(regs);
+++	state = irqentry_enter(regs);
++ 
++ 	inc_irq_stat(irq_hv_callback_count);
++ 
++ 	if (__this_cpu_read(apf_reason.enabled)) {
++ 		token = __this_cpu_read(apf_reason.token);
++ 		kvm_async_pf_task_wake(token);
++ 		__this_cpu_write(apf_reason.token, 0);
++ 		wrmsrl(MSR_KVM_ASYNC_PF_ACK, 1);
++ 	}
++ 
+ -	idtentry_exit_cond_rcu(regs, rcu_exit);
+++	irqentry_exit(regs, state);
++ 	set_irq_regs(old_regs);
++ }
++ 
+  static void __init paravirt_ops_setup(void)
+  {
+  	pv_info.name = "KVM";

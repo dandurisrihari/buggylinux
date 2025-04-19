@@ -1,0 +1,62 @@
+commit 558c303c9734af5a813739cd284879227f7297d2
+Author: James Morse <james.morse@arm.com>
+Date:   Wed Nov 10 14:48:00 2021 +0000
+
+    arm64: Mitigate spectre style branch history side channels
+    
+    Speculation attacks against some high-performance processors can
+    make use of branch history to influence future speculation.
+    When taking an exception from user-space, a sequence of branches
+    or a firmware call overwrites or invalidates the branch history.
+    
+    The sequence of branches is added to the vectors, and should appear
+    before the first indirect branch. For systems using KPTI the sequence
+    is added to the kpti trampoline where it has a free register as the exit
+    from the trampoline is via a 'ret'. For systems not using KPTI, the same
+    register tricks are used to free up a register in the vectors.
+    
+    For the firmware call, arch-workaround-3 clobbers 4 registers, so
+    there is no choice but to save them to the EL1 stack. This only happens
+    for entry from EL0, so if we take an exception due to the stack access,
+    it will not become re-entrant.
+    
+    For KVM, the existing branch-predictor-hardening vectors are used.
+    When a spectre version of these vectors is in use, the firmware call
+    is sufficient to mitigate against Spectre-BHB. For the non-spectre
+    versions, the sequence of branches is added to the indirect vector.
+    
+    Reviewed-by: Catalin Marinas <catalin.marinas@arm.com>
+    Signed-off-by: James Morse <james.morse@arm.com>
+
+diff --git a/arch/arm64/include/asm/assembler.h b/arch/arm64/include/asm/assembler.h
+index 046c38ee2841..5cc97130843f 100644
+--- a/arch/arm64/include/asm/assembler.h
++++ b/arch/arm64/include/asm/assembler.h
+@@ -852,7 +852,9 @@ alternative_endif
+ 
+ 	.macro __mitigate_spectre_bhb_loop      tmp
+ #ifdef CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY
+-	mov	\tmp, #32
++alternative_cb  spectre_bhb_patch_loop_iter
++	mov	\tmp, #32		// Patched to correct the immediate
++alternative_cb_end
+ .Lspectre_bhb_loop\@:
+ 	b	. + 4
+ 	subs	\tmp, \tmp, #1
+@@ -861,6 +863,16 @@ alternative_endif
+ #endif /* CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY */
+ 	.endm
+ 
++	.macro mitigate_spectre_bhb_loop	tmp
++#ifdef CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY
++alternative_cb	spectre_bhb_patch_loop_mitigation_enable
++	b	.L_spectre_bhb_loop_done\@	// Patched to NOP
++alternative_cb_end
++	__mitigate_spectre_bhb_loop	\tmp
++.L_spectre_bhb_loop_done\@:
++#endif /* CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY */
++	.endm
++
+ 	/* Save/restores x0-x3 to the stack */
+ 	.macro __mitigate_spectre_bhb_fw
+ #ifdef CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY

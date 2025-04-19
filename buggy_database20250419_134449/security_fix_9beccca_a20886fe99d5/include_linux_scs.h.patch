@@ -1,0 +1,61 @@
+commit 9beccca0984022a844850e32f0d7dd80d4a225de
+Author: Ard Biesheuvel <ardb@kernel.org>
+Date:   Thu Oct 27 17:59:07 2022 +0200
+
+    scs: add support for dynamic shadow call stacks
+    
+    In order to allow arches to use code patching to conditionally emit the
+    shadow stack pushes and pops, rather than always taking the performance
+    hit even on CPUs that implement alternatives such as stack pointer
+    authentication on arm64, add a Kconfig symbol that can be set by the
+    arch to omit the SCS codegen itself, without otherwise affecting how
+    support code for SCS and compiler options (for register reservation, for
+    instance) are emitted.
+    
+    Also, add a static key and some plumbing to omit the allocation of
+    shadow call stack for dynamic SCS configurations if SCS is disabled at
+    runtime.
+    
+    Signed-off-by: Ard Biesheuvel <ardb@kernel.org>
+    Reviewed-by: Nick Desaulniers <ndesaulniers@google.com>
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Reviewed-by: Sami Tolvanen <samitolvanen@google.com>
+    Tested-by: Sami Tolvanen <samitolvanen@google.com>
+    Link: https://lore.kernel.org/r/20221027155908.1940624-3-ardb@kernel.org
+    Signed-off-by: Will Deacon <will@kernel.org>
+
+diff --git a/include/linux/scs.h b/include/linux/scs.h
+index 18122d9e17ff..4ab5bdc898cf 100644
+--- a/include/linux/scs.h
++++ b/include/linux/scs.h
+@@ -53,6 +53,22 @@ static inline bool task_scs_end_corrupted(struct task_struct *tsk)
+ 	return sz >= SCS_SIZE - 1 || READ_ONCE_NOCHECK(*magic) != SCS_END_MAGIC;
+ }
+ 
++DECLARE_STATIC_KEY_FALSE(dynamic_scs_enabled);
++
++static inline bool scs_is_dynamic(void)
++{
++	if (!IS_ENABLED(CONFIG_DYNAMIC_SCS))
++		return false;
++	return static_branch_likely(&dynamic_scs_enabled);
++}
++
++static inline bool scs_is_enabled(void)
++{
++	if (!IS_ENABLED(CONFIG_DYNAMIC_SCS))
++		return true;
++	return scs_is_dynamic();
++}
++
+ #else /* CONFIG_SHADOW_CALL_STACK */
+ 
+ static inline void *scs_alloc(int node) { return NULL; }
+@@ -62,6 +78,8 @@ static inline void scs_task_reset(struct task_struct *tsk) {}
+ static inline int scs_prepare(struct task_struct *tsk, int node) { return 0; }
+ static inline void scs_release(struct task_struct *tsk) {}
+ static inline bool task_scs_end_corrupted(struct task_struct *tsk) { return false; }
++static inline bool scs_is_enabled(void) { return false; }
++static inline bool scs_is_dynamic(void) { return false; }
+ 
+ #endif /* CONFIG_SHADOW_CALL_STACK */

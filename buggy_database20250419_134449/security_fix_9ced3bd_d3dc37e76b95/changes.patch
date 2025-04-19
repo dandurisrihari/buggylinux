@@ -1,0 +1,244 @@
+diff --git a/scripts/kconfig/lkc_proto.h b/scripts/kconfig/lkc_proto.h
+index c46929fab7d9..2b16d6e1b2db 100644
+--- a/scripts/kconfig/lkc_proto.h
++++ b/scripts/kconfig/lkc_proto.h
+@@ -50,6 +50,8 @@ const char * prop_get_type_name(enum prop_type type);
+ 
+ /* preprocess.c */
+ void env_write_dep(FILE *f, const char *auto_conf_name);
++void variable_add(const char *name, const char *value);
++void variable_all_del(void);
+ char *expand_string(const char *in);
+ char *expand_dollar(const char **str);
+ char *expand_one_token(const char **str);
+diff --git a/scripts/kconfig/preprocess.c b/scripts/kconfig/preprocess.c
+index 528be594e1d0..46487fe6b36c 100644
+--- a/scripts/kconfig/preprocess.c
++++ b/scripts/kconfig/preprocess.c
+@@ -177,6 +177,72 @@ static char *function_expand(const char *name, int argc, char *argv[])
+ 	return NULL;
+ }
+ 
++/*
++ * Variables (and user-defined functions)
++ */
++static LIST_HEAD(variable_list);
++
++struct variable {
++	char *name;
++	char *value;
++	struct list_head node;
++};
++
++static struct variable *variable_lookup(const char *name)
++{
++	struct variable *v;
++
++	list_for_each_entry(v, &variable_list, node) {
++		if (!strcmp(name, v->name))
++			return v;
++	}
++
++	return NULL;
++}
++
++static char *variable_expand(const char *name, int argc, char *argv[])
++{
++	struct variable *v;
++
++	v = variable_lookup(name);
++	if (!v)
++		return NULL;
++
++	return expand_string_with_args(v->value, argc, argv);
++}
++
++void variable_add(const char *name, const char *value)
++{
++	struct variable *v;
++
++	v = variable_lookup(name);
++	if (v) {
++		free(v->value);
++	} else {
++		v = xmalloc(sizeof(*v));
++		v->name = xstrdup(name);
++		list_add_tail(&v->node, &variable_list);
++	}
++
++	v->value = xstrdup(value);
++}
++
++static void variable_del(struct variable *v)
++{
++	list_del(&v->node);
++	free(v->name);
++	free(v->value);
++	free(v);
++}
++
++void variable_all_del(void)
++{
++	struct variable *v, *tmp;
++
++	list_for_each_entry_safe(v, tmp, &variable_list, node)
++		variable_del(v);
++}
++
+ /*
+  * Evaluate a clause with arguments.  argc/argv are arguments from the upper
+  * function call.
+@@ -185,14 +251,26 @@ static char *function_expand(const char *name, int argc, char *argv[])
+  */
+ static char *eval_clause(const char *str, size_t len, int argc, char *argv[])
+ {
+-	char *tmp, *name, *res, *prev, *p;
++	char *tmp, *name, *res, *endptr, *prev, *p;
+ 	int new_argc = 0;
+ 	char *new_argv[FUNCTION_MAX_ARGS];
+ 	int nest = 0;
+ 	int i;
++	unsigned long n;
+ 
+ 	tmp = xstrndup(str, len);
+ 
++	/*
++	 * If variable name is '1', '2', etc.  It is generally an argument
++	 * from a user-function call (i.e. local-scope variable).  If not
++	 * available, then look-up global-scope variables.
++	 */
++	n = strtoul(tmp, &endptr, 10);
++	if (!*endptr && n > 0 && n <= argc) {
++		res = xstrdup(argv[n - 1]);
++		goto free_tmp;
++	}
++
+ 	prev = p = tmp;
+ 
+ 	/*
+@@ -238,6 +316,11 @@ static char *eval_clause(const char *str, size_t len, int argc, char *argv[])
+ 		new_argv[i] = expand_string_with_args(new_argv[i + 1],
+ 						      argc, argv);
+ 
++	/* Search for variables */
++	res = variable_expand(name, new_argc, new_argv);
++	if (res)
++		goto free;
++
+ 	/* Look for built-in functions */
+ 	res = function_expand(name, new_argc, new_argv);
+ 	if (res)
+@@ -255,6 +338,7 @@ static char *eval_clause(const char *str, size_t len, int argc, char *argv[])
+ 	for (i = 0; i < new_argc; i++)
+ 		free(new_argv[i]);
+ 	free(name);
++free_tmp:
+ 	free(tmp);
+ 
+ 	return res;
+diff --git a/scripts/kconfig/zconf.l b/scripts/kconfig/zconf.l
+index 9a147977dc3f..dd08f7a38ccd 100644
+--- a/scripts/kconfig/zconf.l
++++ b/scripts/kconfig/zconf.l
+@@ -1,12 +1,13 @@
+ %option nostdinit noyywrap never-interactive full ecs
+ %option 8bit nodefault yylineno
+-%x COMMAND HELP STRING PARAM
++%x COMMAND HELP STRING PARAM ASSIGN_VAL
+ %{
+ /*
+  * Copyright (C) 2002 Roman Zippel <zippel@linux-m68k.org>
+  * Released under the terms of the GNU GPL v2.0.
+  */
+ 
++#include <assert.h>
+ #include <limits.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -111,8 +112,10 @@ n	[A-Za-z0-9_-]
+ 		}
+ 		alloc_string(yytext, yyleng);
+ 		yylval.string = text;
+-		return T_WORD;
++		return T_VARIABLE;
+ 	}
++	"="	{ BEGIN(ASSIGN_VAL); return T_ASSIGN; }
++	[[:blank:]]+
+ 	.	warn_ignored_character(*yytext);
+ 	\n	{
+ 		BEGIN(INITIAL);
+@@ -120,6 +123,16 @@ n	[A-Za-z0-9_-]
+ 	}
+ }
+ 
++<ASSIGN_VAL>{
++	[^[:blank:]\n]+.*	{
++		alloc_string(yytext, yyleng);
++		yylval.string = text;
++		return T_ASSIGN_VAL;
++	}
++	\n	{ BEGIN(INITIAL); return T_EOL; }
++	.
++}
++
+ <PARAM>{
+ 	"&&"	return T_AND;
+ 	"||"	return T_OR;
+diff --git a/scripts/kconfig/zconf.y b/scripts/kconfig/zconf.y
+index 8a82aaf27581..e15e8c7063e0 100644
+--- a/scripts/kconfig/zconf.y
++++ b/scripts/kconfig/zconf.y
+@@ -77,6 +77,9 @@ static struct menu *current_menu, *current_entry;
+ %token T_CLOSE_PAREN
+ %token T_OPEN_PAREN
+ %token T_EOL
++%token <string> T_VARIABLE
++%token T_ASSIGN
++%token <string> T_ASSIGN_VAL
+ 
+ %left T_OR
+ %left T_AND
+@@ -92,7 +95,7 @@ static struct menu *current_menu, *current_entry;
+ %type <id> end
+ %type <id> option_name
+ %type <menu> if_entry menu_entry choice_entry
+-%type <string> symbol_option_arg word_opt
++%type <string> symbol_option_arg word_opt assign_val
+ 
+ %destructor {
+ 	fprintf(stderr, "%s:%d: missing end statement for this entry\n",
+@@ -143,6 +146,7 @@ common_stmt:
+ 	| config_stmt
+ 	| menuconfig_stmt
+ 	| source_stmt
++	| assignment_stmt
+ ;
+ 
+ option_error:
+@@ -511,6 +515,15 @@ symbol:	  nonconst_symbol
+ word_opt: /* empty */			{ $$ = NULL; }
+ 	| T_WORD
+ 
++/* assignment statement */
++
++assignment_stmt:  T_VARIABLE T_ASSIGN assign_val T_EOL	{ variable_add($1, $3); free($1); free($3); }
++
++assign_val:
++	/* empty */		{ $$ = xstrdup(""); };
++	| T_ASSIGN_VAL
++;
++
+ %%
+ 
+ void conf_parse(const char *name)
+@@ -525,6 +538,10 @@ void conf_parse(const char *name)
+ 	if (getenv("ZCONF_DEBUG"))
+ 		yydebug = 1;
+ 	yyparse();
++
++	/* Variables are expanded in the parse phase. We can free them here. */
++	variable_all_del();
++
+ 	if (yynerrs)
+ 		exit(1);
+ 	if (!modules_sym)

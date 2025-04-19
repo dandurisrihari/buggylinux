@@ -1,0 +1,63 @@
+commit 7a09e8d92c6d56121910ccb2e8bc0d1affff66ee
+Author: Quinn Tran <qutran@marvell.com>
+Date:   Wed Jun 23 22:26:03 2021 -0700
+
+    scsi: qla2xxx: edif: Add doorbell notification for app
+    
+    Some FC adapters from Marvell offer the ability to encrypt data in flight
+    (EDIF). This feature requires an application to act as an authenticator.
+    
+    During runtime, driver and authentication application need to stay in sync
+    in terms of: Session being down|up, arrival of new authentication
+    message (AUTH ELS) and SADB update completion.
+    
+    These events are queued up as doorbell to the authentication
+    application. Application would read this doorbell on regular basis to stay
+    up to date. Each SCSI host would have a separate doorbell queue.
+    
+    The doorbell interface can daisy chain a list of events for each read. Each
+    event contains an event code + hint to help application steer the next
+    course of action.
+    
+    Link: https://lore.kernel.org/r/20210624052606.21613-9-njavali@marvell.com
+    Reviewed-by: Hannes Reinecke <hare@suse.de>
+    Reviewed-by: Himanshu Madhani <himanshu.madhani@oracle.com>
+    Co-developed-by: Larry Wisneski <Larry.Wisneski@marvell.com>
+    Signed-off-by: Larry Wisneski <Larry.Wisneski@marvell.com>
+    Co-developed-by: Duane Grigsby <duane.grigsby@marvell.com>
+    Signed-off-by: Duane Grigsby <duane.grigsby@marvell.com>
+    Co-developed-by: Rick Hicksted Jr <rhicksted@marvell.com>
+    Signed-off-by: Rick Hicksted Jr <rhicksted@marvell.com>
+    Signed-off-by: Quinn Tran <qutran@marvell.com>
+    Signed-off-by: Nilesh Javali <njavali@marvell.com>
+    Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+
+diff --git a/drivers/scsi/qla2xxx/qla_os.c b/drivers/scsi/qla2xxx/qla_os.c
+index 216f132dc5b2..0234cd90bb01 100644
+--- a/drivers/scsi/qla2xxx/qla_os.c
++++ b/drivers/scsi/qla2xxx/qla_os.c
+@@ -3488,6 +3488,7 @@ qla2x00_probe_one(struct pci_dev *pdev, const struct pci_device_id *id)
+ 
+ probe_failed:
+ 	qla_enode_stop(base_vha);
++	qla_edb_stop(base_vha);
+ 	if (base_vha->gnl.l) {
+ 		dma_free_coherent(&ha->pdev->dev, base_vha->gnl.size,
+ 				base_vha->gnl.l, base_vha->gnl.ldma);
+@@ -3791,6 +3792,7 @@ qla2x00_remove_one(struct pci_dev *pdev)
+ 
+ 	base_vha->gnl.l = NULL;
+ 	qla_enode_stop(base_vha);
++	qla_edb_stop(base_vha);
+ 
+ 	vfree(base_vha->scan.l);
+ 
+@@ -4917,6 +4919,8 @@ struct scsi_qla_host *qla2x00_create_host(struct scsi_host_template *sht,
+ 	init_waitqueue_head(&vha->fcport_waitQ);
+ 	init_waitqueue_head(&vha->vref_waitq);
+ 	qla_enode_init(vha);
++	qla_edb_init(vha);
++
+ 
+ 	vha->gnl.size = sizeof(struct get_name_list_extended) *
+ 			(ha->max_loop_id + 1);

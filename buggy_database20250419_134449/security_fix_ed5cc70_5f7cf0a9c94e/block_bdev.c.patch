@@ -1,0 +1,158 @@
+commit ed5cc702d311c14b653323d76062b0294effa66e
+Author: Jan Kara <jack@suse.cz>
+Date:   Wed Nov 1 18:43:08 2023 +0100
+
+    block: Add config option to not allow writing to mounted devices
+    
+    Writing to mounted devices is dangerous and can lead to filesystem
+    corruption as well as crashes. Furthermore syzbot comes with more and
+    more involved examples how to corrupt block device under a mounted
+    filesystem leading to kernel crashes and reports we can do nothing
+    about. Add tracking of writers to each block device and a kernel cmdline
+    argument which controls whether other writeable opens to block devices
+    open with BLK_OPEN_RESTRICT_WRITES flag are allowed. We will make
+    filesystems use this flag for used devices.
+    
+    Note that this effectively only prevents modification of the particular
+    block device's page cache by other writers. The actual device content
+    can still be modified by other means - e.g. by issuing direct scsi
+    commands, by doing writes through devices lower in the storage stack
+    (e.g. in case loop devices, DM, or MD are involved) etc. But blocking
+    direct modifications of the block device page cache is enough to give
+    filesystems a chance to perform data validation when loading data from
+    the underlying storage and thus prevent kernel crashes.
+    
+    Syzbot can use this cmdline argument option to avoid uninteresting
+    crashes. Also users whose userspace setup does not need writing to
+    mounted block devices can set this option for hardening.
+    
+    Link: https://lore.kernel.org/all/60788e5d-5c7c-1142-e554-c21d709acfd9@linaro.org
+    Signed-off-by: Jan Kara <jack@suse.cz>
+    Link: https://lore.kernel.org/r/20231101174325.10596-3-jack@suse.cz
+    Reviewed-by: Jens Axboe <axboe@kernel.dk>
+    Signed-off-by: Christian Brauner <brauner@kernel.org>
+
+diff --git a/block/bdev.c b/block/bdev.c
+index 0daf14e50dd0..fc8d28d77495 100644
+--- a/block/bdev.c
++++ b/block/bdev.c
+@@ -30,6 +30,9 @@
+ #include "../fs/internal.h"
+ #include "blk.h"
+ 
++/* Should we allow writing to mounted block devices? */
++static bool bdev_allow_write_mounted = IS_ENABLED(CONFIG_BLK_DEV_WRITE_MOUNTED);
++
+ struct bdev_inode {
+ 	struct block_device bdev;
+ 	struct inode vfs_inode;
+@@ -730,7 +733,58 @@ void blkdev_put_no_open(struct block_device *bdev)
+ {
+ 	put_device(&bdev->bd_device);
+ }
+-	
++
++static bool bdev_writes_blocked(struct block_device *bdev)
++{
++	return bdev->bd_writers == -1;
++}
++
++static void bdev_block_writes(struct block_device *bdev)
++{
++	bdev->bd_writers = -1;
++}
++
++static void bdev_unblock_writes(struct block_device *bdev)
++{
++	bdev->bd_writers = 0;
++}
++
++static bool bdev_may_open(struct block_device *bdev, blk_mode_t mode)
++{
++	if (bdev_allow_write_mounted)
++		return true;
++	/* Writes blocked? */
++	if (mode & BLK_OPEN_WRITE && bdev_writes_blocked(bdev))
++		return false;
++	if (mode & BLK_OPEN_RESTRICT_WRITES && bdev->bd_writers > 0)
++		return false;
++	return true;
++}
++
++static void bdev_claim_write_access(struct block_device *bdev, blk_mode_t mode)
++{
++	if (bdev_allow_write_mounted)
++		return;
++
++	/* Claim exclusive or shared write access. */
++	if (mode & BLK_OPEN_RESTRICT_WRITES)
++		bdev_block_writes(bdev);
++	else if (mode & BLK_OPEN_WRITE)
++		bdev->bd_writers++;
++}
++
++static void bdev_yield_write_access(struct block_device *bdev, blk_mode_t mode)
++{
++	if (bdev_allow_write_mounted)
++		return;
++
++	/* Yield exclusive or shared write access. */
++	if (mode & BLK_OPEN_RESTRICT_WRITES)
++		bdev_unblock_writes(bdev);
++	else if (mode & BLK_OPEN_WRITE)
++		bdev->bd_writers--;
++}
++
+ /**
+  * bdev_open_by_dev - open a block device by device number
+  * @dev: device number of block device to open
+@@ -773,6 +827,10 @@ struct bdev_handle *bdev_open_by_dev(dev_t dev, blk_mode_t mode, void *holder,
+ 	if (ret)
+ 		goto free_handle;
+ 
++	/* Blocking writes requires exclusive opener */
++	if (mode & BLK_OPEN_RESTRICT_WRITES && !holder)
++		return ERR_PTR(-EINVAL);
++
+ 	bdev = blkdev_get_no_open(dev);
+ 	if (!bdev) {
+ 		ret = -ENXIO;
+@@ -800,12 +858,16 @@ struct bdev_handle *bdev_open_by_dev(dev_t dev, blk_mode_t mode, void *holder,
+ 		goto abort_claiming;
+ 	if (!try_module_get(disk->fops->owner))
+ 		goto abort_claiming;
++	ret = -EBUSY;
++	if (!bdev_may_open(bdev, mode))
++		goto abort_claiming;
+ 	if (bdev_is_partition(bdev))
+ 		ret = blkdev_get_part(bdev, mode);
+ 	else
+ 		ret = blkdev_get_whole(bdev, mode);
+ 	if (ret)
+ 		goto put_module;
++	bdev_claim_write_access(bdev, mode);
+ 	if (holder) {
+ 		bd_finish_claiming(bdev, holder, hops);
+ 
+@@ -901,6 +963,8 @@ void bdev_release(struct bdev_handle *handle)
+ 		sync_blockdev(bdev);
+ 
+ 	mutex_lock(&disk->open_mutex);
++	bdev_yield_write_access(bdev, handle->mode);
++
+ 	if (handle->holder)
+ 		bd_end_claim(bdev, handle->holder);
+ 
+@@ -1069,3 +1133,12 @@ void bdev_statx_dioalign(struct inode *inode, struct kstat *stat)
+ 
+ 	blkdev_put_no_open(bdev);
+ }
++
++static int __init setup_bdev_allow_write_mounted(char *str)
++{
++	if (kstrtobool(str, &bdev_allow_write_mounted))
++		pr_warn("Invalid option string for bdev_allow_write_mounted:"
++			" '%s'\n", str);
++	return 1;
++}
++__setup("bdev_allow_write_mounted=", setup_bdev_allow_write_mounted);

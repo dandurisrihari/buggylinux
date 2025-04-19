@@ -1,0 +1,136 @@
+diff --cc arch/x86/kvm/mmu.c
+index a63964e7cec7,9086ee4b64cb..a10af9c87f8a
+--- a/arch/x86/kvm/mmu.c
++++ b/arch/x86/kvm/mmu.c
+@@@ -5665,87 -5650,21 +5669,99 @@@ int kvm_mmu_create(struct kvm_vcpu *vcp
+  		vcpu->arch.guest_mmu.prev_roots[i] = KVM_MMU_ROOT_INFO_INVALID;
+  
+  	vcpu->arch.nested_mmu.translate_gpa = translate_nested_gpa;
+- 	return alloc_mmu_pages(vcpu);
++ 
++ 	ret = alloc_mmu_pages(vcpu, &vcpu->arch.guest_mmu);
++ 	if (ret)
++ 		return ret;
++ 
++ 	ret = alloc_mmu_pages(vcpu, &vcpu->arch.root_mmu);
++ 	if (ret)
++ 		goto fail_allocate_root;
++ 
++ 	return ret;
++  fail_allocate_root:
++ 	free_mmu_pages(&vcpu->arch.guest_mmu);
++ 	return ret;
+  }
+  
+ +
+ +static void kvm_zap_obsolete_pages(struct kvm *kvm)
+ +{
+ +	struct kvm_mmu_page *sp, *node;
+ +	LIST_HEAD(invalid_list);
+ +	int ign;
+ +
+ +restart:
+ +	list_for_each_entry_safe_reverse(sp, node,
+ +	      &kvm->arch.active_mmu_pages, link) {
+ +		/*
+ +		 * No obsolete valid page exists before a newly created page
+ +		 * since active_mmu_pages is a FIFO list.
+ +		 */
+ +		if (!is_obsolete_sp(kvm, sp))
+ +			break;
+ +
+ +		/*
+ +		 * Do not repeatedly zap a root page to avoid unnecessary
+ +		 * KVM_REQ_MMU_RELOAD, otherwise we may not be able to
+ +		 * progress:
+ +		 *    vcpu 0                        vcpu 1
+ +		 *                         call vcpu_enter_guest():
+ +		 *                            1): handle KVM_REQ_MMU_RELOAD
+ +		 *                                and require mmu-lock to
+ +		 *                                load mmu
+ +		 * repeat:
+ +		 *    1): zap root page and
+ +		 *        send KVM_REQ_MMU_RELOAD
+ +		 *
+ +		 *    2): if (cond_resched_lock(mmu-lock))
+ +		 *
+ +		 *                            2): hold mmu-lock and load mmu
+ +		 *
+ +		 *                            3): see KVM_REQ_MMU_RELOAD bit
+ +		 *                                on vcpu->requests is set
+ +		 *                                then return 1 to call
+ +		 *                                vcpu_enter_guest() again.
+ +		 *            goto repeat;
+ +		 *
+ +		 * Since we are reversely walking the list and the invalid
+ +		 * list will be moved to the head, skip the invalid page
+ +		 * can help us to avoid the infinity list walking.
+ +		 */
+ +		if (sp->role.invalid)
+ +			continue;
+ +
+ +		if (need_resched() || spin_needbreak(&kvm->mmu_lock)) {
+ +			kvm_mmu_commit_zap_page(kvm, &invalid_list);
+ +			cond_resched_lock(&kvm->mmu_lock);
+ +			goto restart;
+ +		}
+ +
+ +		if (__kvm_mmu_prepare_zap_page(kvm, sp, &invalid_list, &ign))
+ +			goto restart;
+ +	}
+ +
+ +	kvm_mmu_commit_zap_page(kvm, &invalid_list);
+ +}
+ +
+ +/*
+ + * Fast invalidate all shadow pages and use lock-break technique
+ + * to zap obsolete pages.
+ + *
+ + * It's required when memslot is being deleted or VM is being
+ + * destroyed, in these cases, we should ensure that KVM MMU does
+ + * not use any resource of the being-deleted slot or all slots
+ + * after calling the function.
+ + */
+ +static void kvm_mmu_zap_all_fast(struct kvm *kvm)
+ +{
+ +	spin_lock(&kvm->mmu_lock);
+ +	kvm->arch.mmu_valid_gen++;
+ +
+ +	kvm_zap_obsolete_pages(kvm);
+ +	spin_unlock(&kvm->mmu_lock);
+ +}
+ +
+  static void kvm_mmu_invalidate_zap_pages_in_memslot(struct kvm *kvm,
+  			struct kvm_memory_slot *slot,
+  			struct kvm_page_track_notifier_node *node)
+diff --cc arch/x86/kvm/svm.c
+index e0368076a1ef,d24050b647c7..04fe21849b6e
+--- a/arch/x86/kvm/svm.c
++++ b/arch/x86/kvm/svm.c
+@@@ -7326,9 -7318,11 +7312,11 @@@ static struct kvm_x86_ops svm_x86_ops _
+  	.mem_enc_unreg_region = svm_unregister_enc_region,
+  
+  	.nested_enable_evmcs = nested_enable_evmcs,
+ -	.nested_get_evmcs_version = nested_get_evmcs_version,
+ +	.nested_get_evmcs_version = NULL,
+  
+  	.need_emulation_on_page_fault = svm_need_emulation_on_page_fault,
++ 
++ 	.apic_init_signal_blocked = svm_apic_init_signal_blocked,
+  };
+  
+  static int __init svm_init(void)
+diff --cc arch/x86/kvm/vmx/vmx.c
+index c030c96fc81a,73bf9a2e6fb6..4a99be1fae4e
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@@ -7797,8 -7798,8 +7798,9 @@@ static struct kvm_x86_ops vmx_x86_ops _
+  	.set_nested_state = NULL,
+  	.get_vmcs12_pages = NULL,
+  	.nested_enable_evmcs = NULL,
+ +	.nested_get_evmcs_version = NULL,
+  	.need_emulation_on_page_fault = vmx_need_emulation_on_page_fault,
++ 	.apic_init_signal_blocked = vmx_apic_init_signal_blocked,
+  };
+  
+  static void vmx_cleanup_l1d_flush(void)

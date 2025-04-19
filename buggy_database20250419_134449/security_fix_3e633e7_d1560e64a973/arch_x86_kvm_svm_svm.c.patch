@@ -1,0 +1,52 @@
+commit 3e633e7e7d0725b483aee843cbdce22bc9cd1707
+Author: Maxim Levitsky <mlevitsk@redhat.com>
+Date:   Tue Sep 10 16:03:48 2024 -0400
+
+    KVM: x86: Add interrupt injection information to the kvm_entry tracepoint
+    
+    Add VMX/SVM specific interrupt injection info the kvm_entry tracepoint.
+    As is done with kvm_exit, gather the information via a kvm_x86_ops hook
+    to avoid the moderately costly VMREADs on VMX when the tracepoint isn't
+    enabled.
+    
+    Opportunistically rename the parameters in the get_exit_info()
+    declaration to match the names used by both SVM and VMX.
+    
+    Signed-off-by: Maxim Levitsky <mlevitsk@redhat.com>
+    Link: https://lore.kernel.org/r/20240910200350.264245-2-mlevitsk@redhat.com
+    [sean: drop is_guest_mode() change, use intr_info/error_code for names]
+    Signed-off-by: Sean Christopherson <seanjc@google.com>
+
+diff --git a/arch/x86/kvm/svm/svm.c b/arch/x86/kvm/svm/svm.c
+index 8fc2f4a97495..d06fe41a2de0 100644
+--- a/arch/x86/kvm/svm/svm.c
++++ b/arch/x86/kvm/svm/svm.c
+@@ -3542,6 +3542,21 @@ static void svm_get_exit_info(struct kvm_vcpu *vcpu, u32 *reason,
+ 		*error_code = 0;
+ }
+ 
++static void svm_get_entry_info(struct kvm_vcpu *vcpu, u32 *intr_info,
++			       u32 *error_code)
++{
++	struct vmcb_control_area *control = &to_svm(vcpu)->vmcb->control;
++
++	*intr_info = control->event_inj;
++
++	if ((*intr_info & SVM_EXITINTINFO_VALID) &&
++	    (*intr_info & SVM_EXITINTINFO_VALID_ERR))
++		*error_code = control->event_inj_err;
++	else
++		*error_code = 0;
++
++}
++
+ static int svm_handle_exit(struct kvm_vcpu *vcpu, fastpath_t exit_fastpath)
+ {
+ 	struct vcpu_svm *svm = to_svm(vcpu);
+@@ -5082,6 +5097,7 @@ static struct kvm_x86_ops svm_x86_ops __initdata = {
+ 	.required_apicv_inhibits = AVIC_REQUIRED_APICV_INHIBITS,
+ 
+ 	.get_exit_info = svm_get_exit_info,
++	.get_entry_info = svm_get_entry_info,
+ 
+ 	.vcpu_after_set_cpuid = svm_vcpu_after_set_cpuid,

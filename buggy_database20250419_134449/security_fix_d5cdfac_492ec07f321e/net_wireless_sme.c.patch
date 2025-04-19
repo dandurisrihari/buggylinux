@@ -1,0 +1,85 @@
+commit d5cdfacb35ed886271d1ccfffbded98d3447da17
+Author: Jouni Malinen <j@w1.fi>
+Date:   Sun Apr 4 09:37:19 2010 +0300
+
+    cfg80211: Add local-state-change-only auth/deauth/disassoc
+    
+    cfg80211 is quite strict on allowing authentication and association
+    commands only in certain states. In order to meet these requirements,
+    user space applications may need to clear authentication or
+    association state in some cases. Currently, this can be done with
+    deauth/disassoc command, but that ends up sending out Deauthentication
+    or Disassociation frame unnecessarily. Add a new nl80211 attribute to
+    allow this sending of the frame be skipped, but with all other
+    deauth/disassoc operations being completed.
+    
+    Similar state change is also needed for IEEE 802.11r FT protocol in
+    the FT-over-DS case which does not use Authentication frame exchange
+    in a transition to another BSS. For this to work with cfg80211, an
+    authentication entry needs to be created for the target BSS without
+    sending out an Authentication frame. The nl80211 authentication
+    command can be used for this purpose, too, with the new attribute to
+    indicate that the command is only for changing local state. This
+    enables wpa_supplicant to complete FT-over-DS transition successfully.
+    
+    Signed-off-by: Jouni Malinen <j@w1.fi>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/wireless/sme.c b/net/wireless/sme.c
+index 17fde0da1b08..17465777eb47 100644
+--- a/net/wireless/sme.c
++++ b/net/wireless/sme.c
+@@ -170,7 +170,7 @@ static int cfg80211_conn_do_work(struct wireless_dev *wdev)
+ 					    params->ssid, params->ssid_len,
+ 					    NULL, 0,
+ 					    params->key, params->key_len,
+-					    params->key_idx);
++					    params->key_idx, false);
+ 	case CFG80211_CONN_ASSOCIATE_NEXT:
+ 		BUG_ON(!rdev->ops->assoc);
+ 		wdev->conn->state = CFG80211_CONN_ASSOCIATING;
+@@ -185,12 +185,13 @@ static int cfg80211_conn_do_work(struct wireless_dev *wdev)
+ 		if (err)
+ 			__cfg80211_mlme_deauth(rdev, wdev->netdev, params->bssid,
+ 					       NULL, 0,
+-					       WLAN_REASON_DEAUTH_LEAVING);
++					       WLAN_REASON_DEAUTH_LEAVING,
++					       false);
+ 		return err;
+ 	case CFG80211_CONN_DEAUTH_ASSOC_FAIL:
+ 		__cfg80211_mlme_deauth(rdev, wdev->netdev, params->bssid,
+ 				       NULL, 0,
+-				       WLAN_REASON_DEAUTH_LEAVING);
++				       WLAN_REASON_DEAUTH_LEAVING, false);
+ 		/* return an error so that we call __cfg80211_connect_result() */
+ 		return -EINVAL;
+ 	default:
+@@ -675,7 +676,8 @@ void __cfg80211_disconnected(struct net_device *dev, const u8 *ie,
+ 				continue;
+ 			bssid = wdev->auth_bsses[i]->pub.bssid;
+ 			ret = __cfg80211_mlme_deauth(rdev, dev, bssid, NULL, 0,
+-						WLAN_REASON_DEAUTH_LEAVING);
++						WLAN_REASON_DEAUTH_LEAVING,
++						false);
+ 			WARN(ret, "deauth failed: %d\n", ret);
+ 		}
+ 	}
+@@ -934,7 +936,7 @@ int __cfg80211_disconnect(struct cfg80211_registered_device *rdev,
+ 		/* wdev->conn->params.bssid must be set if > SCANNING */
+ 		err = __cfg80211_mlme_deauth(rdev, dev,
+ 					     wdev->conn->params.bssid,
+-					     NULL, 0, reason);
++					     NULL, 0, reason, false);
+ 		if (err)
+ 			return err;
+ 	} else {
+@@ -990,7 +992,8 @@ void cfg80211_sme_disassoc(struct net_device *dev, int idx)
+ 
+ 	memcpy(bssid, wdev->auth_bsses[idx]->pub.bssid, ETH_ALEN);
+ 	if (__cfg80211_mlme_deauth(rdev, dev, bssid,
+-				   NULL, 0, WLAN_REASON_DEAUTH_LEAVING)) {
++				   NULL, 0, WLAN_REASON_DEAUTH_LEAVING,
++				   false)) {
+ 		/* whatever -- assume gone anyway */
+ 		cfg80211_unhold_bss(wdev->auth_bsses[idx]);
+ 		cfg80211_put_bss(&wdev->auth_bsses[idx]->pub);

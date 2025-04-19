@@ -1,0 +1,61 @@
+commit be3c5832d51174ef7f21cefd6ad612dabdcb62fd
+Author: Christian Borntraeger <borntraeger@linux.ibm.com>
+Date:   Tue Nov 18 22:44:13 2008 +0100
+
+    kvm-s390: implement config_changed for virtio on s390
+    
+    This patch implements config_changed for the s390 virtio transport.
+    
+    We use the least significant bit of the interrupt parameter field
+    to decide, if this interrupt should call the virtio virtqueue callback
+    or the config_changed callback.
+    
+    This method is compatible with old host and guest code. Old 64 bit guests
+    will not check the bit and trigger a harmless additional vring_interrupt
+    call. Old host code will never set this bit, this is also safe.
+    
+    This patch also takes care of a potential future 31 bit virtio transport
+    for s390. On 31 bit _LC_PFAULT_INTPARM and __LC_EXT_PARAMS are identical.
+    We exploit the alignment of the token and fold the change bit into the
+    lsb of the token itself.
+    
+    Signed-off-by: Christian Borntraeger <borntraeger@de.ibm.com>
+    Signed-off-by: Rusty Russell <rusty@rustcorp.com.au>
+
+diff --git a/drivers/s390/kvm/kvm_virtio.c b/drivers/s390/kvm/kvm_virtio.c
+index 4e8354aa8576..28c90b89f2b4 100644
+--- a/drivers/s390/kvm/kvm_virtio.c
++++ b/drivers/s390/kvm/kvm_virtio.c
+@@ -299,13 +299,29 @@ static void scan_devices(void)
+  */
+ static void kvm_extint_handler(u16 code)
+ {
+-	void *data = (void *) *(long *) __LC_PFAULT_INTPARM;
+-	u16 subcode = S390_lowcore.cpu_addr;
++	struct virtqueue *vq;
++	u16 subcode;
++	int config_changed;
+ 
++	subcode = S390_lowcore.cpu_addr;
+ 	if ((subcode & 0xff00) != VIRTIO_SUBCODE_64)
+ 		return;
+ 
+-	vring_interrupt(0, data);
++	/* The LSB might be overloaded, we have to mask it */
++	vq = (struct virtqueue *) ((*(long *) __LC_PFAULT_INTPARM) & ~1UL);
++
++	/* We use the LSB of extparam, to decide, if this interrupt is a config
++	 * change or a "standard" interrupt */
++	config_changed =  (*(int *)  __LC_EXT_PARAMS & 1);
++
++	if (config_changed) {
++		struct virtio_driver *drv;
++		drv = container_of(vq->vdev->dev.driver,
++				   struct virtio_driver, driver);
++		if (drv->config_changed)
++			drv->config_changed(vq->vdev);
++	} else
++		vring_interrupt(0, vq);
+ }
+ 
+ /*

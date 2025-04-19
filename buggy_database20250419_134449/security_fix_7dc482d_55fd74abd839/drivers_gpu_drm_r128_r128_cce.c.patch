@@ -1,0 +1,86 @@
+commit 7dc482dfeeeefcfd000d4271c4626937406756d7
+Author: Ben Hutchings <ben@decadent.org.uk>
+Date:   Sun Aug 23 16:59:04 2009 +0100
+
+    drm/r128: Add test for initialisation to all ioctls that require it
+    
+    Almost all r128's private ioctls require that the CCE state has
+    already been initialised.  However, most do not test that this has
+    been done, and will proceed to dereference a null pointer.  This may
+    result in a security vulnerability, since some ioctls are
+    unprivileged.
+    
+    This adds a macro for the common initialisation test and changes all
+    ioctl implementations that require prior initialisation to use that
+    macro.
+    
+    Also, r128_do_init_cce() does not test that the CCE state has not
+    been initialised already.  Repeated initialisation may lead to a crash
+    or resource leak.  This adds that test.
+    
+    Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+    Signed-off-by: Dave Airlie <airlied@redhat.com>
+
+diff --git a/drivers/gpu/drm/r128/r128_cce.c b/drivers/gpu/drm/r128/r128_cce.c
+index 15252f60bbd3..4c39a407aa4a 100644
+--- a/drivers/gpu/drm/r128/r128_cce.c
++++ b/drivers/gpu/drm/r128/r128_cce.c
+@@ -346,6 +346,11 @@ static int r128_do_init_cce(struct drm_device * dev, drm_r128_init_t * init)
+ 
+ 	DRM_DEBUG("\n");
+ 
++	if (dev->dev_private) {
++		DRM_DEBUG("called when already initialized\n");
++		return -EINVAL;
++	}
++
+ 	dev_priv = kzalloc(sizeof(drm_r128_private_t), GFP_KERNEL);
+ 	if (dev_priv == NULL)
+ 		return -ENOMEM;
+@@ -647,6 +652,8 @@ int r128_cce_start(struct drm_device *dev, void *data, struct drm_file *file_pri
+ 
+ 	LOCK_TEST_WITH_RETURN(dev, file_priv);
+ 
++	DEV_INIT_TEST_WITH_RETURN(dev_priv);
++
+ 	if (dev_priv->cce_running || dev_priv->cce_mode == R128_PM4_NONPM4) {
+ 		DRM_DEBUG("while CCE running\n");
+ 		return 0;
+@@ -669,6 +676,8 @@ int r128_cce_stop(struct drm_device *dev, void *data, struct drm_file *file_priv
+ 
+ 	LOCK_TEST_WITH_RETURN(dev, file_priv);
+ 
++	DEV_INIT_TEST_WITH_RETURN(dev_priv);
++
+ 	/* Flush any pending CCE commands.  This ensures any outstanding
+ 	 * commands are exectuted by the engine before we turn it off.
+ 	 */
+@@ -706,10 +715,7 @@ int r128_cce_reset(struct drm_device *dev, void *data, struct drm_file *file_pri
+ 
+ 	LOCK_TEST_WITH_RETURN(dev, file_priv);
+ 
+-	if (!dev_priv) {
+-		DRM_DEBUG("called before init done\n");
+-		return -EINVAL;
+-	}
++	DEV_INIT_TEST_WITH_RETURN(dev_priv);
+ 
+ 	r128_do_cce_reset(dev_priv);
+ 
+@@ -726,6 +732,8 @@ int r128_cce_idle(struct drm_device *dev, void *data, struct drm_file *file_priv
+ 
+ 	LOCK_TEST_WITH_RETURN(dev, file_priv);
+ 
++	DEV_INIT_TEST_WITH_RETURN(dev_priv);
++
+ 	if (dev_priv->cce_running) {
+ 		r128_do_cce_flush(dev_priv);
+ 	}
+@@ -739,6 +747,8 @@ int r128_engine_reset(struct drm_device *dev, void *data, struct drm_file *file_
+ 
+ 	LOCK_TEST_WITH_RETURN(dev, file_priv);
+ 
++	DEV_INIT_TEST_WITH_RETURN(dev->dev_private);
++
+ 	return r128_do_engine_reset(dev);
+ }

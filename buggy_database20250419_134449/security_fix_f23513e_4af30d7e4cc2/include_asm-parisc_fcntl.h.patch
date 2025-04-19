@@ -1,0 +1,117 @@
+commit f23513e8d96cf5e6cf8d2ff0cb5dd6bbc33995e4
+Author: Ulrich Drepper <drepper@redhat.com>
+Date:   Sun Jul 15 23:40:32 2007 -0700
+
+    Introduce O_CLOEXEC
+    
+    The problem is as follows: in multi-threaded code (or more correctly: all
+    code using clone() with CLONE_FILES) we have a race when exec'ing.
+    
+       thread #1                       thread #2
+    
+       fd=open()
+    
+                                       fork + exec
+    
+      fcntl(fd,F_SETFD,FD_CLOEXEC)
+    
+    In some applications this can happen frequently.  Take a web browser.  One
+    thread opens a file and another thread starts, say, an external PDF viewer.
+     The result can even be a security issue if that open file descriptor
+    refers to a sensitive file and the external program can somehow be tricked
+    into using that descriptor.
+    
+    Just adding O_CLOEXEC support to open() doesn't solve the whole set of
+    problems.  There are other ways to create file descriptors (socket,
+    epoll_create, Unix domain socket transfer, etc).  These can and should be
+    addressed separately though.  open() is such an easy case that it makes not
+    much sense putting the fix off.
+    
+    The test program:
+    
+    #include <errno.h>
+    #include <fcntl.h>
+    #include <stdio.h>
+    #include <unistd.h>
+    
+    #ifndef O_CLOEXEC
+    # define O_CLOEXEC 02000000
+    #endif
+    
+    int
+    main (int argc, char *argv[])
+    {
+      int fd;
+      if (argc > 1)
+        {
+          fd = atol (argv[1]);
+          printf ("child: fd = %d\n", fd);
+          if (fcntl (fd, F_GETFD) == 0 || errno != EBADF)
+            {
+              puts ("file descriptor valid in child");
+              return 1;
+            }
+          return 0;
+        }
+    
+      fd = open ("/proc/self/exe", O_RDONLY | O_CLOEXEC);
+      printf ("in parent: new fd = %d\n", fd);
+      char buf[20];
+      snprintf (buf, sizeof (buf), "%d", fd);
+      execl ("/proc/self/exe", argv[0], buf, NULL);
+      puts ("execl failed");
+      return 1;
+    }
+    
+    [kyle@parisc-linux.org: parisc fix]
+    Signed-off-by: Ulrich Drepper <drepper@redhat.com>
+    Acked-by: Ingo Molnar <mingo@elte.hu>
+    Cc: Davide Libenzi <davidel@xmailserver.org>
+    Cc: Michael Kerrisk <mtk-manpages@gmx.net>
+    Cc: Chris Zankel <chris@zankel.net>
+    Signed-off-by: Kyle McMartin <kyle@parisc-linux.org>
+    Acked-by: David S. Miller <davem@davemloft.net>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/include/asm-parisc/fcntl.h b/include/asm-parisc/fcntl.h
+index 317851fa78f3..1e1c824764ee 100644
+--- a/include/asm-parisc/fcntl.h
++++ b/include/asm-parisc/fcntl.h
+@@ -3,21 +3,22 @@
+ 
+ /* open/fcntl - O_SYNC is only implemented on blocks devices and on files
+    located on an ext2 file system */
+-#define O_APPEND	00000010
+-#define O_BLKSEEK	00000100 /* HPUX only */
+-#define O_CREAT		00000400 /* not fcntl */
+-#define O_EXCL		00002000 /* not fcntl */
+-#define O_LARGEFILE	00004000
+-#define O_SYNC		00100000
+-#define O_NONBLOCK	00200004 /* HPUX has separate NDELAY & NONBLOCK */
+-#define O_NOCTTY	00400000 /* not fcntl */
+-#define O_DSYNC		01000000 /* HPUX only */
+-#define O_RSYNC		02000000 /* HPUX only */
+-#define O_NOATIME	04000000
++#define O_APPEND	000000010
++#define O_BLKSEEK	000000100 /* HPUX only */
++#define O_CREAT		000000400 /* not fcntl */
++#define O_EXCL		000002000 /* not fcntl */
++#define O_LARGEFILE	000004000
++#define O_SYNC		000100000
++#define O_NONBLOCK	000200004 /* HPUX has separate NDELAY & NONBLOCK */
++#define O_NOCTTY	000400000 /* not fcntl */
++#define O_DSYNC		001000000 /* HPUX only */
++#define O_RSYNC		002000000 /* HPUX only */
++#define O_NOATIME	004000000
++#define O_CLOEXEC	010000000 /* set close_on_exec */
+ 
+-#define O_DIRECTORY	00010000 /* must be a directory */
+-#define O_NOFOLLOW	00000200 /* don't follow links */
+-#define O_INVISIBLE	04000000 /* invisible I/O, for DMAPI/XDSM */
++#define O_DIRECTORY	000010000 /* must be a directory */
++#define O_NOFOLLOW	000000200 /* don't follow links */
++#define O_INVISIBLE	004000000 /* invisible I/O, for DMAPI/XDSM */
+ 
+ #define F_GETLK64	8
+ #define F_SETLK64	9

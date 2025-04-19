@@ -1,0 +1,95 @@
+diff --git a/include/linux/sunrpc/auth.h b/include/linux/sunrpc/auth.h
+index 8ef27afeea73..3972b8414c88 100644
+--- a/include/linux/sunrpc/auth.h
++++ b/include/linux/sunrpc/auth.h
+@@ -143,7 +143,8 @@ int			rpcauth_refreshcred(struct rpc_task *);
+ void			rpcauth_invalcred(struct rpc_task *);
+ int			rpcauth_uptodatecred(struct rpc_task *);
+ int			rpcauth_init_credcache(struct rpc_auth *, unsigned long);
+-void			rpcauth_free_credcache(struct rpc_auth *);
++void			rpcauth_destroy_credcache(struct rpc_auth *);
++void			rpcauth_clear_credcache(struct rpc_cred_cache *);
+ 
+ static inline
+ struct rpc_cred *	get_rpccred(struct rpc_cred *cred)
+diff --git a/net/sunrpc/auth.c b/net/sunrpc/auth.c
+index 9527f2bb1744..f6b6c81cbc3e 100644
+--- a/net/sunrpc/auth.c
++++ b/net/sunrpc/auth.c
+@@ -137,9 +137,8 @@ void rpcauth_destroy_credlist(struct hlist_head *head)
+  * that are not referenced.
+  */
+ void
+-rpcauth_free_credcache(struct rpc_auth *auth)
++rpcauth_clear_credcache(struct rpc_cred_cache *cache)
+ {
+-	struct rpc_cred_cache *cache = auth->au_credcache;
+ 	HLIST_HEAD(free);
+ 	struct hlist_node *pos, *next;
+ 	struct rpc_cred	*cred;
+@@ -157,6 +156,21 @@ rpcauth_free_credcache(struct rpc_auth *auth)
+ 	rpcauth_destroy_credlist(&free);
+ }
+ 
++/*
++ * Destroy the RPC credential cache
++ */
++void
++rpcauth_destroy_credcache(struct rpc_auth *auth)
++{
++	struct rpc_cred_cache *cache = auth->au_credcache;
++
++	if (cache) {
++		auth->au_credcache = NULL;
++		rpcauth_clear_credcache(cache);
++		kfree(cache);
++	}
++}
++
+ static void
+ rpcauth_prune_expired(struct rpc_auth *auth, struct rpc_cred *cred, struct hlist_head *free)
+ {
+diff --git a/net/sunrpc/auth_gss/auth_gss.c b/net/sunrpc/auth_gss/auth_gss.c
+index 50809086fa1b..8b4c02f8befb 100644
+--- a/net/sunrpc/auth_gss/auth_gss.c
++++ b/net/sunrpc/auth_gss/auth_gss.c
+@@ -665,12 +665,13 @@ gss_destroy(struct rpc_auth *auth)
+ 	dprintk("RPC:       destroying GSS authenticator %p flavor %d\n",
+ 			auth, auth->au_flavor);
+ 
++	rpcauth_destroy_credcache(auth);
++
+ 	gss_auth = container_of(auth, struct gss_auth, rpc_auth);
+ 	rpc_unlink(gss_auth->dentry);
+ 	gss_auth->dentry = NULL;
+ 	gss_mech_put(gss_auth->mech);
+ 
+-	rpcauth_free_credcache(auth);
+ 	kfree(gss_auth);
+ 	module_put(THIS_MODULE);
+ }
+diff --git a/net/sunrpc/auth_unix.c b/net/sunrpc/auth_unix.c
+index 82300b83045e..5622783011a4 100644
+--- a/net/sunrpc/auth_unix.c
++++ b/net/sunrpc/auth_unix.c
+@@ -50,7 +50,7 @@ static void
+ unx_destroy(struct rpc_auth *auth)
+ {
+ 	dprintk("RPC:       destroying UNIX authenticator %p\n", auth);
+-	rpcauth_free_credcache(auth);
++	rpcauth_clear_credcache(auth->au_credcache);
+ }
+ 
+ /*
+diff --git a/net/sunrpc/sunrpc_syms.c b/net/sunrpc/sunrpc_syms.c
+index b99b11b11461..3e19e7af6799 100644
+--- a/net/sunrpc/sunrpc_syms.c
++++ b/net/sunrpc/sunrpc_syms.c
+@@ -57,7 +57,7 @@ EXPORT_SYMBOL(rpcauth_unregister);
+ EXPORT_SYMBOL(rpcauth_create);
+ EXPORT_SYMBOL(rpcauth_lookupcred);
+ EXPORT_SYMBOL(rpcauth_lookup_credcache);
+-EXPORT_SYMBOL(rpcauth_free_credcache);
++EXPORT_SYMBOL(rpcauth_destroy_credcache);
+ EXPORT_SYMBOL(rpcauth_init_credcache);
+ EXPORT_SYMBOL(put_rpccred);

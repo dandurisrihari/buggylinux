@@ -1,0 +1,57 @@
+commit b5abb028e214cca68f4231d4f3bc0847ddbc986e
+Author: Anton Blanchard <anton@samba.org>
+Date:   Fri Feb 19 17:54:53 2010 +0000
+
+    e1000: Fix DMA mapping error handling on RX
+    
+    Check for error return from pci_map_single/pci_map_page and clean up.
+    
+    With this and the previous patch the driver was able to handle a significant
+    percentage of errors (I set the fault injection rate to 10% and could still
+    download large files at a reasonable speed).
+    
+    Signed-off-by: Anton Blanchard <anton@samba.org>
+    Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/e1000/e1000_main.c b/drivers/net/e1000/e1000_main.c
+index d29bb532eccf..765543663a4f 100644
+--- a/drivers/net/e1000/e1000_main.c
++++ b/drivers/net/e1000/e1000_main.c
+@@ -4006,11 +4006,21 @@ e1000_alloc_jumbo_rx_buffers(struct e1000_adapter *adapter,
+ 			}
+ 		}
+ 
+-		if (!buffer_info->dma)
++		if (!buffer_info->dma) {
+ 			buffer_info->dma = pci_map_page(pdev,
+ 			                                buffer_info->page, 0,
+ 			                                buffer_info->length,
+ 			                                PCI_DMA_FROMDEVICE);
++			if (pci_dma_mapping_error(pdev, buffer_info->dma)) {
++				put_page(buffer_info->page);
++				dev_kfree_skb(skb);
++				buffer_info->page = NULL;
++				buffer_info->skb = NULL;
++				buffer_info->dma = 0;
++				adapter->alloc_rx_buff_failed++;
++				break; /* while !buffer_info->skb */
++			}
++		}
+ 
+ 		rx_desc = E1000_RX_DESC(*rx_ring, i);
+ 		rx_desc->buffer_addr = cpu_to_le64(buffer_info->dma);
+@@ -4101,6 +4111,13 @@ static void e1000_alloc_rx_buffers(struct e1000_adapter *adapter,
+ 						  skb->data,
+ 						  buffer_info->length,
+ 						  PCI_DMA_FROMDEVICE);
++		if (pci_dma_mapping_error(pdev, buffer_info->dma)) {
++			dev_kfree_skb(skb);
++			buffer_info->skb = NULL;
++			buffer_info->dma = 0;
++			adapter->alloc_rx_buff_failed++;
++			break; /* while !buffer_info->skb */
++		}
+ 
+ 		/*
+ 		 * XXX if it was allocated cleanly it will never map to a

@@ -1,0 +1,61 @@
+commit 0d7336f8f06d4a1a1e2c62624d086561e8490bb7
+Author: Matthieu Baerts (NGI0) <matttbe@kernel.org>
+Date:   Thu Mar 6 12:29:28 2025 +0100
+
+    tcp: ulp: diag: more info without CAP_NET_ADMIN
+    
+    When introduced in commit 61723b393292 ("tcp: ulp: add functions to dump
+    ulp-specific information"), the whole ULP diag info has been exported
+    only if the requester had CAP_NET_ADMIN.
+    
+    It looks like not everything is sensitive, and some info can be exported
+    to all users in order to ease the debugging from the userspace side
+    without requiring additional capabilities. Each layer should then decide
+    what can be exposed to everybody. The 'net_admin' boolean is then passed
+    to the different layers.
+    
+    On kTLS side, it looks like there is nothing sensitive there: version,
+    cipher type, tx/rx user config type, plus some flags. So, only some
+    metadata about the configuration, no cryptographic info like keys, etc.
+    Then, everything can be exported to all users.
+    
+    On MPTCP side, that's different. The MPTCP-related sequence numbers per
+    subflow should certainly not be exposed to everybody. For example, the
+    DSS mapping and ssn_offset would give all users on the system access to
+    narrow ranges of values for the subflow TCP sequence numbers and
+    MPTCP-level DSNs, and then ease packet injection. The TCP diag interface
+    doesn't expose the TCP sequence numbers for TCP sockets, so best to do
+    the same here. The rest -- token, IDs, flags -- can be exported to
+    everybody.
+    
+    Acked-by: Mat Martineau <martineau@kernel.org>
+    Signed-off-by: Matthieu Baerts (NGI0) <matttbe@kernel.org>
+    Link: https://patch.msgid.link/20250306-net-next-tcp-ulp-diag-net-admin-v1-2-06afdd860fc9@kernel.org
+    Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+diff --git a/net/ipv4/tcp_diag.c b/net/ipv4/tcp_diag.c
+index d8bba37dbffd..45e174b8cd22 100644
+--- a/net/ipv4/tcp_diag.c
++++ b/net/ipv4/tcp_diag.c
+@@ -96,8 +96,8 @@ static int tcp_diag_put_ulp(struct sk_buff *skb, struct sock *sk,
+ 	if (err)
+ 		goto nla_failure;
+ 
+-	if (net_admin && ulp_ops->get_info)
+-		err = ulp_ops->get_info(sk, skb);
++	if (ulp_ops->get_info)
++		err = ulp_ops->get_info(sk, skb, net_admin);
+ 	if (err)
+ 		goto nla_failure;
+ 
+@@ -170,8 +170,8 @@ static size_t tcp_diag_get_aux_size(struct sock *sk, bool net_admin)
+ 		if (ulp_ops) {
+ 			size += nla_total_size(0) +
+ 				nla_total_size(TCP_ULP_NAME_MAX);
+-			if (net_admin && ulp_ops->get_info_size)
+-				size += ulp_ops->get_info_size(sk);
++			if (ulp_ops->get_info_size)
++				size += ulp_ops->get_info_size(sk, net_admin);
+ 		}
+ 	}
+ 	return size;

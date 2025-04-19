@@ -1,0 +1,161 @@
+diff --git a/crypto/asymmetric_keys/asymmetric_type.c b/crypto/asymmetric_keys/asymmetric_type.c
+index 9f2165b27d52..a79d30128821 100644
+--- a/crypto/asymmetric_keys/asymmetric_type.c
++++ b/crypto/asymmetric_keys/asymmetric_type.c
+@@ -331,7 +331,8 @@ static void asymmetric_key_free_preparse(struct key_preparsed_payload *prep)
+ 	pr_devel("==>%s()\n", __func__);
+ 
+ 	if (subtype) {
+-		subtype->destroy(prep->payload.data[asym_crypto]);
++		subtype->destroy(prep->payload.data[asym_crypto],
++				 prep->payload.data[asym_auth]);
+ 		module_put(subtype->owner);
+ 	}
+ 	asymmetric_key_free_kids(kids);
+@@ -346,13 +347,15 @@ static void asymmetric_key_destroy(struct key *key)
+ 	struct asymmetric_key_subtype *subtype = asymmetric_key_subtype(key);
+ 	struct asymmetric_key_ids *kids = key->payload.data[asym_key_ids];
+ 	void *data = key->payload.data[asym_crypto];
++	void *auth = key->payload.data[asym_auth];
+ 
+ 	key->payload.data[asym_crypto] = NULL;
+ 	key->payload.data[asym_subtype] = NULL;
+ 	key->payload.data[asym_key_ids] = NULL;
++	key->payload.data[asym_auth] = NULL;
+ 
+ 	if (subtype) {
+-		subtype->destroy(data);
++		subtype->destroy(data, auth);
+ 		module_put(subtype->owner);
+ 	}
+ 
+diff --git a/crypto/asymmetric_keys/public_key.c b/crypto/asymmetric_keys/public_key.c
+index 0f8b264b3961..fd76b5fc3b3a 100644
+--- a/crypto/asymmetric_keys/public_key.c
++++ b/crypto/asymmetric_keys/public_key.c
+@@ -39,15 +39,23 @@ static void public_key_describe(const struct key *asymmetric_key,
+ /*
+  * Destroy a public key algorithm key.
+  */
+-void public_key_destroy(void *payload)
++void public_key_free(struct public_key *key)
+ {
+-	struct public_key *key = payload;
+-
+-	if (key)
++	if (key) {
+ 		kfree(key->key);
+-	kfree(key);
++		kfree(key);
++	}
++}
++EXPORT_SYMBOL_GPL(public_key_free);
++
++/*
++ * Destroy a public key algorithm key.
++ */
++static void public_key_destroy(void *payload0, void *payload3)
++{
++	public_key_free(payload0);
++	public_key_signature_free(payload3);
+ }
+-EXPORT_SYMBOL_GPL(public_key_destroy);
+ 
+ struct public_key_completion {
+ 	struct completion completion;
+diff --git a/crypto/asymmetric_keys/signature.c b/crypto/asymmetric_keys/signature.c
+index 004d5fc8e56b..3beee3976ed5 100644
+--- a/crypto/asymmetric_keys/signature.c
++++ b/crypto/asymmetric_keys/signature.c
+@@ -15,9 +15,23 @@
+ #include <keys/asymmetric-subtype.h>
+ #include <linux/export.h>
+ #include <linux/err.h>
++#include <linux/slab.h>
+ #include <crypto/public_key.h>
+ #include "asymmetric_keys.h"
+ 
++/*
++ * Destroy a public key signature.
++ */
++void public_key_signature_free(struct public_key_signature *sig)
++{
++	if (sig) {
++		kfree(sig->s);
++		kfree(sig->digest);
++		kfree(sig);
++	}
++}
++EXPORT_SYMBOL_GPL(public_key_signature_free);
++
+ /**
+  * verify_signature - Initiate the use of an asymmetric key to verify a signature
+  * @key: The asymmetric key to verify against
+diff --git a/crypto/asymmetric_keys/x509_cert_parser.c b/crypto/asymmetric_keys/x509_cert_parser.c
+index 4a29bac70060..05251c7f9a03 100644
+--- a/crypto/asymmetric_keys/x509_cert_parser.c
++++ b/crypto/asymmetric_keys/x509_cert_parser.c
+@@ -47,7 +47,7 @@ struct x509_parse_context {
+ void x509_free_certificate(struct x509_certificate *cert)
+ {
+ 	if (cert) {
+-		public_key_destroy(cert->pub);
++		public_key_free(cert->pub);
+ 		kfree(cert->issuer);
+ 		kfree(cert->subject);
+ 		kfree(cert->id);
+diff --git a/include/crypto/public_key.h b/include/crypto/public_key.h
+index aa730ea7faf8..19f557ca50ba 100644
+--- a/include/crypto/public_key.h
++++ b/include/crypto/public_key.h
+@@ -41,7 +41,7 @@ struct public_key {
+ 	const char *pkey_algo;
+ };
+ 
+-extern void public_key_destroy(void *payload);
++extern void public_key_free(struct public_key *key);
+ 
+ /*
+  * Public key cryptography signature data
+@@ -55,7 +55,10 @@ struct public_key_signature {
+ 	const char *hash_algo;
+ };
+ 
++extern void public_key_signature_free(struct public_key_signature *sig);
++
+ extern struct asymmetric_key_subtype public_key_subtype;
++
+ struct key;
+ extern int verify_signature(const struct key *key,
+ 			    const struct public_key_signature *sig);
+diff --git a/include/keys/asymmetric-subtype.h b/include/keys/asymmetric-subtype.h
+index 4915d40d3c3c..2480469ce8fb 100644
+--- a/include/keys/asymmetric-subtype.h
++++ b/include/keys/asymmetric-subtype.h
+@@ -32,7 +32,7 @@ struct asymmetric_key_subtype {
+ 	void (*describe)(const struct key *key, struct seq_file *m);
+ 
+ 	/* Destroy a key of this subtype */
+-	void (*destroy)(void *payload);
++	void (*destroy)(void *payload_crypto, void *payload_auth);
+ 
+ 	/* Verify the signature on a key of this subtype (optional) */
+ 	int (*verify_signature)(const struct key *key,
+diff --git a/include/keys/asymmetric-type.h b/include/keys/asymmetric-type.h
+index 59c1df9cf922..70a8775bb444 100644
+--- a/include/keys/asymmetric-type.h
++++ b/include/keys/asymmetric-type.h
+@@ -23,9 +23,10 @@ extern struct key_type key_type_asymmetric;
+  * follows:
+  */
+ enum asymmetric_payload_bits {
+-	asym_crypto,
+-	asym_subtype,
+-	asym_key_ids,
++	asym_crypto,		/* The data representing the key */
++	asym_subtype,		/* Pointer to an asymmetric_key_subtype struct */
++	asym_key_ids,		/* Pointer to an asymmetric_key_ids struct */
++	asym_auth		/* The key's authorisation (signature, parent key ID) */
+ };
+ 
+ /*

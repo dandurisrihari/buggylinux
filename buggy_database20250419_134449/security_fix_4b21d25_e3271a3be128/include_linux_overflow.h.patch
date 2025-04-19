@@ -1,0 +1,109 @@
+commit 4b21d25bf519c9487935a664886956bb18f04f6d
+Author: Kees Cook <kees@kernel.org>
+Date:   Mon Oct 24 23:11:25 2022 +0300
+
+    overflow: Introduce overflows_type() and castable_to_type()
+    
+    Implement a robust overflows_type() macro to test if a variable or
+    constant value would overflow another variable or type. This can be
+    used as a constant expression for static_assert() (which requires a
+    constant expression[1][2]) when used on constant values. This must be
+    constructed manually, since __builtin_add_overflow() does not produce
+    a constant expression[3].
+    
+    Additionally adds castable_to_type(), similar to __same_type(), but for
+    checking if a constant value would overflow if cast to a given type.
+    
+    Add unit tests for overflows_type(), __same_type(), and castable_to_type()
+    to the existing KUnit "overflow" test:
+    
+    [16:03:33] ================== overflow (21 subtests) ==================
+    ...
+    [16:03:33] [PASSED] overflows_type_test
+    [16:03:33] [PASSED] same_type_test
+    [16:03:33] [PASSED] castable_to_type_test
+    [16:03:33] ==================== [PASSED] overflow =====================
+    [16:03:33] ============================================================
+    [16:03:33] Testing complete. Ran 21 tests: passed: 21
+    [16:03:33] Elapsed time: 24.022s total, 0.002s configuring, 22.598s building, 0.767s running
+    
+    [1] https://en.cppreference.com/w/c/language/_Static_assert
+    [2] C11 standard (ISO/IEC 9899:2011): 6.7.10 Static assertions
+    [3] https://gcc.gnu.org/onlinedocs/gcc/Integer-Overflow-Builtins.html
+        6.56 Built-in Functions to Perform Arithmetic with Overflow Checking
+        Built-in Function: bool __builtin_add_overflow (type1 a, type2 b,
+    
+    Cc: Luc Van Oostenryck <luc.vanoostenryck@gmail.com>
+    Cc: Nathan Chancellor <nathan@kernel.org>
+    Cc: Nick Desaulniers <ndesaulniers@google.com>
+    Cc: Tom Rix <trix@redhat.com>
+    Cc: Daniel Latypov <dlatypov@google.com>
+    Cc: Vitor Massaru Iha <vitor@massaru.org>
+    Cc: "Gustavo A. R. Silva" <gustavoars@kernel.org>
+    Cc: Jani Nikula <jani.nikula@intel.com>
+    Cc: Mauro Carvalho Chehab <mchehab@kernel.org>
+    Cc: linux-hardening@vger.kernel.org
+    Cc: llvm@lists.linux.dev
+    Co-developed-by: Gwan-gyeong Mun <gwan-gyeong.mun@intel.com>
+    Signed-off-by: Gwan-gyeong Mun <gwan-gyeong.mun@intel.com>
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+    Link: https://lore.kernel.org/r/20221024201125.1416422-1-gwan-gyeong.mun@intel.com
+
+diff --git a/include/linux/overflow.h b/include/linux/overflow.h
+index 1d3be1a2204c..0e33b5cbdb9f 100644
+--- a/include/linux/overflow.h
++++ b/include/linux/overflow.h
+@@ -128,6 +128,53 @@ static inline bool __must_check __must_check_overflow(bool overflow)
+ 	(*_d >> _to_shift) != _a);					\
+ }))
+ 
++#define __overflows_type_constexpr(x, T) (			\
++	is_unsigned_type(typeof(x)) ?				\
++		(x) > type_max(typeof(T)) :			\
++	is_unsigned_type(typeof(T)) ?				\
++		(x) < 0 || (x) > type_max(typeof(T)) :		\
++	(x) < type_min(typeof(T)) || (x) > type_max(typeof(T)))
++
++#define __overflows_type(x, T)		({	\
++	typeof(T) v = 0;			\
++	check_add_overflow((x), v, &v);		\
++})
++
++/**
++ * overflows_type - helper for checking the overflows between value, variables,
++ *		    or data type
++ *
++ * @n: source constant value or variable to be checked
++ * @T: destination variable or data type proposed to store @x
++ *
++ * Compares the @x expression for whether or not it can safely fit in
++ * the storage of the type in @T. @x and @T can have different types.
++ * If @x is a constant expression, this will also resolve to a constant
++ * expression.
++ *
++ * Returns: true if overflow can occur, false otherwise.
++ */
++#define overflows_type(n, T)					\
++	__builtin_choose_expr(__is_constexpr(n),		\
++			      __overflows_type_constexpr(n, T),	\
++			      __overflows_type(n, T))
++
++/**
++ * castable_to_type - like __same_type(), but also allows for casted literals
++ *
++ * @n: variable or constant value
++ * @T: variable or data type
++ *
++ * Unlike the __same_type() macro, this allows a constant value as the
++ * first argument. If this value would not overflow into an assignment
++ * of the second argument's type, it returns true. Otherwise, this falls
++ * back to __same_type().
++ */
++#define castable_to_type(n, T)						\
++	__builtin_choose_expr(__is_constexpr(n),			\
++			      !__overflows_type_constexpr(n, T),	\
++			      __same_type(n, T))
++
+ /**
+  * size_mul() - Calculate size_t multiplication with saturation at SIZE_MAX
+  * @factor1: first factor

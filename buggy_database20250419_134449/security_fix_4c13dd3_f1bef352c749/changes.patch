@@ -1,0 +1,187 @@
+diff --git a/Documentation/vm/slub.txt b/Documentation/vm/slub.txt
+index b37300edf27c..07375e73981a 100644
+--- a/Documentation/vm/slub.txt
++++ b/Documentation/vm/slub.txt
+@@ -41,6 +41,7 @@ Possible debug options are
+ 	P		Poisoning (object and padding)
+ 	U		User tracking (free and alloc)
+ 	T		Trace (please only use on single slabs)
++	A		Toggle failslab filter mark for the cache
+ 	O		Switch debugging off for caches that would have
+ 			caused higher minimum slab orders
+ 	-		Switch all debugging off (useful if the kernel is
+diff --git a/include/linux/fault-inject.h b/include/linux/fault-inject.h
+index 06ca9b21dad2..7b64ad40e4ce 100644
+--- a/include/linux/fault-inject.h
++++ b/include/linux/fault-inject.h
+@@ -82,9 +82,10 @@ static inline void cleanup_fault_attr_dentries(struct fault_attr *attr)
+ #endif /* CONFIG_FAULT_INJECTION */
+ 
+ #ifdef CONFIG_FAILSLAB
+-extern bool should_failslab(size_t size, gfp_t gfpflags);
++extern bool should_failslab(size_t size, gfp_t gfpflags, unsigned long flags);
+ #else
+-static inline bool should_failslab(size_t size, gfp_t gfpflags)
++static inline bool should_failslab(size_t size, gfp_t gfpflags,
++				unsigned long flags)
+ {
+ 	return false;
+ }
+diff --git a/include/linux/slab.h b/include/linux/slab.h
+index 2da8372519f5..488446289cab 100644
+--- a/include/linux/slab.h
++++ b/include/linux/slab.h
+@@ -70,6 +70,11 @@
+ #else
+ # define SLAB_NOTRACK		0x00000000UL
+ #endif
++#ifdef CONFIG_FAILSLAB
++# define SLAB_FAILSLAB		0x02000000UL	/* Fault injection mark */
++#else
++# define SLAB_FAILSLAB		0x00000000UL
++#endif
+ 
+ /* The following flags affect the page allocator grouping pages by mobility */
+ #define SLAB_RECLAIM_ACCOUNT	0x00020000UL		/* Objects are reclaimable */
+diff --git a/mm/failslab.c b/mm/failslab.c
+index 9339de5f0a91..bb41f98dd8b7 100644
+--- a/mm/failslab.c
++++ b/mm/failslab.c
+@@ -1,18 +1,22 @@
+ #include <linux/fault-inject.h>
+ #include <linux/gfp.h>
++#include <linux/slab.h>
+ 
+ static struct {
+ 	struct fault_attr attr;
+ 	u32 ignore_gfp_wait;
++	int cache_filter;
+ #ifdef CONFIG_FAULT_INJECTION_DEBUG_FS
+ 	struct dentry *ignore_gfp_wait_file;
++	struct dentry *cache_filter_file;
+ #endif
+ } failslab = {
+ 	.attr = FAULT_ATTR_INITIALIZER,
+ 	.ignore_gfp_wait = 1,
++	.cache_filter = 0,
+ };
+ 
+-bool should_failslab(size_t size, gfp_t gfpflags)
++bool should_failslab(size_t size, gfp_t gfpflags, unsigned long cache_flags)
+ {
+ 	if (gfpflags & __GFP_NOFAIL)
+ 		return false;
+@@ -20,6 +24,9 @@ bool should_failslab(size_t size, gfp_t gfpflags)
+         if (failslab.ignore_gfp_wait && (gfpflags & __GFP_WAIT))
+ 		return false;
+ 
++	if (failslab.cache_filter && !(cache_flags & SLAB_FAILSLAB))
++		return false;
++
+ 	return should_fail(&failslab.attr, size);
+ }
+ 
+@@ -30,7 +37,6 @@ static int __init setup_failslab(char *str)
+ __setup("failslab=", setup_failslab);
+ 
+ #ifdef CONFIG_FAULT_INJECTION_DEBUG_FS
+-
+ static int __init failslab_debugfs_init(void)
+ {
+ 	mode_t mode = S_IFREG | S_IRUSR | S_IWUSR;
+@@ -46,8 +52,14 @@ static int __init failslab_debugfs_init(void)
+ 		debugfs_create_bool("ignore-gfp-wait", mode, dir,
+ 				      &failslab.ignore_gfp_wait);
+ 
+-	if (!failslab.ignore_gfp_wait_file) {
++	failslab.cache_filter_file =
++		debugfs_create_bool("cache-filter", mode, dir,
++				      &failslab.cache_filter);
++
++	if (!failslab.ignore_gfp_wait_file ||
++	    !failslab.cache_filter_file) {
+ 		err = -ENOMEM;
++		debugfs_remove(failslab.cache_filter_file);
+ 		debugfs_remove(failslab.ignore_gfp_wait_file);
+ 		cleanup_fault_attr_dentries(&failslab.attr);
+ 	}
+diff --git a/mm/slab.c b/mm/slab.c
+index 7451bdacaf18..33496b704859 100644
+--- a/mm/slab.c
++++ b/mm/slab.c
+@@ -3101,7 +3101,7 @@ static bool slab_should_failslab(struct kmem_cache *cachep, gfp_t flags)
+ 	if (cachep == &cache_cache)
+ 		return false;
+ 
+-	return should_failslab(obj_size(cachep), flags);
++	return should_failslab(obj_size(cachep), flags, cachep->flags);
+ }
+ 
+ static inline void *____cache_alloc(struct kmem_cache *cachep, gfp_t flags)
+diff --git a/mm/slub.c b/mm/slub.c
+index 8d71aaf888d7..cab5288736c8 100644
+--- a/mm/slub.c
++++ b/mm/slub.c
+@@ -151,7 +151,8 @@
+  * Set of flags that will prevent slab merging
+  */
+ #define SLUB_NEVER_MERGE (SLAB_RED_ZONE | SLAB_POISON | SLAB_STORE_USER | \
+-		SLAB_TRACE | SLAB_DESTROY_BY_RCU | SLAB_NOLEAKTRACE)
++		SLAB_TRACE | SLAB_DESTROY_BY_RCU | SLAB_NOLEAKTRACE | \
++		SLAB_FAILSLAB)
+ 
+ #define SLUB_MERGE_SAME (SLAB_DEBUG_FREE | SLAB_RECLAIM_ACCOUNT | \
+ 		SLAB_CACHE_DMA | SLAB_NOTRACK)
+@@ -1020,6 +1021,9 @@ static int __init setup_slub_debug(char *str)
+ 		case 't':
+ 			slub_debug |= SLAB_TRACE;
+ 			break;
++		case 'a':
++			slub_debug |= SLAB_FAILSLAB;
++			break;
+ 		default:
+ 			printk(KERN_ERR "slub_debug option '%c' "
+ 				"unknown. skipped\n", *str);
+@@ -1718,7 +1722,7 @@ static __always_inline void *slab_alloc(struct kmem_cache *s,
+ 	lockdep_trace_alloc(gfpflags);
+ 	might_sleep_if(gfpflags & __GFP_WAIT);
+ 
+-	if (should_failslab(s->objsize, gfpflags))
++	if (should_failslab(s->objsize, gfpflags, s->flags))
+ 		return NULL;
+ 
+ 	local_irq_save(flags);
+@@ -4171,6 +4175,23 @@ static ssize_t trace_store(struct kmem_cache *s, const char *buf,
+ }
+ SLAB_ATTR(trace);
+ 
++#ifdef CONFIG_FAILSLAB
++static ssize_t failslab_show(struct kmem_cache *s, char *buf)
++{
++	return sprintf(buf, "%d\n", !!(s->flags & SLAB_FAILSLAB));
++}
++
++static ssize_t failslab_store(struct kmem_cache *s, const char *buf,
++							size_t length)
++{
++	s->flags &= ~SLAB_FAILSLAB;
++	if (buf[0] == '1')
++		s->flags |= SLAB_FAILSLAB;
++	return length;
++}
++SLAB_ATTR(failslab);
++#endif
++
+ static ssize_t reclaim_account_show(struct kmem_cache *s, char *buf)
+ {
+ 	return sprintf(buf, "%d\n", !!(s->flags & SLAB_RECLAIM_ACCOUNT));
+@@ -4467,6 +4488,10 @@ static struct attribute *slab_attrs[] = {
+ 	&deactivate_remote_frees_attr.attr,
+ 	&order_fallback_attr.attr,
+ #endif
++#ifdef CONFIG_FAILSLAB
++	&failslab_attr.attr,
++#endif
++
+ 	NULL
+ };

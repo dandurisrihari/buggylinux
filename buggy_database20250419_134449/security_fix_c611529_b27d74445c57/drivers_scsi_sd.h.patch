@@ -1,0 +1,111 @@
+commit c611529e7cd3465ec0eada0f44200e8420c38908
+Author: Martin K. Petersen <martin.petersen@oracle.com>
+Date:   Fri Sep 26 19:20:08 2014 -0400
+
+    sd: Honor block layer integrity handling flags
+    
+    A set of flags introduced in the block layer enable better control over
+    how protection information is handled. These flags are useful for both
+    error injection and data recovery purposes. Checking can be enabled and
+    disabled for controller and disk, and the guard tag format is now a
+    per-I/O property.
+    
+    Update sd_protect_op to communicate the relevant information to the
+    low-level device driver via a set of flags in scsi_cmnd.
+    
+    Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+    Reviewed-by: Sagi Grimberg <sagig@mellanox.com>
+    Acked-by: Christoph Hellwig <hch@lst.de>
+    Signed-off-by: Jens Axboe <axboe@fb.com>
+
+diff --git a/drivers/scsi/sd.h b/drivers/scsi/sd.h
+index 4c3ab8377fd3..467377884b63 100644
+--- a/drivers/scsi/sd.h
++++ b/drivers/scsi/sd.h
+@@ -166,6 +166,68 @@ enum sd_dif_target_protection_types {
+ 	SD_DIF_TYPE3_PROTECTION = 0x3,
+ };
+ 
++/*
++ * Look up the DIX operation based on whether the command is read or
++ * write and whether dix and dif are enabled.
++ */
++static inline unsigned int sd_prot_op(bool write, bool dix, bool dif)
++{
++	/* Lookup table: bit 2 (write), bit 1 (dix), bit 0 (dif) */
++	const unsigned int ops[] = {	/* wrt dix dif */
++		SCSI_PROT_NORMAL,	/*  0	0   0  */
++		SCSI_PROT_READ_STRIP,	/*  0	0   1  */
++		SCSI_PROT_READ_INSERT,	/*  0	1   0  */
++		SCSI_PROT_READ_PASS,	/*  0	1   1  */
++		SCSI_PROT_NORMAL,	/*  1	0   0  */
++		SCSI_PROT_WRITE_INSERT, /*  1	0   1  */
++		SCSI_PROT_WRITE_STRIP,	/*  1	1   0  */
++		SCSI_PROT_WRITE_PASS,	/*  1	1   1  */
++	};
++
++	return ops[write << 2 | dix << 1 | dif];
++}
++
++/*
++ * Returns a mask of the protection flags that are valid for a given DIX
++ * operation.
++ */
++static inline unsigned int sd_prot_flag_mask(unsigned int prot_op)
++{
++	const unsigned int flag_mask[] = {
++		[SCSI_PROT_NORMAL]		= 0,
++
++		[SCSI_PROT_READ_STRIP]		= SCSI_PROT_TRANSFER_PI |
++						  SCSI_PROT_GUARD_CHECK |
++						  SCSI_PROT_REF_CHECK |
++						  SCSI_PROT_REF_INCREMENT,
++
++		[SCSI_PROT_READ_INSERT]		= SCSI_PROT_REF_INCREMENT |
++						  SCSI_PROT_IP_CHECKSUM,
++
++		[SCSI_PROT_READ_PASS]		= SCSI_PROT_TRANSFER_PI |
++						  SCSI_PROT_GUARD_CHECK |
++						  SCSI_PROT_REF_CHECK |
++						  SCSI_PROT_REF_INCREMENT |
++						  SCSI_PROT_IP_CHECKSUM,
++
++		[SCSI_PROT_WRITE_INSERT]	= SCSI_PROT_TRANSFER_PI |
++						  SCSI_PROT_REF_INCREMENT,
++
++		[SCSI_PROT_WRITE_STRIP]		= SCSI_PROT_GUARD_CHECK |
++						  SCSI_PROT_REF_CHECK |
++						  SCSI_PROT_REF_INCREMENT |
++						  SCSI_PROT_IP_CHECKSUM,
++
++		[SCSI_PROT_WRITE_PASS]		= SCSI_PROT_TRANSFER_PI |
++						  SCSI_PROT_GUARD_CHECK |
++						  SCSI_PROT_REF_CHECK |
++						  SCSI_PROT_REF_INCREMENT |
++						  SCSI_PROT_IP_CHECKSUM,
++	};
++
++	return flag_mask[prot_op];
++}
++
+ /*
+  * Data Integrity Field tuple.
+  */
+@@ -178,7 +240,7 @@ struct sd_dif_tuple {
+ #ifdef CONFIG_BLK_DEV_INTEGRITY
+ 
+ extern void sd_dif_config_host(struct scsi_disk *);
+-extern void sd_dif_prepare(struct request *rq, sector_t, unsigned int);
++extern void sd_dif_prepare(struct scsi_cmnd *scmd);
+ extern void sd_dif_complete(struct scsi_cmnd *, unsigned int);
+ 
+ #else /* CONFIG_BLK_DEV_INTEGRITY */
+@@ -186,7 +248,7 @@ extern void sd_dif_complete(struct scsi_cmnd *, unsigned int);
+ static inline void sd_dif_config_host(struct scsi_disk *disk)
+ {
+ }
+-static inline int sd_dif_prepare(struct request *rq, sector_t s, unsigned int a)
++static inline int sd_dif_prepare(struct scsi_cmnd *scmd)
+ {
+ 	return 0;
+ }

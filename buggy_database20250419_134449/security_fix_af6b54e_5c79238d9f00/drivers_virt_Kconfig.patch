@@ -1,0 +1,76 @@
+commit af6b54e2b5baa54c844573b6d49cc91157bcdd7e
+Author: Jason A. Donenfeld <Jason@zx2c4.com>
+Date:   Wed Feb 23 13:46:24 2022 +0100
+
+    virt: vmgenid: notify RNG of VM fork and supply generation ID
+    
+    VM Generation ID is a feature from Microsoft, described at
+    <https://go.microsoft.com/fwlink/?LinkId=260709>, and supported by
+    Hyper-V and QEMU. Its usage is described in Microsoft's RNG whitepaper,
+    <https://aka.ms/win10rng>, as:
+    
+        If the OS is running in a VM, there is a problem that most
+        hypervisors can snapshot the state of the machine and later rewind
+        the VM state to the saved state. This results in the machine running
+        a second time with the exact same RNG state, which leads to serious
+        security problems.  To reduce the window of vulnerability, Windows
+        10 on a Hyper-V VM will detect when the VM state is reset, retrieve
+        a unique (not random) value from the hypervisor, and reseed the root
+        RNG with that unique value.  This does not eliminate the
+        vulnerability, but it greatly reduces the time during which the RNG
+        system will produce the same outputs as it did during a previous
+        instantiation of the same VM state.
+    
+    Linux has the same issue, and given that vmgenid is supported already by
+    multiple hypervisors, we can implement more or less the same solution.
+    So this commit wires up the vmgenid ACPI notification to the RNG's newly
+    added add_vmfork_randomness() function.
+    
+    It can be used from qemu via the `-device vmgenid,guid=auto` parameter.
+    After setting that, use `savevm` in the monitor to save the VM state,
+    then quit QEMU, start it again, and use `loadvm`. That will trigger this
+    driver's notify function, which hands the new UUID to the RNG. This is
+    described in <https://git.qemu.org/?p=qemu.git;a=blob;f=docs/specs/vmgenid.txt>.
+    And there are hooks for this in libvirt as well, described in
+    <https://libvirt.org/formatdomain.html#general-metadata>.
+    
+    Note, however, that the treatment of this as a UUID is considered to be
+    an accidental QEMU nuance, per
+    <https://github.com/libguestfs/virt-v2v/blob/master/docs/vm-generation-id-across-hypervisors.txt>,
+    so this driver simply treats these bytes as an opaque 128-bit binary
+    blob, as per the spec. This doesn't really make a difference anyway,
+    considering that's how it ends up when handed to the RNG in the end.
+    
+    Cc: Alexander Graf <graf@amazon.com>
+    Cc: Adrian Catangiu <adrian@parity.io>
+    Cc: Daniel P. Berrangé <berrange@redhat.com>
+    Cc: Dominik Brodowski <linux@dominikbrodowski.net>
+    Cc: Wei Yongjun <weiyongjun1@huawei.com>
+    Tested-by: Souradeep Chakrabarti <souradch.linux@gmail.com> # With Hyper-V's virtual hardware
+    Reviewed-by: Ard Biesheuvel <ardb@kernel.org>
+    Reviewed-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+    Reviewed-by: Laszlo Ersek <lersek@redhat.com>
+    Signed-off-by: Jason A. Donenfeld <Jason@zx2c4.com>
+
+diff --git a/drivers/virt/Kconfig b/drivers/virt/Kconfig
+index 8061e8ef449f..121b9293c737 100644
+--- a/drivers/virt/Kconfig
++++ b/drivers/virt/Kconfig
+@@ -13,6 +13,17 @@ menuconfig VIRT_DRIVERS
+ 
+ if VIRT_DRIVERS
+ 
++config VMGENID
++	tristate "Virtual Machine Generation ID driver"
++	default y
++	depends on ACPI
++	help
++	  Say Y here to use the hypervisor-provided Virtual Machine Generation ID
++	  to reseed the RNG when the VM is cloned. This is highly recommended if
++	  you intend to do any rollback / cloning / snapshotting of VMs.
++
++	  Prefer Y to M so that this protection is activated very early.
++
+ config FSL_HV_MANAGER
+ 	tristate "Freescale hypervisor management driver"
+ 	depends on FSL_SOC

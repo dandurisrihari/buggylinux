@@ -1,0 +1,92 @@
+commit 3b619e22c4601b444ed2d6a5458271f72625ac89
+Author: Ard Biesheuvel <ardb@kernel.org>
+Date:   Thu Oct 27 17:59:08 2022 +0200
+
+    arm64: implement dynamic shadow call stack for Clang
+    
+    Implement dynamic shadow call stack support on Clang, by parsing the
+    unwind tables at init time to locate all occurrences of PACIASP/AUTIASP
+    instructions, and replacing them with the shadow call stack push and pop
+    instructions, respectively.
+    
+    This is useful because the overhead of the shadow call stack is
+    difficult to justify on hardware that implements pointer authentication
+    (PAC), and given that the PAC instructions are executed as NOPs on
+    hardware that doesn't, we can just replace them without breaking
+    anything. As PACIASP/AUTIASP are guaranteed to be paired with respect to
+    manipulations of the return address, replacing them 1:1 with shadow call
+    stack pushes and pops is guaranteed to result in the desired behavior.
+    
+    Signed-off-by: Ard Biesheuvel <ardb@kernel.org>
+    Reviewed-by: Sami Tolvanen <samitolvanen@google.com>
+    Tested-by: Sami Tolvanen <samitolvanen@google.com>
+    Link: https://lore.kernel.org/r/20221027155908.1940624-4-ardb@kernel.org
+    Signed-off-by: Will Deacon <will@kernel.org>
+
+diff --git a/arch/arm64/include/asm/scs.h b/arch/arm64/include/asm/scs.h
+index 8297bccf0784..ff7da1268a52 100644
+--- a/arch/arm64/include/asm/scs.h
++++ b/arch/arm64/include/asm/scs.h
+@@ -5,6 +5,7 @@
+ #ifdef __ASSEMBLY__
+ 
+ #include <asm/asm-offsets.h>
++#include <asm/sysreg.h>
+ 
+ #ifdef CONFIG_SHADOW_CALL_STACK
+ 	scs_sp	.req	x18
+@@ -24,6 +25,54 @@
+ 	.endm
+ #endif /* CONFIG_SHADOW_CALL_STACK */
+ 
++
++#else
++
++#include <linux/scs.h>
++#include <asm/cpufeature.h>
++
++#ifdef CONFIG_UNWIND_PATCH_PAC_INTO_SCS
++static inline bool should_patch_pac_into_scs(void)
++{
++	u64 reg;
++
++	/*
++	 * We only enable the shadow call stack dynamically if we are running
++	 * on a system that does not implement PAC or BTI. PAC and SCS provide
++	 * roughly the same level of protection, and BTI relies on the PACIASP
++	 * instructions serving as landing pads, preventing us from patching
++	 * those instructions into something else.
++	 */
++	reg = read_sysreg_s(SYS_ID_AA64ISAR1_EL1);
++	if (SYS_FIELD_GET(ID_AA64ISAR1_EL1, APA, reg) |
++	    SYS_FIELD_GET(ID_AA64ISAR1_EL1, API, reg))
++		return false;
++
++	reg = read_sysreg_s(SYS_ID_AA64ISAR2_EL1);
++	if (SYS_FIELD_GET(ID_AA64ISAR2_EL1, APA3, reg))
++		return false;
++
++	if (IS_ENABLED(CONFIG_ARM64_BTI_KERNEL)) {
++		reg = read_sysreg_s(SYS_ID_AA64PFR1_EL1);
++		if (reg & (0xf << ID_AA64PFR1_EL1_BT_SHIFT))
++			return false;
++	}
++	return true;
++}
++
++static inline void dynamic_scs_init(void)
++{
++	if (should_patch_pac_into_scs()) {
++		pr_info("Enabling dynamic shadow call stack\n");
++		static_branch_enable(&dynamic_scs_enabled);
++	}
++}
++#else
++static inline void dynamic_scs_init(void) {}
++#endif
++
++int scs_patch(const u8 eh_frame[], int size);
++
+ #endif /* __ASSEMBLY __ */
+ 
+ #endif /* _ASM_SCS_H */

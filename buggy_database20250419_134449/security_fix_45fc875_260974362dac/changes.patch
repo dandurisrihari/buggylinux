@@ -1,0 +1,285 @@
+diff --git a/arch/x86/include/asm/desc.h b/arch/x86/include/asm/desc.h
+index 4b5ef0c64291..ec05f9c1a62c 100644
+--- a/arch/x86/include/asm/desc.h
++++ b/arch/x86/include/asm/desc.h
+@@ -248,9 +248,77 @@ static inline void native_set_ldt(const void *addr, unsigned int entries)
+ 	}
+ }
+ 
++static inline void native_load_gdt(const struct desc_ptr *dtr)
++{
++	asm volatile("lgdt %0"::"m" (*dtr));
++}
++
++static inline void native_load_idt(const struct desc_ptr *dtr)
++{
++	asm volatile("lidt %0"::"m" (*dtr));
++}
++
++static inline void native_store_gdt(struct desc_ptr *dtr)
++{
++	asm volatile("sgdt %0":"=m" (*dtr));
++}
++
++static inline void native_store_idt(struct desc_ptr *dtr)
++{
++	asm volatile("sidt %0":"=m" (*dtr));
++}
++
++/*
++ * The LTR instruction marks the TSS GDT entry as busy. On 64-bit, the GDT is
++ * a read-only remapping. To prevent a page fault, the GDT is switched to the
++ * original writeable version when needed.
++ */
++#ifdef CONFIG_X86_64
+ static inline void native_load_tr_desc(void)
+ {
++	struct desc_ptr gdt;
++	int cpu = raw_smp_processor_id();
++	bool restore = 0;
++	struct desc_struct *fixmap_gdt;
++
++	native_store_gdt(&gdt);
++	fixmap_gdt = get_cpu_gdt_ro(cpu);
++
++	/*
++	 * If the current GDT is the read-only fixmap, swap to the original
++	 * writeable version. Swap back at the end.
++	 */
++	if (gdt.address == (unsigned long)fixmap_gdt) {
++		load_direct_gdt(cpu);
++		restore = 1;
++	}
+ 	asm volatile("ltr %w0"::"q" (GDT_ENTRY_TSS*8));
++	if (restore)
++		load_fixmap_gdt(cpu);
++}
++#else
++static inline void native_load_tr_desc(void)
++{
++	asm volatile("ltr %w0"::"q" (GDT_ENTRY_TSS*8));
++}
++#endif
++
++static inline unsigned long native_store_tr(void)
++{
++	unsigned long tr;
++
++	asm volatile("str %0":"=r" (tr));
++
++	return tr;
++}
++
++static inline void native_load_tls(struct thread_struct *t, unsigned int cpu)
++{
++	struct desc_struct *gdt = get_cpu_gdt_rw(cpu);
++	unsigned int i;
++
++	for (i = 0; i < GDT_ENTRY_TLS_ENTRIES; i++)
++		gdt[GDT_ENTRY_TLS_MIN + i] = t->tls_array[i];
+ }
+ 
+ DECLARE_PER_CPU(bool, __tss_limit_invalid);
+@@ -305,44 +373,6 @@ static inline void invalidate_tss_limit(void)
+ 		this_cpu_write(__tss_limit_invalid, true);
+ }
+ 
+-static inline void native_load_gdt(const struct desc_ptr *dtr)
+-{
+-	asm volatile("lgdt %0"::"m" (*dtr));
+-}
+-
+-static inline void native_load_idt(const struct desc_ptr *dtr)
+-{
+-	asm volatile("lidt %0"::"m" (*dtr));
+-}
+-
+-static inline void native_store_gdt(struct desc_ptr *dtr)
+-{
+-	asm volatile("sgdt %0":"=m" (*dtr));
+-}
+-
+-static inline void native_store_idt(struct desc_ptr *dtr)
+-{
+-	asm volatile("sidt %0":"=m" (*dtr));
+-}
+-
+-static inline unsigned long native_store_tr(void)
+-{
+-	unsigned long tr;
+-
+-	asm volatile("str %0":"=r" (tr));
+-
+-	return tr;
+-}
+-
+-static inline void native_load_tls(struct thread_struct *t, unsigned int cpu)
+-{
+-	struct desc_struct *gdt = get_cpu_gdt_rw(cpu);
+-	unsigned int i;
+-
+-	for (i = 0; i < GDT_ENTRY_TLS_ENTRIES; i++)
+-		gdt[GDT_ENTRY_TLS_MIN + i] = t->tls_array[i];
+-}
+-
+ /* This intentionally ignores lm, since 32-bit apps don't have that field. */
+ #define LDT_empty(info)					\
+ 	((info)->base_addr		== 0	&&	\
+diff --git a/arch/x86/include/asm/processor.h b/arch/x86/include/asm/processor.h
+index 1150e1b21b0d..edf42c4ac8c8 100644
+--- a/arch/x86/include/asm/processor.h
++++ b/arch/x86/include/asm/processor.h
+@@ -716,6 +716,7 @@ extern struct desc_ptr		early_gdt_descr;
+ 
+ extern void cpu_set_gdt(int);
+ extern void switch_to_new_gdt(int);
++extern void load_direct_gdt(int);
+ extern void load_fixmap_gdt(int);
+ extern void load_percpu_segment(int);
+ extern void cpu_init(void);
+diff --git a/arch/x86/kernel/cpu/common.c b/arch/x86/kernel/cpu/common.c
+index 3cf1590ec9ce..f8e22dbad86c 100644
+--- a/arch/x86/kernel/cpu/common.c
++++ b/arch/x86/kernel/cpu/common.c
+@@ -448,8 +448,15 @@ void load_percpu_segment(int cpu)
+ 	load_stack_canary_segment();
+ }
+ 
+-/* Used by XEN to force the GDT read-only when required */
++/*
++ * On 64-bit the GDT remapping is read-only.
++ * A global is used for Xen to change the default when required.
++ */
++#ifdef CONFIG_X86_64
++pgprot_t pg_fixmap_gdt_flags = PAGE_KERNEL_RO;
++#else
+ pgprot_t pg_fixmap_gdt_flags = PAGE_KERNEL;
++#endif
+ 
+ /* Setup the fixmap mapping only once per-processor */
+ static inline void setup_fixmap_gdt(int cpu)
+@@ -458,6 +465,17 @@ static inline void setup_fixmap_gdt(int cpu)
+ 		     __pa(get_cpu_gdt_rw(cpu)), pg_fixmap_gdt_flags);
+ }
+ 
++/* Load the original GDT from the per-cpu structure */
++void load_direct_gdt(int cpu)
++{
++	struct desc_ptr gdt_descr;
++
++	gdt_descr.address = (long)get_cpu_gdt_rw(cpu);
++	gdt_descr.size = GDT_SIZE - 1;
++	load_gdt(&gdt_descr);
++}
++EXPORT_SYMBOL_GPL(load_direct_gdt);
++
+ /* Load a fixmap remapping of the per-cpu GDT */
+ void load_fixmap_gdt(int cpu)
+ {
+@@ -467,6 +485,7 @@ void load_fixmap_gdt(int cpu)
+ 	gdt_descr.size = GDT_SIZE - 1;
+ 	load_gdt(&gdt_descr);
+ }
++EXPORT_SYMBOL_GPL(load_fixmap_gdt);
+ 
+ /*
+  * Current gdt points %fs at the "master" per-cpu area: after this,
+@@ -474,11 +493,8 @@ void load_fixmap_gdt(int cpu)
+  */
+ void switch_to_new_gdt(int cpu)
+ {
+-	struct desc_ptr gdt_descr;
+-
+-	gdt_descr.address = (long)get_cpu_gdt_rw(cpu);
+-	gdt_descr.size = GDT_SIZE - 1;
+-	load_gdt(&gdt_descr);
++	/* Load the original GDT */
++	load_direct_gdt(cpu);
+ 	/* Reload the per-cpu base */
+ 	load_percpu_segment(cpu);
+ }
+diff --git a/arch/x86/kvm/svm.c b/arch/x86/kvm/svm.c
+index d1efe2c62b3f..c02b9af2056a 100644
+--- a/arch/x86/kvm/svm.c
++++ b/arch/x86/kvm/svm.c
+@@ -741,7 +741,6 @@ static int svm_hardware_enable(void)
+ 
+ 	struct svm_cpu_data *sd;
+ 	uint64_t efer;
+-	struct desc_ptr gdt_descr;
+ 	struct desc_struct *gdt;
+ 	int me = raw_smp_processor_id();
+ 
+@@ -763,8 +762,7 @@ static int svm_hardware_enable(void)
+ 	sd->max_asid = cpuid_ebx(SVM_CPUID_FUNC) - 1;
+ 	sd->next_asid = sd->max_asid + 1;
+ 
+-	native_store_gdt(&gdt_descr);
+-	gdt = (struct desc_struct *)gdt_descr.address;
++	gdt = get_current_gdt_rw();
+ 	sd->tss_desc = (struct kvm_ldttss_desc *)(gdt + GDT_ENTRY_TSS);
+ 
+ 	wrmsrl(MSR_EFER, efer | EFER_SVME);
+diff --git a/arch/x86/kvm/vmx.c b/arch/x86/kvm/vmx.c
+index 98e82ee1e699..596a76d82b11 100644
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -935,7 +935,6 @@ static DEFINE_PER_CPU(struct vmcs *, current_vmcs);
+  * when a CPU is brought down, and we need to VMCLEAR all VMCSs loaded on it.
+  */
+ static DEFINE_PER_CPU(struct list_head, loaded_vmcss_on_cpu);
+-static DEFINE_PER_CPU(struct desc_ptr, host_gdt);
+ 
+ /*
+  * We maintian a per-CPU linked-list of vCPU, so in wakeup_handler() we
+@@ -2052,14 +2051,13 @@ static bool update_transition_efer(struct vcpu_vmx *vmx, int efer_offset)
+  */
+ static unsigned long segment_base(u16 selector)
+ {
+-	struct desc_ptr *gdt = this_cpu_ptr(&host_gdt);
+ 	struct desc_struct *table;
+ 	unsigned long v;
+ 
+ 	if (!(selector & ~SEGMENT_RPL_MASK))
+ 		return 0;
+ 
+-	table = (struct desc_struct *)gdt->address;
++	table = get_current_gdt_ro();
+ 
+ 	if ((selector & SEGMENT_TI_MASK) == SEGMENT_LDT) {
+ 		u16 ldt_selector = kvm_read_ldt();
+@@ -2164,7 +2162,7 @@ static void __vmx_load_host_state(struct vcpu_vmx *vmx)
+ #endif
+ 	if (vmx->host_state.msr_host_bndcfgs)
+ 		wrmsrl(MSR_IA32_BNDCFGS, vmx->host_state.msr_host_bndcfgs);
+-	load_gdt(this_cpu_ptr(&host_gdt));
++	load_fixmap_gdt(raw_smp_processor_id());
+ }
+ 
+ static void vmx_load_host_state(struct vcpu_vmx *vmx)
+@@ -2266,7 +2264,7 @@ static void vmx_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
+ 	}
+ 
+ 	if (!already_loaded) {
+-		struct desc_ptr *gdt = this_cpu_ptr(&host_gdt);
++		unsigned long gdt = get_current_gdt_ro_vaddr();
+ 		unsigned long sysenter_esp;
+ 
+ 		kvm_make_request(KVM_REQ_TLB_FLUSH, vcpu);
+@@ -2277,7 +2275,7 @@ static void vmx_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
+ 		 */
+ 		vmcs_writel(HOST_TR_BASE,
+ 			    (unsigned long)this_cpu_ptr(&cpu_tss));
+-		vmcs_writel(HOST_GDTR_BASE, gdt->address);
++		vmcs_writel(HOST_GDTR_BASE, gdt);   /* 22.2.4 */
+ 
+ 		/*
+ 		 * VM exits change the host TR limit to 0x67 after a VM
+@@ -3465,8 +3463,6 @@ static int hardware_enable(void)
+ 		ept_sync_global();
+ 	}
+ 
+-	native_store_gdt(this_cpu_ptr(&host_gdt));
+-
+ 	return 0;
+ }

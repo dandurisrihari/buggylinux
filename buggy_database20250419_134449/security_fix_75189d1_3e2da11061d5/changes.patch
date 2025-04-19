@@ -1,0 +1,54 @@
+diff --git a/arch/x86/kvm/pmu.h b/arch/x86/kvm/pmu.h
+index 9e66fba1d6a3..22992b049d38 100644
+--- a/arch/x86/kvm/pmu.h
++++ b/arch/x86/kvm/pmu.h
+@@ -138,6 +138,15 @@ static inline u64 get_sample_period(struct kvm_pmc *pmc, u64 counter_value)
+ 	return sample_period;
+ }
+ 
++static inline void pmc_update_sample_period(struct kvm_pmc *pmc)
++{
++	if (!pmc->perf_event || pmc->is_paused)
++		return;
++
++	perf_event_period(pmc->perf_event,
++			  get_sample_period(pmc, pmc->counter));
++}
++
+ void reprogram_gp_counter(struct kvm_pmc *pmc, u64 eventsel);
+ void reprogram_fixed_counter(struct kvm_pmc *pmc, u8 ctrl, int fixed_idx);
+ void reprogram_counter(struct kvm_pmu *pmu, int pmc_idx);
+diff --git a/arch/x86/kvm/svm/pmu.c b/arch/x86/kvm/svm/pmu.c
+index 24eb935b6f85..b14860863c39 100644
+--- a/arch/x86/kvm/svm/pmu.c
++++ b/arch/x86/kvm/svm/pmu.c
+@@ -257,6 +257,7 @@ static int amd_pmu_set_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
+ 	pmc = get_gp_pmc_amd(pmu, msr, PMU_TYPE_COUNTER);
+ 	if (pmc) {
+ 		pmc->counter += data - pmc_read_counter(pmc);
++		pmc_update_sample_period(pmc);
+ 		return 0;
+ 	}
+ 	/* MSR_EVNTSELn */
+diff --git a/arch/x86/kvm/vmx/pmu_intel.c b/arch/x86/kvm/vmx/pmu_intel.c
+index bc3f8512bb64..b82b6709d7a8 100644
+--- a/arch/x86/kvm/vmx/pmu_intel.c
++++ b/arch/x86/kvm/vmx/pmu_intel.c
+@@ -431,15 +431,11 @@ static int intel_pmu_set_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
+ 			    !(msr & MSR_PMC_FULL_WIDTH_BIT))
+ 				data = (s64)(s32)data;
+ 			pmc->counter += data - pmc_read_counter(pmc);
+-			if (pmc->perf_event && !pmc->is_paused)
+-				perf_event_period(pmc->perf_event,
+-						  get_sample_period(pmc, data));
++			pmc_update_sample_period(pmc);
+ 			return 0;
+ 		} else if ((pmc = get_fixed_pmc(pmu, msr))) {
+ 			pmc->counter += data - pmc_read_counter(pmc);
+-			if (pmc->perf_event && !pmc->is_paused)
+-				perf_event_period(pmc->perf_event,
+-						  get_sample_period(pmc, data));
++			pmc_update_sample_period(pmc);
+ 			return 0;
+ 		} else if ((pmc = get_gp_pmc(pmu, msr, MSR_P6_EVNTSEL0))) {
+ 			if (data == pmc->eventsel)

@@ -1,0 +1,116 @@
+commit d264ee0c2ed20c6a426663590d4fc7a36cb6abd7
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Mon Aug 27 15:21:12 2018 -0700
+
+    KVM: VMX: use preemption timer to force immediate VMExit
+    
+    A VMX preemption timer value of '0' is guaranteed to cause a VMExit
+    prior to the CPU executing any instructions in the guest.  Use the
+    preemption timer (if it's supported) to trigger immediate VMExit
+    in place of the current method of sending a self-IPI.  This ensures
+    that pending VMExit injection to L1 occurs prior to executing any
+    instructions in the guest (regardless of nesting level).
+    
+    When deferring VMExit injection, KVM generates an immediate VMExit
+    from the (possibly nested) guest by sending itself an IPI.  Because
+    hardware interrupts are blocked prior to VMEnter and are unblocked
+    (in hardware) after VMEnter, this results in taking a VMExit(INTR)
+    before any guest instruction is executed.  But, as this approach
+    relies on the IPI being received before VMEnter executes, it only
+    works as intended when KVM is running as L0.  Because there are no
+    architectural guarantees regarding when IPIs are delivered, when
+    running nested the INTR may "arrive" long after L2 is running e.g.
+    L0 KVM doesn't force an immediate switch to L1 to deliver an INTR.
+    
+    For the most part, this unintended delay is not an issue since the
+    events being injected to L1 also do not have architectural guarantees
+    regarding their timing.  The notable exception is the VMX preemption
+    timer[1], which is architecturally guaranteed to cause a VMExit prior
+    to executing any instructions in the guest if the timer value is '0'
+    at VMEnter.  Specifically, the delay in injecting the VMExit causes
+    the preemption timer KVM unit test to fail when run in a nested guest.
+    
+    Note: this approach is viable even on CPUs with a broken preemption
+    timer, as broken in this context only means the timer counts at the
+    wrong rate.  There are no known errata affecting timer value of '0'.
+    
+    [1] I/O SMIs also have guarantees on when they arrive, but I have
+        no idea if/how those are emulated in KVM.
+    
+    Signed-off-by: Sean Christopherson <sean.j.christopherson@intel.com>
+    [Use a hook for SVM instead of leaving the default in x86.c - Paolo]
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/vmx.c b/arch/x86/kvm/vmx.c
+index 62670b2f6d48..a4a1585f47f1 100644
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -1020,6 +1020,8 @@ struct vcpu_vmx {
+ 	int ple_window;
+ 	bool ple_window_dirty;
+ 
++	bool req_immediate_exit;
++
+ 	/* Support for PML */
+ #define PML_ENTITY_NUM		512
+ 	struct page *pml_pg;
+@@ -2865,6 +2867,8 @@ static void vmx_prepare_switch_to_guest(struct kvm_vcpu *vcpu)
+ 	u16 fs_sel, gs_sel;
+ 	int i;
+ 
++	vmx->req_immediate_exit = false;
++
+ 	if (vmx->loaded_cpu_state)
+ 		return;
+ 
+@@ -7967,6 +7971,9 @@ static __init int hardware_setup(void)
+ 		kvm_x86_ops->enable_log_dirty_pt_masked = NULL;
+ 	}
+ 
++	if (!cpu_has_vmx_preemption_timer())
++		kvm_x86_ops->request_immediate_exit = __kvm_request_immediate_exit;
++
+ 	if (cpu_has_vmx_preemption_timer() && enable_preemption_timer) {
+ 		u64 vmx_msr;
+ 
+@@ -9209,7 +9216,8 @@ static int handle_pml_full(struct kvm_vcpu *vcpu)
+ 
+ static int handle_preemption_timer(struct kvm_vcpu *vcpu)
+ {
+-	kvm_lapic_expired_hv_timer(vcpu);
++	if (!to_vmx(vcpu)->req_immediate_exit)
++		kvm_lapic_expired_hv_timer(vcpu);
+ 	return 1;
+ }
+ 
+@@ -10611,6 +10619,11 @@ static void vmx_update_hv_timer(struct kvm_vcpu *vcpu)
+ 	u64 tscl;
+ 	u32 delta_tsc;
+ 
++	if (vmx->req_immediate_exit) {
++		vmx_arm_hv_timer(vmx, 0);
++		return;
++	}
++
+ 	if (vmx->hv_deadline_tsc != -1) {
+ 		tscl = rdtsc();
+ 		if (vmx->hv_deadline_tsc > tscl)
+@@ -12879,6 +12892,11 @@ static int vmx_check_nested_events(struct kvm_vcpu *vcpu, bool external_intr)
+ 	return 0;
+ }
+ 
++static void vmx_request_immediate_exit(struct kvm_vcpu *vcpu)
++{
++	to_vmx(vcpu)->req_immediate_exit = true;
++}
++
+ static u32 vmx_get_preemption_timer_value(struct kvm_vcpu *vcpu)
+ {
+ 	ktime_t remaining =
+@@ -14135,6 +14153,7 @@ static struct kvm_x86_ops vmx_x86_ops __ro_after_init = {
+ 	.umip_emulated = vmx_umip_emulated,
+ 
+ 	.check_nested_events = vmx_check_nested_events,
++	.request_immediate_exit = vmx_request_immediate_exit,
+ 
+ 	.sched_in = vmx_sched_in,

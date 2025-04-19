@@ -1,0 +1,75 @@
+commit f235bc11cc95fcd5847e8249d4c1c9ae5979701c
+Author: Eric Biggers <ebiggers@google.com>
+Date:   Fri Aug 9 16:11:49 2024 -0700
+
+    crypto: arm/aes-neonbs - go back to using aes-arm directly
+    
+    In aes-neonbs, instead of going through the crypto API for the parts
+    that the bit-sliced AES code doesn't handle, namely AES-CBC encryption
+    and single-block AES, just call the ARM scalar AES cipher directly.
+    
+    This basically goes back to the original approach that was used before
+    commit b56f5cbc7e08 ("crypto: arm/aes-neonbs - resolve fallback cipher
+    at runtime").  Calling the ARM scalar AES cipher directly is faster,
+    simpler, and avoids any chance of bugs specific to the use of fallback
+    ciphers such as module loading deadlocks which have happened twice.  The
+    deadlocks turned out to be fixable in other ways, but there's no need to
+    rely on anything so fragile in the first place.
+    
+    The rationale for the above-mentioned commit was to allow people to
+    choose to use a time-invariant AES implementation for the fallback
+    cipher.  There are a couple problems with that rationale, though:
+    
+    - In practice the ARM scalar AES cipher (aes-arm) was used anyway, since
+      it has a higher priority than aes-fixed-time.  Users *could* go out of
+      their way to disable or blacklist aes-arm, or to lower its priority
+      using NETLINK_CRYPTO, but very few users customize the crypto API to
+      this extent.  Systems with the ARMv8 Crypto Extensions used aes-ce,
+      but the bit-sliced algorithms are irrelevant on such systems anyway.
+    
+    - Since commit 913a3aa07d16 ("crypto: arm/aes - add some hardening
+      against cache-timing attacks"), the ARM scalar AES cipher is partially
+      hardened against cache-timing attacks.  It actually works like
+      aes-fixed-time, in that it disables interrupts and prefetches its
+      lookup table.  It does use a larger table than aes-fixed-time, but
+      even so, it is not clear that aes-fixed-time is meaningfully more
+      time-invariant than aes-arm.  And of course, the real solution for
+      time-invariant AES is to use a CPU that supports AES instructions.
+    
+    Signed-off-by: Eric Biggers <ebiggers@google.com>
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+diff --git a/arch/arm/crypto/Kconfig b/arch/arm/crypto/Kconfig
+index 847b7a003356..5ff49a5e9afc 100644
+--- a/arch/arm/crypto/Kconfig
++++ b/arch/arm/crypto/Kconfig
+@@ -166,10 +166,9 @@ config CRYPTO_AES_ARM
+ config CRYPTO_AES_ARM_BS
+ 	tristate "Ciphers: AES, modes: ECB/CBC/CTR/XTS (bit-sliced NEON)"
+ 	depends on KERNEL_MODE_NEON
++	select CRYPTO_AES_ARM
+ 	select CRYPTO_SKCIPHER
+ 	select CRYPTO_LIB_AES
+-	select CRYPTO_AES
+-	select CRYPTO_CBC
+ 	select CRYPTO_SIMD
+ 	help
+ 	  Length-preserving ciphers: AES cipher algorithms (FIPS-197)
+@@ -183,8 +182,15 @@ config CRYPTO_AES_ARM_BS
+ 	  Bit sliced AES gives around 45% speedup on Cortex-A15 for CTR mode
+ 	  and for XTS mode encryption, CBC and XTS mode decryption speedup is
+ 	  around 25%. (CBC encryption speed is not affected by this driver.)
+-	  This implementation does not rely on any lookup tables so it is
+-	  believed to be invulnerable to cache timing attacks.
++
++	  The bit sliced AES code does not use lookup tables, so it is believed
++	  to be invulnerable to cache timing attacks. However, since the bit
++	  sliced AES code cannot process single blocks efficiently, in certain
++	  cases table-based code with some countermeasures against cache timing
++	  attacks will still be used as a fallback method; specifically CBC
++	  encryption (not CBC decryption), the encryption of XTS tweaks, XTS
++	  ciphertext stealing when the message isn't a multiple of 16 bytes, and
++	  CTR when invoked in a context in which NEON instructions are unusable.
+ 
+ config CRYPTO_AES_ARM_CE
+ 	tristate "Ciphers: AES, modes: ECB/CBC/CTS/CTR/XTS (ARMv8 Crypto Extensions)"

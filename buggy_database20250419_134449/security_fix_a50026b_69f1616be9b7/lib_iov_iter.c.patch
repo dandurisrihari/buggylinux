@@ -1,0 +1,128 @@
+commit a50026bdb867c8caf9d29e18f9fe9e1390312619
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Tue Mar 5 21:33:36 2024 +0800
+
+    iov_iter: get rid of 'copy_mc' flag
+    
+    This flag is only set by one single user: the magical core dumping code
+    that looks up user pages one by one, and then writes them out using
+    their kernel addresses (by using a BVEC_ITER).
+    
+    That actually ends up being a huge problem, because while we do use
+    copy_mc_to_kernel() for this case and it is able to handle the possible
+    machine checks involved, nothing else is really ready to handle the
+    failures caused by the machine check.
+    
+    In particular, as reported by Tong Tiangen, we don't actually support
+    fault_in_iov_iter_readable() on a machine check area.
+    
+    As a result, the usual logic for writing things to a file under a
+    filesystem lock, which involves doing a copy with page faults disabled
+    and then if that fails trying to fault pages in without holding the
+    locks with fault_in_iov_iter_readable() does not work at all.
+    
+    We could decide to always just make the MC copy "succeed" (and filling
+    the destination with zeroes), and that would then create a core dump
+    file that just ignores any machine checks.
+    
+    But honestly, this single special case has been problematic before, and
+    means that all the normal iov_iter code ends up slightly more complex
+    and slower.
+    
+    See for example commit c9eec08bac96 ("iov_iter: Don't deal with
+    iter->copy_mc in memcpy_from_iter_mc()") where David Howells
+    re-organized the code just to avoid having to check the 'copy_mc' flags
+    inside the inner iov_iter loops.
+    
+    So considering that we have exactly one user, and that one user is a
+    non-critical special case that doesn't actually ever trigger in real
+    life (Tong found this with manual error injection), the sane solution is
+    to just decide that the onus on handling the machine check lines on that
+    user instead.
+    
+    Ergo, do the copy_mc_to_kernel() in the core dump logic itself, copying
+    the user data to a stable kernel page before writing it out.
+    
+    Fixes: f1982740f5e7 ("iov_iter: Convert iterate*() to inline funcs")
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+    Signed-off-by: Tong Tiangen <tongtiangen@huawei.com>
+    Link: https://lore.kernel.org/r/20240305133336.3804360-1-tongtiangen@huawei.com
+    Link: https://lore.kernel.org/all/4e80924d-9c85-f13a-722a-6a5d2b1c225a@huawei.com/
+    Tested-by: David Howells <dhowells@redhat.com>
+    Reviewed-by: David Howells <dhowells@redhat.com>
+    Reviewed-by: Jens Axboe <axboe@kernel.dk>
+    Reported-by: Tong Tiangen <tongtiangen@huawei.com>
+    Signed-off-by: Christian Brauner <brauner@kernel.org>
+
+diff --git a/lib/iov_iter.c b/lib/iov_iter.c
+index e0aa6b440ca5..cf2eb2b2f983 100644
+--- a/lib/iov_iter.c
++++ b/lib/iov_iter.c
+@@ -166,7 +166,6 @@ void iov_iter_init(struct iov_iter *i, unsigned int direction,
+ 	WARN_ON(direction & ~(READ | WRITE));
+ 	*i = (struct iov_iter) {
+ 		.iter_type = ITER_IOVEC,
+-		.copy_mc = false,
+ 		.nofault = false,
+ 		.data_source = direction,
+ 		.__iov = iov,
+@@ -244,27 +243,9 @@ size_t _copy_mc_to_iter(const void *addr, size_t bytes, struct iov_iter *i)
+ EXPORT_SYMBOL_GPL(_copy_mc_to_iter);
+ #endif /* CONFIG_ARCH_HAS_COPY_MC */
+ 
+-static __always_inline
+-size_t memcpy_from_iter_mc(void *iter_from, size_t progress,
+-			   size_t len, void *to, void *priv2)
+-{
+-	return copy_mc_to_kernel(to + progress, iter_from, len);
+-}
+-
+-static size_t __copy_from_iter_mc(void *addr, size_t bytes, struct iov_iter *i)
+-{
+-	if (unlikely(i->count < bytes))
+-		bytes = i->count;
+-	if (unlikely(!bytes))
+-		return 0;
+-	return iterate_bvec(i, bytes, addr, NULL, memcpy_from_iter_mc);
+-}
+-
+ static __always_inline
+ size_t __copy_from_iter(void *addr, size_t bytes, struct iov_iter *i)
+ {
+-	if (unlikely(iov_iter_is_copy_mc(i)))
+-		return __copy_from_iter_mc(addr, bytes, i);
+ 	return iterate_and_advance(i, bytes, addr,
+ 				   copy_from_user_iter, memcpy_from_iter);
+ }
+@@ -633,7 +614,6 @@ void iov_iter_kvec(struct iov_iter *i, unsigned int direction,
+ 	WARN_ON(direction & ~(READ | WRITE));
+ 	*i = (struct iov_iter){
+ 		.iter_type = ITER_KVEC,
+-		.copy_mc = false,
+ 		.data_source = direction,
+ 		.kvec = kvec,
+ 		.nr_segs = nr_segs,
+@@ -650,7 +630,6 @@ void iov_iter_bvec(struct iov_iter *i, unsigned int direction,
+ 	WARN_ON(direction & ~(READ | WRITE));
+ 	*i = (struct iov_iter){
+ 		.iter_type = ITER_BVEC,
+-		.copy_mc = false,
+ 		.data_source = direction,
+ 		.bvec = bvec,
+ 		.nr_segs = nr_segs,
+@@ -679,7 +658,6 @@ void iov_iter_xarray(struct iov_iter *i, unsigned int direction,
+ 	BUG_ON(direction & ~1);
+ 	*i = (struct iov_iter) {
+ 		.iter_type = ITER_XARRAY,
+-		.copy_mc = false,
+ 		.data_source = direction,
+ 		.xarray = xarray,
+ 		.xarray_start = start,
+@@ -703,7 +681,6 @@ void iov_iter_discard(struct iov_iter *i, unsigned int direction, size_t count)
+ 	BUG_ON(direction != READ);
+ 	*i = (struct iov_iter){
+ 		.iter_type = ITER_DISCARD,
+-		.copy_mc = false,
+ 		.data_source = false,
+ 		.count = count,
+ 		.iov_offset = 0

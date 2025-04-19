@@ -1,0 +1,80 @@
+commit 7aa81cc04781b5b99a0647ec04533599d78cd219
+Author: Anthony Liguori <aliguori@us.ibm.com>
+Date:   Mon Sep 17 14:57:50 2007 -0500
+
+    KVM: Refactor hypercall infrastructure (v3)
+    
+    This patch refactors the current hypercall infrastructure to better
+    support live migration and SMP.  It eliminates the hypercall page by
+    trapping the UD exception that would occur if you used the wrong hypercall
+    instruction for the underlying architecture and replacing it with the right
+    one lazily.
+    
+    A fall-out of this patch is that the unhandled hypercalls no longer trap to
+    userspace.  There is very little reason though to use a hypercall to
+    communicate with userspace as PIO or MMIO can be used.  There is no code
+    in tree that uses userspace hypercalls.
+    
+    [avi: fix #ud injection on vmx]
+    
+    Signed-off-by: Anthony Liguori <aliguori@us.ibm.com>
+    Signed-off-by: Avi Kivity <avi@qumranet.com>
+
+diff --git a/drivers/kvm/svm.c b/drivers/kvm/svm.c
+index ced4ac1955db..794d95416f7b 100644
+--- a/drivers/kvm/svm.c
++++ b/drivers/kvm/svm.c
+@@ -476,7 +476,8 @@ static void init_vmcb(struct vmcb *vmcb)
+ 					INTERCEPT_DR5_MASK |
+ 					INTERCEPT_DR7_MASK;
+ 
+-	control->intercept_exceptions = 1 << PF_VECTOR;
++	control->intercept_exceptions = (1 << PF_VECTOR) |
++					(1 << UD_VECTOR);
+ 
+ 
+ 	control->intercept = 	(1ULL << INTERCEPT_INTR) |
+@@ -979,6 +980,17 @@ static int pf_interception(struct vcpu_svm *svm, struct kvm_run *kvm_run)
+ 	return 0;
+ }
+ 
++static int ud_interception(struct vcpu_svm *svm, struct kvm_run *kvm_run)
++{
++	int er;
++
++	er = emulate_instruction(&svm->vcpu, kvm_run, 0, 0);
++	if (er != EMULATE_DONE)
++		inject_ud(&svm->vcpu);
++
++	return 1;
++}
++
+ static int nm_interception(struct vcpu_svm *svm, struct kvm_run *kvm_run)
+ {
+ 	svm->vmcb->control.intercept_exceptions &= ~(1 << NM_VECTOR);
+@@ -1045,7 +1057,8 @@ static int vmmcall_interception(struct vcpu_svm *svm, struct kvm_run *kvm_run)
+ {
+ 	svm->next_rip = svm->vmcb->save.rip + 3;
+ 	skip_emulated_instruction(&svm->vcpu);
+-	return kvm_hypercall(&svm->vcpu, kvm_run);
++	kvm_emulate_hypercall(&svm->vcpu);
++	return 1;
+ }
+ 
+ static int invalid_op_interception(struct vcpu_svm *svm,
+@@ -1241,6 +1254,7 @@ static int (*svm_exit_handlers[])(struct vcpu_svm *svm,
+ 	[SVM_EXIT_WRITE_DR3]			= emulate_on_interception,
+ 	[SVM_EXIT_WRITE_DR5]			= emulate_on_interception,
+ 	[SVM_EXIT_WRITE_DR7]			= emulate_on_interception,
++	[SVM_EXIT_EXCP_BASE + UD_VECTOR]	= ud_interception,
+ 	[SVM_EXIT_EXCP_BASE + PF_VECTOR] 	= pf_interception,
+ 	[SVM_EXIT_EXCP_BASE + NM_VECTOR] 	= nm_interception,
+ 	[SVM_EXIT_INTR] 			= nop_on_interception,
+@@ -1675,7 +1689,6 @@ svm_patch_hypercall(struct kvm_vcpu *vcpu, unsigned char *hypercall)
+ 	hypercall[0] = 0x0f;
+ 	hypercall[1] = 0x01;
+ 	hypercall[2] = 0xd9;
+-	hypercall[3] = 0xc3;
+ }
+ 
+ static void svm_check_processor_compat(void *rtn)

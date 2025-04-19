@@ -1,0 +1,275 @@
+diff --git a/arch/x86/Kconfig b/arch/x86/Kconfig
+index a148e7ac0d83..e25b6358fbe3 100644
+--- a/arch/x86/Kconfig
++++ b/arch/x86/Kconfig
+@@ -835,6 +835,14 @@ config X86_MCE_THRESHOLD
+ 	bool
+ 	default y
+ 
++config X86_MCE_INJECT
++	depends on X86_NEW_MCE
++	tristate "Machine check injector support"
++	---help---
++	  Provide support for injecting machine checks for testing purposes.
++	  If you don't know what a machine check is and you don't do kernel
++	  QA it is safe to say n.
++
+ config X86_MCE_NONFATAL
+ 	tristate "Check for non-fatal errors on AMD Athlon/Duron / Intel Pentium 4"
+ 	depends on X86_OLD_MCE
+diff --git a/arch/x86/include/asm/mce.h b/arch/x86/include/asm/mce.h
+index c3c7ee701753..e7d2372301ef 100644
+--- a/arch/x86/include/asm/mce.h
++++ b/arch/x86/include/asm/mce.h
+@@ -141,6 +141,9 @@ extern void machine_check_poll(enum mcp_flags flags, mce_banks_t *b);
+ 
+ extern int mce_notify_user(void);
+ 
++DECLARE_PER_CPU(struct mce, injectm);
++extern struct file_operations mce_chrdev_ops;
++
+ #ifdef CONFIG_X86_MCE
+ extern void mcheck_init(struct cpuinfo_x86 *c);
+ #else
+diff --git a/arch/x86/kernel/cpu/mcheck/Makefile b/arch/x86/kernel/cpu/mcheck/Makefile
+index 5f8b09425d39..60ee182c6c52 100644
+--- a/arch/x86/kernel/cpu/mcheck/Makefile
++++ b/arch/x86/kernel/cpu/mcheck/Makefile
+@@ -7,3 +7,4 @@ obj-$(CONFIG_X86_MCE_INTEL)	+= mce_intel_64.o mce_intel.o
+ obj-$(CONFIG_X86_MCE_AMD)	+= mce_amd_64.o
+ obj-$(CONFIG_X86_MCE_NONFATAL)	+= non-fatal.o
+ obj-$(CONFIG_X86_MCE_THRESHOLD) += threshold.o
++obj-$(CONFIG_X86_MCE_INJECT)	+= mce-inject.o
+diff --git a/arch/x86/kernel/cpu/mcheck/mce-inject.c b/arch/x86/kernel/cpu/mcheck/mce-inject.c
+new file mode 100644
+index 000000000000..58afac4b5df5
+--- /dev/null
++++ b/arch/x86/kernel/cpu/mcheck/mce-inject.c
+@@ -0,0 +1,126 @@
++/*
++ * Machine check injection support.
++ * Copyright 2008 Intel Corporation.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License
++ * as published by the Free Software Foundation; version 2
++ * of the License.
++ *
++ * Authors:
++ * Andi Kleen
++ * Ying Huang
++ */
++#include <linux/module.h>
++#include <linux/timer.h>
++#include <linux/kernel.h>
++#include <linux/string.h>
++#include <linux/fs.h>
++#include <linux/smp.h>
++#include <asm/uaccess.h>
++#include <asm/mce.h>
++
++/* Update fake mce registers on current CPU. */
++static void inject_mce(struct mce *m)
++{
++	struct mce *i = &per_cpu(injectm, m->cpu);
++
++	/* Make sure noone reads partially written injectm */
++	i->finished = 0;
++	mb();
++	m->finished = 0;
++	/* First set the fields after finished */
++	i->cpu = m->cpu;
++	mb();
++	/* Now write record in order, finished last (except above) */
++	memcpy(i, m, sizeof(struct mce));
++	/* Finally activate it */
++	mb();
++	i->finished = 1;
++}
++
++struct delayed_mce {
++	struct timer_list timer;
++	struct mce m;
++};
++
++/* Inject mce on current CPU */
++static void raise_mce(unsigned long data)
++{
++	struct delayed_mce *dm = (struct delayed_mce *)data;
++	struct mce *m = &dm->m;
++	int cpu = m->cpu;
++
++	inject_mce(m);
++	if (m->status & MCI_STATUS_UC) {
++		struct pt_regs regs;
++		memset(&regs, 0, sizeof(struct pt_regs));
++		regs.ip = m->ip;
++		regs.cs = m->cs;
++		printk(KERN_INFO "Triggering MCE exception on CPU %d\n", cpu);
++		do_machine_check(&regs, 0);
++		printk(KERN_INFO "MCE exception done on CPU %d\n", cpu);
++	} else {
++		mce_banks_t b;
++		memset(&b, 0xff, sizeof(mce_banks_t));
++		printk(KERN_INFO "Starting machine check poll CPU %d\n", cpu);
++		machine_check_poll(0, &b);
++		mce_notify_user();
++		printk(KERN_INFO "Finished machine check poll on CPU %d\n",
++		       cpu);
++	}
++	kfree(dm);
++}
++
++/* Error injection interface */
++static ssize_t mce_write(struct file *filp, const char __user *ubuf,
++			 size_t usize, loff_t *off)
++{
++	struct delayed_mce *dm;
++	struct mce m;
++
++	if (!capable(CAP_SYS_ADMIN))
++		return -EPERM;
++	/*
++	 * There are some cases where real MSR reads could slip
++	 * through.
++	 */
++	if (!boot_cpu_has(X86_FEATURE_MCE) || !boot_cpu_has(X86_FEATURE_MCA))
++		return -EIO;
++
++	if ((unsigned long)usize > sizeof(struct mce))
++		usize = sizeof(struct mce);
++	if (copy_from_user(&m, ubuf, usize))
++		return -EFAULT;
++
++	if (m.cpu >= NR_CPUS || !cpu_online(m.cpu))
++		return -EINVAL;
++
++	dm = kmalloc(sizeof(struct delayed_mce), GFP_KERNEL);
++	if (!dm)
++		return -ENOMEM;
++
++	/*
++	 * Need to give user space some time to set everything up,
++	 * so do it a jiffie or two later everywhere.
++	 * Should we use a hrtimer here for better synchronization?
++	 */
++	memcpy(&dm->m, &m, sizeof(struct mce));
++	setup_timer(&dm->timer, raise_mce, (unsigned long)dm);
++	dm->timer.expires = jiffies + 2;
++	add_timer_on(&dm->timer, m.cpu);
++	return usize;
++}
++
++static int inject_init(void)
++{
++	printk(KERN_INFO "Machine check injector initialized\n");
++	mce_chrdev_ops.write = mce_write;
++	return 0;
++}
++
++module_init(inject_init);
++/* Cannot tolerate unloading currently because we cannot
++ * guarantee all openers of mce_chrdev will get a reference to us.
++ */
++MODULE_LICENSE("GPL");
+diff --git a/arch/x86/kernel/cpu/mcheck/mce.c b/arch/x86/kernel/cpu/mcheck/mce.c
+index e755c95674dc..fe216bd10f43 100644
+--- a/arch/x86/kernel/cpu/mcheck/mce.c
++++ b/arch/x86/kernel/cpu/mcheck/mce.c
+@@ -98,6 +98,9 @@ void mce_setup(struct mce *m)
+ 	rdtscll(m->tsc);
+ }
+ 
++DEFINE_PER_CPU(struct mce, injectm);
++EXPORT_PER_CPU_SYMBOL_GPL(injectm);
++
+ /*
+  * Lockless MCE logging infrastructure.
+  * This avoids deadlocks on printk locks without having to break locks. Also
+@@ -194,16 +197,46 @@ static void mce_panic(char *msg, struct mce *backup, u64 start)
+ 	panic(msg);
+ }
+ 
++/* Support code for software error injection */
++
++static int msr_to_offset(u32 msr)
++{
++	unsigned bank = __get_cpu_var(injectm.bank);
++	if (msr == rip_msr)
++		return offsetof(struct mce, ip);
++	if (msr == MSR_IA32_MC0_STATUS + bank*4)
++		return offsetof(struct mce, status);
++	if (msr == MSR_IA32_MC0_ADDR + bank*4)
++		return offsetof(struct mce, addr);
++	if (msr == MSR_IA32_MC0_MISC + bank*4)
++		return offsetof(struct mce, misc);
++	if (msr == MSR_IA32_MCG_STATUS)
++		return offsetof(struct mce, mcgstatus);
++	return -1;
++}
++
+ /* MSR access wrappers used for error injection */
+ static u64 mce_rdmsrl(u32 msr)
+ {
+ 	u64 v;
++	if (__get_cpu_var(injectm).finished) {
++		int offset = msr_to_offset(msr);
++		if (offset < 0)
++			return 0;
++		return *(u64 *)((char *)&__get_cpu_var(injectm) + offset);
++	}
+ 	rdmsrl(msr, v);
+ 	return v;
+ }
+ 
+ static void mce_wrmsrl(u32 msr, u64 v)
+ {
++	if (__get_cpu_var(injectm).finished) {
++		int offset = msr_to_offset(msr);
++		if (offset >= 0)
++			*(u64 *)((char *)&__get_cpu_var(injectm) + offset) = v;
++		return;
++	}
+ 	wrmsrl(msr, v);
+ }
+ 
+@@ -296,6 +329,7 @@ void machine_check_poll(enum mcp_flags flags, mce_banks_t *b)
+ 	 * exceptions.
+ 	 */
+ }
++EXPORT_SYMBOL_GPL(machine_check_poll);
+ 
+ /*
+  * The actual machine check handler. This only handles real
+@@ -468,6 +502,7 @@ void do_machine_check(struct pt_regs *regs, long error_code)
+  out2:
+ 	atomic_dec(&mce_entry);
+ }
++EXPORT_SYMBOL_GPL(do_machine_check);
+ 
+ #ifdef CONFIG_X86_MCE_INTEL
+ /***
+@@ -568,6 +603,7 @@ int mce_notify_user(void)
+ 	}
+ 	return 0;
+ }
++EXPORT_SYMBOL_GPL(mce_notify_user);
+ 
+ /*
+  * Initialize Machine Checks for a CPU.
+@@ -904,13 +940,14 @@ static long mce_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
+ 	}
+ }
+ 
+-static const struct file_operations mce_chrdev_ops = {
++struct file_operations mce_chrdev_ops = {
+ 	.open			= mce_open,
+ 	.release		= mce_release,
+ 	.read			= mce_read,
+ 	.poll			= mce_poll,
+ 	.unlocked_ioctl		= mce_ioctl,
+ };
++EXPORT_SYMBOL_GPL(mce_chrdev_ops);
+ 
+ static struct miscdevice mce_log_device = {
+ 	MISC_MCELOG_MINOR,

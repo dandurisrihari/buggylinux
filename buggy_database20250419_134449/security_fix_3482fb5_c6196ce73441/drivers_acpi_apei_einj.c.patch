@@ -1,0 +1,140 @@
+commit 3482fb5e0c1c20ce0dbcfc5ca3b6558a8c455b10
+Author: Tony Luck <tony.luck@intel.com>
+Date:   Wed Nov 6 13:30:36 2013 -0800
+
+    ACPI, APEI, EINJ: Changes to the ACPI/APEI/EINJ debugfs interface
+    
+    When I added support for ACPI5 I made the assumption that
+    injected processor errors would just need to know the APICID,
+    memory errors just the address and mask, and PCIe errors just the
+    segment/bus/device/function. So I had the code check the type of injection
+    and multiplex the "param1" value appropriately.
+    
+    This was not a good assumption :-(
+    
+    There are injection scenarios where we need to specify more than one of
+    these items. E.g. injecting a cache error we need to specify an APICID
+    of the cpu that owns the cache, and also an address (so that we can trip
+    the error by accessing the address).
+    
+    Add a "flags" file to give the user direct access to specify which items
+    are valid in the ACPI SET_ERROR_TYPE_WITH_ADDRESS structure. Also add
+    new files param3 and param4 to hold all these values.
+    
+    For backwards compatability with old injection scripts we maintain the
+    old behaviour if flags remains set at zero (or is reset to 0).
+    
+    Acked-by: Naveen N. Rao <naveen.n.rao@linux.vnet.ibm.com>
+    Signed-off-by: Tony Luck <tony.luck@intel.com>
+
+diff --git a/drivers/acpi/apei/einj.c b/drivers/acpi/apei/einj.c
+index fb57d03e698b..c76674e2a01f 100644
+--- a/drivers/acpi/apei/einj.c
++++ b/drivers/acpi/apei/einj.c
+@@ -416,7 +416,8 @@ static int __einj_error_trigger(u64 trigger_paddr, u32 type,
+ 	return rc;
+ }
+ 
+-static int __einj_error_inject(u32 type, u64 param1, u64 param2)
++static int __einj_error_inject(u32 type, u32 flags, u64 param1, u64 param2,
++			       u64 param3, u64 param4)
+ {
+ 	struct apei_exec_context ctx;
+ 	u64 val, trigger_paddr, timeout = FIRMWARE_TIMEOUT;
+@@ -446,6 +447,12 @@ static int __einj_error_inject(u32 type, u64 param1, u64 param2)
+ 				break;
+ 			}
+ 			v5param->flags = vendor_flags;
++		} else if (flags) {
++				v5param->flags = flags;
++				v5param->memory_address = param1;
++				v5param->memory_address_range = param2;
++				v5param->apicid = param3;
++				v5param->pcie_sbdf = param4;
+ 		} else {
+ 			switch (type) {
+ 			case ACPI_EINJ_PROCESSOR_CORRECTABLE:
+@@ -514,11 +521,17 @@ static int __einj_error_inject(u32 type, u64 param1, u64 param2)
+ }
+ 
+ /* Inject the specified hardware error */
+-static int einj_error_inject(u32 type, u64 param1, u64 param2)
++static int einj_error_inject(u32 type, u32 flags, u64 param1, u64 param2,
++			     u64 param3, u64 param4)
+ {
+ 	int rc;
+ 	unsigned long pfn;
+ 
++	/* If user manually set "flags", make sure it is legal */
++	if (flags && (flags &
++		~(SETWA_FLAGS_APICID|SETWA_FLAGS_MEM|SETWA_FLAGS_PCIE_SBDF)))
++		return -EINVAL;
++
+ 	/*
+ 	 * We need extra sanity checks for memory errors.
+ 	 * Other types leap directly to injection.
+@@ -532,7 +545,7 @@ static int einj_error_inject(u32 type, u64 param1, u64 param2)
+ 	if (type & ACPI5_VENDOR_BIT) {
+ 		if (vendor_flags != SETWA_FLAGS_MEM)
+ 			goto inject;
+-	} else if (!(type & MEM_ERROR_MASK))
++	} else if (!(type & MEM_ERROR_MASK) && !(flags & SETWA_FLAGS_MEM))
+ 		goto inject;
+ 
+ 	/*
+@@ -546,15 +559,18 @@ static int einj_error_inject(u32 type, u64 param1, u64 param2)
+ 
+ inject:
+ 	mutex_lock(&einj_mutex);
+-	rc = __einj_error_inject(type, param1, param2);
++	rc = __einj_error_inject(type, flags, param1, param2, param3, param4);
+ 	mutex_unlock(&einj_mutex);
+ 
+ 	return rc;
+ }
+ 
+ static u32 error_type;
++static u32 error_flags;
+ static u64 error_param1;
+ static u64 error_param2;
++static u64 error_param3;
++static u64 error_param4;
+ static struct dentry *einj_debug_dir;
+ 
+ static int available_error_type_show(struct seq_file *m, void *v)
+@@ -648,7 +664,8 @@ static int error_inject_set(void *data, u64 val)
+ 	if (!error_type)
+ 		return -EINVAL;
+ 
+-	return einj_error_inject(error_type, error_param1, error_param2);
++	return einj_error_inject(error_type, error_flags, error_param1, error_param2,
++		error_param3, error_param4);
+ }
+ 
+ DEFINE_SIMPLE_ATTRIBUTE(error_inject_fops, NULL,
+@@ -729,6 +746,10 @@ static int __init einj_init(void)
+ 	rc = -ENOMEM;
+ 	einj_param = einj_get_parameter_address();
+ 	if ((param_extension || acpi5) && einj_param) {
++		fentry = debugfs_create_x32("flags", S_IRUSR | S_IWUSR,
++					    einj_debug_dir, &error_flags);
++		if (!fentry)
++			goto err_unmap;
+ 		fentry = debugfs_create_x64("param1", S_IRUSR | S_IWUSR,
+ 					    einj_debug_dir, &error_param1);
+ 		if (!fentry)
+@@ -737,6 +758,14 @@ static int __init einj_init(void)
+ 					    einj_debug_dir, &error_param2);
+ 		if (!fentry)
+ 			goto err_unmap;
++		fentry = debugfs_create_x64("param3", S_IRUSR | S_IWUSR,
++					    einj_debug_dir, &error_param3);
++		if (!fentry)
++			goto err_unmap;
++		fentry = debugfs_create_x64("param4", S_IRUSR | S_IWUSR,
++					    einj_debug_dir, &error_param4);
++		if (!fentry)
++			goto err_unmap;
+ 
+ 		fentry = debugfs_create_x32("notrigger", S_IRUSR | S_IWUSR,
+ 					    einj_debug_dir, &notrigger);

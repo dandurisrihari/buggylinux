@@ -1,0 +1,59 @@
+diff --git a/drivers/gpu/drm/drm_auth.c b/drivers/gpu/drm/drm_auth.c
+index 3f46772f0cb2..ba23790450e9 100644
+--- a/drivers/gpu/drm/drm_auth.c
++++ b/drivers/gpu/drm/drm_auth.c
+@@ -101,7 +101,7 @@ static int drm_add_magic(struct drm_master *master, struct drm_file *priv,
+  * Searches and unlinks the entry in drm_device::magiclist with the magic
+  * number hash key, while holding the drm_device::struct_mutex lock.
+  */
+-static int drm_remove_magic(struct drm_master *master, drm_magic_t magic)
++int drm_remove_magic(struct drm_master *master, drm_magic_t magic)
+ {
+ 	struct drm_magic_entry *pt;
+ 	struct drm_hash_item *hash;
+@@ -136,6 +136,8 @@ static int drm_remove_magic(struct drm_master *master, drm_magic_t magic)
+  * If there is a magic number in drm_file::magic then use it, otherwise
+  * searches an unique non-zero magic number and add it associating it with \p
+  * file_priv.
++ * This ioctl needs protection by the drm_global_mutex, which protects
++ * struct drm_file::magic and struct drm_magic_entry::priv.
+  */
+ int drm_getmagic(struct drm_device *dev, void *data, struct drm_file *file_priv)
+ {
+@@ -173,6 +175,8 @@ int drm_getmagic(struct drm_device *dev, void *data, struct drm_file *file_priv)
+  * \return zero if authentication successed, or a negative number otherwise.
+  *
+  * Checks if \p file_priv is associated with the magic number passed in \arg.
++ * This ioctl needs protection by the drm_global_mutex, which protects
++ * struct drm_file::magic and struct drm_magic_entry::priv.
+  */
+ int drm_authmagic(struct drm_device *dev, void *data,
+ 		  struct drm_file *file_priv)
+diff --git a/drivers/gpu/drm/drm_fops.c b/drivers/gpu/drm/drm_fops.c
+index c00cf154cc0b..6263b0147598 100644
+--- a/drivers/gpu/drm/drm_fops.c
++++ b/drivers/gpu/drm/drm_fops.c
+@@ -487,6 +487,11 @@ int drm_release(struct inode *inode, struct file *filp)
+ 		  (long)old_encode_dev(file_priv->minor->device),
+ 		  dev->open_count);
+ 
++	/* Release any auth tokens that might point to this file_priv,
++	   (do that under the drm_global_mutex) */
++	if (file_priv->magic)
++		(void) drm_remove_magic(file_priv->master, file_priv->magic);
++
+ 	/* if the master has gone away we can't do anything with the lock */
+ 	if (file_priv->minor->master)
+ 		drm_master_release(dev, filp);
+diff --git a/include/drm/drmP.h b/include/drm/drmP.h
+index 76caa67c22e2..92f0981b5fb8 100644
+--- a/include/drm/drmP.h
++++ b/include/drm/drmP.h
+@@ -1328,6 +1328,7 @@ extern int drm_getmagic(struct drm_device *dev, void *data,
+ 			struct drm_file *file_priv);
+ extern int drm_authmagic(struct drm_device *dev, void *data,
+ 			 struct drm_file *file_priv);
++extern int drm_remove_magic(struct drm_master *master, drm_magic_t magic);
+ 
+ /* Cache management (drm_cache.c) */
+ void drm_clflush_pages(struct page *pages[], unsigned long num_pages);

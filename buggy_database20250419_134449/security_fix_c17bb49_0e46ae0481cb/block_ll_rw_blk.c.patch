@@ -1,0 +1,105 @@
+commit c17bb4951752d3e0f49cd1ea9d2e868422f9e0d6
+Author: Akinobu Mita <akinobu.mita@gmail.com>
+Date:   Fri Dec 8 02:39:46 2006 -0800
+
+    [PATCH] fault-injection capability for disk IO
+    
+    This patch provides fault-injection capability for disk IO.
+    
+    Boot option:
+    
+    fail_make_request=<probability>,<interval>,<space>,<times>
+    
+            <interval> -- specifies the interval of failures.
+    
+            <probability> -- specifies how often it should fail in percent.
+    
+            <space> -- specifies the size of free space where disk IO can be issued
+                       safely in bytes.
+    
+            <times> -- specifies how many times failures may happen at most.
+    
+    Debugfs:
+    
+    /debug/fail_make_request/interval
+    /debug/fail_make_request/probability
+    /debug/fail_make_request/specifies
+    /debug/fail_make_request/times
+    
+    Example:
+    
+            fail_make_request=10,100,0,-1
+            echo 1 > /sys/blocks/hda/hda1/make-it-fail
+    
+    generic_make_request() on /dev/hda1 fails once per 10 times.
+    
+    Cc: Jens Axboe <axboe@suse.de>
+    Signed-off-by: Akinobu Mita <akinobu.mita@gmail.com>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/block/ll_rw_blk.c b/block/ll_rw_blk.c
+index 31512cd9f3ad..4f83fd922377 100644
+--- a/block/ll_rw_blk.c
++++ b/block/ll_rw_blk.c
+@@ -28,6 +28,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/cpu.h>
+ #include <linux/blktrace_api.h>
++#include <linux/fault-inject.h>
+ 
+ /*
+  * for max sense size
+@@ -3056,6 +3057,42 @@ static void handle_bad_sector(struct bio *bio)
+ 	set_bit(BIO_EOF, &bio->bi_flags);
+ }
+ 
++#ifdef CONFIG_FAIL_MAKE_REQUEST
++
++static DECLARE_FAULT_ATTR(fail_make_request);
++
++static int __init setup_fail_make_request(char *str)
++{
++	return setup_fault_attr(&fail_make_request, str);
++}
++__setup("fail_make_request=", setup_fail_make_request);
++
++static int should_fail_request(struct bio *bio)
++{
++	if ((bio->bi_bdev->bd_disk->flags & GENHD_FL_FAIL) ||
++	    (bio->bi_bdev->bd_part && bio->bi_bdev->bd_part->make_it_fail))
++		return should_fail(&fail_make_request, bio->bi_size);
++
++	return 0;
++}
++
++static int __init fail_make_request_debugfs(void)
++{
++	return init_fault_attr_dentries(&fail_make_request,
++					"fail_make_request");
++}
++
++late_initcall(fail_make_request_debugfs);
++
++#else /* CONFIG_FAIL_MAKE_REQUEST */
++
++static inline int should_fail_request(struct bio *bio)
++{
++	return 0;
++}
++
++#endif /* CONFIG_FAIL_MAKE_REQUEST */
++
+ /**
+  * generic_make_request: hand a buffer to its device driver for I/O
+  * @bio:  The bio describing the location in memory and on the device.
+@@ -3141,6 +3178,9 @@ void generic_make_request(struct bio *bio)
+ 		if (unlikely(test_bit(QUEUE_FLAG_DEAD, &q->queue_flags)))
+ 			goto end_io;
+ 
++		if (should_fail_request(bio))
++			goto end_io;
++
+ 		/*
+ 		 * If this device has partitions, remap block n
+ 		 * of partition p to block n+start(p) of the disk.

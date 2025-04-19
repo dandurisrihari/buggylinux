@@ -1,0 +1,112 @@
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 488891853cb5..251a08d8808d 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -475,6 +475,7 @@ struct drm_i915_error_state {
+ 	struct timeval time;
+ 
+ 	char error_msg[128];
++	bool simulated;
+ 	int iommu;
+ 	u32 reset_count;
+ 	u32 suspend_count;
+@@ -875,9 +876,10 @@ struct i915_gem_context {
+ 
+ 	/* Unique identifier for this context, used by the hw for tracking */
+ 	unsigned long flags;
++#define CONTEXT_NO_ZEROMAP		BIT(0)
++#define CONTEXT_NO_ERROR_CAPTURE	BIT(1)
+ 	unsigned hw_id;
+ 	u32 user_handle;
+-#define CONTEXT_NO_ZEROMAP		(1<<0)
+ 
+ 	u32 ggtt_alignment;
+ 
+diff --git a/drivers/gpu/drm/i915/i915_gem_context.c b/drivers/gpu/drm/i915/i915_gem_context.c
+index 3a6594b70900..8e952b1a31b3 100644
+--- a/drivers/gpu/drm/i915/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/i915_gem_context.c
+@@ -1026,6 +1026,9 @@ int i915_gem_context_getparam_ioctl(struct drm_device *dev, void *data,
+ 		else
+ 			args->value = to_i915(dev)->ggtt.base.total;
+ 		break;
++	case I915_CONTEXT_PARAM_NO_ERROR_CAPTURE:
++		args->value = !!(ctx->flags & CONTEXT_NO_ERROR_CAPTURE);
++		break;
+ 	default:
+ 		ret = -EINVAL;
+ 		break;
+@@ -1071,6 +1074,16 @@ int i915_gem_context_setparam_ioctl(struct drm_device *dev, void *data,
+ 			ctx->flags |= args->value ? CONTEXT_NO_ZEROMAP : 0;
+ 		}
+ 		break;
++	case I915_CONTEXT_PARAM_NO_ERROR_CAPTURE:
++		if (args->size) {
++			ret = -EINVAL;
++		} else {
++			if (args->value)
++				ctx->flags |= CONTEXT_NO_ERROR_CAPTURE;
++			else
++				ctx->flags &= ~CONTEXT_NO_ERROR_CAPTURE;
++		}
++		break;
+ 	default:
+ 		ret = -EINVAL;
+ 		break;
+diff --git a/drivers/gpu/drm/i915/i915_gpu_error.c b/drivers/gpu/drm/i915/i915_gpu_error.c
+index 1be63590a7fe..c6e05cccbedf 100644
+--- a/drivers/gpu/drm/i915/i915_gpu_error.c
++++ b/drivers/gpu/drm/i915/i915_gpu_error.c
+@@ -1093,9 +1093,8 @@ static void i915_gem_record_rings(struct drm_i915_private *dev_priv,
+ 			struct i915_address_space *vm;
+ 			struct intel_ringbuffer *rb;
+ 
+-			vm = request->ctx && request->ctx->ppgtt ?
+-				&request->ctx->ppgtt->base :
+-				&ggtt->base;
++			vm = request->ctx->ppgtt ?
++				&request->ctx->ppgtt->base : &ggtt->base;
+ 
+ 			/* We need to copy these to an anonymous buffer
+ 			 * as the simplest method to avoid being overwritten
+@@ -1123,6 +1122,9 @@ static void i915_gem_record_rings(struct drm_i915_private *dev_priv,
+ 				rcu_read_unlock();
+ 			}
+ 
++			error->simulated |=
++				request->ctx->flags & CONTEXT_NO_ERROR_CAPTURE;
++
+ 			rb = request->ringbuf;
+ 			error->ring[i].cpu_ring_head = rb->head;
+ 			error->ring[i].cpu_ring_tail = rb->tail;
+@@ -1422,12 +1424,14 @@ void i915_capture_error_state(struct drm_i915_private *dev_priv,
+ 	i915_error_capture_msg(dev_priv, error, engine_mask, error_msg);
+ 	DRM_INFO("%s\n", error->error_msg);
+ 
+-	spin_lock_irqsave(&dev_priv->gpu_error.lock, flags);
+-	if (dev_priv->gpu_error.first_error == NULL) {
+-		dev_priv->gpu_error.first_error = error;
+-		error = NULL;
++	if (!error->simulated) {
++		spin_lock_irqsave(&dev_priv->gpu_error.lock, flags);
++		if (!dev_priv->gpu_error.first_error) {
++			dev_priv->gpu_error.first_error = error;
++			error = NULL;
++		}
++		spin_unlock_irqrestore(&dev_priv->gpu_error.lock, flags);
+ 	}
+-	spin_unlock_irqrestore(&dev_priv->gpu_error.lock, flags);
+ 
+ 	if (error) {
+ 		i915_error_state_free(&error->ref);
+diff --git a/include/uapi/drm/i915_drm.h b/include/uapi/drm/i915_drm.h
+index a642bbc7777d..d7e81a3886fd 100644
+--- a/include/uapi/drm/i915_drm.h
++++ b/include/uapi/drm/i915_drm.h
+@@ -1173,6 +1173,7 @@ struct drm_i915_gem_context_param {
+ #define I915_CONTEXT_PARAM_BAN_PERIOD	0x1
+ #define I915_CONTEXT_PARAM_NO_ZEROMAP	0x2
+ #define I915_CONTEXT_PARAM_GTT_SIZE	0x3
++#define I915_CONTEXT_PARAM_NO_ERROR_CAPTURE	0x4
+ 	__u64 value;
+ };

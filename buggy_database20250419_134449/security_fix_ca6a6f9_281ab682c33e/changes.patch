@@ -1,0 +1,99 @@
+diff --git a/Documentation/networking/ip-sysctl.rst b/Documentation/networking/ip-sysctl.rst
+index eacf8983e230..2f2b00295836 100644
+--- a/Documentation/networking/ip-sysctl.rst
++++ b/Documentation/networking/ip-sysctl.rst
+@@ -1000,6 +1000,20 @@ tcp_tw_reuse - INTEGER
+ 
+ 	Default: 2
+ 
++tcp_tw_reuse_delay - UNSIGNED INTEGER
++        The delay in milliseconds before a TIME-WAIT socket can be reused by a
++        new connection, if TIME-WAIT socket reuse is enabled. The actual reuse
++        threshold is within [N, N+1] range, where N is the requested delay in
++        milliseconds, to ensure the delay interval is never shorter than the
++        configured value.
++
++        This setting contains an assumption about the other TCP timestamp clock
++        tick interval. It should not be set to a value lower than the peer's
++        clock tick for PAWS (Protection Against Wrapped Sequence numbers)
++        mechanism work correctly for the reused connection.
++
++        Default: 1000 (milliseconds)
++
+ tcp_window_scaling - BOOLEAN
+ 	Enable window scaling as defined in RFC1323.
+ 
+diff --git a/Documentation/networking/net_cachelines/netns_ipv4_sysctl.rst b/Documentation/networking/net_cachelines/netns_ipv4_sysctl.rst
+index 629da6dc6d74..de0263302f16 100644
+--- a/Documentation/networking/net_cachelines/netns_ipv4_sysctl.rst
++++ b/Documentation/networking/net_cachelines/netns_ipv4_sysctl.rst
+@@ -79,6 +79,7 @@ u8                              sysctl_tcp_retries1
+ u8                              sysctl_tcp_retries2
+ u8                              sysctl_tcp_orphan_retries
+ u8                              sysctl_tcp_tw_reuse                                                                  timewait_sock_ops
++unsigned_int                    sysctl_tcp_tw_reuse_delay                                                            timewait_sock_ops
+ int                             sysctl_tcp_fin_timeout                                                               TCP_LAST_ACK/tcp_rcv_state_process
+ unsigned_int                    sysctl_tcp_notsent_lowat                     read_mostly                             tcp_notsent_lowat/tcp_stream_memory_free
+ u8                              sysctl_tcp_sack                                                                      tcp_syn_options
+diff --git a/include/net/netns/ipv4.h b/include/net/netns/ipv4.h
+index 3c014170e001..46452da35206 100644
+--- a/include/net/netns/ipv4.h
++++ b/include/net/netns/ipv4.h
+@@ -175,6 +175,7 @@ struct netns_ipv4 {
+ 	u8 sysctl_tcp_retries2;
+ 	u8 sysctl_tcp_orphan_retries;
+ 	u8 sysctl_tcp_tw_reuse;
++	unsigned int sysctl_tcp_tw_reuse_delay;
+ 	int sysctl_tcp_fin_timeout;
+ 	u8 sysctl_tcp_sack;
+ 	u8 sysctl_tcp_window_scaling;
+diff --git a/net/ipv4/sysctl_net_ipv4.c b/net/ipv4/sysctl_net_ipv4.c
+index a79b2a52ce01..42cb5dc9cb24 100644
+--- a/net/ipv4/sysctl_net_ipv4.c
++++ b/net/ipv4/sysctl_net_ipv4.c
+@@ -45,6 +45,7 @@ static unsigned int tcp_child_ehash_entries_max = 16 * 1024 * 1024;
+ static unsigned int udp_child_hash_entries_max = UDP_HTABLE_SIZE_MAX;
+ static int tcp_plb_max_rounds = 31;
+ static int tcp_plb_max_cong_thresh = 256;
++static unsigned int tcp_tw_reuse_delay_max = TCP_PAWS_MSL * MSEC_PER_SEC;
+ 
+ /* obsolete */
+ static int sysctl_tcp_low_latency __read_mostly;
+@@ -1065,6 +1066,15 @@ static struct ctl_table ipv4_net_table[] = {
+ 		.extra1		= SYSCTL_ZERO,
+ 		.extra2		= SYSCTL_TWO,
+ 	},
++	{
++		.procname	= "tcp_tw_reuse_delay",
++		.data		= &init_net.ipv4.sysctl_tcp_tw_reuse_delay,
++		.maxlen		= sizeof(unsigned int),
++		.mode		= 0644,
++		.proc_handler	= proc_douintvec_minmax,
++		.extra1		= SYSCTL_ONE,
++		.extra2		= &tcp_tw_reuse_delay_max,
++	},
+ 	{
+ 		.procname	= "tcp_max_syn_backlog",
+ 		.data		= &init_net.ipv4.sysctl_max_syn_backlog,
+diff --git a/net/ipv4/tcp_ipv4.c b/net/ipv4/tcp_ipv4.c
+index 3b6ba1d16921..e45222d5fc2e 100644
+--- a/net/ipv4/tcp_ipv4.c
++++ b/net/ipv4/tcp_ipv4.c
+@@ -163,7 +163,8 @@ int tcp_twsk_unique(struct sock *sk, struct sock *sktw, void *twp)
+ 	   and use initial timestamp retrieved from peer table.
+ 	 */
+ 	ts_recent_stamp = READ_ONCE(tcptw->tw_ts_recent_stamp);
+-	reuse_thresh = READ_ONCE(tw->tw_entry_stamp) + MSEC_PER_SEC;
++	reuse_thresh = READ_ONCE(tw->tw_entry_stamp) +
++		       READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_tw_reuse_delay);
+ 	if (ts_recent_stamp &&
+ 	    (!twp || (reuse && time_after32(tcp_clock_ms(), reuse_thresh)))) {
+ 		/* inet_twsk_hashdance_schedule() sets sk_refcnt after putting twsk
+@@ -3458,6 +3459,7 @@ static int __net_init tcp_sk_init(struct net *net)
+ 	net->ipv4.sysctl_tcp_fin_timeout = TCP_FIN_TIMEOUT;
+ 	net->ipv4.sysctl_tcp_notsent_lowat = UINT_MAX;
+ 	net->ipv4.sysctl_tcp_tw_reuse = 2;
++	net->ipv4.sysctl_tcp_tw_reuse_delay = 1 * MSEC_PER_SEC;
+ 	net->ipv4.sysctl_tcp_no_ssthresh_metrics_save = 1;
+ 
+ 	refcount_set(&net->ipv4.tcp_death_row.tw_refcount, 1);

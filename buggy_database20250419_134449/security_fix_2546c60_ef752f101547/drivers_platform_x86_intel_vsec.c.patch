@@ -1,0 +1,88 @@
+commit 2546c60004309ede8e2d1d5341e0decd90e057bf
+Author: David E. Box <david.e.box@linux.intel.com>
+Date:   Fri Feb 11 17:32:50 2022 -0800
+
+    platform/x86: Add Intel Software Defined Silicon driver
+    
+    Intel Software Defined Silicon (SDSi) is a post manufacturing mechanism for
+    activating additional silicon features. Features are enabled through a
+    license activation process.  The SDSi driver provides a per socket, sysfs
+    attribute interface for applications to perform 3 main provisioning
+    functions:
+    
+    1. Provision an Authentication Key Certificate (AKC), a key written to
+       internal NVRAM that is used to authenticate a capability specific
+       activation payload.
+    
+    2. Provision a Capability Activation Payload (CAP), a token authenticated
+       using the AKC and applied to the CPU configuration to activate a new
+       feature.
+    
+    3. Read the SDSi State Certificate, containing the CPU configuration
+       state.
+    
+    The operations perform function specific mailbox commands that forward the
+    requests to SDSi hardware to perform authentication of the payloads and
+    enable the silicon configuration (to be made available after power
+    cycling).
+    
+    The SDSi device itself is enumerated as an auxiliary device from the
+    intel_vsec driver and as such has a build dependency on CONFIG_INTEL_VSEC.
+    
+    Link: https://github.com/intel/intel-sdsi
+    Signed-off-by: David E. Box <david.e.box@linux.intel.com>
+    Reviewed-by: Mark Gross <markgross@kernel.org>
+    Link: https://lore.kernel.org/r/20220212013252.1293396-2-david.e.box@linux.intel.com
+    Reviewed-by: Hans de Goede <hdegoede@redhat.com>
+    Signed-off-by: Hans de Goede <hdegoede@redhat.com>
+
+diff --git a/drivers/platform/x86/intel/vsec.c b/drivers/platform/x86/intel/vsec.c
+index c3bdd75ed690..bed436bf181f 100644
+--- a/drivers/platform/x86/intel/vsec.c
++++ b/drivers/platform/x86/intel/vsec.c
+@@ -32,6 +32,7 @@
+ #define TABLE_OFFSET_SHIFT		3
+ 
+ static DEFINE_IDA(intel_vsec_ida);
++static DEFINE_IDA(intel_vsec_sdsi_ida);
+ 
+ /**
+  * struct intel_vsec_header - Common fields of Intel VSEC and DVSEC registers.
+@@ -63,12 +64,14 @@ enum intel_vsec_id {
+ 	VSEC_ID_TELEMETRY	= 2,
+ 	VSEC_ID_WATCHER		= 3,
+ 	VSEC_ID_CRASHLOG	= 4,
++	VSEC_ID_SDSI		= 65,
+ };
+ 
+ static enum intel_vsec_id intel_vsec_allow_list[] = {
+ 	VSEC_ID_TELEMETRY,
+ 	VSEC_ID_WATCHER,
+ 	VSEC_ID_CRASHLOG,
++	VSEC_ID_SDSI,
+ };
+ 
+ static const char *intel_vsec_name(enum intel_vsec_id id)
+@@ -83,6 +86,9 @@ static const char *intel_vsec_name(enum intel_vsec_id id)
+ 	case VSEC_ID_CRASHLOG:
+ 		return "crashlog";
+ 
++	case VSEC_ID_SDSI:
++		return "sdsi";
++
+ 	default:
+ 		return NULL;
+ 	}
+@@ -211,7 +217,11 @@ static int intel_vsec_add_dev(struct pci_dev *pdev, struct intel_vsec_header *he
+ 	intel_vsec_dev->resource = res;
+ 	intel_vsec_dev->num_resources = header->num_entries;
+ 	intel_vsec_dev->quirks = quirks;
+-	intel_vsec_dev->ida = &intel_vsec_ida;
++
++	if (header->id == VSEC_ID_SDSI)
++		intel_vsec_dev->ida = &intel_vsec_sdsi_ida;
++	else
++		intel_vsec_dev->ida = &intel_vsec_ida;
+ 
+ 	return intel_vsec_add_aux(pdev, intel_vsec_dev, intel_vsec_name(header->id));
+ }

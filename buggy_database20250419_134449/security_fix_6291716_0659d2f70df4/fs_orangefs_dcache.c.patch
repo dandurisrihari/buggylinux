@@ -1,0 +1,56 @@
+commit 629171657a2864d819a3bbecabe0a5e001d05c7a
+Author: Justin Stitt <justinstitt@google.com>
+Date:   Fri Mar 22 21:41:18 2024 +0000
+
+    orangefs: cleanup uses of strncpy
+    
+    strncpy() is deprecated for use on NUL-terminated destination strings
+    [1] and as such we should prefer more robust and less ambiguous string
+    interfaces.
+    
+    There is some care taken to ensure these destination buffers are
+    NUL-terminated by bounding the strncpy()'s by ORANGEFS_NAME_MAX - 1 or
+    ORANGEFS_MAX_SERVER_ADDR_LEN - 1. Instead, we can use the new 2-argument
+    version of strscpy() to guarantee NUL-termination on the destination
+    buffers while simplifying the code.
+    
+    Based on usage with printf-likes, we can see these buffers are expected
+    to be NUL-terminated:
+    |       gossip_debug(GOSSIP_NAME_DEBUG,
+    |                       "%s: doing lookup on %s under %pU,%d\n",
+    |                       __func__,
+    |                       new_op->upcall.req.lookup.d_name,
+    |                       &new_op->upcall.req.lookup.parent_refn.khandle,
+    |                       new_op->upcall.req.lookup.parent_refn.fs_id);
+    ...
+    |       gossip_debug(GOSSIP_SUPER_DEBUG,
+    |                       "Attempting ORANGEFS Remount via host %s\n",
+    |                       new_op->upcall.req.fs_mount.orangefs_config_server);
+    
+    NUL-padding isn't required for any of these destination buffers as
+    they've all been zero-allocated with op_alloc() or kzalloc().
+    
+    Link: https://www.kernel.org/doc/html/latest/process/deprecated.html#strncpy-on-nul-terminated-strings [1]
+    Link: https://manpages.debian.org/testing/linux-manual-4.8/strscpy.9.en.html [2]
+    Link: https://github.com/KSPP/linux/issues/90
+    Cc: linux-hardening@vger.kernel.org
+    Signed-off-by: Justin Stitt <justinstitt@google.com>
+    Link: https://lore.kernel.org/r/20240322-strncpy-fs-orangefs-dcache-c-v1-1-15d12debbf38@google.com
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Signed-off-by: Christian Brauner <brauner@kernel.org>
+
+diff --git a/fs/orangefs/dcache.c b/fs/orangefs/dcache.c
+index 8bbe9486e3a6..395a00ed8ac7 100644
+--- a/fs/orangefs/dcache.c
++++ b/fs/orangefs/dcache.c
+@@ -33,9 +33,7 @@ static int orangefs_revalidate_lookup(struct dentry *dentry)
+ 
+ 	new_op->upcall.req.lookup.sym_follow = ORANGEFS_LOOKUP_LINK_NO_FOLLOW;
+ 	new_op->upcall.req.lookup.parent_refn = parent->refn;
+-	strncpy(new_op->upcall.req.lookup.d_name,
+-		dentry->d_name.name,
+-		ORANGEFS_NAME_MAX - 1);
++	strscpy(new_op->upcall.req.lookup.d_name, dentry->d_name.name);
+ 
+ 	gossip_debug(GOSSIP_DCACHE_DEBUG,
+ 		     "%s:%s:%d interrupt flag [%d]\n",

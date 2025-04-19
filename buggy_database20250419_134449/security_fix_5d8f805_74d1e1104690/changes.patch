@@ -1,0 +1,65 @@
+diff --git a/fs/cachefiles/cache.c b/fs/cachefiles/cache.c
+index 56ef519a36a0..9fb06dc16520 100644
+--- a/fs/cachefiles/cache.c
++++ b/fs/cachefiles/cache.c
+@@ -313,7 +313,39 @@ static void cachefiles_withdraw_objects(struct cachefiles_cache *cache)
+ }
+ 
+ /*
+- * Withdraw volumes.
++ * Withdraw fscache volumes.
++ */
++static void cachefiles_withdraw_fscache_volumes(struct cachefiles_cache *cache)
++{
++	struct list_head *cur;
++	struct cachefiles_volume *volume;
++	struct fscache_volume *vcookie;
++
++	_enter("");
++retry:
++	spin_lock(&cache->object_list_lock);
++	list_for_each(cur, &cache->volumes) {
++		volume = list_entry(cur, struct cachefiles_volume, cache_link);
++
++		if (atomic_read(&volume->vcookie->n_accesses) == 0)
++			continue;
++
++		vcookie = fscache_try_get_volume(volume->vcookie,
++						 fscache_volume_get_withdraw);
++		if (vcookie) {
++			spin_unlock(&cache->object_list_lock);
++			fscache_withdraw_volume(vcookie);
++			fscache_put_volume(vcookie, fscache_volume_put_withdraw);
++			goto retry;
++		}
++	}
++	spin_unlock(&cache->object_list_lock);
++
++	_leave("");
++}
++
++/*
++ * Withdraw cachefiles volumes.
+  */
+ static void cachefiles_withdraw_volumes(struct cachefiles_cache *cache)
+ {
+@@ -381,6 +413,7 @@ void cachefiles_withdraw_cache(struct cachefiles_cache *cache)
+ 	pr_info("File cache on %s unregistering\n", fscache->name);
+ 
+ 	fscache_withdraw_cache(fscache);
++	cachefiles_withdraw_fscache_volumes(cache);
+ 
+ 	/* we now have to destroy all the active objects pertaining to this
+ 	 * cache - which we do by passing them off to thread pool to be
+diff --git a/fs/cachefiles/volume.c b/fs/cachefiles/volume.c
+index 89df0ba8ba5e..781aac4ef274 100644
+--- a/fs/cachefiles/volume.c
++++ b/fs/cachefiles/volume.c
+@@ -133,7 +133,6 @@ void cachefiles_free_volume(struct fscache_volume *vcookie)
+ 
+ void cachefiles_withdraw_volume(struct cachefiles_volume *volume)
+ {
+-	fscache_withdraw_volume(volume->vcookie);
+ 	cachefiles_set_volume_xattr(volume);
+ 	__cachefiles_free_volume(volume);
+ }

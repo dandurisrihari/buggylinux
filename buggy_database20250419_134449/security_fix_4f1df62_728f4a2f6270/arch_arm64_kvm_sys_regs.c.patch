@@ -1,0 +1,69 @@
+commit 4f1df628d4ec22b04f67e068e6d02538d3dd557b
+Author: Marc Zyngier <maz@kernel.org>
+Date:   Thu Nov 26 17:27:13 2020 +0000
+
+    KVM: arm64: Advertise ID_AA64PFR0_EL1.CSV3=1 if the CPUs are Meltdown-safe
+    
+    Cores that predate the introduction of ID_AA64PFR0_EL1.CSV3 to
+    the ARMv8 architecture have this field set to 0, even of some of
+    them are not affected by the vulnerability.
+    
+    The kernel maintains a list of unaffected cores (A53, A55 and a few
+    others) so that it doesn't impose an expensive mitigation uncessarily.
+    
+    As we do for CSV2, let's expose the CSV3 property to guests that run
+    on HW that is effectively not vulnerable. This can be reset to zero
+    by writing to the ID register from userspace, ensuring that VMs can
+    be migrated despite the new property being set.
+    
+    Reported-by: Will Deacon <will@kernel.org>
+    Signed-off-by: Marc Zyngier <maz@kernel.org>
+
+diff --git a/arch/arm64/kvm/sys_regs.c b/arch/arm64/kvm/sys_regs.c
+index c1fac9836af1..6f653c0f60ec 100644
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@ -1122,6 +1122,8 @@ static u64 read_id_reg(const struct kvm_vcpu *vcpu,
+ 		val &= ~(0xfUL << ID_AA64PFR0_AMU_SHIFT);
+ 		val &= ~(0xfUL << ID_AA64PFR0_CSV2_SHIFT);
+ 		val |= ((u64)vcpu->kvm->arch.pfr0_csv2 << ID_AA64PFR0_CSV2_SHIFT);
++		val &= ~(0xfUL << ID_AA64PFR0_CSV3_SHIFT);
++		val |= ((u64)vcpu->kvm->arch.pfr0_csv3 << ID_AA64PFR0_CSV3_SHIFT);
+ 	} else if (id == SYS_ID_AA64PFR1_EL1) {
+ 		val &= ~(0xfUL << ID_AA64PFR1_MTE_SHIFT);
+ 	} else if (id == SYS_ID_AA64ISAR1_EL1 && !vcpu_has_ptrauth(vcpu)) {
+@@ -1209,9 +1211,9 @@ static int set_id_aa64pfr0_el1(struct kvm_vcpu *vcpu,
+ 			       const struct kvm_one_reg *reg, void __user *uaddr)
+ {
+ 	const u64 id = sys_reg_to_index(rd);
++	u8 csv2, csv3;
+ 	int err;
+ 	u64 val;
+-	u8 csv2;
+ 
+ 	err = reg_from_user(&val, uaddr, id);
+ 	if (err)
+@@ -1227,13 +1229,21 @@ static int set_id_aa64pfr0_el1(struct kvm_vcpu *vcpu,
+ 	    (csv2 && arm64_get_spectre_v2_state() != SPECTRE_UNAFFECTED))
+ 		return -EINVAL;
+ 
+-	/* We can only differ with CSV2, and anything else is an error */
++	/* Same thing for CSV3 */
++	csv3 = cpuid_feature_extract_unsigned_field(val, ID_AA64PFR0_CSV3_SHIFT);
++	if (csv3 > 1 ||
++	    (csv3 && arm64_get_meltdown_state() != SPECTRE_UNAFFECTED))
++		return -EINVAL;
++
++	/* We can only differ with CSV[23], and anything else is an error */
+ 	val ^= read_id_reg(vcpu, rd, false);
+-	val &= ~(0xFUL << ID_AA64PFR0_CSV2_SHIFT);
++	val &= ~((0xFUL << ID_AA64PFR0_CSV2_SHIFT) |
++		 (0xFUL << ID_AA64PFR0_CSV3_SHIFT));
+ 	if (val)
+ 		return -EINVAL;
+ 
+ 	vcpu->kvm->arch.pfr0_csv2 = csv2;
++	vcpu->kvm->arch.pfr0_csv3 = csv3 ;
+ 
+ 	return 0;
+ }

@@ -1,0 +1,326 @@
+commit d1e879ec600f9b3bdd253167533959facfefb17b
+Author: Miri Korenblit <miriam.rachel.korenblit@intel.com>
+Date:   Sun Feb 16 11:42:40 2025 +0200
+
+    wifi: iwlwifi: add iwlmld sub-driver
+    
+    iwlwifi is the driver of all Intel wifi devices since 2008.
+    Since then, the hardware has changed a lot, but the firmware
+    API has changed even more. The need to keep one driver that
+    supports all those different APIs led us to introduce a new
+    architecture circa 2012 which allowed us to keep the same
+    interface to the hardware (DMAs, Tx queues, etc...) with a
+    new layer to implement the mid-layer between mac80211 and
+    the firmware. The first component is called the 'transport'
+    and the latter is called 'operation_mode' a.k.a  op_mode.
+    
+    In 2013 we took advantage of the new architecture to
+    introduce iwlmvm which allowed us to implement the, then,
+    new firmware API. This op_mode supports 7260 and up, those
+    devices supports support at least VHT.
+    
+    Since then, wifi evolved and so did the firmware. It became
+    much bigger and took a lot of functionality from the driver.
+    It became increasingly hard to keep the same op_mode for the
+    newest devices and we experienced frequent regressions on
+    older devices. In order to avoid those regressions and keep
+    the code maintainable, we decided it was about time to start
+    a new op_mode.
+    
+    iwlmld is a new op_mode that supports BE200 or newer if the
+    firmware being used is 97.ucode or newer. If the user has
+    an older devices or BE200 with .96.ucode, iwlmvm will be
+    loaded. Of course, this op_mode selection is seamless.
+    
+    All the features supported in iwlmvm are supported in
+    iwlmld besides a few seldom used use cases: injection and
+    Hotspot 2.0. Those are under work.
+    
+    A few points about the implementation:
+     * iwlmld doesn't have any mutexes, it relies on the
+       wiphy_lock
+     * iwlmld is more "resource oriented": stations, links and
+       interfaces are allocated and freed only after all the
+       relevant flows are completed.
+     * Firmware notifications' sizes are validated in a more
+       structured way.
+    
+    We would love to see this new op_mode merged in 6.15. The
+    firmware for this new driver (.97.ucode) is not yet publicly
+    available but it'll be sent very soon.
+    People eager to get an early version of this firmware can
+    contact Emmanuel at:
+    emmanuel.grumbach@intel.com
+    
+    I've listed the people who directly contributed
+    code, but many others from various teams have
+    contributed in other ways.
+    
+    Co-developed-by: Johannes Berg <johannes.berg@intel.com>
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+    Co-developed-by: Avraham Stern <avraham.stern@intel.com>
+    Signed-off-by: Avraham Stern <avraham.stern@intel.com>
+    Co-developed-by: Daniel Gabay <daniel.gabay@intel.com>
+    Signed-off-by: Daniel Gabay <daniel.gabay@intel.com>
+    Co-developed-by: Emmanuel Grumbach <emmanuel.grumbach@intel.com>
+    Signed-off-by: Emmanuel Grumbach <emmanuel.grumbach@intel.com>
+    Co-developed-by: Anjaneyulu <pagadala.yesu.anjaneyulu@intel.com>
+    Signed-off-by: Anjaneyulu <pagadala.yesu.anjaneyulu@intel.com>
+    Co-developed-by: Yedidya Benshimol <yedidya.ben.shimol@intel.com>
+    Signed-off-by: Yedidya Benshimol <yedidya.ben.shimol@intel.com>
+    Co-developed-by: Benjamin Berg <benjamin.berg@intel.com>
+    Signed-off-by: Benjamin Berg <benjamin.berg@intel.com>
+    Co-developed-by: Shaul Triebitz <shaul.triebitz@intel.com>
+    Signed-off-by: Shaul Triebitz <shaul.triebitz@intel.com>
+    Signed-off-by: Miri Korenblit <miriam.rachel.korenblit@intel.com>
+    Link: https://lore.kernel.org/linux-wireless/20250216094321.537988-1-miriam.rachel.korenblit@intel.com/
+    [fix Kconfig, fix api/phy.h includes, SPDX tag and coding
+     style issues, duplicated includes per 0-day robot]
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+diff --git a/drivers/net/wireless/intel/iwlwifi/mld/time_sync.c b/drivers/net/wireless/intel/iwlwifi/mld/time_sync.c
+new file mode 100644
+index 000000000000..50799f9bfccb
+--- /dev/null
++++ b/drivers/net/wireless/intel/iwlwifi/mld/time_sync.c
+@@ -0,0 +1,240 @@
++// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
++/*
++ * Copyright (C) 2025 Intel Corporation
++ */
++
++#include "mld.h"
++#include "hcmd.h"
++#include "ptp.h"
++#include "time_sync.h"
++#include <linux/ieee80211.h>
++
++static int iwl_mld_init_time_sync(struct iwl_mld *mld, u32 protocols,
++				  const u8 *addr)
++{
++	struct iwl_mld_time_sync_data *time_sync = kzalloc(sizeof(*time_sync),
++							   GFP_KERNEL);
++
++	if (!time_sync)
++		return -ENOMEM;
++
++	time_sync->active_protocols = protocols;
++	ether_addr_copy(time_sync->peer_addr, addr);
++	skb_queue_head_init(&time_sync->frame_list);
++	rcu_assign_pointer(mld->time_sync, time_sync);
++
++	return 0;
++}
++
++int iwl_mld_time_sync_fw_config(struct iwl_mld *mld)
++{
++	struct iwl_time_sync_cfg_cmd cmd = {};
++	struct iwl_mld_time_sync_data *time_sync;
++	int err;
++
++	time_sync = wiphy_dereference(mld->wiphy, mld->time_sync);
++	if (!time_sync)
++		return -EINVAL;
++
++	cmd.protocols = cpu_to_le32(time_sync->active_protocols);
++	ether_addr_copy(cmd.peer_addr, time_sync->peer_addr);
++
++	err = iwl_mld_send_cmd_pdu(mld,
++				   WIDE_ID(DATA_PATH_GROUP,
++					   WNM_80211V_TIMING_MEASUREMENT_CONFIG_CMD),
++				   &cmd);
++	if (err)
++		IWL_ERR(mld, "Failed to send time sync cfg cmd: %d\n", err);
++
++	return err;
++}
++
++int iwl_mld_time_sync_config(struct iwl_mld *mld, const u8 *addr, u32 protocols)
++{
++	struct iwl_mld_time_sync_data *time_sync;
++	int err;
++
++	time_sync = wiphy_dereference(mld->wiphy, mld->time_sync);
++
++	/* The fw only supports one peer. We do allow reconfiguration of the
++	 * same peer for cases of fw reset etc.
++	 */
++	if (time_sync && time_sync->active_protocols &&
++	    !ether_addr_equal(addr, time_sync->peer_addr)) {
++		IWL_DEBUG_INFO(mld, "Time sync: reject config for peer: %pM\n",
++			       addr);
++		return -ENOBUFS;
++	}
++
++	if (protocols & ~(IWL_TIME_SYNC_PROTOCOL_TM |
++			  IWL_TIME_SYNC_PROTOCOL_FTM))
++		return -EINVAL;
++
++	IWL_DEBUG_INFO(mld, "Time sync: set peer addr=%pM\n", addr);
++
++	iwl_mld_deinit_time_sync(mld);
++	err = iwl_mld_init_time_sync(mld, protocols, addr);
++	if (err)
++		return err;
++
++	err = iwl_mld_time_sync_fw_config(mld);
++	return err;
++}
++
++void iwl_mld_deinit_time_sync(struct iwl_mld *mld)
++{
++	struct iwl_mld_time_sync_data *time_sync =
++		wiphy_dereference(mld->wiphy, mld->time_sync);
++
++	if (!time_sync)
++		return;
++
++	RCU_INIT_POINTER(mld->time_sync, NULL);
++	skb_queue_purge(&time_sync->frame_list);
++	kfree_rcu(time_sync, rcu_head);
++}
++
++bool iwl_mld_time_sync_frame(struct iwl_mld *mld, struct sk_buff *skb, u8 *addr)
++{
++	struct iwl_mld_time_sync_data *time_sync;
++
++	rcu_read_lock();
++	time_sync = rcu_dereference(mld->time_sync);
++	if (time_sync && ether_addr_equal(time_sync->peer_addr, addr) &&
++	    (ieee80211_is_timing_measurement(skb) || ieee80211_is_ftm(skb))) {
++		skb_queue_tail(&time_sync->frame_list, skb);
++		rcu_read_unlock();
++		return true;
++	}
++	rcu_read_unlock();
++
++	return false;
++}
++
++static bool iwl_mld_is_skb_match(struct sk_buff *skb, u8 *addr, u8 dialog_token)
++{
++	struct ieee80211_mgmt *mgmt = (void *)skb->data;
++	u8 skb_dialog_token;
++
++	if (ieee80211_is_timing_measurement(skb))
++		skb_dialog_token = mgmt->u.action.u.wnm_timing_msr.dialog_token;
++	else
++		skb_dialog_token = mgmt->u.action.u.ftm.dialog_token;
++
++	if ((ether_addr_equal(mgmt->sa, addr) ||
++	     ether_addr_equal(mgmt->da, addr)) &&
++	    skb_dialog_token == dialog_token)
++		return true;
++
++	return false;
++}
++
++static struct sk_buff *iwl_mld_time_sync_find_skb(struct iwl_mld *mld, u8 *addr,
++						  u8 dialog_token)
++{
++	struct iwl_mld_time_sync_data *time_sync;
++	struct sk_buff *skb;
++
++	rcu_read_lock();
++
++	time_sync = rcu_dereference(mld->time_sync);
++	if (IWL_FW_CHECK(mld, !time_sync,
++			 "Time sync notification but time sync is not initialized\n")) {
++		rcu_read_unlock();
++		return NULL;
++	}
++
++	/* The notifications are expected to arrive in the same order of the
++	 * frames. If the incoming notification doesn't match the first SKB
++	 * in the queue, it means there was no time sync notification for this
++	 * SKB and it can be dropped.
++	 */
++	while ((skb = skb_dequeue(&time_sync->frame_list))) {
++		if (iwl_mld_is_skb_match(skb, addr, dialog_token))
++			break;
++
++		kfree_skb(skb);
++		skb = NULL;
++		IWL_DEBUG_DROP(mld,
++			       "Time sync: drop SKB without matching notification\n");
++	}
++	rcu_read_unlock();
++
++	return skb;
++}
++
++static u64 iwl_mld_get_64_bit(__le32 high, __le32 low)
++{
++	return ((u64)le32_to_cpu(high) << 32) | le32_to_cpu(low);
++}
++
++void iwl_mld_handle_time_msmt_notif(struct iwl_mld *mld,
++				    struct iwl_rx_packet *pkt)
++{
++	struct ptp_data *data = &mld->ptp_data;
++	struct iwl_time_msmt_notify *notif = (void *)pkt->data;
++	struct ieee80211_rx_status *rx_status;
++	struct skb_shared_hwtstamps *shwt;
++	u64 ts_10ns;
++	struct sk_buff *skb =
++		iwl_mld_time_sync_find_skb(mld, notif->peer_addr,
++					   le32_to_cpu(notif->dialog_token));
++	u64 adj_time;
++
++	if (IWL_FW_CHECK(mld, !skb, "Time sync event but no pending skb\n"))
++		return;
++
++	spin_lock_bh(&data->lock);
++	ts_10ns = iwl_mld_get_64_bit(notif->t2_hi, notif->t2_lo);
++	adj_time = iwl_mld_ptp_get_adj_time(mld, ts_10ns * 10);
++	shwt = skb_hwtstamps(skb);
++	shwt->hwtstamp = ktime_set(0, adj_time);
++
++	ts_10ns = iwl_mld_get_64_bit(notif->t3_hi, notif->t3_lo);
++	adj_time = iwl_mld_ptp_get_adj_time(mld, ts_10ns * 10);
++	rx_status = IEEE80211_SKB_RXCB(skb);
++	rx_status->ack_tx_hwtstamp = ktime_set(0, adj_time);
++	spin_unlock_bh(&data->lock);
++
++	IWL_DEBUG_INFO(mld,
++		       "Time sync: RX event - report frame t2=%llu t3=%llu\n",
++		       ktime_to_ns(shwt->hwtstamp),
++		       ktime_to_ns(rx_status->ack_tx_hwtstamp));
++	ieee80211_rx_napi(mld->hw, NULL, skb, NULL);
++}
++
++void iwl_mld_handle_time_sync_confirm_notif(struct iwl_mld *mld,
++					    struct iwl_rx_packet *pkt)
++{
++	struct ptp_data *data = &mld->ptp_data;
++	struct iwl_time_msmt_cfm_notify *notif = (void *)pkt->data;
++	struct ieee80211_tx_status status = {};
++	struct skb_shared_hwtstamps *shwt;
++	u64 ts_10ns, adj_time;
++
++	status.skb =
++		iwl_mld_time_sync_find_skb(mld, notif->peer_addr,
++					   le32_to_cpu(notif->dialog_token));
++
++	if (IWL_FW_CHECK(mld, !status.skb,
++			 "Time sync confirm but no pending skb\n"))
++		return;
++
++	spin_lock_bh(&data->lock);
++	ts_10ns = iwl_mld_get_64_bit(notif->t1_hi, notif->t1_lo);
++	adj_time = iwl_mld_ptp_get_adj_time(mld, ts_10ns * 10);
++	shwt = skb_hwtstamps(status.skb);
++	shwt->hwtstamp = ktime_set(0, adj_time);
++
++	ts_10ns = iwl_mld_get_64_bit(notif->t4_hi, notif->t4_lo);
++	adj_time = iwl_mld_ptp_get_adj_time(mld, ts_10ns * 10);
++	status.info = IEEE80211_SKB_CB(status.skb);
++	status.ack_hwtstamp = ktime_set(0, adj_time);
++	spin_unlock_bh(&data->lock);
++
++	IWL_DEBUG_INFO(mld,
++		       "Time sync: TX event - report frame t1=%llu t4=%llu\n",
++		       ktime_to_ns(shwt->hwtstamp),
++		       ktime_to_ns(status.ack_hwtstamp));
++	ieee80211_tx_status_ext(mld->hw, &status);
++}

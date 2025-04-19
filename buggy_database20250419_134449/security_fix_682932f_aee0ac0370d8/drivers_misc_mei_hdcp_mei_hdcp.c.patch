@@ -1,0 +1,117 @@
+commit 682932f3e144a09759facfc5d8fe186760b01f89
+Author: Ramalingam C <ramalingam.c@intel.com>
+Date:   Thu Feb 21 23:42:02 2019 +0530
+
+    misc/mei/hdcp: Initiate Locality check
+    
+    Requests ME to start the second stage of HDCP2.2 authentication,
+    called Locality Check.
+    
+    On Success, ME FW will provide LC_Init message to send to hdcp sink.
+    
+    v2: Rebased.
+    v3:
+      cldev is passed as first parameter [Tomas]
+      Redundant comments and cast are removed [Tomas]
+    v4:
+      %zd used for ssize_t [Alexander]
+      %s/return -1/return -EIO [Alexander]
+      Style fixed [Uma]
+    v5: Rebased.
+    v6:
+      Collected the Rb-ed by.
+      Rebasing.
+    v7:
+      Adjust to the new mei interface.
+      Fix for Kdoc.
+    v8:
+      K-Doc addition. [Tomas]
+    v9:
+      renamed func as mei_hdcp_* [Tomas]
+      Inline function is defined for DDI index [Tomas]
+    v10:
+      K-Doc fix. [Tomas]
+    v11:
+      Rebased.
+    
+    Signed-off-by: Ramalingam C <ramalingam.c@intel.com>
+    Reviewed-by: Uma Shankar <uma.shankar@intel.com>
+    Acked-by: Tomas Winkler <tomas.winkler@intel.com>
+    Signed-off-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+    Link: https://patchwork.freedesktop.org/patch/msgid/1550772730-23280-9-git-send-email-ramalingam.c@intel.com
+
+diff --git a/drivers/misc/mei/hdcp/mei_hdcp.c b/drivers/misc/mei/hdcp/mei_hdcp.c
+index d5fbb2dbba60..7c880efe9134 100644
+--- a/drivers/misc/mei/hdcp/mei_hdcp.c
++++ b/drivers/misc/mei/hdcp/mei_hdcp.c
+@@ -296,6 +296,61 @@ mei_hdcp_store_pairing_info(struct device *dev, struct hdcp_port_data *data,
+ 	return 0;
+ }
+ 
++/**
++ * mei_hdcp_initiate_locality_check() - Prepare LC_Init
++ * @dev: device corresponding to the mei_cl_device
++ * @data: Intel HW specific hdcp data
++ * @lc_init_data: LC_Init msg output
++ *
++ * Return: 0 on Success, <0 on Failure
++ */
++static int
++mei_hdcp_initiate_locality_check(struct device *dev,
++				 struct hdcp_port_data *data,
++				 struct hdcp2_lc_init *lc_init_data)
++{
++	struct wired_cmd_init_locality_check_in lc_init_in = { { 0 } };
++	struct wired_cmd_init_locality_check_out lc_init_out = { { 0 } };
++	struct mei_cl_device *cldev;
++	ssize_t byte;
++
++	if (!dev || !data || !lc_init_data)
++		return -EINVAL;
++
++	cldev = to_mei_cl_device(dev);
++
++	lc_init_in.header.api_version = HDCP_API_VERSION;
++	lc_init_in.header.command_id = WIRED_INIT_LOCALITY_CHECK;
++	lc_init_in.header.status = ME_HDCP_STATUS_SUCCESS;
++	lc_init_in.header.buffer_len = WIRED_CMD_BUF_LEN_INIT_LOCALITY_CHECK_IN;
++
++	lc_init_in.port.integrated_port_type = data->port_type;
++	lc_init_in.port.physical_port = mei_get_ddi_index(data->port);
++
++	byte = mei_cldev_send(cldev, (u8 *)&lc_init_in, sizeof(lc_init_in));
++	if (byte < 0) {
++		dev_dbg(dev, "mei_cldev_send failed. %zd\n", byte);
++		return byte;
++	}
++
++	byte = mei_cldev_recv(cldev, (u8 *)&lc_init_out, sizeof(lc_init_out));
++	if (byte < 0) {
++		dev_dbg(dev, "mei_cldev_recv failed. %zd\n", byte);
++		return byte;
++	}
++
++	if (lc_init_out.header.status != ME_HDCP_STATUS_SUCCESS) {
++		dev_dbg(dev, "ME cmd 0x%08X Failed. status: 0x%X\n",
++			WIRED_INIT_LOCALITY_CHECK, lc_init_out.header.status);
++		return -EIO;
++	}
++
++	lc_init_data->msg_id = HDCP_2_2_LC_INIT;
++	memcpy(lc_init_data->r_n, lc_init_out.r_n, HDCP_2_2_RN_LEN);
++
++	return 0;
++}
++
+ static const __attribute__((unused))
+ struct i915_hdcp_component_ops mei_hdcp_ops = {
+ 	.owner = THIS_MODULE,
+@@ -304,7 +359,7 @@ struct i915_hdcp_component_ops mei_hdcp_ops = {
+ 				mei_hdcp_verify_receiver_cert_prepare_km,
+ 	.verify_hprime = mei_hdcp_verify_hprime,
+ 	.store_pairing_info = mei_hdcp_store_pairing_info,
+-	.initiate_locality_check = NULL,
++	.initiate_locality_check = mei_hdcp_initiate_locality_check,
+ 	.verify_lprime = NULL,
+ 	.get_session_key = NULL,
+ 	.repeater_check_flow_prepare_ack = NULL,

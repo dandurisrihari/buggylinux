@@ -1,0 +1,88 @@
+commit c17bb4951752d3e0f49cd1ea9d2e868422f9e0d6
+Author: Akinobu Mita <akinobu.mita@gmail.com>
+Date:   Fri Dec 8 02:39:46 2006 -0800
+
+    [PATCH] fault-injection capability for disk IO
+    
+    This patch provides fault-injection capability for disk IO.
+    
+    Boot option:
+    
+    fail_make_request=<probability>,<interval>,<space>,<times>
+    
+            <interval> -- specifies the interval of failures.
+    
+            <probability> -- specifies how often it should fail in percent.
+    
+            <space> -- specifies the size of free space where disk IO can be issued
+                       safely in bytes.
+    
+            <times> -- specifies how many times failures may happen at most.
+    
+    Debugfs:
+    
+    /debug/fail_make_request/interval
+    /debug/fail_make_request/probability
+    /debug/fail_make_request/specifies
+    /debug/fail_make_request/times
+    
+    Example:
+    
+            fail_make_request=10,100,0,-1
+            echo 1 > /sys/blocks/hda/hda1/make-it-fail
+    
+    generic_make_request() on /dev/hda1 fails once per 10 times.
+    
+    Cc: Jens Axboe <axboe@suse.de>
+    Signed-off-by: Akinobu Mita <akinobu.mita@gmail.com>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/block/genhd.c b/block/genhd.c
+index 653919d50cd4..457fdac4c17d 100644
+--- a/block/genhd.c
++++ b/block/genhd.c
+@@ -417,6 +417,34 @@ static struct disk_attribute disk_attr_stat = {
+ 	.show	= disk_stats_read
+ };
+ 
++#ifdef CONFIG_FAIL_MAKE_REQUEST
++
++static ssize_t disk_fail_store(struct gendisk * disk,
++			       const char *buf, size_t count)
++{
++	int i;
++
++	if (count > 0 && sscanf(buf, "%d", &i) > 0) {
++		if (i == 0)
++			disk->flags &= ~GENHD_FL_FAIL;
++		else
++			disk->flags |= GENHD_FL_FAIL;
++	}
++
++	return count;
++}
++static ssize_t disk_fail_read(struct gendisk * disk, char *page)
++{
++	return sprintf(page, "%d\n", disk->flags & GENHD_FL_FAIL ? 1 : 0);
++}
++static struct disk_attribute disk_attr_fail = {
++	.attr = {.name = "make-it-fail", .mode = S_IRUGO | S_IWUSR },
++	.store	= disk_fail_store,
++	.show	= disk_fail_read
++};
++
++#endif
++
+ static struct attribute * default_attrs[] = {
+ 	&disk_attr_uevent.attr,
+ 	&disk_attr_dev.attr,
+@@ -424,6 +452,9 @@ static struct attribute * default_attrs[] = {
+ 	&disk_attr_removable.attr,
+ 	&disk_attr_size.attr,
+ 	&disk_attr_stat.attr,
++#ifdef CONFIG_FAIL_MAKE_REQUEST
++	&disk_attr_fail.attr,
++#endif
+ 	NULL,
+ };

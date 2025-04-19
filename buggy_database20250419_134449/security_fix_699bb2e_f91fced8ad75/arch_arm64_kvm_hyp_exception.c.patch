@@ -1,0 +1,78 @@
+commit 699bb2e0c6f3796549dabac329501df7ffd99439
+Author: Marc Zyngier <maz@kernel.org>
+Date:   Sat May 28 12:38:18 2022 +0100
+
+    KVM: arm64: Move vcpu PC/Exception flags to the input flag set
+    
+    The PC update flags (which also deal with exception injection)
+    is one of the most complicated use of the flag we have. Make it
+    more fool prof by:
+    
+    - moving it over to the new accessors and assign it to the
+      input flag set
+    
+    - turn the combination of generic ELx flags with another flag
+      indicating the target EL itself into an explicit set of
+      flags for each EL and vector combination
+    
+    - add a new accessor to pend the exception
+    
+    This is otherwise a pretty straightformward conversion.
+    
+    Reviewed-by: Fuad Tabba <tabba@google.com>
+    Reviewed-by: Reiji Watanabe <reijiw@google.com>
+    Signed-off-by: Marc Zyngier <maz@kernel.org>
+
+diff --git a/arch/arm64/kvm/hyp/exception.c b/arch/arm64/kvm/hyp/exception.c
+index c5d009715402..b7557b25ed56 100644
+--- a/arch/arm64/kvm/hyp/exception.c
++++ b/arch/arm64/kvm/hyp/exception.c
+@@ -303,14 +303,14 @@ static void enter_exception32(struct kvm_vcpu *vcpu, u32 mode, u32 vect_offset)
+ static void kvm_inject_exception(struct kvm_vcpu *vcpu)
+ {
+ 	if (vcpu_el1_is_32bit(vcpu)) {
+-		switch (vcpu->arch.flags & KVM_ARM64_EXCEPT_MASK) {
+-		case KVM_ARM64_EXCEPT_AA32_UND:
++		switch (vcpu_get_flag(vcpu, EXCEPT_MASK)) {
++		case unpack_vcpu_flag(EXCEPT_AA32_UND):
+ 			enter_exception32(vcpu, PSR_AA32_MODE_UND, 4);
+ 			break;
+-		case KVM_ARM64_EXCEPT_AA32_IABT:
++		case unpack_vcpu_flag(EXCEPT_AA32_IABT):
+ 			enter_exception32(vcpu, PSR_AA32_MODE_ABT, 12);
+ 			break;
+-		case KVM_ARM64_EXCEPT_AA32_DABT:
++		case unpack_vcpu_flag(EXCEPT_AA32_DABT):
+ 			enter_exception32(vcpu, PSR_AA32_MODE_ABT, 16);
+ 			break;
+ 		default:
+@@ -318,9 +318,8 @@ static void kvm_inject_exception(struct kvm_vcpu *vcpu)
+ 			break;
+ 		}
+ 	} else {
+-		switch (vcpu->arch.flags & KVM_ARM64_EXCEPT_MASK) {
+-		case (KVM_ARM64_EXCEPT_AA64_ELx_SYNC |
+-		      KVM_ARM64_EXCEPT_AA64_EL1):
++		switch (vcpu_get_flag(vcpu, EXCEPT_MASK)) {
++		case unpack_vcpu_flag(EXCEPT_AA64_EL1_SYNC):
+ 			enter_exception64(vcpu, PSR_MODE_EL1h, except_type_sync);
+ 			break;
+ 		default:
+@@ -340,12 +339,12 @@ static void kvm_inject_exception(struct kvm_vcpu *vcpu)
+  */
+ void __kvm_adjust_pc(struct kvm_vcpu *vcpu)
+ {
+-	if (vcpu->arch.flags & KVM_ARM64_PENDING_EXCEPTION) {
++	if (vcpu_get_flag(vcpu, PENDING_EXCEPTION)) {
+ 		kvm_inject_exception(vcpu);
+-		vcpu->arch.flags &= ~(KVM_ARM64_PENDING_EXCEPTION |
+-				      KVM_ARM64_EXCEPT_MASK);
+-	} else 	if (vcpu->arch.flags & KVM_ARM64_INCREMENT_PC) {
++		vcpu_clear_flag(vcpu, PENDING_EXCEPTION);
++		vcpu_clear_flag(vcpu, EXCEPT_MASK);
++	} else if (vcpu_get_flag(vcpu, INCREMENT_PC)) {
+ 		kvm_skip_instr(vcpu);
+-		vcpu->arch.flags &= ~KVM_ARM64_INCREMENT_PC;
++		vcpu_clear_flag(vcpu, INCREMENT_PC);
+ 	}
+ }

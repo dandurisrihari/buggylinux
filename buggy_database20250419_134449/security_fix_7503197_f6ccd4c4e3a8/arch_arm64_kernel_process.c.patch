@@ -1,0 +1,55 @@
+commit 7503197562567b57ec14feb3a9d5400ebc56812f
+Author: Mark Rutland <mark.rutland@arm.com>
+Date:   Fri Dec 7 18:39:25 2018 +0000
+
+    arm64: add basic pointer authentication support
+    
+    This patch adds basic support for pointer authentication, allowing
+    userspace to make use of APIAKey, APIBKey, APDAKey, APDBKey, and
+    APGAKey. The kernel maintains key values for each process (shared by all
+    threads within), which are initialised to random values at exec() time.
+    
+    The ID_AA64ISAR1_EL1.{APA,API,GPA,GPI} fields are exposed to userspace,
+    to describe that pointer authentication instructions are available and
+    that the kernel is managing the keys. Two new hwcaps are added for the
+    same reason: PACA (for address authentication) and PACG (for generic
+    authentication).
+    
+    Reviewed-by: Richard Henderson <richard.henderson@linaro.org>
+    Signed-off-by: Mark Rutland <mark.rutland@arm.com>
+    Signed-off-by: Kristina Martsenko <kristina.martsenko@arm.com>
+    Tested-by: Adam Wallis <awallis@codeaurora.org>
+    Cc: Catalin Marinas <catalin.marinas@arm.com>
+    Cc: Ramana Radhakrishnan <ramana.radhakrishnan@arm.com>
+    Cc: Suzuki K Poulose <suzuki.poulose@arm.com>
+    Cc: Will Deacon <will.deacon@arm.com>
+    [will: Fix sizeof() usage and unroll address key initialisation]
+    Signed-off-by: Will Deacon <will.deacon@arm.com>
+
+diff --git a/arch/arm64/kernel/process.c b/arch/arm64/kernel/process.c
+index 8a2d68f04e0d..e0a443730e04 100644
+--- a/arch/arm64/kernel/process.c
++++ b/arch/arm64/kernel/process.c
+@@ -57,6 +57,7 @@
+ #include <asm/fpsimd.h>
+ #include <asm/mmu_context.h>
+ #include <asm/processor.h>
++#include <asm/pointer_auth.h>
+ #include <asm/stacktrace.h>
+ 
+ #if defined(CONFIG_STACKPROTECTOR) && !defined(CONFIG_STACKPROTECTOR_PER_TASK)
+@@ -429,6 +430,7 @@ __notrace_funcgraph struct task_struct *__switch_to(struct task_struct *prev,
+ 	contextidr_thread_switch(next);
+ 	entry_task_switch(next);
+ 	uao_thread_switch(next);
++	ptrauth_thread_switch(next);
+ 
+ 	/*
+ 	 * Complete any pending TLB or cache maintenance on this CPU in case
+@@ -496,4 +498,6 @@ unsigned long arch_randomize_brk(struct mm_struct *mm)
+ void arch_setup_new_exec(void)
+ {
+ 	current->mm->context.flags = is_compat_task() ? MMCF_AARCH32 : 0;
++
++	ptrauth_thread_init_user(current);
+ }

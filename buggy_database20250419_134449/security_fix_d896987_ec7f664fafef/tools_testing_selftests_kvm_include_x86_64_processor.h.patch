@@ -1,0 +1,62 @@
+commit d8969871253a4704f007b307b2dd6232d1e40da8
+Author: Maciej S. Szmigiero <maciej.szmigiero@oracle.com>
+Date:   Mon May 2 00:07:35 2022 +0200
+
+    KVM: selftests: nSVM: Add svm_nested_soft_inject_test
+    
+    Add a KVM self-test that checks whether a nSVM L1 is able to successfully
+    inject a software interrupt, a soft exception and a NMI into its L2 guest.
+    
+    In practice, this tests both the next_rip field consistency and
+    L1-injected event with intervening L0 VMEXIT during its delivery:
+    the first nested VMRUN (that's also trying to inject a software interrupt)
+    will immediately trigger a L0 NPF.
+    This L0 NPF will have zero in its CPU-returned next_rip field, which if
+    incorrectly reused by KVM will trigger a #PF when trying to return to
+    such address 0 from the interrupt handler.
+    
+    For NMI injection this tests whether the L1 NMI state isn't getting
+    incorrectly mixed with the L2 NMI state if a L1 -> L2 NMI needs to be
+    re-injected.
+    
+    Reviewed-by: Maxim Levitsky <mlevitsk@redhat.com>
+    [sean: check exact L2 RIP on first soft interrupt]
+    Signed-off-by: Sean Christopherson <seanjc@google.com>
+    Signed-off-by: Maciej S. Szmigiero <maciej.szmigiero@oracle.com>
+    Message-Id: <d5f3d56528558ad8e28a9f1e1e4187f5a1e6770a.1651440202.git.maciej.szmigiero@oracle.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/tools/testing/selftests/kvm/include/x86_64/processor.h b/tools/testing/selftests/kvm/include/x86_64/processor.h
+index d0d51adec76e..4fd870f37b9e 100644
+--- a/tools/testing/selftests/kvm/include/x86_64/processor.h
++++ b/tools/testing/selftests/kvm/include/x86_64/processor.h
+@@ -17,6 +17,8 @@
+ 
+ #include "../kvm_util.h"
+ 
++#define NMI_VECTOR		0x02
++
+ #define X86_EFLAGS_FIXED	 (1u << 1)
+ 
+ #define X86_CR4_VME		(1ul << 0)
+@@ -385,6 +387,21 @@ static inline void cpu_relax(void)
+ 	asm volatile("rep; nop" ::: "memory");
+ }
+ 
++#define vmmcall()		\
++	__asm__ __volatile__(	\
++		"vmmcall\n"	\
++		)
++
++#define ud2()			\
++	__asm__ __volatile__(	\
++		"ud2\n"	\
++		)
++
++#define hlt()			\
++	__asm__ __volatile__(	\
++		"hlt\n"	\
++		)
++
+ bool is_intel_cpu(void);
+ bool is_amd_cpu(void);

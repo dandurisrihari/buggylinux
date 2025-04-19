@@ -1,0 +1,56 @@
+commit bd2b53b20fcd0d6c4c815b54e6d464e34429d3a4
+Author: Michael S. Tsirkin <mst@redhat.com>
+Date:   Thu Nov 18 19:09:08 2010 +0200
+
+    KVM: fast-path msi injection with irqfd
+    
+    Store irq routing table pointer in the irqfd object,
+    and use that to inject MSI directly without bouncing out to
+    a kernel thread.
+    
+    While we touch this structure, rearrange irqfd fields to make fastpath
+    better packed for better cache utilization.
+    
+    This also adds some comments about locking rules and rcu usage in code.
+    
+    Some notes on the design:
+    - Use pointer into the rt instead of copying an entry,
+      to make it possible to use rcu, thus side-stepping
+      locking complexities.  We also save some memory this way.
+    - Old workqueue code is still used for level irqs.
+      I don't think we DTRT with level anyway, however,
+      it seems easier to keep the code around as
+      it has been thought through and debugged, and fix level later than
+      rip out and re-instate it later.
+    
+    Signed-off-by: Michael S. Tsirkin <mst@redhat.com>
+    Acked-by: Marcelo Tosatti <mtosatti@redhat.com>
+    Acked-by: Gregory Haskins <ghaskins@novell.com>
+    Signed-off-by: Avi Kivity <avi@redhat.com>
+
+diff --git a/virt/kvm/irq_comm.c b/virt/kvm/irq_comm.c
+index 8edca9141b78..9f614b4e365f 100644
+--- a/virt/kvm/irq_comm.c
++++ b/virt/kvm/irq_comm.c
+@@ -114,8 +114,8 @@ int kvm_irq_delivery_to_apic(struct kvm *kvm, struct kvm_lapic *src,
+ 	return r;
+ }
+ 
+-static int kvm_set_msi(struct kvm_kernel_irq_routing_entry *e,
+-		       struct kvm *kvm, int irq_source_id, int level)
++int kvm_set_msi(struct kvm_kernel_irq_routing_entry *e,
++		struct kvm *kvm, int irq_source_id, int level)
+ {
+ 	struct kvm_lapic_irq irq;
+ 
+@@ -409,8 +409,9 @@ int kvm_set_irq_routing(struct kvm *kvm,
+ 
+ 	mutex_lock(&kvm->irq_lock);
+ 	old = kvm->irq_routing;
+-	rcu_assign_pointer(kvm->irq_routing, new);
++	kvm_irq_routing_update(kvm, new);
+ 	mutex_unlock(&kvm->irq_lock);
++
+ 	synchronize_rcu();
+ 
+ 	new = old;

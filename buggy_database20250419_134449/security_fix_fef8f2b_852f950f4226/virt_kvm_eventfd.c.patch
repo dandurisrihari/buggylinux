@@ -1,0 +1,143 @@
+commit fef8f2b90edbd7089a4278021314f11f056b0cbb
+Author: Dmytro Maluka <dmy@semihalf.com>
+Date:   Wed Mar 22 21:43:44 2023 +0100
+
+    KVM: x86/ioapic: Resample the pending state of an IRQ when unmasking
+    
+    KVM irqfd based emulation of level-triggered interrupts doesn't work
+    quite correctly in some cases, particularly in the case of interrupts
+    that are handled in a Linux guest as oneshot interrupts (IRQF_ONESHOT).
+    Such an interrupt is acked to the device in its threaded irq handler,
+    i.e. later than it is acked to the interrupt controller (EOI at the end
+    of hardirq), not earlier.
+    
+    Linux keeps such interrupt masked until its threaded handler finishes,
+    to prevent the EOI from re-asserting an unacknowledged interrupt.
+    However, with KVM + vfio (or whatever is listening on the resamplefd)
+    we always notify resamplefd at the EOI, so vfio prematurely unmasks the
+    host physical IRQ, thus a new physical interrupt is fired in the host.
+    This extra interrupt in the host is not a problem per se. The problem is
+    that it is unconditionally queued for injection into the guest, so the
+    guest sees an extra bogus interrupt. [*]
+    
+    There are observed at least 2 user-visible issues caused by those
+    extra erroneous interrupts for a oneshot irq in the guest:
+    
+    1. System suspend aborted due to a pending wakeup interrupt from
+       ChromeOS EC (drivers/platform/chrome/cros_ec.c).
+    2. Annoying "invalid report id data" errors from ELAN0000 touchpad
+       (drivers/input/mouse/elan_i2c_core.c), flooding the guest dmesg
+       every time the touchpad is touched.
+    
+    The core issue here is that by the time when the guest unmasks the IRQ,
+    the physical IRQ line is no longer asserted (since the guest has
+    acked the interrupt to the device in the meantime), yet we
+    unconditionally inject the interrupt queued into the guest by the
+    previous resampling. So to fix the issue, we need a way to detect that
+    the IRQ is no longer pending, and cancel the queued interrupt in this
+    case.
+    
+    With IOAPIC we are not able to probe the physical IRQ line state
+    directly (at least not if the underlying physical interrupt controller
+    is an IOAPIC too), so in this patch we use irqfd resampler for that.
+    Namely, instead of injecting the queued interrupt, we just notify the
+    resampler that this interrupt is done. If the IRQ line is actually
+    already deasserted, we are done. If it is still asserted, a new
+    interrupt will be shortly triggered through irqfd and injected into the
+    guest.
+    
+    In the case if there is no irqfd resampler registered for this IRQ, we
+    cannot fix the issue, so we keep the existing behavior: immediately
+    unconditionally inject the queued interrupt.
+    
+    This patch fixes the issue for x86 IOAPIC only. In the long run, we can
+    fix it for other irqchips and other architectures too, possibly taking
+    advantage of reading the physical state of the IRQ line, which is
+    possible with some other irqchips (e.g. with arm64 GIC, maybe even with
+    the legacy x86 PIC).
+    
+    [*] In this description we assume that the interrupt is a physical host
+        interrupt forwarded to the guest e.g. by vfio. Potentially the same
+        issue may occur also with a purely virtual interrupt from an
+        emulated device, e.g. if the guest handles this interrupt, again, as
+        a oneshot interrupt.
+    
+    Signed-off-by: Dmytro Maluka <dmy@semihalf.com>
+    Link: https://lore.kernel.org/kvm/31420943-8c5f-125c-a5ee-d2fde2700083@semihalf.com/
+    Link: https://lore.kernel.org/lkml/87o7wrug0w.wl-maz@kernel.org/
+    Message-Id: <20230322204344.50138-3-dmy@semihalf.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/virt/kvm/eventfd.c b/virt/kvm/eventfd.c
+index 61aea70dd888..b0af834ffa95 100644
+--- a/virt/kvm/eventfd.c
++++ b/virt/kvm/eventfd.c
+@@ -55,6 +55,15 @@ irqfd_inject(struct work_struct *work)
+ 			    irqfd->gsi, 1, false);
+ }
+ 
++static void irqfd_resampler_notify(struct kvm_kernel_irqfd_resampler *resampler)
++{
++	struct kvm_kernel_irqfd *irqfd;
++
++	list_for_each_entry_srcu(irqfd, &resampler->list, resampler_link,
++				 srcu_read_lock_held(&resampler->kvm->irq_srcu))
++		eventfd_signal(irqfd->resamplefd, 1);
++}
++
+ /*
+  * Since resampler irqfds share an IRQ source ID, we de-assert once
+  * then notify all of the resampler irqfds using this GSI.  We can't
+@@ -65,7 +74,6 @@ irqfd_resampler_ack(struct kvm_irq_ack_notifier *kian)
+ {
+ 	struct kvm_kernel_irqfd_resampler *resampler;
+ 	struct kvm *kvm;
+-	struct kvm_kernel_irqfd *irqfd;
+ 	int idx;
+ 
+ 	resampler = container_of(kian,
+@@ -76,11 +84,7 @@ irqfd_resampler_ack(struct kvm_irq_ack_notifier *kian)
+ 		    resampler->notifier.gsi, 0, false);
+ 
+ 	idx = srcu_read_lock(&kvm->irq_srcu);
+-
+-	list_for_each_entry_srcu(irqfd, &resampler->list, resampler_link,
+-	    srcu_read_lock_held(&kvm->irq_srcu))
+-		eventfd_signal(irqfd->resamplefd, 1);
+-
++	irqfd_resampler_notify(resampler);
+ 	srcu_read_unlock(&kvm->irq_srcu, idx);
+ }
+ 
+@@ -648,6 +652,31 @@ void kvm_irq_routing_update(struct kvm *kvm)
+ 	spin_unlock_irq(&kvm->irqfds.lock);
+ }
+ 
++bool kvm_notify_irqfd_resampler(struct kvm *kvm,
++				unsigned int irqchip,
++				unsigned int pin)
++{
++	struct kvm_kernel_irqfd_resampler *resampler;
++	int gsi, idx;
++
++	idx = srcu_read_lock(&kvm->irq_srcu);
++	gsi = kvm_irq_map_chip_pin(kvm, irqchip, pin);
++	if (gsi != -1) {
++		list_for_each_entry_srcu(resampler,
++					 &kvm->irqfds.resampler_list, link,
++					 srcu_read_lock_held(&kvm->irq_srcu)) {
++			if (resampler->notifier.gsi == gsi) {
++				irqfd_resampler_notify(resampler);
++				srcu_read_unlock(&kvm->irq_srcu, idx);
++				return true;
++			}
++		}
++	}
++	srcu_read_unlock(&kvm->irq_srcu, idx);
++
++	return false;
++}
++
+ /*
+  * create a host-wide workqueue for issuing deferred shutdown requests
+  * aggregated from all vm* instances. We need our own isolated

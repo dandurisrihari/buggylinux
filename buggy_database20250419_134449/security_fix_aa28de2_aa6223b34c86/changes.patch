@@ -1,0 +1,155 @@
+diff --git a/include/linux/uio.h b/include/linux/uio.h
+index f2d36a3d3005..243e2362fe1a 100644
+--- a/include/linux/uio.h
++++ b/include/linux/uio.h
+@@ -10,6 +10,7 @@
+ #define __LINUX_UIO_H
+ 
+ #include <linux/kernel.h>
++#include <linux/thread_info.h>
+ #include <uapi/linux/uio.h>
+ 
+ struct page;
+@@ -91,11 +92,58 @@ size_t copy_page_to_iter(struct page *page, size_t offset, size_t bytes,
+ 			 struct iov_iter *i);
+ size_t copy_page_from_iter(struct page *page, size_t offset, size_t bytes,
+ 			 struct iov_iter *i);
+-size_t copy_to_iter(const void *addr, size_t bytes, struct iov_iter *i);
+-size_t copy_from_iter(void *addr, size_t bytes, struct iov_iter *i);
+-bool copy_from_iter_full(void *addr, size_t bytes, struct iov_iter *i);
+-size_t copy_from_iter_nocache(void *addr, size_t bytes, struct iov_iter *i);
+-bool copy_from_iter_full_nocache(void *addr, size_t bytes, struct iov_iter *i);
++
++size_t _copy_to_iter(const void *addr, size_t bytes, struct iov_iter *i);
++size_t _copy_from_iter(void *addr, size_t bytes, struct iov_iter *i);
++bool _copy_from_iter_full(void *addr, size_t bytes, struct iov_iter *i);
++size_t _copy_from_iter_nocache(void *addr, size_t bytes, struct iov_iter *i);
++bool _copy_from_iter_full_nocache(void *addr, size_t bytes, struct iov_iter *i);
++
++static __always_inline __must_check
++size_t copy_to_iter(const void *addr, size_t bytes, struct iov_iter *i)
++{
++	if (unlikely(!check_copy_size(addr, bytes, true)))
++		return bytes;
++	else
++		return _copy_to_iter(addr, bytes, i);
++}
++
++static __always_inline __must_check
++size_t copy_from_iter(void *addr, size_t bytes, struct iov_iter *i)
++{
++	if (unlikely(!check_copy_size(addr, bytes, false)))
++		return bytes;
++	else
++		return _copy_from_iter(addr, bytes, i);
++}
++
++static __always_inline __must_check
++bool copy_from_iter_full(void *addr, size_t bytes, struct iov_iter *i)
++{
++	if (unlikely(!check_copy_size(addr, bytes, false)))
++		return false;
++	else
++		return _copy_from_iter_full(addr, bytes, i);
++}
++
++static __always_inline __must_check
++size_t copy_from_iter_nocache(void *addr, size_t bytes, struct iov_iter *i)
++{
++	if (unlikely(!check_copy_size(addr, bytes, false)))
++		return bytes;
++	else
++		return _copy_from_iter_nocache(addr, bytes, i);
++}
++
++static __always_inline __must_check
++bool copy_from_iter_full_nocache(void *addr, size_t bytes, struct iov_iter *i)
++{
++	if (unlikely(!check_copy_size(addr, bytes, false)))
++		return false;
++	else
++		return _copy_from_iter_full_nocache(addr, bytes, i);
++}
++
+ size_t iov_iter_zero(size_t bytes, struct iov_iter *);
+ unsigned long iov_iter_alignment(const struct iov_iter *i);
+ unsigned long iov_iter_gap_alignment(const struct iov_iter *i);
+diff --git a/lib/iov_iter.c b/lib/iov_iter.c
+index f835964c9485..bc4a63ebe91a 100644
+--- a/lib/iov_iter.c
++++ b/lib/iov_iter.c
+@@ -535,7 +535,7 @@ static size_t copy_pipe_to_iter(const void *addr, size_t bytes,
+ 	return bytes;
+ }
+ 
+-size_t copy_to_iter(const void *addr, size_t bytes, struct iov_iter *i)
++size_t _copy_to_iter(const void *addr, size_t bytes, struct iov_iter *i)
+ {
+ 	const char *from = addr;
+ 	if (unlikely(i->type & ITER_PIPE))
+@@ -550,9 +550,9 @@ size_t copy_to_iter(const void *addr, size_t bytes, struct iov_iter *i)
+ 
+ 	return bytes;
+ }
+-EXPORT_SYMBOL(copy_to_iter);
++EXPORT_SYMBOL(_copy_to_iter);
+ 
+-size_t copy_from_iter(void *addr, size_t bytes, struct iov_iter *i)
++size_t _copy_from_iter(void *addr, size_t bytes, struct iov_iter *i)
+ {
+ 	char *to = addr;
+ 	if (unlikely(i->type & ITER_PIPE)) {
+@@ -569,9 +569,9 @@ size_t copy_from_iter(void *addr, size_t bytes, struct iov_iter *i)
+ 
+ 	return bytes;
+ }
+-EXPORT_SYMBOL(copy_from_iter);
++EXPORT_SYMBOL(_copy_from_iter);
+ 
+-bool copy_from_iter_full(void *addr, size_t bytes, struct iov_iter *i)
++bool _copy_from_iter_full(void *addr, size_t bytes, struct iov_iter *i)
+ {
+ 	char *to = addr;
+ 	if (unlikely(i->type & ITER_PIPE)) {
+@@ -594,9 +594,9 @@ bool copy_from_iter_full(void *addr, size_t bytes, struct iov_iter *i)
+ 	iov_iter_advance(i, bytes);
+ 	return true;
+ }
+-EXPORT_SYMBOL(copy_from_iter_full);
++EXPORT_SYMBOL(_copy_from_iter_full);
+ 
+-size_t copy_from_iter_nocache(void *addr, size_t bytes, struct iov_iter *i)
++size_t _copy_from_iter_nocache(void *addr, size_t bytes, struct iov_iter *i)
+ {
+ 	char *to = addr;
+ 	if (unlikely(i->type & ITER_PIPE)) {
+@@ -613,9 +613,9 @@ size_t copy_from_iter_nocache(void *addr, size_t bytes, struct iov_iter *i)
+ 
+ 	return bytes;
+ }
+-EXPORT_SYMBOL(copy_from_iter_nocache);
++EXPORT_SYMBOL(_copy_from_iter_nocache);
+ 
+-bool copy_from_iter_full_nocache(void *addr, size_t bytes, struct iov_iter *i)
++bool _copy_from_iter_full_nocache(void *addr, size_t bytes, struct iov_iter *i)
+ {
+ 	char *to = addr;
+ 	if (unlikely(i->type & ITER_PIPE)) {
+@@ -637,7 +637,7 @@ bool copy_from_iter_full_nocache(void *addr, size_t bytes, struct iov_iter *i)
+ 	iov_iter_advance(i, bytes);
+ 	return true;
+ }
+-EXPORT_SYMBOL(copy_from_iter_full_nocache);
++EXPORT_SYMBOL(_copy_from_iter_full_nocache);
+ 
+ size_t copy_page_to_iter(struct page *page, size_t offset, size_t bytes,
+ 			 struct iov_iter *i)
+@@ -663,7 +663,7 @@ size_t copy_page_from_iter(struct page *page, size_t offset, size_t bytes,
+ 	}
+ 	if (i->type & (ITER_BVEC|ITER_KVEC)) {
+ 		void *kaddr = kmap_atomic(page);
+-		size_t wanted = copy_from_iter(kaddr + offset, bytes, i);
++		size_t wanted = _copy_from_iter(kaddr + offset, bytes, i);
+ 		kunmap_atomic(kaddr);
+ 		return wanted;
+ 	} else

@@ -1,0 +1,64 @@
+commit fffd0934b9390f34bec45762192b7edd3b12b4b5
+Author: Johannes Berg <johannes@sipsolutions.net>
+Date:   Wed Jul 8 14:22:54 2009 +0200
+
+    cfg80211: rework key operation
+    
+    This reworks the key operation in cfg80211, and now only
+    allows, from userspace, configuring keys (via nl80211)
+    after the connection has been established (in managed
+    mode), the IBSS been joined (in IBSS mode), at any time
+    (in AP[_VLAN] modes) or never for all the other modes.
+    
+    In order to do shared key authentication correctly, it
+    is now possible to give a WEP key to the AUTH command.
+    To configure static WEP keys, these are given to the
+    CONNECT or IBSS_JOIN command directly, for a userspace
+    SME it is assumed it will configure it properly after
+    the connection has been established.
+    
+    Since mac80211 used to check the default key in IBSS
+    mode to see whether or not the network is protected,
+    it needs an update in that area, as well as an update
+    to make use of the WEP key passed to auth() for shared
+    key authentication.
+    
+    Signed-off-by: Johannes Berg <johannes@sipsolutions.net>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/mac80211/mlme.c b/net/mac80211/mlme.c
+index c9db9646025b..8e4a60497bba 100644
+--- a/net/mac80211/mlme.c
++++ b/net/mac80211/mlme.c
+@@ -954,7 +954,7 @@ ieee80211_authenticate(struct ieee80211_sub_if_data *sdata,
+ 	       sdata->dev->name, wk->bss->cbss.bssid, wk->tries);
+ 
+ 	ieee80211_send_auth(sdata, 1, wk->auth_alg, wk->ie, wk->ie_len,
+-			    wk->bss->cbss.bssid, 0);
++			    wk->bss->cbss.bssid, NULL, 0, 0);
+ 	wk->auth_transaction = 2;
+ 
+ 	wk->timeout = jiffies + IEEE80211_AUTH_TIMEOUT;
+@@ -1176,7 +1176,8 @@ static void ieee80211_auth_challenge(struct ieee80211_sub_if_data *sdata,
+ 		return;
+ 	ieee80211_send_auth(sdata, 3, wk->auth_alg,
+ 			    elems.challenge - 2, elems.challenge_len + 2,
+-			    wk->bss->cbss.bssid, 1);
++			    wk->bss->cbss.bssid,
++			    wk->key, wk->key_len, wk->key_idx);
+ 	wk->auth_transaction = 4;
+ }
+ 
+@@ -2175,6 +2176,12 @@ int ieee80211_mgd_auth(struct ieee80211_sub_if_data *sdata,
+ 		wk->ie_len = req->ie_len;
+ 	}
+ 
++	if (req->key && req->key_len) {
++		wk->key_len = req->key_len;
++		wk->key_idx = req->key_idx;
++		memcpy(wk->key, req->key, req->key_len);
++	}
++
+ 	ssid = ieee80211_bss_get_ie(req->bss, WLAN_EID_SSID);
+ 	memcpy(wk->ssid, ssid + 2, ssid[1]);
+ 	wk->ssid_len = ssid[1];

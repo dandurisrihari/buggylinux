@@ -1,0 +1,56 @@
+commit ab434b60ab07f8c44246b6fb0cddee436687a09a
+Author: Sage Weil <sage@newdream.net>
+Date:   Fri Jan 13 22:22:03 2012 -0800
+
+    ceph: initialize client debugfs outside of monc->mutex
+    
+    Initializing debufs under monc->mutex introduces a lock dependency for
+    sb->s_type->i_mutex_key, which (combined with several other dependencies)
+    leads to an annoying lockdep warning.  There's no particular reason to do
+    the debugfs setup under this lock, so move it out.
+    
+    It used to be the case that our first monmap could come from the OSD; that
+    is no longer the case with recent servers, so we will reliably set up the
+    client entry during the initial authentication.
+    
+    We don't have to worry about racing with debugfs teardown by
+    ceph_debugfs_client_cleanup() because ceph_destroy_client() calls
+    ceph_msgr_flush() first, which will wait for the message dispatch work
+    to complete (and the debugfs init to complete).
+    
+    Fixes: #1940
+    Signed-off-by: Sage Weil <sage@newdream.net>
+
+diff --git a/net/ceph/mon_client.c b/net/ceph/mon_client.c
+index 0b62deae42bd..1845cde26227 100644
+--- a/net/ceph/mon_client.c
++++ b/net/ceph/mon_client.c
+@@ -8,8 +8,8 @@
+ 
+ #include <linux/ceph/mon_client.h>
+ #include <linux/ceph/libceph.h>
++#include <linux/ceph/debugfs.h>
+ #include <linux/ceph/decode.h>
+-
+ #include <linux/ceph/auth.h>
+ 
+ /*
+@@ -340,8 +340,19 @@ static void ceph_monc_handle_map(struct ceph_mon_client *monc,
+ 	client->monc.monmap = monmap;
+ 	kfree(old);
+ 
++	if (!client->have_fsid) {
++		client->have_fsid = true;
++		mutex_unlock(&monc->mutex);
++		/*
++		 * do debugfs initialization without mutex to avoid
++		 * creating a locking dependency
++		 */
++		ceph_debugfs_client_init(client);
++		goto out_unlocked;
++	}
+ out:
+ 	mutex_unlock(&monc->mutex);
++out_unlocked:
+ 	wake_up_all(&client->auth_wq);
+ }

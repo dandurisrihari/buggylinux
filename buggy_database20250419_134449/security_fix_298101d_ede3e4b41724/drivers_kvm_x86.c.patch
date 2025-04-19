@@ -1,0 +1,70 @@
+commit 298101da2f507c13eaf179ee4507a7c0fe3e7b06
+Author: Avi Kivity <avi@qumranet.com>
+Date:   Sun Nov 25 13:41:11 2007 +0200
+
+    KVM: Generalize exception injection mechanism
+    
+    Instead of each subarch doing its own thing, add an API for queuing an
+    injection, and manage failed exception injection centerally (i.e., if
+    an inject failed due to a shadow page fault, we need to requeue it).
+    
+    Signed-off-by: Avi Kivity <avi@qumranet.com>
+
+diff --git a/drivers/kvm/x86.c b/drivers/kvm/x86.c
+index c9e4b67bfb1b..11440d12a2d3 100644
+--- a/drivers/kvm/x86.c
++++ b/drivers/kvm/x86.c
+@@ -133,6 +133,32 @@ static void inject_gp(struct kvm_vcpu *vcpu)
+ 	kvm_x86_ops->inject_gp(vcpu, 0);
+ }
+ 
++void kvm_queue_exception(struct kvm_vcpu *vcpu, unsigned nr)
++{
++	WARN_ON(vcpu->exception.pending);
++	vcpu->exception.pending = true;
++	vcpu->exception.has_error_code = false;
++	vcpu->exception.nr = nr;
++}
++EXPORT_SYMBOL_GPL(kvm_queue_exception);
++
++void kvm_queue_exception_e(struct kvm_vcpu *vcpu, unsigned nr, u32 error_code)
++{
++	WARN_ON(vcpu->exception.pending);
++	vcpu->exception.pending = true;
++	vcpu->exception.has_error_code = true;
++	vcpu->exception.nr = nr;
++	vcpu->exception.error_code = error_code;
++}
++EXPORT_SYMBOL_GPL(kvm_queue_exception_e);
++
++static void __queue_exception(struct kvm_vcpu *vcpu)
++{
++	kvm_x86_ops->queue_exception(vcpu, vcpu->exception.nr,
++				     vcpu->exception.has_error_code,
++				     vcpu->exception.error_code);
++}
++
+ /*
+  * Load the pae pdptrs.  Return true is they are all valid.
+  */
+@@ -2370,7 +2396,9 @@ static int __vcpu_run(struct kvm_vcpu *vcpu, struct kvm_run *kvm_run)
+ 		goto out;
+ 	}
+ 
+-	if (irqchip_in_kernel(vcpu->kvm))
++	if (vcpu->exception.pending)
++		__queue_exception(vcpu);
++	else if (irqchip_in_kernel(vcpu->kvm))
+ 		kvm_x86_ops->inject_pending_irq(vcpu);
+ 	else
+ 		kvm_x86_ops->inject_pending_vectors(vcpu, kvm_run);
+@@ -2409,6 +2437,9 @@ static int __vcpu_run(struct kvm_vcpu *vcpu, struct kvm_run *kvm_run)
+ 		profile_hit(KVM_PROFILING, (void *)vcpu->rip);
+ 	}
+ 
++	if (vcpu->exception.pending && kvm_x86_ops->exception_injected(vcpu))
++		vcpu->exception.pending = false;
++
+ 	r = kvm_x86_ops->handle_exit(kvm_run, vcpu);
+ 
+ 	if (r > 0) {

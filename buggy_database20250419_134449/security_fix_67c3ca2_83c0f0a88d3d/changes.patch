@@ -1,0 +1,198 @@
+diff --git a/drivers/net/ethernet/mscc/ocelot.c b/drivers/net/ethernet/mscc/ocelot.c
+index ed2fb44500b0..69a4e5a90475 100644
+--- a/drivers/net/ethernet/mscc/ocelot.c
++++ b/drivers/net/ethernet/mscc/ocelot.c
+@@ -1193,17 +1193,34 @@ bool ocelot_can_inject(struct ocelot *ocelot, int grp)
+ }
+ EXPORT_SYMBOL(ocelot_can_inject);
+ 
+-void ocelot_ifh_port_set(void *ifh, int port, u32 rew_op, u32 vlan_tag)
++/**
++ * ocelot_ifh_set_basic - Set basic information in Injection Frame Header
++ * @ifh: Pointer to Injection Frame Header memory
++ * @ocelot: Switch private data structure
++ * @port: Egress port number
++ * @rew_op: Egress rewriter operation for PTP
++ * @skb: Pointer to socket buffer (packet)
++ *
++ * Populate the Injection Frame Header with basic information for this skb: the
++ * analyzer bypass bit, destination port, VLAN info, egress rewriter info.
++ */
++void ocelot_ifh_set_basic(void *ifh, struct ocelot *ocelot, int port,
++			  u32 rew_op, struct sk_buff *skb)
+ {
++	struct ocelot_port *ocelot_port = ocelot->ports[port];
++	u64 vlan_tci, tag_type;
++
++	ocelot_xmit_get_vlan_info(skb, ocelot_port->bridge, &vlan_tci,
++				  &tag_type);
++
+ 	ocelot_ifh_set_bypass(ifh, 1);
+ 	ocelot_ifh_set_dest(ifh, BIT_ULL(port));
+-	ocelot_ifh_set_tag_type(ifh, IFH_TAG_TYPE_C);
+-	if (vlan_tag)
+-		ocelot_ifh_set_vlan_tci(ifh, vlan_tag);
++	ocelot_ifh_set_tag_type(ifh, tag_type);
++	ocelot_ifh_set_vlan_tci(ifh, vlan_tci);
+ 	if (rew_op)
+ 		ocelot_ifh_set_rew_op(ifh, rew_op);
+ }
+-EXPORT_SYMBOL(ocelot_ifh_port_set);
++EXPORT_SYMBOL(ocelot_ifh_set_basic);
+ 
+ void ocelot_port_inject_frame(struct ocelot *ocelot, int port, int grp,
+ 			      u32 rew_op, struct sk_buff *skb)
+@@ -1214,7 +1231,7 @@ void ocelot_port_inject_frame(struct ocelot *ocelot, int port, int grp,
+ 	ocelot_write_rix(ocelot, QS_INJ_CTRL_GAP_SIZE(1) |
+ 			 QS_INJ_CTRL_SOF, QS_INJ_CTRL, grp);
+ 
+-	ocelot_ifh_port_set(ifh, port, rew_op, skb_vlan_tag_get(skb));
++	ocelot_ifh_set_basic(ifh, ocelot, port, rew_op, skb);
+ 
+ 	for (i = 0; i < OCELOT_TAG_LEN / 4; i++)
+ 		ocelot_write_rix(ocelot, ifh[i], QS_INJ_WR, grp);
+diff --git a/drivers/net/ethernet/mscc/ocelot_fdma.c b/drivers/net/ethernet/mscc/ocelot_fdma.c
+index 312a46832154..87b59cc5e441 100644
+--- a/drivers/net/ethernet/mscc/ocelot_fdma.c
++++ b/drivers/net/ethernet/mscc/ocelot_fdma.c
+@@ -666,7 +666,7 @@ static int ocelot_fdma_prepare_skb(struct ocelot *ocelot, int port, u32 rew_op,
+ 	ifh = skb_push(skb, OCELOT_TAG_LEN);
+ 	skb_put(skb, ETH_FCS_LEN);
+ 	memset(ifh, 0, OCELOT_TAG_LEN);
+-	ocelot_ifh_port_set(ifh, port, rew_op, skb_vlan_tag_get(skb));
++	ocelot_ifh_set_basic(ifh, ocelot, port, rew_op, skb);
+ 
+ 	return 0;
+ }
+diff --git a/include/linux/dsa/ocelot.h b/include/linux/dsa/ocelot.h
+index dca2969015d8..6fbfbde68a37 100644
+--- a/include/linux/dsa/ocelot.h
++++ b/include/linux/dsa/ocelot.h
+@@ -5,6 +5,8 @@
+ #ifndef _NET_DSA_TAG_OCELOT_H
+ #define _NET_DSA_TAG_OCELOT_H
+ 
++#include <linux/if_bridge.h>
++#include <linux/if_vlan.h>
+ #include <linux/kthread.h>
+ #include <linux/packing.h>
+ #include <linux/skbuff.h>
+@@ -273,4 +275,49 @@ static inline u32 ocelot_ptp_rew_op(struct sk_buff *skb)
+ 	return rew_op;
+ }
+ 
++/**
++ * ocelot_xmit_get_vlan_info: Determine VLAN_TCI and TAG_TYPE for injected frame
++ * @skb: Pointer to socket buffer
++ * @br: Pointer to bridge device that the port is under, if any
++ * @vlan_tci:
++ * @tag_type:
++ *
++ * If the port is under a VLAN-aware bridge, remove the VLAN header from the
++ * payload and move it into the DSA tag, which will make the switch classify
++ * the packet to the bridge VLAN. Otherwise, leave the classified VLAN at zero,
++ * which is the pvid of standalone ports (OCELOT_STANDALONE_PVID), although not
++ * of VLAN-unaware bridge ports (that would be ocelot_vlan_unaware_pvid()).
++ * Anyway, VID 0 is fine because it is stripped on egress for these port modes,
++ * and source address learning is not performed for packets injected from the
++ * CPU anyway, so it doesn't matter that the VID is "wrong".
++ */
++static inline void ocelot_xmit_get_vlan_info(struct sk_buff *skb,
++					     struct net_device *br,
++					     u64 *vlan_tci, u64 *tag_type)
++{
++	struct vlan_ethhdr *hdr;
++	u16 proto, tci;
++
++	if (!br || !br_vlan_enabled(br)) {
++		*vlan_tci = 0;
++		*tag_type = IFH_TAG_TYPE_C;
++		return;
++	}
++
++	hdr = (struct vlan_ethhdr *)skb_mac_header(skb);
++	br_vlan_get_proto(br, &proto);
++
++	if (ntohs(hdr->h_vlan_proto) == proto) {
++		vlan_remove_tag(skb, &tci);
++		*vlan_tci = tci;
++	} else {
++		rcu_read_lock();
++		br_vlan_get_pvid_rcu(br, &tci);
++		rcu_read_unlock();
++		*vlan_tci = tci;
++	}
++
++	*tag_type = (proto != ETH_P_8021Q) ? IFH_TAG_TYPE_S : IFH_TAG_TYPE_C;
++}
++
+ #endif
+diff --git a/include/soc/mscc/ocelot.h b/include/soc/mscc/ocelot.h
+index 6a37b29f4b4c..ed18e6bafc8d 100644
+--- a/include/soc/mscc/ocelot.h
++++ b/include/soc/mscc/ocelot.h
+@@ -969,7 +969,8 @@ void __ocelot_target_write_ix(struct ocelot *ocelot, enum ocelot_target target,
+ bool ocelot_can_inject(struct ocelot *ocelot, int grp);
+ void ocelot_port_inject_frame(struct ocelot *ocelot, int port, int grp,
+ 			      u32 rew_op, struct sk_buff *skb);
+-void ocelot_ifh_port_set(void *ifh, int port, u32 rew_op, u32 vlan_tag);
++void ocelot_ifh_set_basic(void *ifh, struct ocelot *ocelot, int port,
++			  u32 rew_op, struct sk_buff *skb);
+ int ocelot_xtr_poll_frame(struct ocelot *ocelot, int grp, struct sk_buff **skb);
+ void ocelot_drain_cpu_queue(struct ocelot *ocelot, int grp);
+ void ocelot_ptp_rx_timestamp(struct ocelot *ocelot, struct sk_buff *skb,
+diff --git a/net/dsa/tag_ocelot.c b/net/dsa/tag_ocelot.c
+index e0e4300bfbd3..bf6608fc6be7 100644
+--- a/net/dsa/tag_ocelot.c
++++ b/net/dsa/tag_ocelot.c
+@@ -8,40 +8,6 @@
+ #define OCELOT_NAME	"ocelot"
+ #define SEVILLE_NAME	"seville"
+ 
+-/* If the port is under a VLAN-aware bridge, remove the VLAN header from the
+- * payload and move it into the DSA tag, which will make the switch classify
+- * the packet to the bridge VLAN. Otherwise, leave the classified VLAN at zero,
+- * which is the pvid of standalone and VLAN-unaware bridge ports.
+- */
+-static void ocelot_xmit_get_vlan_info(struct sk_buff *skb, struct dsa_port *dp,
+-				      u64 *vlan_tci, u64 *tag_type)
+-{
+-	struct net_device *br = dsa_port_bridge_dev_get(dp);
+-	struct vlan_ethhdr *hdr;
+-	u16 proto, tci;
+-
+-	if (!br || !br_vlan_enabled(br)) {
+-		*vlan_tci = 0;
+-		*tag_type = IFH_TAG_TYPE_C;
+-		return;
+-	}
+-
+-	hdr = skb_vlan_eth_hdr(skb);
+-	br_vlan_get_proto(br, &proto);
+-
+-	if (ntohs(hdr->h_vlan_proto) == proto) {
+-		vlan_remove_tag(skb, &tci);
+-		*vlan_tci = tci;
+-	} else {
+-		rcu_read_lock();
+-		br_vlan_get_pvid_rcu(br, &tci);
+-		rcu_read_unlock();
+-		*vlan_tci = tci;
+-	}
+-
+-	*tag_type = (proto != ETH_P_8021Q) ? IFH_TAG_TYPE_S : IFH_TAG_TYPE_C;
+-}
+-
+ static void ocelot_xmit_common(struct sk_buff *skb, struct net_device *netdev,
+ 			       __be32 ifh_prefix, void **ifh)
+ {
+@@ -53,7 +19,8 @@ static void ocelot_xmit_common(struct sk_buff *skb, struct net_device *netdev,
+ 	u32 rew_op = 0;
+ 	u64 qos_class;
+ 
+-	ocelot_xmit_get_vlan_info(skb, dp, &vlan_tci, &tag_type);
++	ocelot_xmit_get_vlan_info(skb, dsa_port_bridge_dev_get(dp), &vlan_tci,
++				  &tag_type);
+ 
+ 	qos_class = netdev_get_num_tc(netdev) ?
+ 		    netdev_get_prio_tc_map(netdev, skb->priority) : skb->priority;

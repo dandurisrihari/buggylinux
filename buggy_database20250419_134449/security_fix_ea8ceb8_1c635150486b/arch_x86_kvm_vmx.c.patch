@@ -1,0 +1,56 @@
+commit ea8ceb8354e1c84a13cf2a8e915dc74f96759393
+Author: Jan Kiszka <jan.kiszka@siemens.com>
+Date:   Sun Apr 14 21:04:26 2013 +0200
+
+    KVM: nVMX: Fix conditions for NMI injection
+    
+    The logic for checking if interrupts can be injected has to be applied
+    also on NMIs. The difference is that if NMI interception is on these
+    events are consumed and blocked by the VM exit.
+    
+    Signed-off-by: Jan Kiszka <jan.kiszka@siemens.com>
+    Signed-off-by: Gleb Natapov <gleb@redhat.com>
+
+diff --git a/arch/x86/kvm/vmx.c b/arch/x86/kvm/vmx.c
+index 451ab2a57ca0..11ea3cbbb78c 100644
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -4392,6 +4392,12 @@ static bool nested_exit_on_intr(struct kvm_vcpu *vcpu)
+ 		PIN_BASED_EXT_INTR_MASK;
+ }
+ 
++static bool nested_exit_on_nmi(struct kvm_vcpu *vcpu)
++{
++	return get_vmcs12(vcpu)->pin_based_vm_exec_control &
++		PIN_BASED_NMI_EXITING;
++}
++
+ static void enable_irq_window(struct kvm_vcpu *vcpu)
+ {
+ 	u32 cpu_based_vm_exec_control;
+@@ -4517,6 +4523,26 @@ static void vmx_set_nmi_mask(struct kvm_vcpu *vcpu, bool masked)
+ 
+ static int vmx_nmi_allowed(struct kvm_vcpu *vcpu)
+ {
++	if (is_guest_mode(vcpu)) {
++		struct vmcs12 *vmcs12 = get_vmcs12(vcpu);
++
++		if (to_vmx(vcpu)->nested.nested_run_pending)
++			return 0;
++		if (nested_exit_on_nmi(vcpu)) {
++			nested_vmx_vmexit(vcpu);
++			vmcs12->vm_exit_reason = EXIT_REASON_EXCEPTION_NMI;
++			vmcs12->vm_exit_intr_info = NMI_VECTOR |
++				INTR_TYPE_NMI_INTR | INTR_INFO_VALID_MASK;
++			/*
++			 * The NMI-triggered VM exit counts as injection:
++			 * clear this one and block further NMIs.
++			 */
++			vcpu->arch.nmi_pending = 0;
++			vmx_set_nmi_mask(vcpu, true);
++			return 0;
++		}
++	}
++
+ 	if (!cpu_has_virtual_nmis() && to_vmx(vcpu)->soft_vnmi_blocked)
+ 		return 0;

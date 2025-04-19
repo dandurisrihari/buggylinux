@@ -1,0 +1,44 @@
+commit a9810327726b01404ecde082c075a7468c433ddf
+Author: Christian Borntraeger <borntraeger@linux.ibm.com>
+Date:   Mon Jan 29 12:22:45 2018 +0100
+
+    KVM: s390: optimize wakeup for exitless interrupts
+    
+    For interrupt injection of floating interrupts we queue the interrupt
+    either in the GISA or in the floating  interrupt list. The first CPU
+    that looks at these data structures - either in KVM code or hardware
+    will then deliver that interrupt. To minimize latency we also:
+    -a: choose a VCPU to deliver that interrupt. We prefer idle CPUs
+    -b: we wake up the host thread that runs the VCPU
+    -c: set an I/O intervention bit for that CPU so that it exits guest
+        context as soon as the PSW I/O mask is enabled
+    This will make sure that this CPU will execute the interrupt delivery
+    code of KVM very soon.
+    
+    We can now optimize the injection case if we have exitless interrupts.
+    The wakeup is still necessary in case the target CPU sleeps. We can
+    avoid the I/O intervention request bit though. Whenever this
+    intervention request would be handled, the hardware could also directly
+    inject the interrupt on that CPU, no need to go through the interrupt
+    injection loop of KVM.
+    
+    Cc: Michael Mueller <mimu@linux.vnet.ibm.com>
+    Reviewed-by: Halil Pasic <pasic@linux.vnet.ibm.com>
+    Reviewed-by: David Hildenbrand <david@redhat.com>
+    Reviewed-by: Cornelia Huck <cohuck@redhat.com>
+    Signed-off-by: Christian Borntraeger <borntraeger@de.ibm.com>
+
+diff --git a/arch/s390/kvm/interrupt.c b/arch/s390/kvm/interrupt.c
+index aabf46f5f883..337a69bc04db 100644
+--- a/arch/s390/kvm/interrupt.c
++++ b/arch/s390/kvm/interrupt.c
+@@ -1701,7 +1701,8 @@ static void __floating_irq_kick(struct kvm *kvm, u64 type)
+ 		kvm_s390_set_cpuflags(dst_vcpu, CPUSTAT_STOP_INT);
+ 		break;
+ 	case KVM_S390_INT_IO_MIN...KVM_S390_INT_IO_MAX:
+-		kvm_s390_set_cpuflags(dst_vcpu, CPUSTAT_IO_INT);
++		if (!(type & KVM_S390_INT_IO_AI_MASK && kvm->arch.gisa))
++			kvm_s390_set_cpuflags(dst_vcpu, CPUSTAT_IO_INT);
+ 		break;
+ 	default:
+ 		kvm_s390_set_cpuflags(dst_vcpu, CPUSTAT_EXT_INT);

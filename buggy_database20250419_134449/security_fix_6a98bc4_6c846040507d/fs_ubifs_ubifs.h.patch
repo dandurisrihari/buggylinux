@@ -1,0 +1,108 @@
+commit 6a98bc4614de8fac8c6d520a6b20b194e23c9936
+Author: Sascha Hauer <s.hauer@pengutronix.de>
+Date:   Fri Sep 7 14:36:36 2018 +0200
+
+    ubifs: Add authentication nodes to journal
+    
+    Nodes that are written to flash can only be authenticated through the
+    index after the next commit. When a journal replay is necessary the
+    nodes are not yet referenced by the index and thus can't be
+    authenticated.
+    
+    This patch overcomes this situation by creating a hash over all nodes
+    beginning from the commit start node over the reference node(s) and
+    the buds themselves. From
+    time to time we insert authentication nodes. Authentication nodes
+    contain a HMAC from the current hash state, so that they can be
+    used to authenticate a journal replay up to the point where the
+    authentication node is. The hash is continued afterwards
+    so that theoretically we would only have to check the HMAC of
+    the last authentication node we find.
+    
+    Overall we get this picture:
+    
+    ,,,,,,,,
+    ,......,...........................................
+    ,. CS  ,               hash1.----.           hash2.----.
+    ,.  |  ,                    .    |hmac            .    |hmac
+    ,.  v  ,                    .    v                .    v
+    ,.REF#0,-> bud -> bud -> bud.-> auth -> bud -> bud.-> auth ...
+    ,..|...,...........................................
+    ,  |   ,
+    ,  |   ,,,,,,,,,,,,,,,
+    .  |            hash3,----.
+    ,  |                 ,    |hmac
+    ,  v                 ,    v
+    , REF#1 -> bud -> bud,-> auth ...
+    ,,,|,,,,,,,,,,,,,,,,,,
+       v
+      REF#2 -> ...
+       |
+       V
+      ...
+    
+    Note how hash3 covers CS, REF#0 and REF#1 so that it is not possible to
+    exchange or skip any reference nodes. Unlike the picture suggests the
+    auth nodes themselves are not hashed.
+    
+    With this it is possible for an offline attacker to cut each journal
+    head or to drop the last reference node(s), but not to skip any journal
+    heads or to reorder any operations.
+    
+    Signed-off-by: Sascha Hauer <s.hauer@pengutronix.de>
+    Signed-off-by: Richard Weinberger <richard@nod.at>
+
+diff --git a/fs/ubifs/ubifs.h b/fs/ubifs/ubifs.h
+index 67bfd58d28d4..600a25b93a80 100644
+--- a/fs/ubifs/ubifs.h
++++ b/fs/ubifs/ubifs.h
+@@ -717,6 +717,7 @@ struct ubifs_wbuf {
+  * @jhead: journal head number this bud belongs to
+  * @list: link in the list buds belonging to the same journal head
+  * @rb: link in the tree of all buds
++ * @log_hash: the log hash from the commit start node up to this bud
+  */
+ struct ubifs_bud {
+ 	int lnum;
+@@ -724,6 +725,7 @@ struct ubifs_bud {
+ 	int jhead;
+ 	struct list_head list;
+ 	struct rb_node rb;
++	struct shash_desc *log_hash;
+ };
+ 
+ /**
+@@ -731,6 +733,7 @@ struct ubifs_bud {
+  * @wbuf: head's write-buffer
+  * @buds_list: list of bud LEBs belonging to this journal head
+  * @grouped: non-zero if UBIFS groups nodes when writing to this journal head
++ * @log_hash: the log hash from the commit start node up to this journal head
+  *
+  * Note, the @buds list is protected by the @c->buds_lock.
+  */
+@@ -738,6 +741,7 @@ struct ubifs_jhead {
+ 	struct ubifs_wbuf wbuf;
+ 	struct list_head buds_list;
+ 	unsigned int grouped:1;
++	struct shash_desc *log_hash;
+ };
+ 
+ /**
+@@ -1236,6 +1240,8 @@ struct ubifs_debug_info;
+  * @auth_key_name: the authentication key name
+  * @auth_hash_name: the name of the hash algorithm used for authentication
+  * @auth_hash_algo: the authentication hash used for this fs
++ * @log_hash: the log hash from the commit start node up to the latest reference
++ *            node.
+  *
+  * @empty: %1 if the UBI device is empty
+  * @need_recovery: %1 if the file-system needs recovery
+@@ -1478,6 +1484,8 @@ struct ubifs_info {
+ 	char *auth_hash_name;
+ 	enum hash_algo auth_hash_algo;
+ 
++	struct shash_desc *log_hash;
++
+ 	/* The below fields are used only during mounting and re-mounting */
+ 	unsigned int empty:1;
+ 	unsigned int need_recovery:1;

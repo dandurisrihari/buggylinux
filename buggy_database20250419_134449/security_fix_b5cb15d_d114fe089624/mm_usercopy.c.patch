@@ -1,0 +1,104 @@
+commit b5cb15d9372abc9adc4e844c0c1bf594ca6a7695
+Author: Chris von Recklinghausen <crecklin@redhat.com>
+Date:   Tue Jul 3 15:43:08 2018 -0400
+
+    usercopy: Allow boot cmdline disabling of hardening
+    
+    Enabling HARDENED_USERCOPY may cause measurable regressions in networking
+    performance: up to 8% under UDP flood.
+    
+    I ran a small packet UDP flood using pktgen vs. a host b2b connected. On
+    the receiver side the UDP packets are processed by a simple user space
+    process that just reads and drops them:
+    
+    https://github.com/netoptimizer/network-testing/blob/master/src/udp_sink.c
+    
+    Not very useful from a functional PoV, but it helps to pin-point
+    bottlenecks in the networking stack.
+    
+    When running a kernel with CONFIG_HARDENED_USERCOPY=y, I see a 5-8%
+    regression in the receive tput, compared to the same kernel without this
+    option enabled.
+    
+    With CONFIG_HARDENED_USERCOPY=y, perf shows ~6% of CPU time spent
+    cumulatively in __check_object_size (~4%) and __virt_addr_valid (~2%).
+    
+    The call-chain is:
+    
+    __GI___libc_recvfrom
+    entry_SYSCALL_64_after_hwframe
+    do_syscall_64
+    __x64_sys_recvfrom
+    __sys_recvfrom
+    inet_recvmsg
+    udp_recvmsg
+    __check_object_size
+    
+    udp_recvmsg() actually calls copy_to_iter() (inlined) and the latters
+    calls check_copy_size() (again, inlined).
+    
+    A generic distro may want to enable HARDENED_USERCOPY in their default
+    kernel config, but at the same time, such distro may want to be able to
+    avoid the performance penalties in with the default configuration and
+    disable the stricter check on a per-boot basis.
+    
+    This change adds a boot parameter that conditionally disables
+    HARDENED_USERCOPY via "hardened_usercopy=off".
+    
+    Signed-off-by: Chris von Recklinghausen <crecklin@redhat.com>
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+
+diff --git a/mm/usercopy.c b/mm/usercopy.c
+index e9e9325f7638..852eb4e53f06 100644
+--- a/mm/usercopy.c
++++ b/mm/usercopy.c
+@@ -20,6 +20,8 @@
+ #include <linux/sched/task.h>
+ #include <linux/sched/task_stack.h>
+ #include <linux/thread_info.h>
++#include <linux/atomic.h>
++#include <linux/jump_label.h>
+ #include <asm/sections.h>
+ 
+ /*
+@@ -240,6 +242,8 @@ static inline void check_heap_object(const void *ptr, unsigned long n,
+ 	}
+ }
+ 
++static DEFINE_STATIC_KEY_FALSE_RO(bypass_usercopy_checks);
++
+ /*
+  * Validates that the given object is:
+  * - not bogus address
+@@ -248,6 +252,9 @@ static inline void check_heap_object(const void *ptr, unsigned long n,
+  */
+ void __check_object_size(const void *ptr, unsigned long n, bool to_user)
+ {
++	if (static_branch_unlikely(&bypass_usercopy_checks))
++		return;
++
+ 	/* Skip all tests if size is zero. */
+ 	if (!n)
+ 		return;
+@@ -279,3 +286,21 @@ void __check_object_size(const void *ptr, unsigned long n, bool to_user)
+ 	check_kernel_text_object((const unsigned long)ptr, n, to_user);
+ }
+ EXPORT_SYMBOL(__check_object_size);
++
++static bool enable_checks __initdata = true;
++
++static int __init parse_hardened_usercopy(char *str)
++{
++	return strtobool(str, &enable_checks);
++}
++
++__setup("hardened_usercopy=", parse_hardened_usercopy);
++
++static int __init set_hardened_usercopy(void)
++{
++	if (enable_checks == false)
++		static_branch_enable(&bypass_usercopy_checks);
++	return 1;
++}
++
++late_initcall(set_hardened_usercopy);

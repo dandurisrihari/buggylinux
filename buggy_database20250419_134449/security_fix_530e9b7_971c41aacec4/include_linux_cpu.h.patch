@@ -1,0 +1,166 @@
+commit 530e9b76ae8f863dfdef4a6ad0b38613d32e8c3f
+Author: Thomas Gleixner <tglx@linutronix.de>
+Date:   Wed Dec 21 20:19:53 2016 +0100
+
+    cpu/hotplug: Remove obsolete cpu hotplug register/unregister functions
+    
+    hotcpu_notifier(), cpu_notifier(), __hotcpu_notifier(), __cpu_notifier(),
+    register_hotcpu_notifier(), register_cpu_notifier(),
+    __register_hotcpu_notifier(), __register_cpu_notifier(),
+    unregister_hotcpu_notifier(), unregister_cpu_notifier(),
+    __unregister_hotcpu_notifier(), __unregister_cpu_notifier()
+    
+    are unused now. Remove them and all related code.
+    
+    Remove also the now pointless cpu notifier error injection mechanism. The
+    states can be executed step by step and error rollback is the same as cpu
+    down, so any state transition can be tested w/o requiring the notifier
+    error injection.
+    
+    Some CPU hotplug states are kept as they are (ab)used for hotplug state
+    tracking.
+    
+    Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: rt@linutronix.de
+    Link: http://lkml.kernel.org/r/20161221192112.005642358@linutronix.de
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+
+diff --git a/include/linux/cpu.h b/include/linux/cpu.h
+index 09807c2ce328..21f9c74496e7 100644
+--- a/include/linux/cpu.h
++++ b/include/linux/cpu.h
+@@ -57,9 +57,6 @@ struct notifier_block;
+ 
+ #define CPU_ONLINE		0x0002 /* CPU (unsigned)v is up */
+ #define CPU_UP_PREPARE		0x0003 /* CPU (unsigned)v coming up */
+-#define CPU_UP_CANCELED		0x0004 /* CPU (unsigned)v NOT coming up */
+-#define CPU_DOWN_PREPARE	0x0005 /* CPU (unsigned)v going down */
+-#define CPU_DOWN_FAILED		0x0006 /* CPU (unsigned)v NOT going down */
+ #define CPU_DEAD		0x0007 /* CPU (unsigned)v dead */
+ #define CPU_POST_DEAD		0x0009 /* CPU (unsigned)v dead, cpu_hotplug
+ 					* lock is dropped */
+@@ -80,80 +77,14 @@ struct notifier_block;
+ 
+ #ifdef CONFIG_SMP
+ extern bool cpuhp_tasks_frozen;
+-/* Need to know about CPUs going up/down? */
+-#if defined(CONFIG_HOTPLUG_CPU) || !defined(MODULE)
+-#define cpu_notifier(fn, pri) {					\
+-	static struct notifier_block fn##_nb =			\
+-		{ .notifier_call = fn, .priority = pri };	\
+-	register_cpu_notifier(&fn##_nb);			\
+-}
+-
+-#define __cpu_notifier(fn, pri) {				\
+-	static struct notifier_block fn##_nb =			\
+-		{ .notifier_call = fn, .priority = pri };	\
+-	__register_cpu_notifier(&fn##_nb);			\
+-}
+-
+-extern int register_cpu_notifier(struct notifier_block *nb);
+-extern int __register_cpu_notifier(struct notifier_block *nb);
+-extern void unregister_cpu_notifier(struct notifier_block *nb);
+-extern void __unregister_cpu_notifier(struct notifier_block *nb);
+-
+-#else /* #if defined(CONFIG_HOTPLUG_CPU) || !defined(MODULE) */
+-#define cpu_notifier(fn, pri)	do { (void)(fn); } while (0)
+-#define __cpu_notifier(fn, pri)	do { (void)(fn); } while (0)
+-
+-static inline int register_cpu_notifier(struct notifier_block *nb)
+-{
+-	return 0;
+-}
+-
+-static inline int __register_cpu_notifier(struct notifier_block *nb)
+-{
+-	return 0;
+-}
+-
+-static inline void unregister_cpu_notifier(struct notifier_block *nb)
+-{
+-}
+-
+-static inline void __unregister_cpu_notifier(struct notifier_block *nb)
+-{
+-}
+-#endif
+-
+ int cpu_up(unsigned int cpu);
+ void notify_cpu_starting(unsigned int cpu);
+ extern void cpu_maps_update_begin(void);
+ extern void cpu_maps_update_done(void);
+ 
+-#define cpu_notifier_register_begin	cpu_maps_update_begin
+-#define cpu_notifier_register_done	cpu_maps_update_done
+-
+ #else	/* CONFIG_SMP */
+ #define cpuhp_tasks_frozen	0
+ 
+-#define cpu_notifier(fn, pri)	do { (void)(fn); } while (0)
+-#define __cpu_notifier(fn, pri)	do { (void)(fn); } while (0)
+-
+-static inline int register_cpu_notifier(struct notifier_block *nb)
+-{
+-	return 0;
+-}
+-
+-static inline int __register_cpu_notifier(struct notifier_block *nb)
+-{
+-	return 0;
+-}
+-
+-static inline void unregister_cpu_notifier(struct notifier_block *nb)
+-{
+-}
+-
+-static inline void __unregister_cpu_notifier(struct notifier_block *nb)
+-{
+-}
+-
+ static inline void cpu_maps_update_begin(void)
+ {
+ }
+@@ -162,14 +93,6 @@ static inline void cpu_maps_update_done(void)
+ {
+ }
+ 
+-static inline void cpu_notifier_register_begin(void)
+-{
+-}
+-
+-static inline void cpu_notifier_register_done(void)
+-{
+-}
+-
+ #endif /* CONFIG_SMP */
+ extern struct bus_type cpu_subsys;
+ 
+@@ -182,12 +105,6 @@ extern void get_online_cpus(void);
+ extern void put_online_cpus(void);
+ extern void cpu_hotplug_disable(void);
+ extern void cpu_hotplug_enable(void);
+-#define hotcpu_notifier(fn, pri)	cpu_notifier(fn, pri)
+-#define __hotcpu_notifier(fn, pri)	__cpu_notifier(fn, pri)
+-#define register_hotcpu_notifier(nb)	register_cpu_notifier(nb)
+-#define __register_hotcpu_notifier(nb)	__register_cpu_notifier(nb)
+-#define unregister_hotcpu_notifier(nb)	unregister_cpu_notifier(nb)
+-#define __unregister_hotcpu_notifier(nb)	__unregister_cpu_notifier(nb)
+ void clear_tasks_mm_cpumask(int cpu);
+ int cpu_down(unsigned int cpu);
+ 
+@@ -199,13 +116,6 @@ static inline void cpu_hotplug_done(void) {}
+ #define put_online_cpus()	do { } while (0)
+ #define cpu_hotplug_disable()	do { } while (0)
+ #define cpu_hotplug_enable()	do { } while (0)
+-#define hotcpu_notifier(fn, pri)	do { (void)(fn); } while (0)
+-#define __hotcpu_notifier(fn, pri)	do { (void)(fn); } while (0)
+-/* These aren't inline functions due to a GCC bug. */
+-#define register_hotcpu_notifier(nb)	({ (void)(nb); 0; })
+-#define __register_hotcpu_notifier(nb)	({ (void)(nb); 0; })
+-#define unregister_hotcpu_notifier(nb)	({ (void)(nb); })
+-#define __unregister_hotcpu_notifier(nb)	({ (void)(nb); })
+ #endif		/* CONFIG_HOTPLUG_CPU */
+ 
+ #ifdef CONFIG_PM_SLEEP_SMP

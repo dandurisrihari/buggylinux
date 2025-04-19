@@ -1,0 +1,53 @@
+commit 2a61169209c72317d4933f8d22f749a6a61a3d36
+Author: Johan Hedberg <johan.hedberg@nokia.com>
+Date:   Sat Feb 19 12:06:00 2011 -0300
+
+    Bluetooth: Add mgmt_auth_failed event
+    
+    To properly track bonding completion an event to indicate authentication
+    failure is needed. This event will be sent whenever an authentication
+    complete HCI event with a non-zero status comes. It will also be sent
+    when we're acting in acceptor role for SSP authentication in which case
+    the controller will send a Simple Pairing Complete event.
+    
+    Signed-off-by: Johan Hedberg <johan.hedberg@nokia.com>
+    Signed-off-by: Gustavo F. Padovan <padovan@profusion.mobi>
+
+diff --git a/net/bluetooth/hci_event.c b/net/bluetooth/hci_event.c
+index 604c7b5fee97..3fbfa50c2bff 100644
+--- a/net/bluetooth/hci_event.c
++++ b/net/bluetooth/hci_event.c
+@@ -1424,8 +1424,10 @@ static inline void hci_auth_complete_evt(struct hci_dev *hdev, struct sk_buff *s
+ 		if (!ev->status) {
+ 			conn->link_mode |= HCI_LM_AUTH;
+ 			conn->sec_level = conn->pending_sec_level;
+-		} else
++		} else {
++			mgmt_auth_failed(hdev->id, &conn->dst, ev->status);
+ 			conn->sec_level = BT_SECURITY_LOW;
++		}
+ 
+ 		clear_bit(HCI_CONN_AUTH_PEND, &conn->pend);
+ 
+@@ -2418,9 +2420,20 @@ static inline void hci_simple_pair_complete_evt(struct hci_dev *hdev, struct sk_
+ 	hci_dev_lock(hdev);
+ 
+ 	conn = hci_conn_hash_lookup_ba(hdev, ACL_LINK, &ev->bdaddr);
+-	if (conn)
+-		hci_conn_put(conn);
++	if (!conn)
++		goto unlock;
++
++	/* To avoid duplicate auth_failed events to user space we check
++	 * the HCI_CONN_AUTH_PEND flag which will be set if we
++	 * initiated the authentication. A traditional auth_complete
++	 * event gets always produced as initiator and is also mapped to
++	 * the mgmt_auth_failed event */
++	if (!test_bit(HCI_CONN_AUTH_PEND, &conn->pend) && ev->status != 0)
++		mgmt_auth_failed(hdev->id, &conn->dst, ev->status);
+ 
++	hci_conn_put(conn);
++
++unlock:
+ 	hci_dev_unlock(hdev);
+ }

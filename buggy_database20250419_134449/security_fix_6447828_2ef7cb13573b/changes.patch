@@ -1,0 +1,87 @@
+diff --git a/arch/x86/include/asm/mce.h b/arch/x86/include/asm/mce.h
+index eb2db07ef39c..6c77c03139f7 100644
+--- a/arch/x86/include/asm/mce.h
++++ b/arch/x86/include/asm/mce.h
+@@ -296,8 +296,6 @@ enum mcp_flags {
+ 
+ void machine_check_poll(enum mcp_flags flags, mce_banks_t *b);
+ 
+-bool mce_notify_irq(void);
+-
+ DECLARE_PER_CPU(struct mce, injectm);
+ 
+ /* Disable CMCI/polling for MCA bank claimed by firmware */
+diff --git a/arch/x86/kernel/cpu/mce/core.c b/arch/x86/kernel/cpu/mce/core.c
+index 0dc00c9894c7..1f14c3308b6b 100644
+--- a/arch/x86/kernel/cpu/mce/core.c
++++ b/arch/x86/kernel/cpu/mce/core.c
+@@ -584,6 +584,28 @@ bool mce_is_correctable(struct mce *m)
+ }
+ EXPORT_SYMBOL_GPL(mce_is_correctable);
+ 
++/*
++ * Notify the user(s) about new machine check events.
++ * Can be called from interrupt context, but not from machine check/NMI
++ * context.
++ */
++static bool mce_notify_irq(void)
++{
++	/* Not more than two messages every minute */
++	static DEFINE_RATELIMIT_STATE(ratelimit, 60*HZ, 2);
++
++	if (test_and_clear_bit(0, &mce_need_notify)) {
++		mce_work_trigger();
++
++		if (__ratelimit(&ratelimit))
++			pr_info(HW_ERR "Machine check events logged\n");
++
++		return true;
++	}
++
++	return false;
++}
++
+ static int mce_early_notifier(struct notifier_block *nb, unsigned long val,
+ 			      void *data)
+ {
+@@ -1773,28 +1795,6 @@ static void mce_timer_delete_all(void)
+ 		del_timer_sync(&per_cpu(mce_timer, cpu));
+ }
+ 
+-/*
+- * Notify the user(s) about new machine check events.
+- * Can be called from interrupt context, but not from machine check/NMI
+- * context.
+- */
+-bool mce_notify_irq(void)
+-{
+-	/* Not more than two messages every minute */
+-	static DEFINE_RATELIMIT_STATE(ratelimit, 60*HZ, 2);
+-
+-	if (test_and_clear_bit(0, &mce_need_notify)) {
+-		mce_work_trigger();
+-
+-		if (__ratelimit(&ratelimit))
+-			pr_info(HW_ERR "Machine check events logged\n");
+-
+-		return true;
+-	}
+-	return false;
+-}
+-EXPORT_SYMBOL_GPL(mce_notify_irq);
+-
+ static void __mcheck_cpu_mce_banks_init(void)
+ {
+ 	struct mce_bank *mce_banks = this_cpu_ptr(mce_banks_array);
+diff --git a/arch/x86/kernel/cpu/mce/inject.c b/arch/x86/kernel/cpu/mce/inject.c
+index 313fe682db33..06e3cf7229ce 100644
+--- a/arch/x86/kernel/cpu/mce/inject.c
++++ b/arch/x86/kernel/cpu/mce/inject.c
+@@ -229,7 +229,6 @@ static int raise_local(void)
+ 	} else if (m->status) {
+ 		pr_info("Starting machine check poll CPU %d\n", cpu);
+ 		raise_poll(m);
+-		mce_notify_irq();
+ 		pr_info("Machine check poll done on CPU %d\n", cpu);
+ 	} else
+ 		m->finished = 0;

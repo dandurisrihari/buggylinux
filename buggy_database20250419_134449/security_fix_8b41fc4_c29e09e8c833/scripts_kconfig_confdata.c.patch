@@ -1,0 +1,158 @@
+commit 8b41fc4454e36fbfdbb23f940d023d4dece2de29
+Author: Masahiro Yamada <masahiroy@kernel.org>
+Date:   Thu Dec 19 17:33:29 2019 +0900
+
+    kbuild: create modules.builtin without Makefile.modbuiltin or tristate.conf
+    
+    Commit bc081dd6e9f6 ("kbuild: generate modules.builtin") added
+    infrastructure to generate modules.builtin, the list of all
+    builtin modules.
+    
+    Basically, it works like this:
+    
+      - Kconfig generates include/config/tristate.conf, the list of
+        tristate CONFIG options with a value in a capital letter.
+    
+      - scripts/Makefile.modbuiltin makes Kbuild descend into
+        directories to collect the information of builtin modules.
+    
+    I am not a big fan of it because Kbuild ends up with traversing
+    the source tree twice.
+    
+    I am not sure how perfectly it should work, but this approach cannot
+    avoid false positives; even if the relevant CONFIG option is tristate,
+    some Makefiles forces obj-m to obj-y.
+    
+    Some examples are:
+    
+      arch/powerpc/platforms/powermac/Makefile:
+        obj-$(CONFIG_NVRAM:m=y)         += nvram.o
+    
+      net/ipv6/Makefile:
+        obj-$(subst m,y,$(CONFIG_IPV6)) += inet6_hashtables.o
+    
+      net/netlabel/Makefile:
+        obj-$(subst m,y,$(CONFIG_IPV6)) += netlabel_calipso.o
+    
+    Nobody has complained about (or noticed) it, so it is probably fine to
+    have false positives in modules.builtin.
+    
+    This commit simplifies the implementation. Let's exploit the fact
+    that every module has MODULE_LICENSE(). (modpost shows a warning if
+    MODULE_LICENSE is missing. If so, 0-day bot would already have blocked
+    such a module.)
+    
+    I added MODULE_FILE to <linux/module.h>. When the code is being compiled
+    as builtin, it will be filled with the file path of the module, and
+    collected into modules.builtin.info. Then, scripts/link-vmlinux.sh
+    extracts the list of builtin modules out of it.
+    
+    This new approach fixes the false-positives above, but adds another
+    type of false-positives; non-modular code may have MODULE_LICENSE()
+    by mistake. This is not a big deal, it is just the code is always
+    orphan. We can clean it up if we like. You can see cleanup examples by:
+    
+      $ git log --grep='make.* explicitly non-modular'
+    
+    To sum up, this commits deletes lots of code, but still produces almost
+    equivalent results. Please note it does not increase the vmlinux size at
+    all. As you can see in include/asm-generic/vmlinux.lds.h, the .modinfo
+    section is discarded in the link stage.
+    
+    Signed-off-by: Masahiro Yamada <masahiroy@kernel.org>
+
+diff --git a/scripts/kconfig/confdata.c b/scripts/kconfig/confdata.c
+index 3569d2dec37c..fb675bd9a809 100644
+--- a/scripts/kconfig/confdata.c
++++ b/scripts/kconfig/confdata.c
+@@ -710,25 +710,6 @@ static struct conf_printer header_printer_cb =
+ 	.print_comment = header_print_comment,
+ };
+ 
+-/*
+- * Tristate printer
+- *
+- * This printer is used when generating the `include/config/tristate.conf' file.
+- */
+-static void
+-tristate_print_symbol(FILE *fp, struct symbol *sym, const char *value, void *arg)
+-{
+-
+-	if (sym->type == S_TRISTATE && *value != 'n')
+-		fprintf(fp, "%s%s=%c\n", CONFIG_, sym->name, (char)toupper(*value));
+-}
+-
+-static struct conf_printer tristate_printer_cb =
+-{
+-	.print_symbol = tristate_print_symbol,
+-	.print_comment = kconfig_print_comment,
+-};
+-
+ static void conf_write_symbol(FILE *fp, struct symbol *sym,
+ 			      struct conf_printer *printer, void *printer_arg)
+ {
+@@ -1062,7 +1043,7 @@ int conf_write_autoconf(int overwrite)
+ 	struct symbol *sym;
+ 	const char *name;
+ 	const char *autoconf_name = conf_get_autoconfig_name();
+-	FILE *out, *tristate, *out_h;
++	FILE *out, *out_h;
+ 	int i;
+ 
+ 	if (!overwrite && is_present(autoconf_name))
+@@ -1077,23 +1058,13 @@ int conf_write_autoconf(int overwrite)
+ 	if (!out)
+ 		return 1;
+ 
+-	tristate = fopen(".tmpconfig_tristate", "w");
+-	if (!tristate) {
+-		fclose(out);
+-		return 1;
+-	}
+-
+ 	out_h = fopen(".tmpconfig.h", "w");
+ 	if (!out_h) {
+ 		fclose(out);
+-		fclose(tristate);
+ 		return 1;
+ 	}
+ 
+ 	conf_write_heading(out, &kconfig_printer_cb, NULL);
+-
+-	conf_write_heading(tristate, &tristate_printer_cb, NULL);
+-
+ 	conf_write_heading(out_h, &header_printer_cb, NULL);
+ 
+ 	for_all_symbols(i, sym) {
+@@ -1101,15 +1072,11 @@ int conf_write_autoconf(int overwrite)
+ 		if (!(sym->flags & SYMBOL_WRITE) || !sym->name)
+ 			continue;
+ 
+-		/* write symbol to auto.conf, tristate and header files */
++		/* write symbols to auto.conf and autoconf.h */
+ 		conf_write_symbol(out, sym, &kconfig_printer_cb, (void *)1);
+-
+-		conf_write_symbol(tristate, sym, &tristate_printer_cb, (void *)1);
+-
+ 		conf_write_symbol(out_h, sym, &header_printer_cb, NULL);
+ 	}
+ 	fclose(out);
+-	fclose(tristate);
+ 	fclose(out_h);
+ 
+ 	name = getenv("KCONFIG_AUTOHEADER");
+@@ -1120,14 +1087,6 @@ int conf_write_autoconf(int overwrite)
+ 	if (rename(".tmpconfig.h", name))
+ 		return 1;
+ 
+-	name = getenv("KCONFIG_TRISTATE");
+-	if (!name)
+-		name = "include/config/tristate.conf";
+-	if (make_parent_dir(name))
+-		return 1;
+-	if (rename(".tmpconfig_tristate", name))
+-		return 1;
+-
+ 	if (make_parent_dir(autoconf_name))
+ 		return 1;
+ 	/*

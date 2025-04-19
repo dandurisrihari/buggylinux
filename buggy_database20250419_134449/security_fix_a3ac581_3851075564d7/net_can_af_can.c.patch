@@ -1,0 +1,43 @@
+commit a3ac5817ffe8f81dbe6be1522b499b48bc322e3a
+Author: Gustavo A. R. Silva <gustavo@embeddedor.com>
+Date:   Fri Dec 21 15:22:29 2018 -0600
+
+    can: af_can: Fix Spectre v1 vulnerability
+    
+    protocol is indirectly controlled by user-space, hence leading to
+    a potential exploitation of the Spectre variant 1 vulnerability.
+    
+    This issue was detected with the help of Smatch:
+    
+    net/can/af_can.c:115 can_get_proto() warn: potential spectre issue 'proto_tab' [w]
+    
+    Fix this by sanitizing protocol before using it to index proto_tab.
+    
+    Notice that given that speculation windows are large, the policy is
+    to kill the speculation on the first load and not worry if it can be
+    completed with a dependent load/store [1].
+    
+    [1] https://marc.info/?l=linux-kernel&m=152449131114778&w=2
+    
+    Signed-off-by: Gustavo A. R. Silva <gustavo@embeddedor.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/can/af_can.c b/net/can/af_can.c
+index 1684ba5b51eb..cade7250c6d4 100644
+--- a/net/can/af_can.c
++++ b/net/can/af_can.c
+@@ -59,6 +59,7 @@
+ #include <linux/can/core.h>
+ #include <linux/can/skb.h>
+ #include <linux/ratelimit.h>
++#include <linux/nospec.h>
+ #include <net/net_namespace.h>
+ #include <net/sock.h>
+ 
+@@ -136,6 +137,7 @@ static int can_create(struct net *net, struct socket *sock, int protocol,
+ 
+ 	if (protocol < 0 || protocol >= CAN_NPROTO)
+ 		return -EINVAL;
++	protocol = array_index_nospec(protocol, CAN_NPROTO);
+ 
+ 	cp = can_get_proto(protocol);

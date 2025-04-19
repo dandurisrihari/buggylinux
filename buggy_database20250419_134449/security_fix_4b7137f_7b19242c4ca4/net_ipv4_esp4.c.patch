@@ -1,0 +1,69 @@
+commit 4b7137ff8fb49d7bf22dfa248baa0d02ace2c43d
+Author: Herbert Xu <herbert@gondor.apana.org.au>
+Date:   Mon Oct 8 17:13:44 2007 -0700
+
+    [IPSEC] esp: Remove keys from esp_data structure
+    
+    The keys are only used during initialisation so we don't need to carry them
+    in esp_data.  Since we don't have to allocate them again, there is no need
+    to place a limit on the authentication key length anymore.
+    
+    This patch also kills the unused auth.icv member.
+    
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/ipv4/esp4.c b/net/ipv4/esp4.c
+index 98767a4f1185..d233e2e62500 100644
+--- a/net/ipv4/esp4.c
++++ b/net/ipv4/esp4.c
+@@ -343,11 +343,6 @@ static int esp_init_state(struct xfrm_state *x)
+ 	struct crypto_blkcipher *tfm;
+ 	u32 align;
+ 
+-	/* null auth and encryption can have zero length keys */
+-	if (x->aalg) {
+-		if (x->aalg->alg_key_len > 512)
+-			goto error;
+-	}
+ 	if (x->ealg == NULL)
+ 		goto error;
+ 
+@@ -359,15 +354,14 @@ static int esp_init_state(struct xfrm_state *x)
+ 		struct xfrm_algo_desc *aalg_desc;
+ 		struct crypto_hash *hash;
+ 
+-		esp->auth.key = x->aalg->alg_key;
+-		esp->auth.key_len = (x->aalg->alg_key_len+7)/8;
+ 		hash = crypto_alloc_hash(x->aalg->alg_name, 0,
+ 					 CRYPTO_ALG_ASYNC);
+ 		if (IS_ERR(hash))
+ 			goto error;
+ 
+ 		esp->auth.tfm = hash;
+-		if (crypto_hash_setkey(hash, esp->auth.key, esp->auth.key_len))
++		if (crypto_hash_setkey(hash, x->aalg->alg_key,
++				       (x->aalg->alg_key_len + 7) / 8))
+ 			goto error;
+ 
+ 		aalg_desc = xfrm_aalg_get_byname(x->aalg->alg_name, 0);
+@@ -389,8 +383,7 @@ static int esp_init_state(struct xfrm_state *x)
+ 		if (!esp->auth.work_icv)
+ 			goto error;
+ 	}
+-	esp->conf.key = x->ealg->alg_key;
+-	esp->conf.key_len = (x->ealg->alg_key_len+7)/8;
++
+ 	tfm = crypto_alloc_blkcipher(x->ealg->alg_name, 0, CRYPTO_ALG_ASYNC);
+ 	if (IS_ERR(tfm))
+ 		goto error;
+@@ -403,7 +396,8 @@ static int esp_init_state(struct xfrm_state *x)
+ 			goto error;
+ 		esp->conf.ivinitted = 0;
+ 	}
+-	if (crypto_blkcipher_setkey(tfm, esp->conf.key, esp->conf.key_len))
++	if (crypto_blkcipher_setkey(tfm, x->ealg->alg_key,
++				    (x->ealg->alg_key_len + 7) / 8))
+ 		goto error;
+ 	x->props.header_len = sizeof(struct ip_esp_hdr) + esp->conf.ivlen;
+ 	if (x->props.mode == XFRM_MODE_TUNNEL)

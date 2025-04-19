@@ -1,0 +1,64 @@
+commit f1001f3d3b6868998cab73d10fda1a5c99ddf963
+Author: Wei Xu <weixugc@google.com>
+Date:   Thu Oct 17 18:15:28 2024 +0000
+
+    mm/mglru: reset page lru tier bits when activating
+    
+    When a folio is activated, lru_gen_add_folio() moves the folio to the
+    youngest generation.  But unlike folio_update_gen()/folio_inc_gen(),
+    lru_gen_add_folio() doesn't reset the folio lru tier bits (LRU_REFS_MASK |
+    LRU_REFS_FLAGS).  This inconsistency can affect how pages are aged via
+    folio_mark_accessed() (e.g.  fd accesses), though no user visible impact
+    related to this has been detected yet.
+    
+    Note that lru_gen_add_folio() cannot clear PG_workingset if the activation
+    is due to workingset refault, otherwise PSI accounting will be skipped.
+    So fix lru_gen_add_folio() to clear the lru tier bits other than
+    PG_workingset when activating a folio, and also clear all the lru tier
+    bits when a folio is activated via folio_activate() in
+    lru_gen_look_around().
+    
+    Link: https://lkml.kernel.org/r/20241017181528.3358821-1-weixugc@google.com
+    Fixes: 018ee47f1489 ("mm: multi-gen LRU: exploit locality in rmap")
+    Signed-off-by: Wei Xu <weixugc@google.com>
+    Cc: Axel Rasmussen <axelrasmussen@google.com>
+    Cc: Brian Geffon <bgeffon@google.com>
+    Cc: Jan Alexander Steffens <heftig@archlinux.org>
+    Cc: Suleiman Souhlal <suleiman@google.com>
+    Cc: Yu Zhao <yuzhao@google.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index 5bec29914f12..8d1301c0f22a 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -2603,8 +2603,6 @@ static bool should_clear_pmd_young(void)
+  *                          shorthand helpers
+  ******************************************************************************/
+ 
+-#define LRU_REFS_FLAGS	(BIT(PG_referenced) | BIT(PG_workingset))
+-
+ #define DEFINE_MAX_SEQ(lruvec)						\
+ 	unsigned long max_seq = READ_ONCE((lruvec)->lrugen.max_seq)
+ 
+@@ -4142,8 +4140,10 @@ bool lru_gen_look_around(struct page_vma_mapped_walk *pvmw)
+ 		old_gen = folio_lru_gen(folio);
+ 		if (old_gen < 0)
+ 			folio_set_referenced(folio);
+-		else if (old_gen != new_gen)
++		else if (old_gen != new_gen) {
++			folio_clear_lru_refs(folio);
+ 			folio_activate(folio);
++		}
+ 	}
+ 
+ 	arch_leave_lazy_mmu_mode();
+@@ -4376,7 +4376,7 @@ static bool isolate_folio(struct lruvec *lruvec, struct folio *folio, struct sca
+ 
+ 	/* see the comment on MAX_NR_TIERS */
+ 	if (!folio_test_referenced(folio))
+-		set_mask_bits(&folio->flags, LRU_REFS_MASK | LRU_REFS_FLAGS, 0);
++		folio_clear_lru_refs(folio);
+ 
+ 	/* for shrink_folio_list() */
+ 	folio_clear_reclaim(folio);

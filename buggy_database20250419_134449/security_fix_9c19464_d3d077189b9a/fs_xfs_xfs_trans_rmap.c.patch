@@ -1,0 +1,68 @@
+commit 9c19464469556a0cd342fc40a24926ab46d7d243
+Author: Darrick J. Wong <darrick.wong@oracle.com>
+Date:   Wed Aug 3 12:16:05 2016 +1000
+
+    xfs: propagate bmap updates to rmapbt
+    
+    When we map, unmap, or convert an extent in a file's data or attr
+    fork, schedule a respective update in the rmapbt.  Previous versions
+    of this patch required a 1:1 correspondence between bmap and rmap,
+    but this is no longer true as we now have ability to make interval
+    queries against the rmapbt.
+    
+    We use the deferred operations code to handle redo operations
+    atomically and deadlock free.  This plumbs in all five rmap actions
+    (map, unmap, convert extent, alloc, free); we'll use the first three
+    now for file data, and reflink will want the last two.  We also add
+    an error injection site to test log recovery.
+    
+    Finally, we need to fix the bmap shift extent code to adjust the
+    rmaps correctly.
+    
+    Signed-off-by: Darrick J. Wong <darrick.wong@oracle.com>
+    Reviewed-by: Dave Chinner <dchinner@redhat.com>
+    Signed-off-by: Dave Chinner <david@fromorbit.com>
+
+diff --git a/fs/xfs/xfs_trans_rmap.c b/fs/xfs/xfs_trans_rmap.c
+index baab99077f77..83414764e1ab 100644
+--- a/fs/xfs/xfs_trans_rmap.c
++++ b/fs/xfs/xfs_trans_rmap.c
+@@ -171,14 +171,15 @@ xfs_trans_log_finish_rmap_update(
+ 	xfs_fileoff_t			startoff,
+ 	xfs_fsblock_t			startblock,
+ 	xfs_filblks_t			blockcount,
+-	xfs_exntst_t			state)
++	xfs_exntst_t			state,
++	struct xfs_btree_cur		**pcur)
+ {
+ 	uint				next_extent;
+ 	struct xfs_map_extent		*rmap;
+ 	int				error;
+ 
+-	/* XXX: actually finish the rmap update here */
+-	error = -EFSCORRUPTED;
++	error = xfs_rmap_finish_one(tp, type, owner, whichfork, startoff,
++			startblock, blockcount, state, pcur);
+ 
+ 	/*
+ 	 * Mark the transaction dirty, even on error. This ensures the
+@@ -276,7 +277,8 @@ xfs_rmap_update_finish_item(
+ 			rmap->ri_bmap.br_startoff,
+ 			rmap->ri_bmap.br_startblock,
+ 			rmap->ri_bmap.br_blockcount,
+-			rmap->ri_bmap.br_state);
++			rmap->ri_bmap.br_state,
++			(struct xfs_btree_cur **)state);
+ 	kmem_free(rmap);
+ 	return error;
+ }
+@@ -288,6 +290,9 @@ xfs_rmap_update_finish_cleanup(
+ 	void			*state,
+ 	int			error)
+ {
++	struct xfs_btree_cur	*rcur = state;
++
++	xfs_rmap_finish_one_cleanup(tp, rcur, error);
+ }
+ 
+ /* Abort all pending RUIs. */

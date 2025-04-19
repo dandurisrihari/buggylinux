@@ -1,0 +1,47 @@
+commit 402b08622d9ac6e32e25289573272e0f21bb58a7
+Author: Carsten Otte <cotte@de.ibm.com>
+Date:   Tue Mar 25 18:47:10 2008 +0100
+
+    s390: KVM preparation: provide hook to enable pgstes in user pagetable
+    
+    The SIE instruction on s390 uses the 2nd half of the page table page to
+    virtualize the storage keys of a guest. This patch offers the s390_enable_sie
+    function, which reorganizes the page tables of a single-threaded process to
+    reserve space in the page table:
+    s390_enable_sie makes sure that the process is single threaded and then uses
+    dup_mm to create a new mm with reorganized page tables. The old mm is freed
+    and the process has now a page status extended field after every page table.
+    
+    Code that wants to exploit pgstes should SELECT CONFIG_PGSTE.
+    
+    This patch has a small common code hit, namely making dup_mm non-static.
+    
+    Edit (Carsten): I've modified Martin's patch, following Jeremy Fitzhardinge's
+    review feedback. Now we do have the prototype for dup_mm in
+    include/linux/sched.h. Following Martin's suggestion, s390_enable_sie() does now
+    call task_lock() to prevent race against ptrace modification of mm_users.
+    
+    Signed-off-by: Martin Schwidefsky <schwidefsky@de.ibm.com>
+    Signed-off-by: Carsten Otte <cotte@de.ibm.com>
+    Acked-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Avi Kivity <avi@qumranet.com>
+
+diff --git a/include/asm-s390/mmu_context.h b/include/asm-s390/mmu_context.h
+index b5a34c6f91a9..4c2fbf48c9c4 100644
+--- a/include/asm-s390/mmu_context.h
++++ b/include/asm-s390/mmu_context.h
+@@ -20,7 +20,13 @@ static inline int init_new_context(struct task_struct *tsk,
+ #ifdef CONFIG_64BIT
+ 	mm->context.asce_bits |= _ASCE_TYPE_REGION3;
+ #endif
+-	mm->context.noexec = s390_noexec;
++	if (current->mm->context.pgstes) {
++		mm->context.noexec = 0;
++		mm->context.pgstes = 1;
++	} else {
++		mm->context.noexec = s390_noexec;
++		mm->context.pgstes = 0;
++	}
+ 	mm->context.asce_limit = STACK_TOP_MAX;
+ 	crst_table_init((unsigned long *) mm->pgd, pgd_entry_type(mm));
+ 	return 0;

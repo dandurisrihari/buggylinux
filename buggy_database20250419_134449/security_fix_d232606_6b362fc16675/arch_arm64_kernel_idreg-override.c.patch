@@ -1,0 +1,46 @@
+commit d232606773a0b09ec7f1ffc25f63abe801d011fd
+Author: Justin Stitt <justinstitt@google.com>
+Date:   Fri Aug 11 16:33:51 2023 +0000
+
+    arm64/sysreg: refactor deprecated strncpy
+    
+    `strncpy` is deprecated for use on NUL-terminated destination strings
+    [1]. Which seems to be the case here due to the forceful setting of `buf`'s
+    tail to 0.
+    
+    A suitable replacement is `strscpy` [2] due to the fact that it
+    guarantees NUL-termination on its destination buffer argument which is
+    _not_ the case for `strncpy`!
+    
+    In this case, we can simplify the logic and also check for any silent
+    truncation by using `strscpy`'s return value.
+    
+    This should have no functional change and yet uses a more robust and
+    less ambiguous interface whilst reducing code complexity.
+    
+    Link: www.kernel.org/doc/html/latest/process/deprecated.html#strncpy-on-nul-terminated-strings[1]
+    Link: https://manpages.debian.org/testing/linux-manual-4.8/strscpy.9.en.html [2]
+    Link: https://github.com/KSPP/linux/issues/90
+    Suggested-by: Kees Cook <keescook@chromium.org>
+    Cc: linux-hardening@vger.kernel.org
+    Signed-off-by: Justin Stitt <justinstitt@google.com>
+    Link: https://lore.kernel.org/r/20230811-strncpy-arch-arm64-v2-1-ba84eabffadb@google.com
+    Signed-off-by: Will Deacon <will@kernel.org>
+
+diff --git a/arch/arm64/kernel/idreg-override.c b/arch/arm64/kernel/idreg-override.c
+index 2fe2491b692c..aee12c75b738 100644
+--- a/arch/arm64/kernel/idreg-override.c
++++ b/arch/arm64/kernel/idreg-override.c
+@@ -262,9 +262,9 @@ static __init void __parse_cmdline(const char *cmdline, bool parse_aliases)
+ 		if (!len)
+ 			return;
+ 
+-		len = min(len, ARRAY_SIZE(buf) - 1);
+-		strncpy(buf, cmdline, len);
+-		buf[len] = 0;
++		len = strscpy(buf, cmdline, ARRAY_SIZE(buf));
++		if (len == -E2BIG)
++			len = ARRAY_SIZE(buf) - 1;
+ 
+ 		if (strcmp(buf, "--") == 0)
+ 			return;

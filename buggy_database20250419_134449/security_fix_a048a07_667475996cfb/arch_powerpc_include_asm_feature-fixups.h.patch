@@ -1,0 +1,70 @@
+commit a048a07d7f4535baa4cbad6bc024f175317ab938
+Author: Nicholas Piggin <npiggin@gmail.com>
+Date:   Tue May 22 09:00:00 2018 +1000
+
+    powerpc/64s: Add support for a store forwarding barrier at kernel entry/exit
+    
+    On some CPUs we can prevent a vulnerability related to store-to-load
+    forwarding by preventing store forwarding between privilege domains,
+    by inserting a barrier in kernel entry and exit paths.
+    
+    This is known to be the case on at least Power7, Power8 and Power9
+    powerpc CPUs.
+    
+    Barriers must be inserted generally before the first load after moving
+    to a higher privilege, and after the last store before moving to a
+    lower privilege, HV and PR privilege transitions must be protected.
+    
+    Barriers are added as patch sections, with all kernel/hypervisor entry
+    points patched, and the exit points to lower privilge levels patched
+    similarly to the RFI flush patching.
+    
+    Firmware advertisement is not implemented yet, so CPU flush types
+    are hard coded.
+    
+    Thanks to Michal Suchánek for bug fixes and review.
+    
+    Signed-off-by: Nicholas Piggin <npiggin@gmail.com>
+    Signed-off-by: Mauricio Faria de Oliveira <mauricfo@linux.vnet.ibm.com>
+    Signed-off-by: Michael Neuling <mikey@neuling.org>
+    Signed-off-by: Michal Suchánek <msuchanek@suse.de>
+    Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/arch/powerpc/include/asm/feature-fixups.h b/arch/powerpc/include/asm/feature-fixups.h
+index 1e82eb3caabd..a9b64df34e2a 100644
+--- a/arch/powerpc/include/asm/feature-fixups.h
++++ b/arch/powerpc/include/asm/feature-fixups.h
+@@ -187,6 +187,22 @@ label##3:					       	\
+ 	FTR_ENTRY_OFFSET label##1b-label##3b;		\
+ 	.popsection;
+ 
++#define STF_ENTRY_BARRIER_FIXUP_SECTION			\
++953:							\
++	.pushsection __stf_entry_barrier_fixup,"a";	\
++	.align 2;					\
++954:							\
++	FTR_ENTRY_OFFSET 953b-954b;			\
++	.popsection;
++
++#define STF_EXIT_BARRIER_FIXUP_SECTION			\
++955:							\
++	.pushsection __stf_exit_barrier_fixup,"a";	\
++	.align 2;					\
++956:							\
++	FTR_ENTRY_OFFSET 955b-956b;			\
++	.popsection;
++
+ #define RFI_FLUSH_FIXUP_SECTION				\
+ 951:							\
+ 	.pushsection __rfi_flush_fixup,"a";		\
+@@ -199,6 +215,9 @@ label##3:					       	\
+ #ifndef __ASSEMBLY__
+ #include <linux/types.h>
+ 
++extern long stf_barrier_fallback;
++extern long __start___stf_entry_barrier_fixup, __stop___stf_entry_barrier_fixup;
++extern long __start___stf_exit_barrier_fixup, __stop___stf_exit_barrier_fixup;
+ extern long __start___rfi_flush_fixup, __stop___rfi_flush_fixup;
+ 
+ void apply_feature_fixups(void);

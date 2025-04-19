@@ -1,0 +1,82 @@
+diff --git a/arch/powerpc/Kconfig b/arch/powerpc/Kconfig
+index 3d008115fe18..076e05ae9b04 100644
+--- a/arch/powerpc/Kconfig
++++ b/arch/powerpc/Kconfig
+@@ -190,6 +190,7 @@ config PPC
+ 	select HAVE_EBPF_JIT			if PPC64
+ 	select HAVE_EFFICIENT_UNALIGNED_ACCESS	if !(CPU_LITTLE_ENDIAN && POWER7_CPU)
+ 	select HAVE_FTRACE_MCOUNT_RECORD
++	select HAVE_FUNCTION_ERROR_INJECTION
+ 	select HAVE_FUNCTION_GRAPH_TRACER
+ 	select HAVE_FUNCTION_TRACER
+ 	select HAVE_GCC_PLUGINS			if GCC_VERSION >= 50200   # plugin support on gcc <= 5.1 is buggy on PPC
+diff --git a/arch/powerpc/include/asm/error-injection.h b/arch/powerpc/include/asm/error-injection.h
+new file mode 100644
+index 000000000000..62fd24739852
+--- /dev/null
++++ b/arch/powerpc/include/asm/error-injection.h
+@@ -0,0 +1,13 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++
++#ifndef _ASM_ERROR_INJECTION_H
++#define _ASM_ERROR_INJECTION_H
++
++#include <linux/compiler.h>
++#include <linux/linkage.h>
++#include <asm/ptrace.h>
++#include <asm-generic/error-injection.h>
++
++void override_function_with_return(struct pt_regs *regs);
++
++#endif /* _ASM_ERROR_INJECTION_H */
+diff --git a/arch/powerpc/include/asm/ptrace.h b/arch/powerpc/include/asm/ptrace.h
+index 2ba2a1e52291..33196b311964 100644
+--- a/arch/powerpc/include/asm/ptrace.h
++++ b/arch/powerpc/include/asm/ptrace.h
+@@ -133,6 +133,11 @@ static inline long regs_return_value(struct pt_regs *regs)
+ 		return -regs->gpr[3];
+ }
+ 
++static inline void regs_set_return_value(struct pt_regs *regs, unsigned long rc)
++{
++	regs->gpr[3] = rc;
++}
++
+ #ifdef __powerpc64__
+ #define user_mode(regs) ((((regs)->msr) >> MSR_PR_LG) & 0x1)
+ #else
+diff --git a/arch/powerpc/lib/Makefile b/arch/powerpc/lib/Makefile
+index 703afa1808ed..3bf9fc6fd36c 100644
+--- a/arch/powerpc/lib/Makefile
++++ b/arch/powerpc/lib/Makefile
+@@ -12,6 +12,8 @@ obj-y += string.o alloc.o code-patching.o feature-fixups.o
+ 
+ obj-$(CONFIG_PPC32)	+= div64.o copy_32.o crtsavres.o strlen_32.o
+ 
++obj-$(CONFIG_FUNCTION_ERROR_INJECTION)	+= error-inject.o
++
+ # See corresponding test in arch/powerpc/Makefile
+ # 64-bit linker creates .sfpr on demand for final link (vmlinux),
+ # so it is only needed for modules, and only for older linkers which
+diff --git a/arch/powerpc/lib/error-inject.c b/arch/powerpc/lib/error-inject.c
+new file mode 100644
+index 000000000000..407b992fb02f
+--- /dev/null
++++ b/arch/powerpc/lib/error-inject.c
+@@ -0,0 +1,16 @@
++// SPDX-License-Identifier: GPL-2.0+
++
++#include <linux/error-injection.h>
++#include <linux/kprobes.h>
++#include <linux/uaccess.h>
++
++void override_function_with_return(struct pt_regs *regs)
++{
++	/*
++	 * Emulate 'blr'. 'regs' represents the state on entry of a predefined
++	 * function in the kernel/module, captured on a kprobe. We don't need
++	 * to worry about 32-bit userspace on a 64-bit kernel.
++	 */
++	regs->nip = regs->link;
++}
++NOKPROBE_SYMBOL(override_function_with_return);

@@ -1,0 +1,49 @@
+commit 254e3459285cbf2174350bbc0051e475e1bc5196
+Author: Darrick J. Wong <djwong@kernel.org>
+Date:   Mon Nov 28 17:24:36 2022 -0800
+
+    xfs: add debug knob to slow down write for fun
+    
+    Add a new error injection knob so that we can arbitrarily slow down
+    pagecache writes to test for race conditions and aberrant reclaim
+    behavior if the writeback mechanisms are slow to issue writeback.  This
+    will enable functional testing for the ifork sequence counters
+    introduced in commit 304a68b9c63b ("xfs: use iomap_valid method to
+    detect stale cached iomaps") that fixes write racing with reclaim
+    writeback.
+    
+    Signed-off-by: Darrick J. Wong <djwong@kernel.org>
+    Reviewed-by: Dave Chinner <dchinner@redhat.com>
+
+diff --git a/fs/xfs/xfs_iomap.c b/fs/xfs/xfs_iomap.c
+index 1bdd7afc1010..1005f1e36545 100644
+--- a/fs/xfs/xfs_iomap.c
++++ b/fs/xfs/xfs_iomap.c
+@@ -27,6 +27,8 @@
+ #include "xfs_dquot_item.h"
+ #include "xfs_dquot.h"
+ #include "xfs_reflink.h"
++#include "xfs_error.h"
++#include "xfs_errortag.h"
+ 
+ #define XFS_ALLOC_ALIGN(mp, off) \
+ 	(((off) >> mp->m_allocsize_log) << mp->m_allocsize_log)
+@@ -71,8 +73,16 @@ xfs_iomap_valid(
+ 	struct inode		*inode,
+ 	const struct iomap	*iomap)
+ {
+-	return iomap->validity_cookie ==
+-			xfs_iomap_inode_sequence(XFS_I(inode), iomap->flags);
++	struct xfs_inode	*ip = XFS_I(inode);
++
++	if (iomap->validity_cookie !=
++			xfs_iomap_inode_sequence(ip, iomap->flags)) {
++		trace_xfs_iomap_invalid(ip, iomap);
++		return false;
++	}
++
++	XFS_ERRORTAG_DELAY(ip->i_mount, XFS_ERRTAG_WRITE_DELAY_MS);
++	return true;
+ }
+ 
+ const struct iomap_page_ops xfs_iomap_page_ops = {

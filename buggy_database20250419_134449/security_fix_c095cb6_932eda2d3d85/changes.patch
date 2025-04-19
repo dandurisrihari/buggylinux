@@ -1,0 +1,209 @@
+diff --git a/tools/testing/selftests/kvm/include/x86_64/processor.h b/tools/testing/selftests/kvm/include/x86_64/processor.h
+index 583754bf18c3..b8023c30bded 100644
+--- a/tools/testing/selftests/kvm/include/x86_64/processor.h
++++ b/tools/testing/selftests/kvm/include/x86_64/processor.h
+@@ -427,8 +427,10 @@ void vcpu_load_state(struct kvm_vm *vm, uint32_t vcpuid,
+ 		     struct kvm_x86_state *state);
+ void kvm_x86_state_cleanup(struct kvm_x86_state *state);
+ 
+-struct kvm_msr_list *kvm_get_msr_index_list(void);
++const struct kvm_msr_list *kvm_get_msr_index_list(void);
++bool kvm_msr_is_in_save_restore_list(uint32_t msr_index);
+ uint64_t kvm_get_feature_msr(uint64_t msr_index);
++
+ struct kvm_cpuid2 *kvm_get_supported_cpuid(void);
+ struct kvm_cpuid2 *vcpu_get_cpuid(struct kvm_vm *vm, uint32_t vcpuid);
+ 
+diff --git a/tools/testing/selftests/kvm/lib/x86_64/processor.c b/tools/testing/selftests/kvm/lib/x86_64/processor.c
+index 02266b8123df..3f83857009a3 100644
+--- a/tools/testing/selftests/kvm/lib/x86_64/processor.c
++++ b/tools/testing/selftests/kvm/lib/x86_64/processor.c
+@@ -719,18 +719,6 @@ struct kvm_cpuid2 *kvm_get_supported_cpuid(void)
+ 	return cpuid;
+ }
+ 
+-/*
+- * KVM Get MSR
+- *
+- * Input Args:
+- *   msr_index - Index of MSR
+- *
+- * Output Args: None
+- *
+- * Return: On success, value of the MSR. On failure a TEST_ASSERT is produced.
+- *
+- * Get value of MSR for VCPU.
+- */
+ uint64_t kvm_get_feature_msr(uint64_t msr_index)
+ {
+ 	struct {
+@@ -903,38 +891,47 @@ void vcpu_dump(FILE *stream, struct kvm_vm *vm, uint32_t vcpuid, uint8_t indent)
+ 	sregs_dump(stream, &sregs, indent + 4);
+ }
+ 
+-static int kvm_get_num_msrs_fd(int kvm_fd)
++const struct kvm_msr_list *kvm_get_msr_index_list(void)
+ {
++	static struct kvm_msr_list *list;
+ 	struct kvm_msr_list nmsrs;
+-	int r;
++	int kvm_fd, r;
++
++	if (list)
++		return list;
++
++	kvm_fd = open_kvm_dev_path_or_exit();
+ 
+ 	nmsrs.nmsrs = 0;
+ 	r = __kvm_ioctl(kvm_fd, KVM_GET_MSR_INDEX_LIST, &nmsrs);
+ 	TEST_ASSERT(r == -1 && errno == E2BIG,
+-		    "Unexpected result from KVM_GET_MSR_INDEX_LIST probe, r: %i", r);
++		    "Expected -E2BIG, got rc: %i errno: %i (%s)",
++		    r, errno, strerror(errno));
+ 
+-	return nmsrs.nmsrs;
+-}
++	list = malloc(sizeof(*list) + nmsrs.nmsrs * sizeof(list->indices[0]));
++	TEST_ASSERT(list, "-ENOMEM when allocating MSR index list");
++	list->nmsrs = nmsrs.nmsrs;
+ 
+-static int kvm_get_num_msrs(struct kvm_vm *vm)
+-{
+-	return kvm_get_num_msrs_fd(vm->kvm_fd);
++	kvm_ioctl(kvm_fd, KVM_GET_MSR_INDEX_LIST, list);
++	close(kvm_fd);
++
++	TEST_ASSERT(list->nmsrs == nmsrs.nmsrs,
++		    "Number of save/restore MSRs changed, was %d, now %d",
++		    nmsrs.nmsrs, list->nmsrs);
++	return list;
+ }
+ 
+-struct kvm_msr_list *kvm_get_msr_index_list(void)
++bool kvm_msr_is_in_save_restore_list(uint32_t msr_index)
+ {
+-	struct kvm_msr_list *list;
+-	int nmsrs, kvm_fd;
+-
+-	kvm_fd = open_kvm_dev_path_or_exit();
++	const struct kvm_msr_list *list = kvm_get_msr_index_list();
++	int i;
+ 
+-	nmsrs = kvm_get_num_msrs_fd(kvm_fd);
+-	list = malloc(sizeof(*list) + nmsrs * sizeof(list->indices[0]));
+-	list->nmsrs = nmsrs;
+-	kvm_ioctl(kvm_fd, KVM_GET_MSR_INDEX_LIST, list);
+-	close(kvm_fd);
++	for (i = 0; i < list->nmsrs; ++i) {
++		if (list->indices[i] == msr_index)
++			return true;
++	}
+ 
+-	return list;
++	return false;
+ }
+ 
+ static int vcpu_save_xsave_state(struct kvm_vm *vm, struct vcpu *vcpu,
+@@ -955,10 +952,10 @@ static int vcpu_save_xsave_state(struct kvm_vm *vm, struct vcpu *vcpu,
+ 
+ struct kvm_x86_state *vcpu_save_state(struct kvm_vm *vm, uint32_t vcpuid)
+ {
++	const struct kvm_msr_list *msr_list = kvm_get_msr_index_list();
+ 	struct vcpu *vcpu = vcpu_get(vm, vcpuid);
+-	struct kvm_msr_list *list;
+ 	struct kvm_x86_state *state;
+-	int nmsrs, r, i;
++	int r, i;
+ 	static int nested_size = -1;
+ 
+ 	if (nested_size == -1) {
+@@ -976,12 +973,7 @@ struct kvm_x86_state *vcpu_save_state(struct kvm_vm *vm, uint32_t vcpuid)
+ 	 */
+ 	vcpu_run_complete_io(vm, vcpuid);
+ 
+-	nmsrs = kvm_get_num_msrs(vm);
+-	list = malloc(sizeof(*list) + nmsrs * sizeof(list->indices[0]));
+-	list->nmsrs = nmsrs;
+-	kvm_ioctl(vm->kvm_fd, KVM_GET_MSR_INDEX_LIST, list);
+-
+-	state = malloc(sizeof(*state) + nmsrs * sizeof(state->msrs.entries[0]));
++	state = malloc(sizeof(*state) + msr_list->nmsrs * sizeof(state->msrs.entries[0]));
+ 	r = ioctl(vcpu->fd, KVM_GET_VCPU_EVENTS, &state->events);
+ 	TEST_ASSERT(r == 0, "Unexpected result from KVM_GET_VCPU_EVENTS, r: %i",
+ 		    r);
+@@ -1019,18 +1011,17 @@ struct kvm_x86_state *vcpu_save_state(struct kvm_vm *vm, uint32_t vcpuid)
+ 	} else
+ 		state->nested.size = 0;
+ 
+-	state->msrs.nmsrs = nmsrs;
+-	for (i = 0; i < nmsrs; i++)
+-		state->msrs.entries[i].index = list->indices[i];
++	state->msrs.nmsrs = msr_list->nmsrs;
++	for (i = 0; i < msr_list->nmsrs; i++)
++		state->msrs.entries[i].index = msr_list->indices[i];
+ 	r = ioctl(vcpu->fd, KVM_GET_MSRS, &state->msrs);
+-	TEST_ASSERT(r == nmsrs, "Unexpected result from KVM_GET_MSRS, r: %i (failed MSR was 0x%x)",
+-		    r, r == nmsrs ? -1 : list->indices[r]);
++	TEST_ASSERT(r == msr_list->nmsrs, "Unexpected result from KVM_GET_MSRS, r: %i (failed MSR was 0x%x)",
++		    r, r == msr_list->nmsrs ? -1 : msr_list->indices[r]);
+ 
+ 	r = ioctl(vcpu->fd, KVM_GET_DEBUGREGS, &state->debugregs);
+ 	TEST_ASSERT(r == 0, "Unexpected result from KVM_GET_DEBUGREGS, r: %i",
+ 		    r);
+ 
+-	free(list);
+ 	return state;
+ }
+ 
+diff --git a/tools/testing/selftests/kvm/x86_64/xss_msr_test.c b/tools/testing/selftests/kvm/x86_64/xss_msr_test.c
+index 3529376747c2..7bd15f8a805c 100644
+--- a/tools/testing/selftests/kvm/x86_64/xss_msr_test.c
++++ b/tools/testing/selftests/kvm/x86_64/xss_msr_test.c
+@@ -17,28 +17,11 @@
+ 
+ #define X86_FEATURE_XSAVES	(1<<3)
+ 
+-bool is_supported_msr(u32 msr_index)
+-{
+-	struct kvm_msr_list *list;
+-	bool found = false;
+-	int i;
+-
+-	list = kvm_get_msr_index_list();
+-	for (i = 0; i < list->nmsrs; ++i) {
+-		if (list->indices[i] == msr_index) {
+-			found = true;
+-			break;
+-		}
+-	}
+-
+-	free(list);
+-	return found;
+-}
+-
+ int main(int argc, char *argv[])
+ {
+ 	struct kvm_cpuid_entry2 *entry;
+ 	bool xss_supported = false;
++	bool xss_in_msr_list;
+ 	struct kvm_vm *vm;
+ 	uint64_t xss_val;
+ 	int i, r;
+@@ -64,12 +47,14 @@ int main(int argc, char *argv[])
+ 	 * At present, KVM only supports a guest IA32_XSS value of 0. Verify
+ 	 * that trying to set the guest IA32_XSS to an unsupported value fails.
+ 	 * Also, in the future when a non-zero value succeeds check that
+-	 * IA32_XSS is in the KVM_GET_MSR_INDEX_LIST.
++	 * IA32_XSS is in the list of MSRs to save/restore.
+ 	 */
++	xss_in_msr_list = kvm_msr_is_in_save_restore_list(MSR_IA32_XSS);
+ 	for (i = 0; i < MSR_BITS; ++i) {
+ 		r = _vcpu_set_msr(vm, VCPU_ID, MSR_IA32_XSS, 1ull << i);
+-		TEST_ASSERT(r == 0 || is_supported_msr(MSR_IA32_XSS),
+-			    "IA32_XSS was able to be set, but was not found in KVM_GET_MSR_INDEX_LIST.\n");
++
++		TEST_ASSERT(r == 0 || xss_in_msr_list,
++			    "IA32_XSS was able to be set, but was not in save/restore list");
+ 	}
+ 
+ 	kvm_vm_free(vm);

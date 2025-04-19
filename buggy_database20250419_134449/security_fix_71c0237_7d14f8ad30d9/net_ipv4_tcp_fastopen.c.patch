@@ -1,0 +1,84 @@
+commit 71c02379c762cb616c00fd5c4ed253fbf6bbe11b
+Author: Christoph Paasch <cpaasch@apple.com>
+Date:   Mon Oct 23 13:22:23 2017 -0700
+
+    tcp: Configure TFO without cookie per socket and/or per route
+    
+    We already allow to enable TFO without a cookie by using the
+    fastopen-sysctl and setting it to TFO_SERVER_COOKIE_NOT_REQD (or
+    TFO_CLIENT_NO_COOKIE).
+    This is safe to do in certain environments where we know that there
+    isn't a malicous host (aka., data-centers) or when the
+    application-protocol already provides an authentication mechanism in the
+    first flight of data.
+    
+    A server however might be providing multiple services or talking to both
+    sides (public Internet and data-center). So, this server would want to
+    enable cookie-less TFO for certain services and/or for connections that
+    go to the data-center.
+    
+    This patch exposes a socket-option and a per-route attribute to enable such
+    fine-grained configurations.
+    
+    Signed-off-by: Christoph Paasch <cpaasch@apple.com>
+    Reviewed-by: Yuchung Cheng <ycheng@google.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/ipv4/tcp_fastopen.c b/net/ipv4/tcp_fastopen.c
+index 21075ce19cb6..e0a4b56644aa 100644
+--- a/net/ipv4/tcp_fastopen.c
++++ b/net/ipv4/tcp_fastopen.c
+@@ -310,13 +310,23 @@ static bool tcp_fastopen_queue_check(struct sock *sk)
+ 	return true;
+ }
+ 
++static bool tcp_fastopen_no_cookie(const struct sock *sk,
++				   const struct dst_entry *dst,
++				   int flag)
++{
++	return (sock_net(sk)->ipv4.sysctl_tcp_fastopen & flag) ||
++	       tcp_sk(sk)->fastopen_no_cookie ||
++	       (dst && dst_metric(dst, RTAX_FASTOPEN_NO_COOKIE));
++}
++
+ /* Returns true if we should perform Fast Open on the SYN. The cookie (foc)
+  * may be updated and return the client in the SYN-ACK later. E.g., Fast Open
+  * cookie request (foc->len == 0).
+  */
+ struct sock *tcp_try_fastopen(struct sock *sk, struct sk_buff *skb,
+ 			      struct request_sock *req,
+-			      struct tcp_fastopen_cookie *foc)
++			      struct tcp_fastopen_cookie *foc,
++			      const struct dst_entry *dst)
+ {
+ 	bool syn_data = TCP_SKB_CB(skb)->end_seq != TCP_SKB_CB(skb)->seq + 1;
+ 	int tcp_fastopen = sock_net(sk)->ipv4.sysctl_tcp_fastopen;
+@@ -333,7 +343,8 @@ struct sock *tcp_try_fastopen(struct sock *sk, struct sk_buff *skb,
+ 		return NULL;
+ 	}
+ 
+-	if (syn_data && (tcp_fastopen & TFO_SERVER_COOKIE_NOT_REQD))
++	if (syn_data &&
++	    tcp_fastopen_no_cookie(sk, dst, TFO_SERVER_COOKIE_NOT_REQD))
+ 		goto fastopen;
+ 
+ 	if (foc->len >= 0 &&  /* Client presents or requests a cookie */
+@@ -370,6 +381,7 @@ bool tcp_fastopen_cookie_check(struct sock *sk, u16 *mss,
+ 			       struct tcp_fastopen_cookie *cookie)
+ {
+ 	unsigned long last_syn_loss = 0;
++	const struct dst_entry *dst;
+ 	int syn_loss = 0;
+ 
+ 	tcp_fastopen_cache_get(sk, mss, cookie, &syn_loss, &last_syn_loss);
+@@ -387,7 +399,9 @@ bool tcp_fastopen_cookie_check(struct sock *sk, u16 *mss,
+ 		return false;
+ 	}
+ 
+-	if (sock_net(sk)->ipv4.sysctl_tcp_fastopen & TFO_CLIENT_NO_COOKIE) {
++	dst = __sk_dst_get(sk);
++
++	if (tcp_fastopen_no_cookie(sk, dst, TFO_CLIENT_NO_COOKIE)) {
+ 		cookie->len = -1;
+ 		return true;
+ 	}

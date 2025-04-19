@@ -1,0 +1,54 @@
+commit 56bcd0f07fdbf9770284bedb982236ab881ef909
+Author: Mike Snitzer <snitzer@kernel.org>
+Date:   Thu Sep 5 15:09:57 2024 -0400
+
+    nfs: implement client support for NFS_LOCALIO_PROGRAM
+    
+    The LOCALIO auxiliary RPC protocol consists of a single "UUID_IS_LOCAL"
+    RPC method that allows the Linux NFS client to verify the local Linux
+    NFS server can see the nonce (single-use UUID) the client generated and
+    made available in nfs_common for subsequent lookup and verification
+    by the NFS server.  If matched, the NFS server populates members in the
+    nfs_uuid_t struct.  The NFS client then transfers these nfs_uuid_t
+    struct member pointers to the nfs_client struct and cleans up the
+    nfs_uuid_t struct.  See: fs/nfs/localio.c:nfs_local_probe()
+    
+    This protocol isn't part of an IETF standard, nor does it need to be
+    considering it is Linux-to-Linux auxiliary RPC protocol that amounts
+    to an implementation detail.
+    
+    Localio is only supported when UNIX-style authentication (AUTH_UNIX, aka
+    AUTH_SYS) is used (enforced by fs/nfs/localio.c:nfs_local_probe()).
+    
+    The UUID_IS_LOCAL method encodes the client generated uuid_t in terms of
+    the fixed UUID_SIZE (16 bytes).  The fixed size opaque encode and decode
+    XDR methods are used instead of the less efficient variable sized
+    methods.
+    
+    Having a nonce (single-use uuid) is better than using the same uuid
+    for the life of the server, and sending it proactively by client
+    rather than reactively by the server is also safer.
+    
+    Signed-off-by: Mike Snitzer <snitzer@kernel.org>
+    Co-developed-by: NeilBrown <neilb@suse.de>
+    Signed-off-by: NeilBrown <neilb@suse.de>
+    Reviewed-by: Jeff Layton <jlayton@kernel.org>
+    Signed-off-by: Anna Schumaker <anna.schumaker@oracle.com>
+
+diff --git a/fs/nfs/client.c b/fs/nfs/client.c
+index c09ef6088451..a1d21c4be0ac 100644
+--- a/fs/nfs/client.c
++++ b/fs/nfs/client.c
+@@ -434,8 +434,10 @@ struct nfs_client *nfs_get_client(const struct nfs_client_initdata *cl_init)
+ 			list_add_tail(&new->cl_share_link,
+ 					&nn->nfs_client_list);
+ 			spin_unlock(&nn->nfs_client_lock);
+-			nfs_local_probe(new);
+-			return rpc_ops->init_client(new, cl_init);
++			new = rpc_ops->init_client(new, cl_init);
++			if (!IS_ERR(new))
++				 nfs_local_probe(new);
++			return new;
+ 		}
+ 
+ 		spin_unlock(&nn->nfs_client_lock);

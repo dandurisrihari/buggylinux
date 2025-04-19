@@ -1,0 +1,90 @@
+commit 64badcb6d6459cc6f7b46f7d45e44c95ab874337
+Author: Michal Kazior <michal.kazior@tieto.com>
+Date:   Thu Sep 18 11:18:02 2014 +0300
+
+    ath10k: workaround fw beaconing bug
+    
+    Some firmware revisions don't wait for beacon tx
+    completion before sending another SWBA event. This
+    could lead to hardware using old (freed) beacon
+    data in some cases, e.g. tx credit starvation
+    combined with missed TBTT. This is very very rare.
+    
+    On non-IOMMU-enabled hosts this could be a
+    possible security issue because hw could beacon
+    some random data on the air.  On IOMMU-enabled
+    hosts DMAR faults would occur in most cases and
+    target device would crash.
+    
+    Since there are no beacon tx completions (implicit
+    nor explicit) propagated to host the only
+    workaround for this is to allocate a DMA-coherent
+    buffer for a lifetime of a vif and use it for all
+    beacon tx commands. Worst case for this approach
+    is some beacons may become corrupted, e.g. garbled
+    IEs or out-of-date TIM bitmap.
+    
+    Keep the original beacon-related code as-is in
+    case future firmware revisions solve this problem
+    so that the old path can be easily re-enabled with
+    a fw_feature flag.
+    
+    Signed-off-by: Michal Kazior <michal.kazior@tieto.com>
+    Signed-off-by: Kalle Valo <kvalo@qca.qualcomm.com>
+
+diff --git a/drivers/net/wireless/ath/ath10k/wmi.c b/drivers/net/wireless/ath/ath10k/wmi.c
+index 2c42bd504b79..66392f6f1ab1 100644
+--- a/drivers/net/wireless/ath/ath10k/wmi.c
++++ b/drivers/net/wireless/ath/ath10k/wmi.c
+@@ -1579,6 +1579,7 @@ static void ath10k_wmi_event_host_swba(struct ath10k *ar, struct sk_buff *skb)
+ 	struct wmi_bcn_info *bcn_info;
+ 	struct ath10k_vif *arvif;
+ 	struct sk_buff *bcn;
++	dma_addr_t paddr;
+ 	int ret, vdev_id = 0;
+ 
+ 	ev = (struct wmi_host_swba_event *)skb->data;
+@@ -1647,22 +1648,29 @@ static void ath10k_wmi_event_host_swba(struct ath10k *ar, struct sk_buff *skb)
+ 				ath10k_warn(ar, "SWBA overrun on vdev %d\n",
+ 					    arvif->vdev_id);
+ 
+-			dma_unmap_single(arvif->ar->dev,
+-					 ATH10K_SKB_CB(arvif->beacon)->paddr,
+-					 arvif->beacon->len, DMA_TO_DEVICE);
+-			dev_kfree_skb_any(arvif->beacon);
+-			arvif->beacon = NULL;
++			ath10k_mac_vif_beacon_free(arvif);
+ 		}
+ 
+-		ATH10K_SKB_CB(bcn)->paddr = dma_map_single(arvif->ar->dev,
+-							   bcn->data, bcn->len,
+-							   DMA_TO_DEVICE);
+-		ret = dma_mapping_error(arvif->ar->dev,
+-					ATH10K_SKB_CB(bcn)->paddr);
+-		if (ret) {
+-			ath10k_warn(ar, "failed to map beacon: %d\n", ret);
+-			dev_kfree_skb_any(bcn);
+-			goto skip;
++		if (!arvif->beacon_buf) {
++			paddr = dma_map_single(arvif->ar->dev, bcn->data,
++					       bcn->len, DMA_TO_DEVICE);
++			ret = dma_mapping_error(arvif->ar->dev, paddr);
++			if (ret) {
++				ath10k_warn(ar, "failed to map beacon: %d\n",
++					    ret);
++				dev_kfree_skb_any(bcn);
++				goto skip;
++			}
++
++			ATH10K_SKB_CB(bcn)->paddr = paddr;
++		} else {
++			if (bcn->len > IEEE80211_MAX_FRAME_LEN) {
++				ath10k_warn(ar, "trimming beacon %d -> %d bytes!\n",
++					    bcn->len, IEEE80211_MAX_FRAME_LEN);
++				skb_trim(bcn, IEEE80211_MAX_FRAME_LEN);
++			}
++			memcpy(arvif->beacon_buf, bcn->data, bcn->len);
++			ATH10K_SKB_CB(bcn)->paddr = arvif->beacon_paddr;
+ 		}
+ 
+ 		arvif->beacon = bcn;

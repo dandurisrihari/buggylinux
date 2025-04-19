@@ -1,0 +1,101 @@
+diff --git a/arch/microblaze/include/asm/xilinx_mb_manager.h b/arch/microblaze/include/asm/xilinx_mb_manager.h
+index 392c3aa278dc..7b6995722b0c 100644
+--- a/arch/microblaze/include/asm/xilinx_mb_manager.h
++++ b/arch/microblaze/include/asm/xilinx_mb_manager.h
+@@ -5,6 +5,8 @@
+ #ifndef _XILINX_MB_MANAGER_H
+ #define _XILINX_MB_MANAGER_H
+ 
++# ifndef __ASSEMBLY__
++
+ #include <linux/of_address.h>
+ 
+ /*
+@@ -17,5 +19,11 @@
+ void xmb_manager_register(uintptr_t phys_baseaddr, u32 cr_val,
+ 			  void (*callback)(void *data),
+ 			  void *priv, void (*reset_callback)(void *data));
++asmlinkage void xmb_inject_err(void);
++
++# endif /* __ASSEMBLY__ */
++
++/* Error injection offset */
++#define XMB_INJECT_ERR_OFFSET	0x200
+ 
+ #endif /* _XILINX_MB_MANAGER_H */
+diff --git a/arch/microblaze/kernel/entry.S b/arch/microblaze/kernel/entry.S
+index 4bf9cec516bc..582d7256d815 100644
+--- a/arch/microblaze/kernel/entry.S
++++ b/arch/microblaze/kernel/entry.S
+@@ -27,6 +27,7 @@
+ 
+ #include <asm/page.h>
+ #include <asm/unistd.h>
++#include <asm/xilinx_mb_manager.h>
+ 
+ #include <linux/errno.h>
+ #include <asm/signal.h>
+@@ -1151,6 +1152,41 @@ ENTRY(_switch_to)
+ 	nop
+ 
+ #ifdef CONFIG_MB_MANAGER
++.global xmb_inject_err
++.section .text
++.align 2
++.ent xmb_inject_err
++.type xmb_inject_err, @function
++xmb_inject_err:
++	addik	r1, r1, -PT_SIZE
++	SAVE_REGS
++
++	/* Switch to real mode */
++	VM_OFF;
++	set_bip;
++	mbar	1
++	mbar	2
++	bralid	r15, XMB_INJECT_ERR_OFFSET
++	nop;
++
++	/* enable virtual mode */
++	set_vms;
++	/* barrier for instructions and data accesses */
++	mbar	1
++	mbar	2
++	/*
++	 * Enable Interrupts, Virtual Protected Mode, equalize
++	 * initial state for all possible entries.
++	 */
++	rtbd    r0, 1f
++	nop;
++1:
++	RESTORE_REGS
++	addik	r1, r1, PT_SIZE
++	rtsd	r15, 8;
++	nop;
++.end xmb_inject_err
++
+ .section .data
+ .global xmb_manager_dev
+ .global xmb_manager_baseaddr
+@@ -1225,6 +1261,22 @@ ENTRY(_reset)
+ 	.org	0x20
+ 	brai	TOPHYS(_hw_exception_handler);	/* HW exception handler */
+ 
++#ifdef CONFIG_MB_MANAGER
++	/*
++	 * For TMR Inject API which injects the error should
++	 * be executed from LMB.
++	 * TMR Inject is programmed with address of 0x200 so that
++	 * when program counter matches with this address error will
++	 * be injected. 0x200 is expected to be next available bram
++	 * offset, hence used for this api.
++	 */
++	.org	XMB_INJECT_ERR_OFFSET
++xmb_inject_error:
++	nop
++	rtsd	r15, 8
++	nop
++#endif
++
+ .section .rodata,"a"
+ #include "syscall_table.S"

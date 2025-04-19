@@ -1,0 +1,84 @@
+diff --git a/drivers/char/ipmi/kcs_bmc.c b/drivers/char/ipmi/kcs_bmc.c
+index f292e74bd4a5..58fb1a7bd50d 100644
+--- a/drivers/char/ipmi/kcs_bmc.c
++++ b/drivers/char/ipmi/kcs_bmc.c
+@@ -67,12 +67,7 @@ static inline void write_status(struct kcs_bmc *kcs_bmc, u8 data)
+ 
+ static void update_status_bits(struct kcs_bmc *kcs_bmc, u8 mask, u8 val)
+ {
+-	u8 tmp = read_status(kcs_bmc);
+-
+-	tmp &= ~mask;
+-	tmp |= val & mask;
+-
+-	write_status(kcs_bmc, tmp);
++	kcs_bmc->io_updateb(kcs_bmc, kcs_bmc->ioreg.str, mask, val);
+ }
+ 
+ static inline void set_state(struct kcs_bmc *kcs_bmc, u8 state)
+diff --git a/drivers/char/ipmi/kcs_bmc.h b/drivers/char/ipmi/kcs_bmc.h
+index eb9ea4ce78b8..970f53892f2d 100644
+--- a/drivers/char/ipmi/kcs_bmc.h
++++ b/drivers/char/ipmi/kcs_bmc.h
+@@ -76,6 +76,7 @@ struct kcs_bmc {
+ 	struct kcs_ioreg ioreg;
+ 	u8 (*io_inputb)(struct kcs_bmc *kcs_bmc, u32 reg);
+ 	void (*io_outputb)(struct kcs_bmc *kcs_bmc, u32 reg, u8 b);
++	void (*io_updateb)(struct kcs_bmc *kcs_bmc, u32 reg, u8 mask, u8 val);
+ 
+ 	enum kcs_phases phase;
+ 	enum kcs_errors error;
+diff --git a/drivers/char/ipmi/kcs_bmc_aspeed.c b/drivers/char/ipmi/kcs_bmc_aspeed.c
+index 69be873f40ac..01ebb9da3d49 100644
+--- a/drivers/char/ipmi/kcs_bmc_aspeed.c
++++ b/drivers/char/ipmi/kcs_bmc_aspeed.c
+@@ -90,6 +90,14 @@ static void aspeed_kcs_outb(struct kcs_bmc *kcs_bmc, u32 reg, u8 data)
+ 	WARN(rc != 0, "regmap_write() failed: %d\n", rc);
+ }
+ 
++static void aspeed_kcs_updateb(struct kcs_bmc *kcs_bmc, u32 reg, u8 mask, u8 val)
++{
++	struct aspeed_kcs_bmc *priv = kcs_bmc_priv(kcs_bmc);
++	int rc;
++
++	rc = regmap_update_bits(priv->map, reg, mask, val);
++	WARN(rc != 0, "regmap_update_bits() failed: %d\n", rc);
++}
+ 
+ /*
+  * AST_usrGuide_KCS.pdf
+@@ -345,6 +353,7 @@ static int aspeed_kcs_probe(struct platform_device *pdev)
+ 	kcs_bmc->ioreg = ast_kcs_bmc_ioregs[channel - 1];
+ 	kcs_bmc->io_inputb = aspeed_kcs_inb;
+ 	kcs_bmc->io_outputb = aspeed_kcs_outb;
++	kcs_bmc->io_updateb = aspeed_kcs_updateb;
+ 
+ 	addr = ops->get_io_address(pdev);
+ 	if (addr < 0)
+diff --git a/drivers/char/ipmi/kcs_bmc_npcm7xx.c b/drivers/char/ipmi/kcs_bmc_npcm7xx.c
+index 722f7391fe1f..1f44aadec9e8 100644
+--- a/drivers/char/ipmi/kcs_bmc_npcm7xx.c
++++ b/drivers/char/ipmi/kcs_bmc_npcm7xx.c
+@@ -97,6 +97,15 @@ static void npcm7xx_kcs_outb(struct kcs_bmc *kcs_bmc, u32 reg, u8 data)
+ 	WARN(rc != 0, "regmap_write() failed: %d\n", rc);
+ }
+ 
++static void npcm7xx_kcs_updateb(struct kcs_bmc *kcs_bmc, u32 reg, u8 mask, u8 data)
++{
++	struct npcm7xx_kcs_bmc *priv = kcs_bmc_priv(kcs_bmc);
++	int rc;
++
++	rc = regmap_update_bits(priv->map, reg, mask, data);
++	WARN(rc != 0, "regmap_update_bits() failed: %d\n", rc);
++}
++
+ static void npcm7xx_kcs_enable_channel(struct kcs_bmc *kcs_bmc, bool enable)
+ {
+ 	struct npcm7xx_kcs_bmc *priv = kcs_bmc_priv(kcs_bmc);
+@@ -163,6 +172,7 @@ static int npcm7xx_kcs_probe(struct platform_device *pdev)
+ 	kcs_bmc->ioreg.str = priv->reg->sts;
+ 	kcs_bmc->io_inputb = npcm7xx_kcs_inb;
+ 	kcs_bmc->io_outputb = npcm7xx_kcs_outb;
++	kcs_bmc->io_updateb = npcm7xx_kcs_updateb;
+ 
+ 	dev_set_drvdata(dev, kcs_bmc);

@@ -1,0 +1,42 @@
+commit fb3bd914b3ec28f5fb697ac55c4846ac2d542855
+Author: Borislav Petkov (AMD) <bp@alien8.de>
+Date:   Wed Jun 28 11:02:39 2023 +0200
+
+    x86/srso: Add a Speculative RAS Overflow mitigation
+    
+    Add a mitigation for the speculative return address stack overflow
+    vulnerability found on AMD processors.
+    
+    The mitigation works by ensuring all RET instructions speculate to
+    a controlled location, similar to how speculation is controlled in the
+    retpoline sequence.  To accomplish this, the __x86_return_thunk forces
+    the CPU to mispredict every function return using a 'safe return'
+    sequence.
+    
+    To ensure the safety of this mitigation, the kernel must ensure that the
+    safe return sequence is itself free from attacker interference.  In Zen3
+    and Zen4, this is accomplished by creating a BTB alias between the
+    untraining function srso_untrain_ret_alias() and the safe return
+    function srso_safe_ret_alias() which results in evicting a potentially
+    poisoned BTB entry and using that safe one for all function returns.
+    
+    In older Zen1 and Zen2, this is accomplished using a reinterpretation
+    technique similar to Retbleed one: srso_untrain_ret() and
+    srso_safe_ret().
+    
+    Signed-off-by: Borislav Petkov (AMD) <bp@alien8.de>
+
+diff --git a/tools/objtool/arch/x86/decode.c b/tools/objtool/arch/x86/decode.c
+index 2e1caabecb18..2d51fa8da9e8 100644
+--- a/tools/objtool/arch/x86/decode.c
++++ b/tools/objtool/arch/x86/decode.c
+@@ -824,5 +824,8 @@ bool arch_is_retpoline(struct symbol *sym)
+ 
+ bool arch_is_rethunk(struct symbol *sym)
+ {
+-	return !strcmp(sym->name, "__x86_return_thunk");
++	return !strcmp(sym->name, "__x86_return_thunk") ||
++	       !strcmp(sym->name, "srso_untrain_ret") ||
++	       !strcmp(sym->name, "srso_safe_ret") ||
++	       !strcmp(sym->name, "__ret");
+ }

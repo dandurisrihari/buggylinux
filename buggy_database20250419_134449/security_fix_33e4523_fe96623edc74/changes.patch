@@ -1,0 +1,234 @@
+diff --git a/arch/arm64/include/asm/asm_pointer_auth.h b/arch/arm64/include/asm/asm_pointer_auth.h
+index 3482348ec07f..d3f4aee42851 100644
+--- a/arch/arm64/include/asm/asm_pointer_auth.h
++++ b/arch/arm64/include/asm/asm_pointer_auth.h
+@@ -39,11 +39,25 @@ alternative_if ARM64_HAS_GENERIC_AUTH
+ alternative_else_nop_endif
+ 	.endm
+ 
++	.macro ptrauth_keys_install_kernel tsk, tmp1, tmp2, tmp3
++alternative_if ARM64_HAS_ADDRESS_AUTH
++	mov	\tmp1, #THREAD_KEYS_KERNEL
++	add	\tmp1, \tsk, \tmp1
++	ldp	\tmp2, \tmp3, [\tmp1, #PTRAUTH_KERNEL_KEY_APIA]
++	msr_s	SYS_APIAKEYLO_EL1, \tmp2
++	msr_s	SYS_APIAKEYHI_EL1, \tmp3
++	isb
++alternative_else_nop_endif
++	.endm
++
+ #else /* CONFIG_ARM64_PTR_AUTH */
+ 
+ 	.macro ptrauth_keys_install_user tsk, tmp1, tmp2, tmp3
+ 	.endm
+ 
++	.macro ptrauth_keys_install_kernel tsk, tmp1, tmp2, tmp3
++	.endm
++
+ #endif /* CONFIG_ARM64_PTR_AUTH */
+ 
+ #endif /* __ASM_ASM_POINTER_AUTH_H */
+diff --git a/arch/arm64/include/asm/pointer_auth.h b/arch/arm64/include/asm/pointer_auth.h
+index dabe026ca8ca..aa956ca5f2c2 100644
+--- a/arch/arm64/include/asm/pointer_auth.h
++++ b/arch/arm64/include/asm/pointer_auth.h
+@@ -30,6 +30,10 @@ struct ptrauth_keys_user {
+ 	struct ptrauth_key apga;
+ };
+ 
++struct ptrauth_keys_kernel {
++	struct ptrauth_key apia;
++};
++
+ static inline void ptrauth_keys_init_user(struct ptrauth_keys_user *keys)
+ {
+ 	if (system_supports_address_auth()) {
+@@ -50,6 +54,12 @@ do {								\
+ 	write_sysreg_s(__pki_v.hi, SYS_ ## k ## KEYHI_EL1);	\
+ } while (0)
+ 
++static inline void ptrauth_keys_init_kernel(struct ptrauth_keys_kernel *keys)
++{
++	if (system_supports_address_auth())
++		get_random_bytes(&keys->apia, sizeof(keys->apia));
++}
++
+ extern int ptrauth_prctl_reset_keys(struct task_struct *tsk, unsigned long arg);
+ 
+ /*
+@@ -66,11 +76,14 @@ static inline unsigned long ptrauth_strip_insn_pac(unsigned long ptr)
+ 
+ #define ptrauth_thread_init_user(tsk)					\
+ 	ptrauth_keys_init_user(&(tsk)->thread.keys_user)
++#define ptrauth_thread_init_kernel(tsk)					\
++	ptrauth_keys_init_kernel(&(tsk)->thread.keys_kernel)
+ 
+ #else /* CONFIG_ARM64_PTR_AUTH */
+ #define ptrauth_prctl_reset_keys(tsk, arg)	(-EINVAL)
+ #define ptrauth_strip_insn_pac(lr)	(lr)
+ #define ptrauth_thread_init_user(tsk)
++#define ptrauth_thread_init_kernel(tsk)
+ #endif /* CONFIG_ARM64_PTR_AUTH */
+ 
+ #endif /* __ASM_POINTER_AUTH_H */
+diff --git a/arch/arm64/include/asm/processor.h b/arch/arm64/include/asm/processor.h
+index 496a92873290..4c77da5dc819 100644
+--- a/arch/arm64/include/asm/processor.h
++++ b/arch/arm64/include/asm/processor.h
+@@ -147,6 +147,7 @@ struct thread_struct {
+ 	struct debug_info	debug;		/* debugging */
+ #ifdef CONFIG_ARM64_PTR_AUTH
+ 	struct ptrauth_keys_user	keys_user;
++	struct ptrauth_keys_kernel	keys_kernel;
+ #endif
+ };
+ 
+diff --git a/arch/arm64/include/asm/smp.h b/arch/arm64/include/asm/smp.h
+index 8d66497d8157..40d5ba029615 100644
+--- a/arch/arm64/include/asm/smp.h
++++ b/arch/arm64/include/asm/smp.h
+@@ -38,6 +38,7 @@
+ #include <linux/threads.h>
+ #include <linux/cpumask.h>
+ #include <linux/thread_info.h>
++#include <asm/pointer_auth.h>
+ 
+ DECLARE_PER_CPU_READ_MOSTLY(int, cpu_number);
+ 
+@@ -95,6 +96,9 @@ asmlinkage void secondary_start_kernel(void);
+ struct secondary_data {
+ 	void *stack;
+ 	struct task_struct *task;
++#ifdef CONFIG_ARM64_PTR_AUTH
++	struct ptrauth_keys_kernel ptrauth_key;
++#endif
+ 	long status;
+ };
+ 
+diff --git a/arch/arm64/kernel/asm-offsets.c b/arch/arm64/kernel/asm-offsets.c
+index 7b1ea2aece58..9981a0a5a87f 100644
+--- a/arch/arm64/kernel/asm-offsets.c
++++ b/arch/arm64/kernel/asm-offsets.c
+@@ -42,6 +42,7 @@ int main(void)
+   DEFINE(THREAD_CPU_CONTEXT,	offsetof(struct task_struct, thread.cpu_context));
+ #ifdef CONFIG_ARM64_PTR_AUTH
+   DEFINE(THREAD_KEYS_USER,	offsetof(struct task_struct, thread.keys_user));
++  DEFINE(THREAD_KEYS_KERNEL,	offsetof(struct task_struct, thread.keys_kernel));
+ #endif
+   BLANK();
+   DEFINE(S_X0,			offsetof(struct pt_regs, regs[0]));
+@@ -91,6 +92,9 @@ int main(void)
+   BLANK();
+   DEFINE(CPU_BOOT_STACK,	offsetof(struct secondary_data, stack));
+   DEFINE(CPU_BOOT_TASK,		offsetof(struct secondary_data, task));
++#ifdef CONFIG_ARM64_PTR_AUTH
++  DEFINE(CPU_BOOT_PTRAUTH_KEY,	offsetof(struct secondary_data, ptrauth_key));
++#endif
+   BLANK();
+ #ifdef CONFIG_KVM_ARM_HOST
+   DEFINE(VCPU_CONTEXT,		offsetof(struct kvm_vcpu, arch.ctxt));
+@@ -137,6 +141,7 @@ int main(void)
+   DEFINE(PTRAUTH_USER_KEY_APDA,		offsetof(struct ptrauth_keys_user, apda));
+   DEFINE(PTRAUTH_USER_KEY_APDB,		offsetof(struct ptrauth_keys_user, apdb));
+   DEFINE(PTRAUTH_USER_KEY_APGA,		offsetof(struct ptrauth_keys_user, apga));
++  DEFINE(PTRAUTH_KERNEL_KEY_APIA,	offsetof(struct ptrauth_keys_kernel, apia));
+   BLANK();
+ #endif
+   return 0;
+diff --git a/arch/arm64/kernel/entry.S b/arch/arm64/kernel/entry.S
+index 684e475bfda0..3dad2d000e3c 100644
+--- a/arch/arm64/kernel/entry.S
++++ b/arch/arm64/kernel/entry.S
+@@ -178,6 +178,7 @@ alternative_cb_end
+ 
+ 	apply_ssbd 1, x22, x23
+ 
++	ptrauth_keys_install_kernel tsk, x20, x22, x23
+ 	.else
+ 	add	x21, sp, #S_FRAME_SIZE
+ 	get_current_task tsk
+@@ -342,6 +343,7 @@ alternative_else_nop_endif
+ 	msr	cntkctl_el1, x1
+ 4:
+ #endif
++	/* No kernel C function calls after this as user keys are set. */
+ 	ptrauth_keys_install_user tsk, x0, x1, x2
+ 
+ 	apply_ssbd 0, x0, x1
+@@ -898,6 +900,7 @@ ENTRY(cpu_switch_to)
+ 	ldr	lr, [x8]
+ 	mov	sp, x9
+ 	msr	sp_el0, x1
++	ptrauth_keys_install_kernel x1, x8, x9, x10
+ 	ret
+ ENDPROC(cpu_switch_to)
+ NOKPROBE(cpu_switch_to)
+diff --git a/arch/arm64/kernel/process.c b/arch/arm64/kernel/process.c
+index 6140e791bf92..7db0302bec00 100644
+--- a/arch/arm64/kernel/process.c
++++ b/arch/arm64/kernel/process.c
+@@ -376,6 +376,8 @@ int copy_thread_tls(unsigned long clone_flags, unsigned long stack_start,
+ 	 */
+ 	fpsimd_flush_task_state(p);
+ 
++	ptrauth_thread_init_kernel(p);
++
+ 	if (likely(!(p->flags & PF_KTHREAD))) {
+ 		*childregs = *current_pt_regs();
+ 		childregs->regs[0] = 0;
+diff --git a/arch/arm64/kernel/smp.c b/arch/arm64/kernel/smp.c
+index d4ed9a19d8fe..08903413f106 100644
+--- a/arch/arm64/kernel/smp.c
++++ b/arch/arm64/kernel/smp.c
+@@ -112,6 +112,10 @@ int __cpu_up(unsigned int cpu, struct task_struct *idle)
+ 	 */
+ 	secondary_data.task = idle;
+ 	secondary_data.stack = task_stack_page(idle) + THREAD_SIZE;
++#if defined(CONFIG_ARM64_PTR_AUTH)
++	secondary_data.ptrauth_key.apia.lo = idle->thread.keys_kernel.apia.lo;
++	secondary_data.ptrauth_key.apia.hi = idle->thread.keys_kernel.apia.hi;
++#endif
+ 	update_cpu_boot_status(CPU_MMU_OFF);
+ 	__flush_dcache_area(&secondary_data, sizeof(secondary_data));
+ 
+@@ -138,6 +142,10 @@ int __cpu_up(unsigned int cpu, struct task_struct *idle)
+ 
+ 	secondary_data.task = NULL;
+ 	secondary_data.stack = NULL;
++#if defined(CONFIG_ARM64_PTR_AUTH)
++	secondary_data.ptrauth_key.apia.lo = 0;
++	secondary_data.ptrauth_key.apia.hi = 0;
++#endif
+ 	__flush_dcache_area(&secondary_data, sizeof(secondary_data));
+ 	status = READ_ONCE(secondary_data.status);
+ 	if (ret && status) {
+diff --git a/arch/arm64/mm/proc.S b/arch/arm64/mm/proc.S
+index 4cf19a26af2d..5a11a895e923 100644
+--- a/arch/arm64/mm/proc.S
++++ b/arch/arm64/mm/proc.S
+@@ -485,6 +485,10 @@ SYM_FUNC_START(__cpu_setup)
+ 	ubfx	x2, x2, #ID_AA64ISAR1_APA_SHIFT, #8
+ 	cbz	x2, 3f
+ 
++	/*
++	 * The primary cpu keys are reset here and can be
++	 * re-initialised with some proper values later.
++	 */
+ 	msr_s	SYS_APIAKEYLO_EL1, xzr
+ 	msr_s	SYS_APIAKEYHI_EL1, xzr
+ 
+@@ -497,6 +501,14 @@ alternative_if_not ARM64_HAS_ADDRESS_AUTH
+ 	b	3f
+ alternative_else_nop_endif
+ 
++	/* Install ptrauth key for secondary cpus */
++	adr_l	x2, secondary_data
++	ldr	x3, [x2, #CPU_BOOT_TASK]	// get secondary_data.task
++	cbz	x3, 2f				// check for slow booting cpus
++	ldp	x3, x4, [x2, #CPU_BOOT_PTRAUTH_KEY]
++	msr_s	SYS_APIAKEYLO_EL1, x3
++	msr_s	SYS_APIAKEYHI_EL1, x4
++
+ 2:	/* Enable ptrauth instructions */
+ 	ldr	x2, =SCTLR_ELx_ENIA | SCTLR_ELx_ENIB | \
+ 		     SCTLR_ELx_ENDA | SCTLR_ELx_ENDB

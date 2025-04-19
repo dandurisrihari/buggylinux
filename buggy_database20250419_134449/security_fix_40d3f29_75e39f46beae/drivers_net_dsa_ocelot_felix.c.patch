@@ -1,0 +1,58 @@
+commit 40d3f295b5feda409784e569550057b5fbc2a295
+Author: Vladimir Oltean <vladimir.oltean@nxp.com>
+Date:   Sun Feb 14 00:37:56 2021 +0200
+
+    net: mscc: ocelot: use common tag parsing code with DSA
+    
+    The Injection Frame Header and Extraction Frame Header that the switch
+    prepends to frames over the NPI port is also prepended to frames
+    delivered over the CPU port module's queues.
+    
+    Let's unify the handling of the frame headers by making the ocelot
+    driver call some helpers exported by the DSA tagger. Among other things,
+    this allows us to get rid of the strange cpu_to_be32 when transmitting
+    the Injection Frame Header on ocelot, since the packing API uses
+    network byte order natively (when "quirks" is 0).
+    
+    The comments above ocelot_gen_ifh talk about setting pop_cnt to 3, and
+    the cpu extraction queue mask to something, but the code doesn't do it,
+    so we don't do it either.
+    
+    Signed-off-by: Vladimir Oltean <vladimir.oltean@nxp.com>
+    Reviewed-by: Florian Fainelli <f.fainelli@gmail.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/dsa/ocelot/felix.c b/drivers/net/dsa/ocelot/felix.c
+index d3180b0f2307..60e0d354adea 100644
+--- a/drivers/net/dsa/ocelot/felix.c
++++ b/drivers/net/dsa/ocelot/felix.c
+@@ -14,8 +14,8 @@
+ #include <soc/mscc/ocelot_ptp.h>
+ #include <soc/mscc/ocelot.h>
+ #include <linux/dsa/8021q.h>
++#include <linux/dsa/ocelot.h>
+ #include <linux/platform_device.h>
+-#include <linux/packing.h>
+ #include <linux/module.h>
+ #include <linux/of_net.h>
+ #include <linux/pci.h>
+@@ -1161,9 +1161,9 @@ static int felix_hwtstamp_set(struct dsa_switch *ds, int port,
+ static bool felix_rxtstamp(struct dsa_switch *ds, int port,
+ 			   struct sk_buff *skb, unsigned int type)
+ {
++	u8 *extraction = skb->data - ETH_HLEN - OCELOT_TAG_LEN;
+ 	struct skb_shared_hwtstamps *shhwtstamps;
+ 	struct ocelot *ocelot = ds->priv;
+-	u8 *extraction = skb->data - ETH_HLEN - OCELOT_TAG_LEN;
+ 	u32 tstamp_lo, tstamp_hi;
+ 	struct timespec64 ts;
+ 	u64 tstamp, val;
+@@ -1171,7 +1171,7 @@ static bool felix_rxtstamp(struct dsa_switch *ds, int port,
+ 	ocelot_ptp_gettime64(&ocelot->ptp_info, &ts);
+ 	tstamp = ktime_set(ts.tv_sec, ts.tv_nsec);
+ 
+-	packing(extraction, &val,  116, 85, OCELOT_TAG_LEN, UNPACK, 0);
++	ocelot_xfh_get_rew_val(extraction, &val);
+ 	tstamp_lo = (u32)val;
+ 
+ 	tstamp_hi = tstamp >> 32;

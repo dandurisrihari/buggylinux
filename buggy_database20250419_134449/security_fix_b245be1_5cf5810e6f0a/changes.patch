@@ -1,0 +1,123 @@
+diff --git a/Documentation/sysctl/net.txt b/Documentation/sysctl/net.txt
+index 666594b43cff..6294b5186ae5 100644
+--- a/Documentation/sysctl/net.txt
++++ b/Documentation/sysctl/net.txt
+@@ -97,6 +97,14 @@ rmem_max
+ 
+ The maximum receive socket buffer size in bytes.
+ 
++tstamp_allow_data
++-----------------
++Allow processes to receive tx timestamps looped together with the original
++packet contents. If disabled, transmit timestamp requests from unprivileged
++processes are dropped unless socket option SOF_TIMESTAMPING_OPT_TSONLY is set.
++Default: 1 (on)
++
++
+ wmem_default
+ ------------
+ 
+diff --git a/include/net/sock.h b/include/net/sock.h
+index 15341499786c..511ef7c8889b 100644
+--- a/include/net/sock.h
++++ b/include/net/sock.h
+@@ -2239,6 +2239,7 @@ bool sk_net_capable(const struct sock *sk, int cap);
+ extern __u32 sysctl_wmem_max;
+ extern __u32 sysctl_rmem_max;
+ 
++extern int sysctl_tstamp_allow_data;
+ extern int sysctl_optmem_max;
+ 
+ extern __u32 sysctl_wmem_default;
+diff --git a/net/core/skbuff.c b/net/core/skbuff.c
+index 65a3798f43e6..a5bff2767f15 100644
+--- a/net/core/skbuff.c
++++ b/net/core/skbuff.c
+@@ -74,6 +74,8 @@
+ #include <asm/uaccess.h>
+ #include <trace/events/skb.h>
+ #include <linux/highmem.h>
++#include <linux/capability.h>
++#include <linux/user_namespace.h>
+ 
+ struct kmem_cache *skbuff_head_cache __read_mostly;
+ static struct kmem_cache *skbuff_fclone_cache __read_mostly;
+@@ -3690,11 +3692,28 @@ static void __skb_complete_tx_timestamp(struct sk_buff *skb,
+ 		kfree_skb(skb);
+ }
+ 
++static bool skb_may_tx_timestamp(struct sock *sk, bool tsonly)
++{
++	bool ret;
++
++	if (likely(sysctl_tstamp_allow_data || tsonly))
++		return true;
++
++	read_lock_bh(&sk->sk_callback_lock);
++	ret = sk->sk_socket && sk->sk_socket->file &&
++	      file_ns_capable(sk->sk_socket->file, &init_user_ns, CAP_NET_RAW);
++	read_unlock_bh(&sk->sk_callback_lock);
++	return ret;
++}
++
+ void skb_complete_tx_timestamp(struct sk_buff *skb,
+ 			       struct skb_shared_hwtstamps *hwtstamps)
+ {
+ 	struct sock *sk = skb->sk;
+ 
++	if (!skb_may_tx_timestamp(sk, false))
++		return;
++
+ 	/* take a reference to prevent skb_orphan() from freeing the socket */
+ 	sock_hold(sk);
+ 
+@@ -3712,7 +3731,7 @@ void __skb_tstamp_tx(struct sk_buff *orig_skb,
+ 	struct sk_buff *skb;
+ 	bool tsonly = sk->sk_tsflags & SOF_TIMESTAMPING_OPT_TSONLY;
+ 
+-	if (!sk)
++	if (!sk || !skb_may_tx_timestamp(sk, tsonly))
+ 		return;
+ 
+ 	if (tsonly)
+diff --git a/net/core/sock.c b/net/core/sock.c
+index 1c7a33db1314..93c8b20c91e4 100644
+--- a/net/core/sock.c
++++ b/net/core/sock.c
+@@ -325,6 +325,8 @@ __u32 sysctl_rmem_default __read_mostly = SK_RMEM_MAX;
+ int sysctl_optmem_max __read_mostly = sizeof(unsigned long)*(2*UIO_MAXIOV+512);
+ EXPORT_SYMBOL(sysctl_optmem_max);
+ 
++int sysctl_tstamp_allow_data __read_mostly = 1;
++
+ struct static_key memalloc_socks = STATIC_KEY_INIT_FALSE;
+ EXPORT_SYMBOL_GPL(memalloc_socks);
+ 
+@@ -840,6 +842,7 @@ int sock_setsockopt(struct socket *sock, int level, int optname,
+ 			ret = -EINVAL;
+ 			break;
+ 		}
++
+ 		if (val & SOF_TIMESTAMPING_OPT_ID &&
+ 		    !(sk->sk_tsflags & SOF_TIMESTAMPING_OPT_ID)) {
+ 			if (sk->sk_protocol == IPPROTO_TCP) {
+diff --git a/net/core/sysctl_net_core.c b/net/core/sysctl_net_core.c
+index 31baba2a71ce..fde21d19e61b 100644
+--- a/net/core/sysctl_net_core.c
++++ b/net/core/sysctl_net_core.c
+@@ -321,6 +321,15 @@ static struct ctl_table net_core_table[] = {
+ 		.mode		= 0644,
+ 		.proc_handler	= proc_dointvec
+ 	},
++	{
++		.procname	= "tstamp_allow_data",
++		.data		= &sysctl_tstamp_allow_data,
++		.maxlen		= sizeof(int),
++		.mode		= 0644,
++		.proc_handler	= proc_dointvec_minmax,
++		.extra1		= &zero,
++		.extra2		= &one
++	},
+ #ifdef CONFIG_RPS
+ 	{
+ 		.procname	= "rps_sock_flow_entries",

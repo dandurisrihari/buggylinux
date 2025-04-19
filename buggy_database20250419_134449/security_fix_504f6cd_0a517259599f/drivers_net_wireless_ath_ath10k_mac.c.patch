@@ -1,0 +1,57 @@
+commit 504f6cdf4ac3dfcf645453b5cd65dcc9aed0e1b9
+Author: Sujith Manoharan <c_manoha@qca.qualcomm.com>
+Date:   Tue Nov 25 11:46:58 2014 +0530
+
+    ath10k: fix shared WEP
+    
+    When static keys are used in shared WEP, when a
+    station is associated, message 3 is sent with an
+    encrypted payload. But, for subsequent
+    authentications that are triggered without a
+    deauth, the auth frame is decrypted by the HW.
+    
+    To handle this, check if the WEP keys have already
+    been set for the peer and if so, mark the
+    frame as decrypted. This scenario can happen
+    when a station changes its default TX key and initiates
+    a new authentication sequence.
+    
+    Signed-off-by: Sujith Manoharan <c_manoha@qca.qualcomm.com>
+    Signed-off-by: Kalle Valo <kvalo@qca.qualcomm.com>
+
+diff --git a/drivers/net/wireless/ath/ath10k/mac.c b/drivers/net/wireless/ath/ath10k/mac.c
+index 8d07f77e34de..c6c09c1d421e 100644
+--- a/drivers/net/wireless/ath/ath10k/mac.c
++++ b/drivers/net/wireless/ath/ath10k/mac.c
+@@ -179,6 +179,31 @@ static int ath10k_clear_peer_keys(struct ath10k_vif *arvif,
+ 	return first_errno;
+ }
+ 
++bool ath10k_mac_is_peer_wep_key_set(struct ath10k *ar, const u8 *addr,
++				    u8 keyidx)
++{
++	struct ath10k_peer *peer;
++	int i;
++
++	lockdep_assert_held(&ar->data_lock);
++
++	/* We don't know which vdev this peer belongs to,
++	 * since WMI doesn't give us that information.
++	 *
++	 * FIXME: multi-bss needs to be handled.
++	 */
++	peer = ath10k_peer_find(ar, 0, addr);
++	if (!peer)
++		return false;
++
++	for (i = 0; i < ARRAY_SIZE(peer->keys); i++) {
++		if (peer->keys[i] && peer->keys[i]->keyidx == keyidx)
++			return true;
++	}
++
++	return false;
++}
++
+ static int ath10k_clear_vdev_key(struct ath10k_vif *arvif,
+ 				 struct ieee80211_key_conf *key)
+ {

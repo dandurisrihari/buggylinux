@@ -1,0 +1,44 @@
+commit 4b6f1dd6a6faf4ed8d209bbd548e78b15e55aee8
+Author: Johannes Berg <johannes.berg@intel.com>
+Date:   Tue Apr 3 14:35:57 2012 +0200
+
+    mac80211: add explicit monitor interface if needed
+    
+    The queue mapping redesign that I'm planning to do
+    will break pure injection unless we handle monitor
+    interfaces explicitly. One possible option would
+    be to have the driver tell mac80211 about monitor
+    mode queues etc., but that would duplicate the API
+    since we already need to have queue assignments
+    handled per virtual interface.
+    
+    So in order to solve this, have a virtual monitor
+    interface that is added whenever all active vifs
+    are monitors. We could also use the state of one
+    of the monitor interfaces, but managing that would
+    be complicated, so allocate separate state.
+    
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/mac80211/util.c b/net/mac80211/util.c
+index a18b693042b2..9e8f4b892555 100644
+--- a/net/mac80211/util.c
++++ b/net/mac80211/util.c
+@@ -1223,6 +1223,16 @@ int ieee80211_reconfig(struct ieee80211_local *local)
+ 				   IEEE80211_TPT_LEDTRIG_FL_RADIO, 0);
+ 
+ 	/* add interfaces */
++	sdata = rtnl_dereference(local->monitor_sdata);
++	if (sdata) {
++		res = drv_add_interface(local, sdata);
++		if (WARN_ON(res)) {
++			rcu_assign_pointer(local->monitor_sdata, NULL);
++			synchronize_net();
++			kfree(sdata);
++		}
++	}
++
+ 	list_for_each_entry(sdata, &local->interfaces, list) {
+ 		if (sdata->vif.type != NL80211_IFTYPE_AP_VLAN &&
+ 		    sdata->vif.type != NL80211_IFTYPE_MONITOR &&

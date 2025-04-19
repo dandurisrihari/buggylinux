@@ -1,0 +1,147 @@
+commit 25362dc496edaf17f714c0fecd8b3eb79670207b
+Author: Kees Cook <kees@kernel.org>
+Date:   Tue Jan 26 01:19:36 2016 +0100
+
+    ARM: 8501/1: mm: flip priority of CONFIG_DEBUG_RODATA
+    
+    The use of CONFIG_DEBUG_RODATA is generally seen as an essential part of
+    kernel self-protection:
+    http://www.openwall.com/lists/kernel-hardening/2015/11/30/13
+    Additionally, its name has grown to mean things beyond just rodata. To
+    get ARM closer to this, we ought to rearrange the names of the configs
+    that control how the kernel protects its memory. What was called
+    CONFIG_ARM_KERNMEM_PERMS is realy doing the work that other architectures
+    call CONFIG_DEBUG_RODATA.
+    
+    This redefines CONFIG_DEBUG_RODATA to actually do the bulk of the
+    ROing (and NXing). In the place of the old CONFIG_DEBUG_RODATA, use
+    CONFIG_DEBUG_ALIGN_RODATA, since that's what the option does: adds
+    section alignment for making rodata explicitly NX, as arm does not split
+    the page tables like arm64 does without _ALIGN_RODATA.
+    
+    Also adds human readable names to the sections so I could more easily
+    debug my typos, and makes CONFIG_DEBUG_RODATA default "y" for CPU_V7.
+    
+    Results in /sys/kernel/debug/kernel_page_tables for each config state:
+    
+     # CONFIG_DEBUG_RODATA is not set
+     # CONFIG_DEBUG_ALIGN_RODATA is not set
+    
+    ---[ Kernel Mapping ]---
+    0x80000000-0x80900000           9M     RW x  SHD
+    0x80900000-0xa0000000         503M     RW NX SHD
+    
+     CONFIG_DEBUG_RODATA=y
+     CONFIG_DEBUG_ALIGN_RODATA=y
+    
+    ---[ Kernel Mapping ]---
+    0x80000000-0x80100000           1M     RW NX SHD
+    0x80100000-0x80700000           6M     ro x  SHD
+    0x80700000-0x80a00000           3M     ro NX SHD
+    0x80a00000-0xa0000000         502M     RW NX SHD
+    
+     CONFIG_DEBUG_RODATA=y
+     # CONFIG_DEBUG_ALIGN_RODATA is not set
+    
+    ---[ Kernel Mapping ]---
+    0x80000000-0x80100000           1M     RW NX SHD
+    0x80100000-0x80a00000           9M     ro x  SHD
+    0x80a00000-0xa0000000         502M     RW NX SHD
+    
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+    Reviewed-by: Laura Abbott <labbott@fedoraproject.org>
+    Signed-off-by: Russell King <rmk+kernel@arm.linux.org.uk>
+
+diff --git a/arch/arm/mm/init.c b/arch/arm/mm/init.c
+index 49bd08178008..53f42508025b 100644
+--- a/arch/arm/mm/init.c
++++ b/arch/arm/mm/init.c
+@@ -572,8 +572,9 @@ void __init mem_init(void)
+ 	}
+ }
+ 
+-#ifdef CONFIG_ARM_KERNMEM_PERMS
++#ifdef CONFIG_DEBUG_RODATA
+ struct section_perm {
++	const char *name;
+ 	unsigned long start;
+ 	unsigned long end;
+ 	pmdval_t mask;
+@@ -584,6 +585,7 @@ struct section_perm {
+ static struct section_perm nx_perms[] = {
+ 	/* Make pages tables, etc before _stext RW (set NX). */
+ 	{
++		.name	= "pre-text NX",
+ 		.start	= PAGE_OFFSET,
+ 		.end	= (unsigned long)_stext,
+ 		.mask	= ~PMD_SECT_XN,
+@@ -591,14 +593,16 @@ static struct section_perm nx_perms[] = {
+ 	},
+ 	/* Make init RW (set NX). */
+ 	{
++		.name	= "init NX",
+ 		.start	= (unsigned long)__init_begin,
+ 		.end	= (unsigned long)_sdata,
+ 		.mask	= ~PMD_SECT_XN,
+ 		.prot	= PMD_SECT_XN,
+ 	},
+-#ifdef CONFIG_DEBUG_RODATA
++#ifdef CONFIG_DEBUG_ALIGN_RODATA
+ 	/* Make rodata NX (set RO in ro_perms below). */
+ 	{
++		.name	= "rodata NX",
+ 		.start  = (unsigned long)__start_rodata,
+ 		.end    = (unsigned long)__init_begin,
+ 		.mask   = ~PMD_SECT_XN,
+@@ -607,10 +611,10 @@ static struct section_perm nx_perms[] = {
+ #endif
+ };
+ 
+-#ifdef CONFIG_DEBUG_RODATA
+ static struct section_perm ro_perms[] = {
+ 	/* Make kernel code and rodata RX (set RO). */
+ 	{
++		.name	= "text/rodata RO",
+ 		.start  = (unsigned long)_stext,
+ 		.end    = (unsigned long)__init_begin,
+ #ifdef CONFIG_ARM_LPAE
+@@ -623,7 +627,6 @@ static struct section_perm ro_perms[] = {
+ #endif
+ 	},
+ };
+-#endif
+ 
+ /*
+  * Updates section permissions only for the current mm (sections are
+@@ -670,8 +673,8 @@ void set_section_perms(struct section_perm *perms, int n, bool set,
+ 	for (i = 0; i < n; i++) {
+ 		if (!IS_ALIGNED(perms[i].start, SECTION_SIZE) ||
+ 		    !IS_ALIGNED(perms[i].end, SECTION_SIZE)) {
+-			pr_err("BUG: section %lx-%lx not aligned to %lx\n",
+-				perms[i].start, perms[i].end,
++			pr_err("BUG: %s section %lx-%lx not aligned to %lx\n",
++				perms[i].name, perms[i].start, perms[i].end,
+ 				SECTION_SIZE);
+ 			continue;
+ 		}
+@@ -712,7 +715,6 @@ void fix_kernmem_perms(void)
+ 	stop_machine(__fix_kernmem_perms, NULL, NULL);
+ }
+ 
+-#ifdef CONFIG_DEBUG_RODATA
+ int __mark_rodata_ro(void *unused)
+ {
+ 	update_sections_early(ro_perms, ARRAY_SIZE(ro_perms));
+@@ -735,11 +737,10 @@ void set_kernel_text_ro(void)
+ 	set_section_perms(ro_perms, ARRAY_SIZE(ro_perms), true,
+ 				current->active_mm);
+ }
+-#endif /* CONFIG_DEBUG_RODATA */
+ 
+ #else
+ static inline void fix_kernmem_perms(void) { }
+-#endif /* CONFIG_ARM_KERNMEM_PERMS */
++#endif /* CONFIG_DEBUG_RODATA */
+ 
+ void free_tcmmem(void)
+ {

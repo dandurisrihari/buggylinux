@@ -1,0 +1,100 @@
+commit ca708599ca43567cdd69f799454f95d1c80ffee5
+Author: Mark Rutland <mark.rutland@arm.com>
+Date:   Wed Apr 12 17:01:33 2023 +0100
+
+    arm64: use XPACLRI to strip PAC
+    
+    Currently we strip the PAC from pointers using C code, which requires
+    generating bitmasks, and conditionally clearing/setting bits depending
+    on bit 55. We can do better by using XPACLRI directly.
+    
+    When the logic was originally written to strip PACs from user pointers,
+    contemporary toolchains used for the kernel had assemblers which were
+    unaware of the PAC instructions. As stripping the PAC from userspace
+    pointers required unconditional clearing of a fixed set of bits (which
+    could be performed with a single instruction), it was simpler to
+    implement the masking in C than it was to make use of XPACI or XPACLRI.
+    
+    When support for in-kernel pointer authentication was added, the
+    stripping logic was extended to cover TTBR1 pointers, requiring several
+    instructions to handle whether to clear/set bits dependent on bit 55 of
+    the pointer.
+    
+    This patch simplifies the stripping of PACs by using XPACLRI directly,
+    as contemporary toolchains do within __builtin_return_address(). This
+    saves a number of instructions, especially where
+    __builtin_return_address() does not implicitly strip the PAC but is
+    heavily used (e.g. with tracepoints). As the kernel might be compiled
+    with an assembler without knowledge of XPACLRI, it is assembled using
+    the 'HINT #7' alias, which results in an identical opcode.
+    
+    At the same time, I've split ptrauth_strip_insn_pac() into
+    ptrauth_strip_user_insn_pac() and ptrauth_strip_kernel_insn_pac()
+    helpers so that we can avoid unnecessary PAC stripping when pointer
+    authentication is not in use in userspace or kernel respectively.
+    
+    The underlying xpaclri() macro uses inline assembly which clobbers x30.
+    The clobber causes the compiler to save/restore the original x30 value
+    in a frame record (protected with PACIASP and AUTIASP when in-kernel
+    authentication is enabled), so this does not provide a gadget to alter
+    the return address. Similarly this does not adversely affect unwinding
+    due to the presence of the frame record.
+    
+    The ptrauth_user_pac_mask() and ptrauth_kernel_pac_mask() are exported
+    from the kernel in ptrace and core dumps, so these are retained. A
+    subsequent patch will move them out of <asm/compiler.h>.
+    
+    Signed-off-by: Mark Rutland <mark.rutland@arm.com>
+    Cc: Amit Daniel Kachhap <amit.kachhap@arm.com>
+    Cc: Catalin Marinas <catalin.marinas@arm.com>
+    Cc: James Morse <james.morse@arm.com>
+    Cc: Kristina Martsenko <kristina.martsenko@arm.com>
+    Cc: Will Deacon <will@kernel.org>
+    Link: https://lore.kernel.org/r/20230412160134.306148-3-mark.rutland@arm.com
+    Signed-off-by: Will Deacon <will@kernel.org>
+
+diff --git a/arch/arm64/include/asm/compiler.h b/arch/arm64/include/asm/compiler.h
+index 9033a0b2f46a..b6d1d62474e5 100644
+--- a/arch/arm64/include/asm/compiler.h
++++ b/arch/arm64/include/asm/compiler.h
+@@ -15,15 +15,33 @@
+ #define ptrauth_user_pac_mask()		GENMASK_ULL(54, vabits_actual)
+ #define ptrauth_kernel_pac_mask()	GENMASK_ULL(63, vabits_actual)
+ 
+-/* Valid for EL0 TTBR0 and EL1 TTBR1 instruction pointers */
+-#define ptrauth_clear_pac(ptr)						\
+-	((ptr & BIT_ULL(55)) ? (ptr | ptrauth_kernel_pac_mask()) :	\
+-			       (ptr & ~ptrauth_user_pac_mask()))
++#define xpaclri(ptr)							\
++({									\
++	register unsigned long __xpaclri_ptr asm("x30") = (ptr);	\
++									\
++	asm(								\
++	ARM64_ASM_PREAMBLE						\
++	"	hint	#7\n"						\
++	: "+r" (__xpaclri_ptr));					\
++									\
++	__xpaclri_ptr;							\
++})
+ 
+-#if defined(CONFIG_ARM64_PTR_AUTH_KERNEL) &&				\
+-    !defined(CONFIG_BUILTIN_RETURN_ADDRESS_STRIPS_PAC)
++#ifdef CONFIG_ARM64_PTR_AUTH_KERNEL
++#define ptrauth_strip_kernel_insn_pac(ptr)	xpaclri(ptr)
++#else
++#define ptrauth_strip_kernel_insn_pac(ptr)	(ptr)
++#endif
++
++#ifdef CONFIG_ARM64_PTR_AUTH
++#define ptrauth_strip_user_insn_pac(ptr)	xpaclri(ptr)
++#else
++#define ptrauth_strip_user_insn_pac(ptr)	(ptr)
++#endif
++
++#if !defined(CONFIG_BUILTIN_RETURN_ADDRESS_STRIPS_PAC)
+ #define __builtin_return_address(val)					\
+-	(void *)(ptrauth_clear_pac((unsigned long)__builtin_return_address(val)))
++	(void *)(ptrauth_strip_kernel_insn_pac((unsigned long)__builtin_return_address(val)))
+ #endif
+ 
+ #endif /* __ASM_COMPILER_H */

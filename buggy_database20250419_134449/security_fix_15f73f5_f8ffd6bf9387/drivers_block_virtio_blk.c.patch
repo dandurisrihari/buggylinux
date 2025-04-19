@@ -1,0 +1,31 @@
+commit 15f73f5b3e5958f2d169fe13c420eeeeae07bbf2
+Author: Christoph Hellwig <hch@lst.de>
+Date:   Thu Jun 11 08:44:47 2020 +0200
+
+    blk-mq: move failure injection out of blk_mq_complete_request
+    
+    Move the call to blk_should_fake_timeout out of blk_mq_complete_request
+    and into the drivers, skipping call sites that are obvious error
+    handlers, and remove the now superflous blk_mq_force_complete_rq helper.
+    This ensures we don't keep injecting errors into completions that just
+    terminate the Linux request after the hardware has been reset or the
+    command has been aborted.
+    
+    Reviewed-by: Daniel Wagner <dwagner@suse.de>
+    Signed-off-by: Christoph Hellwig <hch@lst.de>
+    Signed-off-by: Jens Axboe <axboe@kernel.dk>
+
+diff --git a/drivers/block/virtio_blk.c b/drivers/block/virtio_blk.c
+index 9d21bf0f155e..741804bd8a14 100644
+--- a/drivers/block/virtio_blk.c
++++ b/drivers/block/virtio_blk.c
+@@ -171,7 +171,8 @@ static void virtblk_done(struct virtqueue *vq)
+ 		while ((vbr = virtqueue_get_buf(vblk->vqs[qid].vq, &len)) != NULL) {
+ 			struct request *req = blk_mq_rq_from_pdu(vbr);
+ 
+-			blk_mq_complete_request(req);
++			if (likely(!blk_should_fake_timeout(req->q)))
++				blk_mq_complete_request(req);
+ 			req_done = true;
+ 		}
+ 		if (unlikely(virtqueue_is_broken(vq)))

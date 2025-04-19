@@ -1,0 +1,193 @@
+diff --git a/arch/x86/kvm/lapic.c b/arch/x86/kvm/lapic.c
+index 3e22536a7031..0b734025fc87 100644
+--- a/arch/x86/kvm/lapic.c
++++ b/arch/x86/kvm/lapic.c
+@@ -384,14 +384,16 @@ int kvm_lapic_find_highest_irr(struct kvm_vcpu *vcpu)
+ }
+ 
+ static int __apic_accept_irq(struct kvm_lapic *apic, int delivery_mode,
+-			     int vector, int level, int trig_mode);
++			     int vector, int level, int trig_mode,
++			     unsigned long *dest_map);
+ 
+-int kvm_apic_set_irq(struct kvm_vcpu *vcpu, struct kvm_lapic_irq *irq)
++int kvm_apic_set_irq(struct kvm_vcpu *vcpu, struct kvm_lapic_irq *irq,
++		unsigned long *dest_map)
+ {
+ 	struct kvm_lapic *apic = vcpu->arch.apic;
+ 
+ 	return __apic_accept_irq(apic, irq->delivery_mode, irq->vector,
+-			irq->level, irq->trig_mode);
++			irq->level, irq->trig_mode, dest_map);
+ }
+ 
+ static int pv_eoi_put_user(struct kvm_vcpu *vcpu, u8 val)
+@@ -564,7 +566,7 @@ int kvm_apic_match_dest(struct kvm_vcpu *vcpu, struct kvm_lapic *source,
+ }
+ 
+ bool kvm_irq_delivery_to_apic_fast(struct kvm *kvm, struct kvm_lapic *src,
+-		struct kvm_lapic_irq *irq, int *r)
++		struct kvm_lapic_irq *irq, int *r, unsigned long *dest_map)
+ {
+ 	struct kvm_apic_map *map;
+ 	unsigned long bitmap = 1;
+@@ -575,7 +577,7 @@ bool kvm_irq_delivery_to_apic_fast(struct kvm *kvm, struct kvm_lapic *src,
+ 	*r = -1;
+ 
+ 	if (irq->shorthand == APIC_DEST_SELF) {
+-		*r = kvm_apic_set_irq(src->vcpu, irq);
++		*r = kvm_apic_set_irq(src->vcpu, irq, dest_map);
+ 		return true;
+ 	}
+ 
+@@ -620,7 +622,7 @@ bool kvm_irq_delivery_to_apic_fast(struct kvm *kvm, struct kvm_lapic *src,
+ 			continue;
+ 		if (*r < 0)
+ 			*r = 0;
+-		*r += kvm_apic_set_irq(dst[i]->vcpu, irq);
++		*r += kvm_apic_set_irq(dst[i]->vcpu, irq, dest_map);
+ 	}
+ 
+ 	ret = true;
+@@ -634,7 +636,8 @@ bool kvm_irq_delivery_to_apic_fast(struct kvm *kvm, struct kvm_lapic *src,
+  * Return 1 if successfully added and 0 if discarded.
+  */
+ static int __apic_accept_irq(struct kvm_lapic *apic, int delivery_mode,
+-			     int vector, int level, int trig_mode)
++			     int vector, int level, int trig_mode,
++			     unsigned long *dest_map)
+ {
+ 	int result = 0;
+ 	struct kvm_vcpu *vcpu = apic->vcpu;
+@@ -647,6 +650,9 @@ static int __apic_accept_irq(struct kvm_lapic *apic, int delivery_mode,
+ 		if (unlikely(!apic_enabled(apic)))
+ 			break;
+ 
++		if (dest_map)
++			__set_bit(vcpu->vcpu_id, dest_map);
++
+ 		if (trig_mode) {
+ 			apic_debug("level trig mode for vector %d", vector);
+ 			apic_set_vector(vector, apic->regs + APIC_TMR);
+@@ -805,7 +811,7 @@ static void apic_send_ipi(struct kvm_lapic *apic)
+ 		   irq.trig_mode, irq.level, irq.dest_mode, irq.delivery_mode,
+ 		   irq.vector);
+ 
+-	kvm_irq_delivery_to_apic(apic->vcpu->kvm, apic, &irq);
++	kvm_irq_delivery_to_apic(apic->vcpu->kvm, apic, &irq, NULL);
+ }
+ 
+ static u32 apic_get_tmcct(struct kvm_lapic *apic)
+@@ -1441,7 +1447,8 @@ int kvm_apic_local_deliver(struct kvm_lapic *apic, int lvt_type)
+ 		vector = reg & APIC_VECTOR_MASK;
+ 		mode = reg & APIC_MODE_MASK;
+ 		trig_mode = reg & APIC_LVT_LEVEL_TRIGGER;
+-		return __apic_accept_irq(apic, mode, vector, 1, trig_mode);
++		return __apic_accept_irq(apic, mode, vector, 1, trig_mode,
++					NULL);
+ 	}
+ 	return 0;
+ }
+diff --git a/arch/x86/kvm/lapic.h b/arch/x86/kvm/lapic.h
+index baa20cfb95ae..3e5a43160cb7 100644
+--- a/arch/x86/kvm/lapic.h
++++ b/arch/x86/kvm/lapic.h
+@@ -55,11 +55,12 @@ void kvm_apic_set_version(struct kvm_vcpu *vcpu);
+ 
+ int kvm_apic_match_physical_addr(struct kvm_lapic *apic, u16 dest);
+ int kvm_apic_match_logical_addr(struct kvm_lapic *apic, u8 mda);
+-int kvm_apic_set_irq(struct kvm_vcpu *vcpu, struct kvm_lapic_irq *irq);
++int kvm_apic_set_irq(struct kvm_vcpu *vcpu, struct kvm_lapic_irq *irq,
++		unsigned long *dest_map);
+ int kvm_apic_local_deliver(struct kvm_lapic *apic, int lvt_type);
+ 
+ bool kvm_irq_delivery_to_apic_fast(struct kvm *kvm, struct kvm_lapic *src,
+-		struct kvm_lapic_irq *irq, int *r);
++		struct kvm_lapic_irq *irq, int *r, unsigned long *dest_map);
+ 
+ u64 kvm_get_apic_base(struct kvm_vcpu *vcpu);
+ void kvm_set_apic_base(struct kvm_vcpu *vcpu, u64 data);
+diff --git a/virt/kvm/ioapic.c b/virt/kvm/ioapic.c
+index 1d8906d39214..27ae8dd64e29 100644
+--- a/virt/kvm/ioapic.c
++++ b/virt/kvm/ioapic.c
+@@ -217,7 +217,7 @@ static int ioapic_deliver(struct kvm_ioapic *ioapic, int irq)
+ 	irqe.level = 1;
+ 	irqe.shorthand = 0;
+ 
+-	return kvm_irq_delivery_to_apic(ioapic->kvm, NULL, &irqe);
++	return kvm_irq_delivery_to_apic(ioapic->kvm, NULL, &irqe, NULL);
+ }
+ 
+ int kvm_ioapic_set_irq(struct kvm_ioapic *ioapic, int irq, int irq_source_id,
+diff --git a/virt/kvm/ioapic.h b/virt/kvm/ioapic.h
+index 87cd94bae372..761e5b57099e 100644
+--- a/virt/kvm/ioapic.h
++++ b/virt/kvm/ioapic.h
+@@ -92,7 +92,7 @@ int kvm_ioapic_set_irq(struct kvm_ioapic *ioapic, int irq, int irq_source_id,
+ void kvm_ioapic_clear_all(struct kvm_ioapic *ioapic, int irq_source_id);
+ void kvm_ioapic_reset(struct kvm_ioapic *ioapic);
+ int kvm_irq_delivery_to_apic(struct kvm *kvm, struct kvm_lapic *src,
+-		struct kvm_lapic_irq *irq);
++		struct kvm_lapic_irq *irq, unsigned long *dest_map);
+ int kvm_get_ioapic(struct kvm *kvm, struct kvm_ioapic_state *state);
+ int kvm_set_ioapic(struct kvm *kvm, struct kvm_ioapic_state *state);
+ void kvm_ioapic_make_eoibitmap_request(struct kvm *kvm);
+diff --git a/virt/kvm/irq_comm.c b/virt/kvm/irq_comm.c
+index e9073cf4d040..2f07d2e59a2d 100644
+--- a/virt/kvm/irq_comm.c
++++ b/virt/kvm/irq_comm.c
+@@ -63,7 +63,7 @@ inline static bool kvm_is_dm_lowest_prio(struct kvm_lapic_irq *irq)
+ }
+ 
+ int kvm_irq_delivery_to_apic(struct kvm *kvm, struct kvm_lapic *src,
+-		struct kvm_lapic_irq *irq)
++		struct kvm_lapic_irq *irq, unsigned long *dest_map)
+ {
+ 	int i, r = -1;
+ 	struct kvm_vcpu *vcpu, *lowest = NULL;
+@@ -74,7 +74,7 @@ int kvm_irq_delivery_to_apic(struct kvm *kvm, struct kvm_lapic *src,
+ 		irq->delivery_mode = APIC_DM_FIXED;
+ 	}
+ 
+-	if (kvm_irq_delivery_to_apic_fast(kvm, src, irq, &r))
++	if (kvm_irq_delivery_to_apic_fast(kvm, src, irq, &r, dest_map))
+ 		return r;
+ 
+ 	kvm_for_each_vcpu(i, vcpu, kvm) {
+@@ -88,7 +88,7 @@ int kvm_irq_delivery_to_apic(struct kvm *kvm, struct kvm_lapic *src,
+ 		if (!kvm_is_dm_lowest_prio(irq)) {
+ 			if (r < 0)
+ 				r = 0;
+-			r += kvm_apic_set_irq(vcpu, irq);
++			r += kvm_apic_set_irq(vcpu, irq, dest_map);
+ 		} else if (kvm_lapic_enabled(vcpu)) {
+ 			if (!lowest)
+ 				lowest = vcpu;
+@@ -98,7 +98,7 @@ int kvm_irq_delivery_to_apic(struct kvm *kvm, struct kvm_lapic *src,
+ 	}
+ 
+ 	if (lowest)
+-		r = kvm_apic_set_irq(lowest, irq);
++		r = kvm_apic_set_irq(lowest, irq, dest_map);
+ 
+ 	return r;
+ }
+@@ -130,7 +130,7 @@ int kvm_set_msi(struct kvm_kernel_irq_routing_entry *e,
+ 
+ 	kvm_set_msi_irq(e, &irq);
+ 
+-	return kvm_irq_delivery_to_apic(kvm, NULL, &irq);
++	return kvm_irq_delivery_to_apic(kvm, NULL, &irq, NULL);
+ }
+ 
+ 
+@@ -142,7 +142,7 @@ static int kvm_set_msi_inatomic(struct kvm_kernel_irq_routing_entry *e,
+ 
+ 	kvm_set_msi_irq(e, &irq);
+ 
+-	if (kvm_irq_delivery_to_apic_fast(kvm, NULL, &irq, &r))
++	if (kvm_irq_delivery_to_apic_fast(kvm, NULL, &irq, &r, NULL))
+ 		return r;
+ 	else
+ 		return -EWOULDBLOCK;

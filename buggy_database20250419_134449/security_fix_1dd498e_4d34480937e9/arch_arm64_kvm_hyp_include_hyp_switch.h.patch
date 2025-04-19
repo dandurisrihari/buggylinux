@@ -1,0 +1,62 @@
+commit 1dd498e5e26ad71e3e9130daf72cfb6a693fee03
+Author: James Morse <james.morse@arm.com>
+Date:   Thu Jan 27 12:20:52 2022 +0000
+
+    KVM: arm64: Workaround Cortex-A510's single-step and PAC trap errata
+    
+    Cortex-A510's erratum #2077057 causes SPSR_EL2 to be corrupted when
+    single-stepping authenticated ERET instructions. A single step is
+    expected, but a pointer authentication trap is taken instead. The
+    erratum causes SPSR_EL1 to be copied to SPSR_EL2, which could allow
+    EL1 to cause a return to EL2 with a guest controlled ELR_EL2.
+    
+    Because the conditions require an ERET into active-not-pending state,
+    this is only a problem for the EL2 when EL2 is stepping EL1. In this case
+    the previous SPSR_EL2 value is preserved in struct kvm_vcpu, and can be
+    restored.
+    
+    Cc: stable@vger.kernel.org # 53960faf2b73: arm64: Add Cortex-A510 CPU part definition
+    Cc: stable@vger.kernel.org
+    Signed-off-by: James Morse <james.morse@arm.com>
+    [maz: fixup cpucaps ordering]
+    Signed-off-by: Marc Zyngier <maz@kernel.org>
+    Link: https://lore.kernel.org/r/20220127122052.1584324-5-james.morse@arm.com
+
+diff --git a/arch/arm64/kvm/hyp/include/hyp/switch.h b/arch/arm64/kvm/hyp/include/hyp/switch.h
+index 331dd10821df..701cfb964905 100644
+--- a/arch/arm64/kvm/hyp/include/hyp/switch.h
++++ b/arch/arm64/kvm/hyp/include/hyp/switch.h
+@@ -402,6 +402,24 @@ static inline bool kvm_hyp_handle_exit(struct kvm_vcpu *vcpu, u64 *exit_code)
+ 	return false;
+ }
+ 
++static inline void synchronize_vcpu_pstate(struct kvm_vcpu *vcpu, u64 *exit_code)
++{
++	/*
++	 * Check for the conditions of Cortex-A510's #2077057. When these occur
++	 * SPSR_EL2 can't be trusted, but isn't needed either as it is
++	 * unchanged from the value in vcpu_gp_regs(vcpu)->pstate.
++	 * Are we single-stepping the guest, and took a PAC exception from the
++	 * active-not-pending state?
++	 */
++	if (cpus_have_final_cap(ARM64_WORKAROUND_2077057)		&&
++	    vcpu->guest_debug & KVM_GUESTDBG_SINGLESTEP			&&
++	    *vcpu_cpsr(vcpu) & DBG_SPSR_SS				&&
++	    ESR_ELx_EC(read_sysreg_el2(SYS_ESR)) == ESR_ELx_EC_PAC)
++		write_sysreg_el2(*vcpu_cpsr(vcpu), SYS_SPSR);
++
++	vcpu->arch.ctxt.regs.pstate = read_sysreg_el2(SYS_SPSR);
++}
++
+ /*
+  * Return true when we were able to fixup the guest exit and should return to
+  * the guest, false when we should restore the host state and return to the
+@@ -413,7 +431,7 @@ static inline bool fixup_guest_exit(struct kvm_vcpu *vcpu, u64 *exit_code)
+ 	 * Save PSTATE early so that we can evaluate the vcpu mode
+ 	 * early on.
+ 	 */
+-	vcpu->arch.ctxt.regs.pstate = read_sysreg_el2(SYS_SPSR);
++	synchronize_vcpu_pstate(vcpu, exit_code);
+ 
+ 	/*
+ 	 * Check whether we want to repaint the state one way or

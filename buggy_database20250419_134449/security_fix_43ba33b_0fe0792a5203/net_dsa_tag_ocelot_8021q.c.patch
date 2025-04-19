@@ -1,0 +1,37 @@
+commit 43ba33b4f143965a451cfdc1e826b61f6933c887
+Author: Vladimir Oltean <vladimir.oltean@nxp.com>
+Date:   Tue Oct 12 14:40:43 2021 +0300
+
+    net: dsa: tag_ocelot_8021q: fix inability to inject STP BPDUs into BLOCKING ports
+    
+    When setting up a bridge with stp_state 1, topology changes are not
+    detected and loops are not blocked. This is because the standard way of
+    transmitting a packet, based on VLAN IDs redirected by VCAP IS2 to the
+    right egress port, does not override the port STP state (in the case of
+    Ocelot switches, that's really the PGID_SRC masks).
+    
+    To force a packet to be injected into a port that's BLOCKING, we must
+    send it as a control packet, which means in the case of this tagger to
+    send it using the manual register injection method. We already do this
+    for PTP frames, extend the logic to apply to any link-local MAC DA.
+    
+    Fixes: 7c83a7c539ab ("net: dsa: add a second tagger for Ocelot switches based on tag_8021q")
+    Signed-off-by: Vladimir Oltean <vladimir.oltean@nxp.com>
+    Reviewed-by: Florian Fainelli <f.fainelli@gmail.com>
+    Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+diff --git a/net/dsa/tag_ocelot_8021q.c b/net/dsa/tag_ocelot_8021q.c
+index d05c352f96e5..3412051981d7 100644
+--- a/net/dsa/tag_ocelot_8021q.c
++++ b/net/dsa/tag_ocelot_8021q.c
+@@ -42,8 +42,9 @@ static struct sk_buff *ocelot_xmit(struct sk_buff *skb,
+ 	u16 tx_vid = dsa_8021q_tx_vid(dp->ds, dp->index);
+ 	u16 queue_mapping = skb_get_queue_mapping(skb);
+ 	u8 pcp = netdev_txq_to_tc(netdev, queue_mapping);
++	struct ethhdr *hdr = eth_hdr(skb);
+ 
+-	if (ocelot_ptp_rew_op(skb))
++	if (ocelot_ptp_rew_op(skb) || is_link_local_ether_addr(hdr->h_dest))
+ 		return ocelot_defer_xmit(dp, skb);
+ 
+ 	return dsa_8021q_xmit(skb, netdev, ETH_P_8021Q,

@@ -1,0 +1,62 @@
+commit 899a59d301bc0ccd312dd23d58899cfbbc94bead
+Author: Ilan Tayari <ilant@mellanox.com>
+Date:   Mon Jun 19 14:04:36 2017 +0300
+
+    net/mlx5e: IPSec, Add Innova IPSec offload RX data path
+    
+    In RX data path, the hardware prepends a special metadata ethertype
+    which indicates that the packet underwent decryption, and the result of
+    the authentication check.
+    
+    Communicate this to the stack in skb->sp.
+    
+    Make wqe_size large enough to account for the injected metadata.
+    
+    Support only Linked-list RQ type.
+    
+    IPSec offload RX packets may have useful CHECKSUM_COMPLETE information,
+    which the stack may not be able to use yet.
+    
+    Signed-off-by: Ilan Tayari <ilant@mellanox.com>
+    Signed-off-by: Yossi Kuperman <yossiku@mellanox.com>
+    Signed-off-by: Yevgeny Kliteynik <kliteyn@mellanox.com>
+    Signed-off-by: Boris Pismenny <borisp@mellanox.com>
+    Signed-off-by: Saeed Mahameed <saeedm@mellanox.com>
+
+diff --git a/drivers/net/ethernet/mellanox/mlx5/core/en_accel/ipsec.c b/drivers/net/ethernet/mellanox/mlx5/core/en_accel/ipsec.c
+index 06d9d6ad93ad..bb69660893ee 100644
+--- a/drivers/net/ethernet/mellanox/mlx5/core/en_accel/ipsec.c
++++ b/drivers/net/ethernet/mellanox/mlx5/core/en_accel/ipsec.c
+@@ -40,6 +40,7 @@
+ #include "en.h"
+ #include "accel/ipsec.h"
+ #include "en_accel/ipsec.h"
++#include "en_accel/ipsec_rxtx.h"
+ 
+ struct mlx5e_ipsec_sa_entry {
+ 	struct hlist_node hlist; /* Item in SADB_RX hashtable */
+@@ -49,6 +50,24 @@ struct mlx5e_ipsec_sa_entry {
+ 	void *context;
+ };
+ 
++struct xfrm_state *mlx5e_ipsec_sadb_rx_lookup(struct mlx5e_ipsec *ipsec,
++					      unsigned int handle)
++{
++	struct mlx5e_ipsec_sa_entry *sa_entry;
++	struct xfrm_state *ret = NULL;
++
++	rcu_read_lock();
++	hash_for_each_possible_rcu(ipsec->sadb_rx, sa_entry, hlist, handle)
++		if (sa_entry->handle == handle) {
++			ret = sa_entry->x;
++			xfrm_state_hold(ret);
++			break;
++		}
++	rcu_read_unlock();
++
++	return ret;
++}
++
+ static int mlx5e_ipsec_sadb_rx_add(struct mlx5e_ipsec_sa_entry *sa_entry)
+ {
+ 	struct mlx5e_ipsec *ipsec = sa_entry->ipsec;

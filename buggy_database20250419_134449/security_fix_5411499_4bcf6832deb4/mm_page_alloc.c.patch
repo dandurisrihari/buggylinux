@@ -1,0 +1,70 @@
+commit 54114994f4de7e8076fc250e44501e55e19b75b5
+Author: Akinobu Mita <akinobu.mita@gmail.com>
+Date:   Sun Jul 15 23:40:23 2007 -0700
+
+    fault-injection: add min-order parameter to fail_page_alloc
+    
+    Limiting smaller allocation failures by fault injection helps to find real
+    possible bugs.  Because higher order allocations are likely to fail and
+    zero-order allocations are not likely to fail.
+    
+    This patch adds min-order parameter to fail_page_alloc.  It specifies the
+    minimum page allocation order to be injected failures.
+    
+    Signed-off-by: Akinobu Mita <akinobu.mita@gmail.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index 297efcf05ba4..f9e4e647d7e8 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -900,11 +900,13 @@ static struct fail_page_alloc_attr {
+ 
+ 	u32 ignore_gfp_highmem;
+ 	u32 ignore_gfp_wait;
++	u32 min_order;
+ 
+ #ifdef CONFIG_FAULT_INJECTION_DEBUG_FS
+ 
+ 	struct dentry *ignore_gfp_highmem_file;
+ 	struct dentry *ignore_gfp_wait_file;
++	struct dentry *min_order_file;
+ 
+ #endif /* CONFIG_FAULT_INJECTION_DEBUG_FS */
+ 
+@@ -912,6 +914,7 @@ static struct fail_page_alloc_attr {
+ 	.attr = FAULT_ATTR_INITIALIZER,
+ 	.ignore_gfp_wait = 1,
+ 	.ignore_gfp_highmem = 1,
++	.min_order = 1,
+ };
+ 
+ static int __init setup_fail_page_alloc(char *str)
+@@ -922,6 +925,8 @@ __setup("fail_page_alloc=", setup_fail_page_alloc);
+ 
+ static int should_fail_alloc_page(gfp_t gfp_mask, unsigned int order)
+ {
++	if (order < fail_page_alloc.min_order)
++		return 0;
+ 	if (gfp_mask & __GFP_NOFAIL)
+ 		return 0;
+ 	if (fail_page_alloc.ignore_gfp_highmem && (gfp_mask & __GFP_HIGHMEM))
+@@ -953,12 +958,17 @@ static int __init fail_page_alloc_debugfs(void)
+ 	fail_page_alloc.ignore_gfp_highmem_file =
+ 		debugfs_create_bool("ignore-gfp-highmem", mode, dir,
+ 				      &fail_page_alloc.ignore_gfp_highmem);
++	fail_page_alloc.min_order_file =
++		debugfs_create_u32("min-order", mode, dir,
++				   &fail_page_alloc.min_order);
+ 
+ 	if (!fail_page_alloc.ignore_gfp_wait_file ||
+-			!fail_page_alloc.ignore_gfp_highmem_file) {
++            !fail_page_alloc.ignore_gfp_highmem_file ||
++            !fail_page_alloc.min_order_file) {
+ 		err = -ENOMEM;
+ 		debugfs_remove(fail_page_alloc.ignore_gfp_wait_file);
+ 		debugfs_remove(fail_page_alloc.ignore_gfp_highmem_file);
++		debugfs_remove(fail_page_alloc.min_order_file);
+ 		cleanup_fault_attr_dentries(&fail_page_alloc.attr);
+ 	}

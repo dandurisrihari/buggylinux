@@ -1,0 +1,110 @@
+commit 7709aba8f71613ae5d18d8c00adb54948e6bedb3
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Tue Aug 30 23:16:08 2022 +0000
+
+    KVM: x86: Morph pending exceptions to pending VM-Exits at queue time
+    
+    Morph pending exceptions to pending VM-Exits (due to interception) when
+    the exception is queued instead of waiting until nested events are
+    checked at VM-Entry.  This fixes a longstanding bug where KVM fails to
+    handle an exception that occurs during delivery of a previous exception,
+    KVM (L0) and L1 both want to intercept the exception (e.g. #PF for shadow
+    paging), and KVM determines that the exception is in the guest's domain,
+    i.e. queues the new exception for L2.  Deferring the interception check
+    causes KVM to esclate various combinations of injected+pending exceptions
+    to double fault (#DF) without consulting L1's interception desires, and
+    ends up injecting a spurious #DF into L2.
+    
+    KVM has fudged around the issue for #PF by special casing emulated #PF
+    injection for shadow paging, but the underlying issue is not unique to
+    shadow paging in L0, e.g. if KVM is intercepting #PF because the guest
+    has a smaller maxphyaddr and L1 (but not L0) is using shadow paging.
+    Other exceptions are affected as well, e.g. if KVM is intercepting #GP
+    for one of SVM's workaround or for the VMware backdoor emulation stuff.
+    The other cases have gone unnoticed because the #DF is spurious if and
+    only if L1 resolves the exception, e.g. KVM's goofs go unnoticed if L1
+    would have injected #DF anyways.
+    
+    The hack-a-fix has also led to ugly code, e.g. bailing from the emulator
+    if #PF injection forced a nested VM-Exit and the emulator finds itself
+    back in L1.  Allowing for direct-to-VM-Exit queueing also neatly solves
+    the async #PF in L2 mess; no need to set a magic flag and token, simply
+    queue a #PF nested VM-Exit.
+    
+    Deal with event migration by flagging that a pending exception was queued
+    by userspace and check for interception at the next KVM_RUN, e.g. so that
+    KVM does the right thing regardless of the order in which userspace
+    restores nested state vs. event state.
+    
+    When "getting" events from userspace, simply drop any pending excpetion
+    that is destined to be intercepted if there is also an injected exception
+    to be migrated.  Ideally, KVM would migrate both events, but that would
+    require new ABI, and practically speaking losing the event is unlikely to
+    be noticed, let alone fatal.  The injected exception is captured, RIP
+    still points at the original faulting instruction, etc...  So either the
+    injection on the target will trigger the same intercepted exception, or
+    the source of the intercepted exception was transient and/or
+    non-deterministic, thus dropping it is ok-ish.
+    
+    Fixes: a04aead144fd ("KVM: nSVM: fix running nested guests when npt=0")
+    Fixes: feaf0c7dc473 ("KVM: nVMX: Do not generate #DF if #PF happens during exception delivery into L2")
+    Cc: Jim Mattson <jmattson@google.com>
+    Signed-off-by: Sean Christopherson <seanjc@google.com>
+    Reviewed-by: Maxim Levitsky <mlevitsk@redhat.com>
+    Link: https://lore.kernel.org/r/20220830231614.3580124-22-seanjc@google.com
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/include/asm/kvm_host.h b/arch/x86/include/asm/kvm_host.h
+index 76fda10baa3d..b3ce723efb43 100644
+--- a/arch/x86/include/asm/kvm_host.h
++++ b/arch/x86/include/asm/kvm_host.h
+@@ -649,7 +649,6 @@ struct kvm_queued_exception {
+ 	u32 error_code;
+ 	unsigned long payload;
+ 	bool has_payload;
+-	u8 nested_apf;
+ };
+ 
+ struct kvm_vcpu_arch {
+@@ -750,8 +749,12 @@ struct kvm_vcpu_arch {
+ 
+ 	u8 event_exit_inst_len;
+ 
++	bool exception_from_userspace;
++
+ 	/* Exceptions to be injected to the guest. */
+ 	struct kvm_queued_exception exception;
++	/* Exception VM-Exits to be synthesized to L1. */
++	struct kvm_queued_exception exception_vmexit;
+ 
+ 	struct kvm_queued_interrupt {
+ 		bool injected;
+@@ -862,7 +865,6 @@ struct kvm_vcpu_arch {
+ 		u32 id;
+ 		bool send_user_only;
+ 		u32 host_apf_flags;
+-		unsigned long nested_apf_token;
+ 		bool delivery_as_pf_vmexit;
+ 		bool pageready_pending;
+ 	} apf;
+@@ -1638,9 +1640,9 @@ struct kvm_x86_ops {
+ 
+ struct kvm_x86_nested_ops {
+ 	void (*leave_nested)(struct kvm_vcpu *vcpu);
++	bool (*is_exception_vmexit)(struct kvm_vcpu *vcpu, u8 vector,
++				    u32 error_code);
+ 	int (*check_events)(struct kvm_vcpu *vcpu);
+-	bool (*handle_page_fault_workaround)(struct kvm_vcpu *vcpu,
+-					     struct x86_exception *fault);
+ 	bool (*hv_timer_pending)(struct kvm_vcpu *vcpu);
+ 	void (*triple_fault)(struct kvm_vcpu *vcpu);
+ 	int (*get_state)(struct kvm_vcpu *vcpu,
+@@ -1867,7 +1869,7 @@ void kvm_queue_exception_p(struct kvm_vcpu *vcpu, unsigned nr, unsigned long pay
+ void kvm_requeue_exception(struct kvm_vcpu *vcpu, unsigned nr);
+ void kvm_requeue_exception_e(struct kvm_vcpu *vcpu, unsigned nr, u32 error_code);
+ void kvm_inject_page_fault(struct kvm_vcpu *vcpu, struct x86_exception *fault);
+-bool kvm_inject_emulated_page_fault(struct kvm_vcpu *vcpu,
++void kvm_inject_emulated_page_fault(struct kvm_vcpu *vcpu,
+ 				    struct x86_exception *fault);
+ bool kvm_require_cpl(struct kvm_vcpu *vcpu, int required_cpl);
+ bool kvm_require_dr(struct kvm_vcpu *vcpu, int dr);

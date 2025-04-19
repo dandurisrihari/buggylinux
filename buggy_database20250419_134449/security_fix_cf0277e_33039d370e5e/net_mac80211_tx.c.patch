@@ -1,0 +1,54 @@
+commit cf0277e714a0db302a8f80e1b85fd61c32cf00b3
+Author: Johannes Berg <johannes@sipsolutions.net>
+Date:   Tue Jan 5 18:00:58 2010 +0100
+
+    mac80211: fix skb buffering issue
+    
+    Since I removed the master netdev, we've been
+    keeping internal queues only, and even before
+    that we never told the networking stack above
+    the virtual interfaces about congestion. This
+    means that packets are queued in mac80211 and
+    the upper layers never know, possibly leading
+    to memory exhaustion and other problems.
+    
+    This patch makes all interfaces multiqueue and
+    uses ndo_select_queue to put the packets into
+    queues per AC. Additionally, when the driver
+    stops a queue, we now stop all corresponding
+    queues for the virtual interfaces as well.
+    
+    The injection case will use VO by default for
+    non-data frames, and BE for data frames, but
+    downgrade any data frames according to ACM. It
+    needs to be fleshed out in the future to allow
+    chosing the queue/AC in radiotap.
+    
+    Reported-by: Lennert Buytenhek <buytenh@marvell.com>
+    Signed-off-by: Johannes Berg <johannes@sipsolutions.net>
+    Cc: stable@kernel.org [2.6.32]
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/mac80211/tx.c b/net/mac80211/tx.c
+index 27ceaefd7bc8..ac210b586702 100644
+--- a/net/mac80211/tx.c
++++ b/net/mac80211/tx.c
+@@ -1512,7 +1512,7 @@ static void ieee80211_xmit(struct ieee80211_sub_if_data *sdata,
+ 				return;
+ 			}
+ 
+-	ieee80211_select_queue(local, skb);
++	ieee80211_set_qos_hdr(local, skb);
+ 	ieee80211_tx(sdata, skb, false);
+ 	rcu_read_unlock();
+ }
+@@ -2291,6 +2291,9 @@ void ieee80211_tx_skb(struct ieee80211_sub_if_data *sdata, struct sk_buff *skb)
+ 	skb_set_network_header(skb, 0);
+ 	skb_set_transport_header(skb, 0);
+ 
++	/* send all internal mgmt frames on VO */
++	skb_set_queue_mapping(skb, 0);
++
+ 	/*
+ 	 * The other path calling ieee80211_xmit is from the tasklet,
+ 	 * and while we can handle concurrent transmissions locking

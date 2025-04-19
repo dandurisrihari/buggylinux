@@ -1,0 +1,57 @@
+commit 96f9b0f2fa01c96e90abd4e981208a341a5da66e
+Author: Nikolay Borisov <nborisov@suse.com>
+Date:   Fri Apr 3 16:40:35 2020 +0300
+
+    btrfs: simplify checks when adding excluded ranges
+    
+    Adresses held in 'logical' array are always guaranteed to fall within
+    the boundaries of the block group. That is, 'start' can never be
+    smaller than cache->start. This invariant follows from the way the
+    address are calculated in btrfs_rmap_block:
+    
+        stripe_nr = physical - map->stripes[i].physical;
+        stripe_nr = div64_u64(stripe_nr, map->stripe_len);
+        bytenr = chunk_start + stripe_nr * io_stripe_size;
+    
+    I.e it's always some IO stripe within the given chunk.
+    
+    Exploit this invariant to simplify the body of the loop by removing the
+    unnecessary 'if' since its 'else' part is the one always executed.
+    
+    Signed-off-by: Nikolay Borisov <nborisov@suse.com>
+    Signed-off-by: David Sterba <dsterba@suse.com>
+
+diff --git a/fs/btrfs/block-group.c b/fs/btrfs/block-group.c
+index 956ae6283d33..e29e9629b246 100644
+--- a/fs/btrfs/block-group.c
++++ b/fs/btrfs/block-group.c
+@@ -1741,25 +1741,12 @@ static int exclude_super_stripes(struct btrfs_block_group *cache)
+ 			return ret;
+ 
+ 		while (nr--) {
+-			u64 start, len;
+-
+-			if (logical[nr] > cache->start + cache->length)
+-				continue;
+-
+-			if (logical[nr] + stripe_len <= cache->start)
+-				continue;
+-
+-			start = logical[nr];
+-			if (start < cache->start) {
+-				start = cache->start;
+-				len = (logical[nr] + stripe_len) - start;
+-			} else {
+-				len = min_t(u64, stripe_len,
+-					    cache->start + cache->length - start);
+-			}
++			u64 len = min_t(u64, stripe_len,
++				cache->start + cache->length - logical[nr]);
+ 
+ 			cache->bytes_super += len;
+-			ret = btrfs_add_excluded_extent(fs_info, start, len);
++			ret = btrfs_add_excluded_extent(fs_info, logical[nr],
++							len);
+ 			if (ret) {
+ 				kfree(logical);
+ 				return ret;

@@ -1,0 +1,91 @@
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index 7e0dc6b4cb99..86519a73971e 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -44,14 +44,15 @@
+ 
+ #define KVM_REQ_SLEEP \
+ 	KVM_ARCH_REQ_FLAGS(0, KVM_REQUEST_WAIT | KVM_REQUEST_NO_WAKEUP)
+-#define KVM_REQ_IRQ_PENDING	KVM_ARCH_REQ(1)
+-#define KVM_REQ_VCPU_RESET	KVM_ARCH_REQ(2)
+-#define KVM_REQ_RECORD_STEAL	KVM_ARCH_REQ(3)
+-#define KVM_REQ_RELOAD_GICv4	KVM_ARCH_REQ(4)
+-#define KVM_REQ_RELOAD_PMU	KVM_ARCH_REQ(5)
+-#define KVM_REQ_SUSPEND		KVM_ARCH_REQ(6)
+-#define KVM_REQ_RESYNC_PMU_EL0	KVM_ARCH_REQ(7)
+-#define KVM_REQ_NESTED_S2_UNMAP	KVM_ARCH_REQ(8)
++#define KVM_REQ_IRQ_PENDING		KVM_ARCH_REQ(1)
++#define KVM_REQ_VCPU_RESET		KVM_ARCH_REQ(2)
++#define KVM_REQ_RECORD_STEAL		KVM_ARCH_REQ(3)
++#define KVM_REQ_RELOAD_GICv4		KVM_ARCH_REQ(4)
++#define KVM_REQ_RELOAD_PMU		KVM_ARCH_REQ(5)
++#define KVM_REQ_SUSPEND			KVM_ARCH_REQ(6)
++#define KVM_REQ_RESYNC_PMU_EL0		KVM_ARCH_REQ(7)
++#define KVM_REQ_NESTED_S2_UNMAP		KVM_ARCH_REQ(8)
++#define KVM_REQ_GUEST_HYP_IRQ_PENDING	KVM_ARCH_REQ(9)
+ 
+ #define KVM_DIRTY_LOG_MANUAL_CAPS   (KVM_DIRTY_LOG_MANUAL_PROTECT_ENABLE | \
+ 				     KVM_DIRTY_LOG_INITIALLY_SET)
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index 383aa4862234..0ec7099f4b63 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -1148,6 +1148,11 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
+ 		 * preserved on VMID roll-over if the task was preempted,
+ 		 * making a thread's VMID inactive. So we need to call
+ 		 * kvm_arm_vmid_update() in non-premptible context.
++		 *
++		 * Note that this must happen after the check_vcpu_request()
++		 * call to pick the correct s2_mmu structure, as a pending
++		 * nested exception (IRQ, for example) can trigger a change
++		 * in translation regime.
+ 		 */
+ 		if (kvm_arm_vmid_update(&vcpu->arch.hw_mmu->vmid) &&
+ 		    has_vhe())
+diff --git a/arch/arm64/kvm/nested.c b/arch/arm64/kvm/nested.c
+index 7c8f39070a50..722e61e410e2 100644
+--- a/arch/arm64/kvm/nested.c
++++ b/arch/arm64/kvm/nested.c
+@@ -1318,4 +1318,8 @@ void check_nested_vcpu_requests(struct kvm_vcpu *vcpu)
+ 		}
+ 		write_unlock(&vcpu->kvm->mmu_lock);
+ 	}
++
++	/* Must be last, as may switch context! */
++	if (kvm_check_request(KVM_REQ_GUEST_HYP_IRQ_PENDING, vcpu))
++		kvm_inject_nested_irq(vcpu);
+ }
+diff --git a/arch/arm64/kvm/vgic/vgic.c b/arch/arm64/kvm/vgic/vgic.c
+index 324c547e1b4d..9734a71b8561 100644
+--- a/arch/arm64/kvm/vgic/vgic.c
++++ b/arch/arm64/kvm/vgic/vgic.c
+@@ -906,6 +906,29 @@ static inline void vgic_restore_state(struct kvm_vcpu *vcpu)
+ /* Flush our emulation state into the GIC hardware before entering the guest. */
+ void kvm_vgic_flush_hwstate(struct kvm_vcpu *vcpu)
+ {
++	/*
++	 * If in a nested state, we must return early. Two possibilities:
++	 *
++	 * - If we have any pending IRQ for the guest and the guest
++	 *   expects IRQs to be handled in its virtual EL2 mode (the
++	 *   virtual IMO bit is set) and it is not already running in
++	 *   virtual EL2 mode, then we have to emulate an IRQ
++	 *   exception to virtual EL2.
++	 *
++	 *   We do that by placing a request to ourselves which will
++	 *   abort the entry procedure and inject the exception at the
++	 *   beginning of the run loop.
++	 *
++	 * - Otherwise, do exactly *NOTHING*. The guest state is
++	 *   already loaded, and we can carry on with running it.
++	 */
++	if (vgic_state_is_nested(vcpu)) {
++		if (kvm_vgic_vcpu_pending_irq(vcpu))
++			kvm_make_request(KVM_REQ_GUEST_HYP_IRQ_PENDING, vcpu);
++
++		return;
++	}
++
+ 	/*
+ 	 * If there are no virtual interrupts active or pending for this
+ 	 * VCPU, then there is no work to do and we can bail out without

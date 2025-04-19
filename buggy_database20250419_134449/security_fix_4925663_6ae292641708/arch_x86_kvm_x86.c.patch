@@ -1,0 +1,56 @@
+commit 4925663a079c77d95d8685228ad6675fc5639c8e
+Author: Gleb Natapov <gleb@redhat.com>
+Date:   Wed Feb 4 17:28:14 2009 +0200
+
+    KVM: Report IRQ injection status to userspace.
+    
+    IRQ injection status is either -1 (if there was no CPU found
+    that should except the interrupt because IRQ was masked or
+    ioapic was misconfigured or ...) or >= 0 in that case the
+    number indicates to how many CPUs interrupt was injected.
+    If the value is 0 it means that the interrupt was coalesced
+    and probably should be reinjected.
+    
+    Signed-off-by: Gleb Natapov <gleb@redhat.com>
+    Signed-off-by: Avi Kivity <avi@redhat.com>
+
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 05d7be89b5eb..e4db5be7c953 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -1019,6 +1019,7 @@ int kvm_dev_ioctl_check_extension(long ext)
+ 	case KVM_CAP_MP_STATE:
+ 	case KVM_CAP_SYNC_MMU:
+ 	case KVM_CAP_REINJECT_CONTROL:
++	case KVM_CAP_IRQ_INJECT_STATUS:
+ 		r = 1;
+ 		break;
+ 	case KVM_CAP_COALESCED_MMIO:
+@@ -1877,6 +1878,7 @@ long kvm_arch_vm_ioctl(struct file *filp,
+ 	create_pit_unlock:
+ 		mutex_unlock(&kvm->lock);
+ 		break;
++	case KVM_IRQ_LINE_STATUS:
+ 	case KVM_IRQ_LINE: {
+ 		struct kvm_irq_level irq_event;
+ 
+@@ -1884,10 +1886,17 @@ long kvm_arch_vm_ioctl(struct file *filp,
+ 		if (copy_from_user(&irq_event, argp, sizeof irq_event))
+ 			goto out;
+ 		if (irqchip_in_kernel(kvm)) {
++			__s32 status;
+ 			mutex_lock(&kvm->lock);
+-			kvm_set_irq(kvm, KVM_USERSPACE_IRQ_SOURCE_ID,
+-				    irq_event.irq, irq_event.level);
++			status = kvm_set_irq(kvm, KVM_USERSPACE_IRQ_SOURCE_ID,
++					irq_event.irq, irq_event.level);
+ 			mutex_unlock(&kvm->lock);
++			if (ioctl == KVM_IRQ_LINE_STATUS) {
++				irq_event.status = status;
++				if (copy_to_user(argp, &irq_event,
++							sizeof irq_event))
++					goto out;
++			}
+ 			r = 0;
+ 		}
+ 		break;

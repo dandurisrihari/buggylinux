@@ -1,0 +1,69 @@
+commit ca6a6f93867a9763bdf8685c788e2e558d10975f
+Author: Jakub Sitnicki <jakub@cloudflare.com>
+Date:   Mon Dec 9 20:38:04 2024 +0100
+
+    tcp: Add sysctl to configure TIME-WAIT reuse delay
+    
+    Today we have a hardcoded delay of 1 sec before a TIME-WAIT socket can be
+    reused by reopening a connection. This is a safe choice based on an
+    assumption that the other TCP timestamp clock frequency, which is unknown
+    to us, may be as low as 1 Hz (RFC 7323, section 5.4).
+    
+    However, this means that in the presence of short lived connections with an
+    RTT of couple of milliseconds, the time during which a 4-tuple is blocked
+    from reuse can be orders of magnitude longer that the connection lifetime.
+    Combined with a reduced pool of ephemeral ports, when using
+    IP_LOCAL_PORT_RANGE to share an egress IP address between hosts [1], the
+    long TIME-WAIT reuse delay can lead to port exhaustion, where all available
+    4-tuples are tied up in TIME-WAIT state.
+    
+    Turn the reuse delay into a per-netns setting so that sysadmins can make
+    more aggressive assumptions about remote TCP timestamp clock frequency and
+    shorten the delay in order to allow connections to reincarnate faster.
+    
+    Note that applications can completely bypass the TIME-WAIT delay protection
+    already today by locking the local port with bind() before connecting. Such
+    immediate connection reuse may result in PAWS failing to detect old
+    duplicate segments, leaving us with just the sequence number check as a
+    safety net.
+    
+    This new configurable offers a trade off where the sysadmin can balance
+    between the risk of PAWS detection failing to act versus exhausting ports
+    by having sockets tied up in TIME-WAIT state for too long.
+    
+    [1] https://lpc.events/event/16/contributions/1349/
+    
+    Signed-off-by: Jakub Sitnicki <jakub@cloudflare.com>
+    Reviewed-by: Eric Dumazet <edumazet@google.com>
+    Reviewed-by: Jason Xing <kerneljasonxing@gmail.com>
+    Link: https://patch.msgid.link/20241209-jakub-krn-909-poc-msec-tw-tstamp-v2-2-66aca0eed03e@cloudflare.com
+    Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+diff --git a/net/ipv4/sysctl_net_ipv4.c b/net/ipv4/sysctl_net_ipv4.c
+index a79b2a52ce01..42cb5dc9cb24 100644
+--- a/net/ipv4/sysctl_net_ipv4.c
++++ b/net/ipv4/sysctl_net_ipv4.c
+@@ -45,6 +45,7 @@ static unsigned int tcp_child_ehash_entries_max = 16 * 1024 * 1024;
+ static unsigned int udp_child_hash_entries_max = UDP_HTABLE_SIZE_MAX;
+ static int tcp_plb_max_rounds = 31;
+ static int tcp_plb_max_cong_thresh = 256;
++static unsigned int tcp_tw_reuse_delay_max = TCP_PAWS_MSL * MSEC_PER_SEC;
+ 
+ /* obsolete */
+ static int sysctl_tcp_low_latency __read_mostly;
+@@ -1065,6 +1066,15 @@ static struct ctl_table ipv4_net_table[] = {
+ 		.extra1		= SYSCTL_ZERO,
+ 		.extra2		= SYSCTL_TWO,
+ 	},
++	{
++		.procname	= "tcp_tw_reuse_delay",
++		.data		= &init_net.ipv4.sysctl_tcp_tw_reuse_delay,
++		.maxlen		= sizeof(unsigned int),
++		.mode		= 0644,
++		.proc_handler	= proc_douintvec_minmax,
++		.extra1		= SYSCTL_ONE,
++		.extra2		= &tcp_tw_reuse_delay_max,
++	},
+ 	{
+ 		.procname	= "tcp_max_syn_backlog",
+ 		.data		= &init_net.ipv4.sysctl_max_syn_backlog,

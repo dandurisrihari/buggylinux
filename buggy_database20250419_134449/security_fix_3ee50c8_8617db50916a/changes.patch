@@ -1,0 +1,62 @@
+diff --git a/drivers/crypto/qce/dma.c b/drivers/crypto/qce/dma.c
+index 40a59214d2e1..7da893dc00e7 100644
+--- a/drivers/crypto/qce/dma.c
++++ b/drivers/crypto/qce/dma.c
+@@ -47,7 +47,8 @@ void qce_dma_release(struct qce_dma_data *dma)
+ }
+ 
+ struct scatterlist *
+-qce_sgtable_add(struct sg_table *sgt, struct scatterlist *new_sgl)
++qce_sgtable_add(struct sg_table *sgt, struct scatterlist *new_sgl,
++		int max_ents)
+ {
+ 	struct scatterlist *sg = sgt->sgl, *sg_last = NULL;
+ 
+@@ -60,12 +61,13 @@ qce_sgtable_add(struct sg_table *sgt, struct scatterlist *new_sgl)
+ 	if (!sg)
+ 		return ERR_PTR(-EINVAL);
+ 
+-	while (new_sgl && sg) {
++	while (new_sgl && sg && max_ents) {
+ 		sg_set_page(sg, sg_page(new_sgl), new_sgl->length,
+ 			    new_sgl->offset);
+ 		sg_last = sg;
+ 		sg = sg_next(sg);
+ 		new_sgl = sg_next(new_sgl);
++		max_ents--;
+ 	}
+ 
+ 	return sg_last;
+diff --git a/drivers/crypto/qce/dma.h b/drivers/crypto/qce/dma.h
+index 1e25a9e0e6f8..ed25a0d9829e 100644
+--- a/drivers/crypto/qce/dma.h
++++ b/drivers/crypto/qce/dma.h
+@@ -42,6 +42,7 @@ int qce_dma_prep_sgs(struct qce_dma_data *dma, struct scatterlist *sg_in,
+ void qce_dma_issue_pending(struct qce_dma_data *dma);
+ int qce_dma_terminate_all(struct qce_dma_data *dma);
+ struct scatterlist *
+-qce_sgtable_add(struct sg_table *sgt, struct scatterlist *sg_add);
++qce_sgtable_add(struct sg_table *sgt, struct scatterlist *sg_add,
++		int max_ents);
+ 
+ #endif /* _DMA_H_ */
+diff --git a/drivers/crypto/qce/skcipher.c b/drivers/crypto/qce/skcipher.c
+index e4f6d87ba51d..a9ae356bc2a7 100644
+--- a/drivers/crypto/qce/skcipher.c
++++ b/drivers/crypto/qce/skcipher.c
+@@ -95,13 +95,13 @@ qce_skcipher_async_req_handle(struct crypto_async_request *async_req)
+ 
+ 	sg_init_one(&rctx->result_sg, qce->dma.result_buf, QCE_RESULT_BUF_SZ);
+ 
+-	sg = qce_sgtable_add(&rctx->dst_tbl, req->dst);
++	sg = qce_sgtable_add(&rctx->dst_tbl, req->dst, rctx->dst_nents - 1);
+ 	if (IS_ERR(sg)) {
+ 		ret = PTR_ERR(sg);
+ 		goto error_free;
+ 	}
+ 
+-	sg = qce_sgtable_add(&rctx->dst_tbl, &rctx->result_sg);
++	sg = qce_sgtable_add(&rctx->dst_tbl, &rctx->result_sg, 1);
+ 	if (IS_ERR(sg)) {
+ 		ret = PTR_ERR(sg);
+ 		goto error_free;

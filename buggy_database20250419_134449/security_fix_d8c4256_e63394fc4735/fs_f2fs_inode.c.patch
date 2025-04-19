@@ -1,0 +1,39 @@
+commit d8c4256c17dac3e9ec0c441b81292d5d2044c89f
+Author: Jaegeuk Kim <jaegeuk@kernel.org>
+Date:   Thu Jun 1 15:39:27 2017 -0700
+
+    f2fs: remove false-positive bug_on
+    
+    For example,
+    
+    f2fs_create
+     - new_node_page is failed
+     - handle_failed_inode
+      - skip to add it into orphan list, since ni.blk_addr == NULL_ADDR
+       : set_inode_flag(inode, FI_FREE_NID)
+    
+    f2fs_evict_inode
+     - EIO due to fault injection
+     - f2fs_bug_on() is triggered
+    
+    So, we don't need to call f2fs_bug_on in this case.
+    
+    Signed-off-by: Jaegeuk Kim <jaegeuk@kernel.org>
+
+diff --git a/fs/f2fs/inode.c b/fs/f2fs/inode.c
+index e53c784ab11e..868d71436ebc 100644
+--- a/fs/f2fs/inode.c
++++ b/fs/f2fs/inode.c
+@@ -425,9 +425,10 @@ void f2fs_evict_inode(struct inode *inode)
+ 	if (is_inode_flag_set(inode, FI_FREE_NID)) {
+ 		alloc_nid_failed(sbi, inode->i_ino);
+ 		clear_inode_flag(inode, FI_FREE_NID);
++	} else {
++		f2fs_bug_on(sbi, err &&
++			!exist_written_data(sbi, inode->i_ino, ORPHAN_INO));
+ 	}
+-	f2fs_bug_on(sbi, err &&
+-		!exist_written_data(sbi, inode->i_ino, ORPHAN_INO));
+ out_clear:
+ 	fscrypt_put_encryption_info(inode, NULL);
+ 	clear_inode(inode);

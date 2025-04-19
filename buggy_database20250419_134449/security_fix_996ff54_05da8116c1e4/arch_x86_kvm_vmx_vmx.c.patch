@@ -1,0 +1,66 @@
+commit 996ff5429e9898947016206ee9da387a93d63d9d
+Author: Paolo Bonzini <pbonzini@redhat.com>
+Date:   Mon Dec 14 07:49:54 2020 -0500
+
+    KVM: x86: move kvm_inject_gp up from kvm_set_dr to callers
+    
+    Push the injection of #GP up to the callers, so that they can just use
+    kvm_complete_insn_gp. __kvm_set_dr is pretty much what the callers can use
+    together with kvm_complete_insn_gp, so rename it to kvm_set_dr and drop
+    the old kvm_set_dr wrapper.
+    
+    This also allows nested VMX code, which really wanted to use __kvm_set_dr,
+    to use the right function.
+    
+    While at it, remove the kvm_require_dr() check from the SVM interception.
+    The APM states:
+    
+      All normal exception checks take precedence over the SVM intercepts.
+    
+    which includes the CR4.DE=1 #UD.
+    
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index 049fbbd0aa1a..13898871e5b0 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -5095,6 +5095,7 @@ static int handle_dr(struct kvm_vcpu *vcpu)
+ {
+ 	unsigned long exit_qualification;
+ 	int dr, dr7, reg;
++	int err = 1;
+ 
+ 	exit_qualification = vmx_get_exit_qual(vcpu);
+ 	dr = exit_qualification & DEBUG_REG_ACCESS_NUM;
+@@ -5103,9 +5104,9 @@ static int handle_dr(struct kvm_vcpu *vcpu)
+ 	if (!kvm_require_dr(vcpu, dr))
+ 		return 1;
+ 
+-	/* Do not handle if the CPL > 0, will trigger GP on re-entry */
+-	if (!kvm_require_cpl(vcpu, 0))
+-		return 1;
++	if (kvm_x86_ops.get_cpl(vcpu) > 0)
++		goto out;
++
+ 	dr7 = vmcs_readl(GUEST_DR7);
+ 	if (dr7 & DR7_GD) {
+ 		/*
+@@ -5144,11 +5145,13 @@ static int handle_dr(struct kvm_vcpu *vcpu)
+ 
+ 		kvm_get_dr(vcpu, dr, &val);
+ 		kvm_register_write(vcpu, reg, val);
+-	} else
+-		if (kvm_set_dr(vcpu, dr, kvm_register_readl(vcpu, reg)))
+-			return 1;
++		err = 0;
++	} else {
++		err = kvm_set_dr(vcpu, dr, kvm_register_readl(vcpu, reg));
++	}
+ 
+-	return kvm_skip_emulated_instruction(vcpu);
++out:
++	return kvm_complete_insn_gp(vcpu, err);
+ }
+ 
+ static void vmx_sync_dirty_debug_regs(struct kvm_vcpu *vcpu)

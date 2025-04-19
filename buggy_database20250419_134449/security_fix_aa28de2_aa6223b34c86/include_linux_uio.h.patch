@@ -1,0 +1,89 @@
+commit aa28de275a248879f9828cb9f7ee7e119c72ff96
+Author: Al Viro <viro@zeniv.linux.org.uk>
+Date:   Thu Jun 29 21:45:10 2017 -0400
+
+    iov_iter/hardening: move object size checks to inlined part
+    
+    There we actually have useful information about object sizes.
+    Note: this patch has them done for all iov_iter flavours.
+    Right now we do them twice in iovec case, but that'll change
+    very shortly.
+    
+    Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+
+diff --git a/include/linux/uio.h b/include/linux/uio.h
+index f2d36a3d3005..243e2362fe1a 100644
+--- a/include/linux/uio.h
++++ b/include/linux/uio.h
+@@ -10,6 +10,7 @@
+ #define __LINUX_UIO_H
+ 
+ #include <linux/kernel.h>
++#include <linux/thread_info.h>
+ #include <uapi/linux/uio.h>
+ 
+ struct page;
+@@ -91,11 +92,58 @@ size_t copy_page_to_iter(struct page *page, size_t offset, size_t bytes,
+ 			 struct iov_iter *i);
+ size_t copy_page_from_iter(struct page *page, size_t offset, size_t bytes,
+ 			 struct iov_iter *i);
+-size_t copy_to_iter(const void *addr, size_t bytes, struct iov_iter *i);
+-size_t copy_from_iter(void *addr, size_t bytes, struct iov_iter *i);
+-bool copy_from_iter_full(void *addr, size_t bytes, struct iov_iter *i);
+-size_t copy_from_iter_nocache(void *addr, size_t bytes, struct iov_iter *i);
+-bool copy_from_iter_full_nocache(void *addr, size_t bytes, struct iov_iter *i);
++
++size_t _copy_to_iter(const void *addr, size_t bytes, struct iov_iter *i);
++size_t _copy_from_iter(void *addr, size_t bytes, struct iov_iter *i);
++bool _copy_from_iter_full(void *addr, size_t bytes, struct iov_iter *i);
++size_t _copy_from_iter_nocache(void *addr, size_t bytes, struct iov_iter *i);
++bool _copy_from_iter_full_nocache(void *addr, size_t bytes, struct iov_iter *i);
++
++static __always_inline __must_check
++size_t copy_to_iter(const void *addr, size_t bytes, struct iov_iter *i)
++{
++	if (unlikely(!check_copy_size(addr, bytes, true)))
++		return bytes;
++	else
++		return _copy_to_iter(addr, bytes, i);
++}
++
++static __always_inline __must_check
++size_t copy_from_iter(void *addr, size_t bytes, struct iov_iter *i)
++{
++	if (unlikely(!check_copy_size(addr, bytes, false)))
++		return bytes;
++	else
++		return _copy_from_iter(addr, bytes, i);
++}
++
++static __always_inline __must_check
++bool copy_from_iter_full(void *addr, size_t bytes, struct iov_iter *i)
++{
++	if (unlikely(!check_copy_size(addr, bytes, false)))
++		return false;
++	else
++		return _copy_from_iter_full(addr, bytes, i);
++}
++
++static __always_inline __must_check
++size_t copy_from_iter_nocache(void *addr, size_t bytes, struct iov_iter *i)
++{
++	if (unlikely(!check_copy_size(addr, bytes, false)))
++		return bytes;
++	else
++		return _copy_from_iter_nocache(addr, bytes, i);
++}
++
++static __always_inline __must_check
++bool copy_from_iter_full_nocache(void *addr, size_t bytes, struct iov_iter *i)
++{
++	if (unlikely(!check_copy_size(addr, bytes, false)))
++		return false;
++	else
++		return _copy_from_iter_full_nocache(addr, bytes, i);
++}
++
+ size_t iov_iter_zero(size_t bytes, struct iov_iter *);
+ unsigned long iov_iter_alignment(const struct iov_iter *i);
+ unsigned long iov_iter_gap_alignment(const struct iov_iter *i);

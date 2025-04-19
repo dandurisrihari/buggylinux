@@ -1,0 +1,119 @@
+commit f3a2439f20d918930cc4ae8f76fe1c1afd26958f
+Merge: cc38a46de76e 7c855ef7137a
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Sun Feb 26 12:18:36 2023 -0800
+
+    Merge tag 'rproc-v6.3' of git://git.kernel.org/pub/scm/linux/kernel/git/remoteproc/linux
+    
+    Pull remoteproc updates from Bjorn Andersson:
+    
+     - Support for PRU clients to acquire a control reference to the PRU
+       instances is introduced, and the PRU now allows specifying
+       firmware-name in Devicetree. sysfs is requested to be read-only when
+       the remoteproc instance is consumed by another kernel driver
+    
+     - Support for the C7xv DSP on AM62A SoC is introduced
+    
+     - The Devicetree binding for the Qualcomm PAS devices are split up in
+       multiple files, to better account for the differences in resources
+       between them. A number of missing Devicetree bindings are added, and
+       the Qualcomm WCNSS binding is converted to YAML
+    
+     - A few cleanups are introduced for the Mediatek SCP driver. And a
+       sanity check of the firmware image is introduced in the Mediatek
+       driver
+    
+     - For Qualcomm SC7280 ADSP support is added, MSM8953 gains ADSP and
+       modem support, SM6115 and SM8550 gains ADSP, CDSP and modem support,
+       and support for pronto v3 support (used on e.g. MSM8953) is added
+    
+     - The Qualcomm modem remoteproc driver is modified to use a no-map
+       reserved-memory region for it's authentication metadata, in order to
+       avoid fatal security violations caused by accesses from Linux during
+       the authentication process
+    
+     - Support for separate loading of a Devicetree blob is added to the PAS
+       driver, and support for the PAS driver to carve out DSM memory for
+       the modem is added as well
+    
+     - The Qualcomm ADSP remoteproc driver gains support for mapping memory
+       into specific range using the IOMMU. The sysmon driver is
+       transitioned to strlcpy()
+    
+    * tag 'rproc-v6.3' of git://git.kernel.org/pub/scm/linux/kernel/git/remoteproc/linux: (69 commits)
+      dt-bindings: mailbox: qcom,apcs-kpss-global: drop mbox-names from example
+      dt-bindings: remoteproc: qcom,glink-edge: correct label description
+      dt-bindings: remoteproc: qcom,glink-rpm-edge: convert to DT schema
+      dt-bindings: remoteproc: qcom,sm8550-pas: correct power domains
+      remoteproc: qcom_q6v5_pas: enable sm8550 adsp & cdsp autoboot
+      dt-bindings: remoteproc: qcom: Add sm6115 pas yaml file
+      remoteproc: qcom: pas: Add sm6115 remoteprocs
+      remoteproc: qcom: pas: Adjust the phys addr wrt the mem region
+      remoteproc: qcom: fix sparse warnings
+      remoteproc: qcom: replace kstrdup with kstrndup
+      remoteproc: mediatek: Check the SCP image format
+      remoteproc: qcom_q6v5_mss: Use a carveout to authenticate modem headers
+      Revert "remoteproc: qcom_q6v5_mss: map/unmap metadata region before/after use"
+      dt-bindings: remoteproc: qcom,sc7280-mss-pil: Update memory-region
+      dt-bindings: remoteproc: qcom,sc7180-mss-pil: Update memory-region
+      dt-bindings: remoteproc: qcom,msm8996-mss-pil: Update memory region
+      dt-bindings: remoteproc: qcom,q6v5: Move MSM8996 to schema
+      remoteproc: qcom_q6v5_pas: add sm8550 adsp, cdsp & mpss compatible & data
+      remoteproc: qcom_q6v5_pas: add support for assigning memory to firmware
+      remoteproc: qcom_q6v5_pas: add support for dtb co-firmware loading
+      ...
+
+diff --cc drivers/remoteproc/qcom_q6v5_adsp.c
+index 4c9a1b99cd51,2dc850f48f00..08d8dad22ca7
+--- a/drivers/remoteproc/qcom_q6v5_adsp.c
++++ b/drivers/remoteproc/qcom_q6v5_adsp.c
+@@@ -325,6 -335,47 +335,48 @@@ static int adsp_load(struct rproc *rpro
+  	return 0;
+  }
+  
++ static void adsp_unmap_carveout(struct rproc *rproc)
++ {
++ 	struct qcom_adsp *adsp = rproc->priv;
++ 
++ 	if (adsp->has_iommu)
++ 		iommu_unmap(rproc->domain, adsp->mem_phys, adsp->mem_size);
++ }
++ 
++ static int adsp_map_carveout(struct rproc *rproc)
++ {
++ 	struct qcom_adsp *adsp = rproc->priv;
++ 	struct of_phandle_args args;
++ 	long long sid;
++ 	unsigned long iova;
++ 	int ret;
++ 
++ 	if (!adsp->has_iommu)
++ 		return 0;
++ 
++ 	if (!rproc->domain)
++ 		return -EINVAL;
++ 
++ 	ret = of_parse_phandle_with_args(adsp->dev->of_node, "iommus", "#iommu-cells", 0, &args);
++ 	if (ret < 0)
++ 		return ret;
++ 
++ 	sid = args.args[0] & SID_MASK_DEFAULT;
++ 
++ 	/* Add SID configuration for ADSP Firmware to SMMU */
++ 	iova =  adsp->mem_phys | (sid << 32);
++ 
++ 	ret = iommu_map(rproc->domain, iova, adsp->mem_phys,
+ -			adsp->mem_size,	IOMMU_READ | IOMMU_WRITE);
+++			adsp->mem_size,	IOMMU_READ | IOMMU_WRITE,
+++			GFP_KERNEL);
++ 	if (ret) {
++ 		dev_err(adsp->dev, "Unable to map ADSP Physical Memory\n");
++ 		return ret;
++ 	}
++ 
++ 	return 0;
++ }
++ 
+  static int adsp_start(struct rproc *rproc)
+  {
+  	struct qcom_adsp *adsp = (struct qcom_adsp *)rproc->priv;

@@ -1,0 +1,116 @@
+commit ba17674fe02909fef049fd4b620a2805bdb8c693
+Author: Latchesar Ionkov <lucho@ionkov.net>
+Date:   Wed Oct 17 14:31:07 2007 -0500
+
+    9p: attach-per-user
+    
+    The 9P2000 protocol requires the authentication and permission checks to be
+    done in the file server. For that reason every user that accesses the file
+    server tree has to authenticate and attach to the server separately.
+    Multiple users can share the same connection to the server.
+    
+    Currently v9fs does a single attach and executes all I/O operations as a
+    single user. This makes using v9fs in multiuser environment unsafe as it
+    depends on the client doing the permission checking.
+    
+    This patch improves the 9P2000 support by allowing every user to attach
+    separately. The patch defines three modes of access (new mount option
+    'access'):
+    
+    - attach-per-user (access=user) (default mode for 9P2000.u)
+     If a user tries to access a file served by v9fs for the first time, v9fs
+     sends an attach command to the server (Tattach) specifying the user. If
+     the attach succeeds, the user can access the v9fs tree.
+     As there is no uname->uid (string->integer) mapping yet, this mode works
+     only with the 9P2000.u dialect.
+    
+    - allow only one user to access the tree (access=<uid>)
+     Only the user with uid can access the v9fs tree. Other users that attempt
+     to access it will get EPERM error.
+    
+    - do all operations as a single user (access=any) (default for 9P2000)
+     V9fs does a single attach and all operations are done as a single user.
+     If this mode is selected, the v9fs behavior is identical with the current
+     one.
+    
+    Signed-off-by: Latchesar Ionkov <lucho@ionkov.net>
+    Signed-off-by: Eric Van Hensbergen <ericvh@gmail.com>
+
+diff --git a/net/9p/conv.c b/net/9p/conv.c
+index d979d958ea19..aa2aa9884f95 100644
+--- a/net/9p/conv.c
++++ b/net/9p/conv.c
+@@ -547,7 +547,8 @@ struct p9_fcall *p9_create_tversion(u32 msize, char *version)
+ }
+ EXPORT_SYMBOL(p9_create_tversion);
+ 
+-struct p9_fcall *p9_create_tauth(u32 afid, char *uname, char *aname)
++struct p9_fcall *p9_create_tauth(u32 afid, char *uname, char *aname,
++	u32 n_uname, int dotu)
+ {
+ 	int size;
+ 	struct p9_fcall *fc;
+@@ -555,7 +556,16 @@ struct p9_fcall *p9_create_tauth(u32 afid, char *uname, char *aname)
+ 	struct cbuf *bufp = &buffer;
+ 
+ 	/* afid[4] uname[s] aname[s] */
+-	size = 4 + 2 + strlen(uname) + 2 + strlen(aname);
++	size = 4 + 2 + 2;
++	if (uname)
++		size += strlen(uname);
++
++	if (aname)
++		size += strlen(aname);
++
++	if (dotu)
++		size += 4;	/* n_uname */
++
+ 	fc = p9_create_common(bufp, size, P9_TAUTH);
+ 	if (IS_ERR(fc))
+ 		goto error;
+@@ -563,6 +573,8 @@ struct p9_fcall *p9_create_tauth(u32 afid, char *uname, char *aname)
+ 	p9_put_int32(bufp, afid, &fc->params.tauth.afid);
+ 	p9_put_str(bufp, uname, &fc->params.tauth.uname);
+ 	p9_put_str(bufp, aname, &fc->params.tauth.aname);
++	if (dotu)
++		p9_put_int32(bufp, n_uname, &fc->params.tauth.n_uname);
+ 
+ 	if (buf_check_overflow(bufp)) {
+ 		kfree(fc);
+@@ -574,7 +586,8 @@ struct p9_fcall *p9_create_tauth(u32 afid, char *uname, char *aname)
+ EXPORT_SYMBOL(p9_create_tauth);
+ 
+ struct p9_fcall *
+-p9_create_tattach(u32 fid, u32 afid, char *uname, char *aname)
++p9_create_tattach(u32 fid, u32 afid, char *uname, char *aname,
++	u32 n_uname, int dotu)
+ {
+ 	int size;
+ 	struct p9_fcall *fc;
+@@ -582,7 +595,16 @@ p9_create_tattach(u32 fid, u32 afid, char *uname, char *aname)
+ 	struct cbuf *bufp = &buffer;
+ 
+ 	/* fid[4] afid[4] uname[s] aname[s] */
+-	size = 4 + 4 + 2 + strlen(uname) + 2 + strlen(aname);
++	size = 4 + 4 + 2 + 2;
++	if (uname)
++		size += strlen(uname);
++
++	if (aname)
++		size += strlen(aname);
++
++	if (dotu)
++		size += 4;	/* n_uname */
++
+ 	fc = p9_create_common(bufp, size, P9_TATTACH);
+ 	if (IS_ERR(fc))
+ 		goto error;
+@@ -591,6 +613,8 @@ p9_create_tattach(u32 fid, u32 afid, char *uname, char *aname)
+ 	p9_put_int32(bufp, afid, &fc->params.tattach.afid);
+ 	p9_put_str(bufp, uname, &fc->params.tattach.uname);
+ 	p9_put_str(bufp, aname, &fc->params.tattach.aname);
++	if (dotu)
++		p9_put_int32(bufp, n_uname, &fc->params.tattach.n_uname);
+ 
+ error:
+ 	return fc;

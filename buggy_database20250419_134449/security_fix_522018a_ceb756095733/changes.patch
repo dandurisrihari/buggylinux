@@ -1,0 +1,75 @@
+diff --git a/fs/cachefiles/cache.c b/fs/cachefiles/cache.c
+index f449f7340aad..56ef519a36a0 100644
+--- a/fs/cachefiles/cache.c
++++ b/fs/cachefiles/cache.c
+@@ -8,6 +8,7 @@
+ #include <linux/slab.h>
+ #include <linux/statfs.h>
+ #include <linux/namei.h>
++#include <trace/events/fscache.h>
+ #include "internal.h"
+ 
+ /*
+@@ -319,12 +320,20 @@ static void cachefiles_withdraw_volumes(struct cachefiles_cache *cache)
+ 	_enter("");
+ 
+ 	for (;;) {
++		struct fscache_volume *vcookie = NULL;
+ 		struct cachefiles_volume *volume = NULL;
+ 
+ 		spin_lock(&cache->object_list_lock);
+ 		if (!list_empty(&cache->volumes)) {
+ 			volume = list_first_entry(&cache->volumes,
+ 						  struct cachefiles_volume, cache_link);
++			vcookie = fscache_try_get_volume(volume->vcookie,
++							 fscache_volume_get_withdraw);
++			if (!vcookie) {
++				spin_unlock(&cache->object_list_lock);
++				cpu_relax();
++				continue;
++			}
+ 			list_del_init(&volume->cache_link);
+ 		}
+ 		spin_unlock(&cache->object_list_lock);
+@@ -332,6 +341,7 @@ static void cachefiles_withdraw_volumes(struct cachefiles_cache *cache)
+ 			break;
+ 
+ 		cachefiles_withdraw_volume(volume);
++		fscache_put_volume(vcookie, fscache_volume_put_withdraw);
+ 	}
+ 
+ 	_leave("");
+diff --git a/include/trace/events/fscache.h b/include/trace/events/fscache.h
+index a6190aa1b406..f1a73aa83fbb 100644
+--- a/include/trace/events/fscache.h
++++ b/include/trace/events/fscache.h
+@@ -35,12 +35,14 @@ enum fscache_volume_trace {
+ 	fscache_volume_get_cookie,
+ 	fscache_volume_get_create_work,
+ 	fscache_volume_get_hash_collision,
++	fscache_volume_get_withdraw,
+ 	fscache_volume_free,
+ 	fscache_volume_new_acquire,
+ 	fscache_volume_put_cookie,
+ 	fscache_volume_put_create_work,
+ 	fscache_volume_put_hash_collision,
+ 	fscache_volume_put_relinquish,
++	fscache_volume_put_withdraw,
+ 	fscache_volume_see_create_work,
+ 	fscache_volume_see_hash_wake,
+ 	fscache_volume_wait_create_work,
+@@ -120,12 +122,14 @@ enum fscache_access_trace {
+ 	EM(fscache_volume_get_cookie,		"GET cook ")		\
+ 	EM(fscache_volume_get_create_work,	"GET creat")		\
+ 	EM(fscache_volume_get_hash_collision,	"GET hcoll")		\
++	EM(fscache_volume_get_withdraw,		"GET withd")            \
+ 	EM(fscache_volume_free,			"FREE     ")		\
+ 	EM(fscache_volume_new_acquire,		"NEW acq  ")		\
+ 	EM(fscache_volume_put_cookie,		"PUT cook ")		\
+ 	EM(fscache_volume_put_create_work,	"PUT creat")		\
+ 	EM(fscache_volume_put_hash_collision,	"PUT hcoll")		\
+ 	EM(fscache_volume_put_relinquish,	"PUT relnq")		\
++	EM(fscache_volume_put_withdraw,		"PUT withd")            \
+ 	EM(fscache_volume_see_create_work,	"SEE creat")		\
+ 	EM(fscache_volume_see_hash_wake,	"SEE hwake")		\
+ 	E_(fscache_volume_wait_create_work,	"WAIT crea")

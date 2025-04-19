@@ -1,0 +1,215 @@
+commit 2c9b3512402ed192d1f43f4531fb5da947e72bd0
+Merge: c43a20e4a520 332d2c1d713e
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Sat Jul 20 12:41:03 2024 -0700
+
+    Merge tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm
+    
+    Pull kvm updates from Paolo Bonzini:
+     "ARM:
+    
+       - Initial infrastructure for shadow stage-2 MMUs, as part of nested
+         virtualization enablement
+    
+       - Support for userspace changes to the guest CTR_EL0 value, enabling
+         (in part) migration of VMs between heterogenous hardware
+    
+       - Fixes + improvements to pKVM's FF-A proxy, adding support for v1.1
+         of the protocol
+    
+       - FPSIMD/SVE support for nested, including merged trap configuration
+         and exception routing
+    
+       - New command-line parameter to control the WFx trap behavior under
+         KVM
+    
+       - Introduce kCFI hardening in the EL2 hypervisor
+    
+       - Fixes + cleanups for handling presence/absence of FEAT_TCRX
+    
+       - Miscellaneous fixes + documentation updates
+    
+      LoongArch:
+    
+       - Add paravirt steal time support
+    
+       - Add support for KVM_DIRTY_LOG_INITIALLY_SET
+    
+       - Add perf kvm-stat support for loongarch
+    
+      RISC-V:
+    
+       - Redirect AMO load/store access fault traps to guest
+    
+       - perf kvm stat support
+    
+       - Use guest files for IMSIC virtualization, when available
+    
+      s390:
+    
+       - Assortment of tiny fixes which are not time critical
+    
+      x86:
+    
+       - Fixes for Xen emulation
+    
+       - Add a global struct to consolidate tracking of host values, e.g.
+         EFER
+    
+       - Add KVM_CAP_X86_APIC_BUS_CYCLES_NS to allow configuring the
+         effective APIC bus frequency, because TDX
+    
+       - Print the name of the APICv/AVIC inhibits in the relevant
+         tracepoint
+    
+       - Clean up KVM's handling of vendor specific emulation to
+         consistently act on "compatible with Intel/AMD", versus checking
+         for a specific vendor
+    
+       - Drop MTRR virtualization, and instead always honor guest PAT on
+         CPUs that support self-snoop
+    
+       - Update to the newfangled Intel CPU FMS infrastructure
+    
+       - Don't advertise IA32_PERF_GLOBAL_OVF_CTRL as an MSR-to-be-saved, as
+         it reads '0' and writes from userspace are ignored
+    
+       - Misc cleanups
+    
+      x86 - MMU:
+    
+       - Small cleanups, renames and refactoring extracted from the upcoming
+         Intel TDX support
+    
+       - Don't allocate kvm_mmu_page.shadowed_translation for shadow pages
+         that can't hold leafs SPTEs
+    
+       - Unconditionally drop mmu_lock when allocating TDP MMU page tables
+         for eager page splitting, to avoid stalling vCPUs when splitting
+         huge pages
+    
+       - Bug the VM instead of simply warning if KVM tries to split a SPTE
+         that is non-present or not-huge. KVM is guaranteed to end up in a
+         broken state because the callers fully expect a valid SPTE, it's
+         all but dangerous to let more MMU changes happen afterwards
+    
+      x86 - AMD:
+    
+       - Make per-CPU save_area allocations NUMA-aware
+    
+       - Force sev_es_host_save_area() to be inlined to avoid calling into
+         an instrumentable function from noinstr code
+    
+       - Base support for running SEV-SNP guests. API-wise, this includes a
+         new KVM_X86_SNP_VM type, encrypting/measure the initial image into
+         guest memory, and finalizing it before launching it. Internally,
+         there are some gmem/mmu hooks needed to prepare gmem-allocated
+         pages before mapping them into guest private memory ranges
+    
+         This includes basic support for attestation guest requests, enough
+         to say that KVM supports the GHCB 2.0 specification
+    
+         There is no support yet for loading into the firmware those signing
+         keys to be used for attestation requests, and therefore no need yet
+         for the host to provide certificate data for those keys.
+    
+         To support fetching certificate data from userspace, a new KVM exit
+         type will be needed to handle fetching the certificate from
+         userspace.
+    
+         An attempt to define a new KVM_EXIT_COCO / KVM_EXIT_COCO_REQ_CERTS
+         exit type to handle this was introduced in v1 of this patchset, but
+         is still being discussed by community, so for now this patchset
+         only implements a stub version of SNP Extended Guest Requests that
+         does not provide certificate data
+    
+      x86 - Intel:
+    
+       - Remove an unnecessary EPT TLB flush when enabling hardware
+    
+       - Fix a series of bugs that cause KVM to fail to detect nested
+         pending posted interrupts as valid wake eents for a vCPU executing
+         HLT in L2 (with HLT-exiting disable by L1)
+    
+       - KVM: x86: Suppress MMIO that is triggered during task switch
+         emulation
+    
+         Explicitly suppress userspace emulated MMIO exits that are
+         triggered when emulating a task switch as KVM doesn't support
+         userspace MMIO during complex (multi-step) emulation
+    
+         Silently ignoring the exit request can result in the
+         WARN_ON_ONCE(vcpu->mmio_needed) firing if KVM exits to userspace
+         for some other reason prior to purging mmio_needed
+    
+         See commit 0dc902267cb3 ("KVM: x86: Suppress pending MMIO write
+         exits if emulator detects exception") for more details on KVM's
+         limitations with respect to emulated MMIO during complex emulator
+         flows
+    
+      Generic:
+    
+       - Rename the AS_UNMOVABLE flag that was introduced for KVM to
+         AS_INACCESSIBLE, because the special casing needed by these pages
+         is not due to just unmovability (and in fact they are only
+         unmovable because the CPU cannot access them)
+    
+       - New ioctl to populate the KVM page tables in advance, which is
+         useful to mitigate KVM page faults during guest boot or after live
+         migration. The code will also be used by TDX, but (probably) not
+         through the ioctl
+    
+       - Enable halt poll shrinking by default, as Intel found it to be a
+         clear win
+    
+       - Setup empty IRQ routing when creating a VM to avoid having to
+         synchronize SRCU when creating a split IRQCHIP on x86
+    
+       - Rework the sched_in/out() paths to replace kvm_arch_sched_in() with
+         a flag that arch code can use for hooking both sched_in() and
+         sched_out()
+    
+       - Take the vCPU @id as an "unsigned long" instead of "u32" to avoid
+         truncating a bogus value from userspace, e.g. to help userspace
+         detect bugs
+    
+       - Mark a vCPU as preempted if and only if it's scheduled out while in
+         the KVM_RUN loop, e.g. to avoid marking it preempted and thus
+         writing guest memory when retrieving guest state during live
+         migration blackout
+    
+      Selftests:
+    
+       - Remove dead code in the memslot modification stress test
+    
+       - Treat "branch instructions retired" as supported on all AMD Family
+         17h+ CPUs
+    
+       - Print the guest pseudo-RNG seed only when it changes, to avoid
+         spamming the log for tests that create lots of VMs
+    
+       - Make the PMU counters test less flaky when counting LLC cache
+         misses by doing CLFLUSH{OPT} in every loop iteration"
+    
+    * tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm: (227 commits)
+      crypto: ccp: Add the SNP_VLEK_LOAD command
+      KVM: x86/pmu: Add kvm_pmu_call() to simplify static calls of kvm_pmu_ops
+      KVM: x86: Introduce kvm_x86_call() to simplify static calls of kvm_x86_ops
+      KVM: x86: Replace static_call_cond() with static_call()
+      KVM: SEV: Provide support for SNP_EXTENDED_GUEST_REQUEST NAE event
+      x86/sev: Move sev_guest.h into common SEV header
+      KVM: SEV: Provide support for SNP_GUEST_REQUEST NAE event
+      KVM: x86: Suppress MMIO that is triggered during task switch emulation
+      KVM: x86/mmu: Clean up make_huge_page_split_spte() definition and intro
+      KVM: x86/mmu: Bug the VM if KVM tries to split a !hugepage SPTE
+      KVM: selftests: x86: Add test for KVM_PRE_FAULT_MEMORY
+      KVM: x86: Implement kvm_arch_vcpu_pre_fault_memory()
+      KVM: x86/mmu: Make kvm_mmu_do_page_fault() return mapped level
+      KVM: x86/mmu: Account pf_{fixed,emulate,spurious} in callers of "do page fault"
+      KVM: x86/mmu: Bump pf_taken stat only in the "real" page fault handler
+      KVM: Add KVM_PRE_FAULT_MEMORY vcpu ioctl to pre-populate guest memory
+      KVM: Document KVM_PRE_FAULT_MEMORY ioctl
+      mm, virt: merge AS_UNMOVABLE and AS_INACCESSIBLE
+      perf kvm: Add kvm-stat for loongarch64
+      LoongArch: KVM: Add PV steal time support in guest side
+      ...

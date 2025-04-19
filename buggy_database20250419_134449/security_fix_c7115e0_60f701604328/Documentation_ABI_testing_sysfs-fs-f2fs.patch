@@ -1,0 +1,95 @@
+commit c7115e094ca820bb72e0c89f158d16bc48c6fa04
+Author: Chao Yu <chao@kernel.org>
+Date:   Sat Jan 13 03:41:32 2024 +0800
+
+    f2fs: introduce FAULT_BLKADDR_CONSISTENCE
+    
+    We will encounter below inconsistent status when FAULT_BLKADDR type
+    fault injection is on.
+    
+    Info: checkpoint state = d6 :  nat_bits crc fsck compacted_summary orphan_inodes sudden-power-off
+    [ASSERT] (fsck_chk_inode_blk:1254)  --> ino: 0x1c100 has i_blocks: 000000c0, but has 191 blocks
+    [FIX] (fsck_chk_inode_blk:1260)  --> [0x1c100] i_blocks=0x000000c0 -> 0xbf
+    [FIX] (fsck_chk_inode_blk:1269)  --> [0x1c100] i_compr_blocks=0x00000026 -> 0x27
+    [ASSERT] (fsck_chk_inode_blk:1254)  --> ino: 0x1cadb has i_blocks: 0000002f, but has 46 blocks
+    [FIX] (fsck_chk_inode_blk:1260)  --> [0x1cadb] i_blocks=0x0000002f -> 0x2e
+    [FIX] (fsck_chk_inode_blk:1269)  --> [0x1cadb] i_compr_blocks=0x00000011 -> 0x12
+    [ASSERT] (fsck_chk_inode_blk:1254)  --> ino: 0x1c62c has i_blocks: 00000002, but has 1 blocks
+    [FIX] (fsck_chk_inode_blk:1260)  --> [0x1c62c] i_blocks=0x00000002 -> 0x1
+    
+    After we inject fault into f2fs_is_valid_blkaddr() during truncation,
+    a) it missed to increase @nr_free or @valid_blocks
+    b) it can cause in blkaddr leak in truncated dnode
+    Which may cause inconsistent status.
+    
+    This patch separates FAULT_BLKADDR_CONSISTENCE from FAULT_BLKADDR,
+    and rename FAULT_BLKADDR to FAULT_BLKADDR_VALIDITY
+    so that we can:
+    a) use FAULT_BLKADDR_CONSISTENCE in f2fs_truncate_data_blocks_range()
+    to simulate inconsistent issue independently, then it can verify fsck
+    repair flow.
+    b) FAULT_BLKADDR_VALIDITY fault will not cause any inconsistent status,
+    we can just use it to check error path handling in kernel side.
+    
+    Reviewed-by: Daeho Jeong <daehojeong@google.com>
+    Signed-off-by: Chao Yu <chao@kernel.org>
+    Signed-off-by: Jaegeuk Kim <jaegeuk@kernel.org>
+
+diff --git a/Documentation/ABI/testing/sysfs-fs-f2fs b/Documentation/ABI/testing/sysfs-fs-f2fs
+index 99fa87a43926..48c135e24eb5 100644
+--- a/Documentation/ABI/testing/sysfs-fs-f2fs
++++ b/Documentation/ABI/testing/sysfs-fs-f2fs
+@@ -701,29 +701,30 @@ Description:	Support configuring fault injection type, should be
+ 		enabled with fault_injection option, fault type value
+ 		is shown below, it supports single or combined type.
+ 
+-		===================      ===========
+-		Type_Name                Type_Value
+-		===================      ===========
+-		FAULT_KMALLOC            0x000000001
+-		FAULT_KVMALLOC           0x000000002
+-		FAULT_PAGE_ALLOC         0x000000004
+-		FAULT_PAGE_GET           0x000000008
+-		FAULT_ALLOC_BIO          0x000000010 (obsolete)
+-		FAULT_ALLOC_NID          0x000000020
+-		FAULT_ORPHAN             0x000000040
+-		FAULT_BLOCK              0x000000080
+-		FAULT_DIR_DEPTH          0x000000100
+-		FAULT_EVICT_INODE        0x000000200
+-		FAULT_TRUNCATE           0x000000400
+-		FAULT_READ_IO            0x000000800
+-		FAULT_CHECKPOINT         0x000001000
+-		FAULT_DISCARD            0x000002000
+-		FAULT_WRITE_IO           0x000004000
+-		FAULT_SLAB_ALLOC         0x000008000
+-		FAULT_DQUOT_INIT         0x000010000
+-		FAULT_LOCK_OP            0x000020000
+-		FAULT_BLKADDR            0x000040000
+-		===================      ===========
++		===========================      ===========
++		Type_Name                        Type_Value
++		===========================      ===========
++		FAULT_KMALLOC                    0x000000001
++		FAULT_KVMALLOC                   0x000000002
++		FAULT_PAGE_ALLOC                 0x000000004
++		FAULT_PAGE_GET                   0x000000008
++		FAULT_ALLOC_BIO                  0x000000010 (obsolete)
++		FAULT_ALLOC_NID                  0x000000020
++		FAULT_ORPHAN                     0x000000040
++		FAULT_BLOCK                      0x000000080
++		FAULT_DIR_DEPTH                  0x000000100
++		FAULT_EVICT_INODE                0x000000200
++		FAULT_TRUNCATE                   0x000000400
++		FAULT_READ_IO                    0x000000800
++		FAULT_CHECKPOINT                 0x000001000
++		FAULT_DISCARD                    0x000002000
++		FAULT_WRITE_IO                   0x000004000
++		FAULT_SLAB_ALLOC                 0x000008000
++		FAULT_DQUOT_INIT                 0x000010000
++		FAULT_LOCK_OP                    0x000020000
++		FAULT_BLKADDR_VALIDITY           0x000040000
++		FAULT_BLKADDR_CONSISTENCE        0x000080000
++		===========================      ===========
+ 
+ What:		/sys/fs/f2fs/<disk>/discard_io_aware_gran
+ Date:		January 2023

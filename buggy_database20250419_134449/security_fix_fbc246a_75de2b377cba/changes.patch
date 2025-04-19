@@ -1,0 +1,226 @@
+diff --cc fs/f2fs/f2fs.h
+index 7c5f121edac5,11c5a6d9f849..4024790028aa
+--- a/fs/f2fs/f2fs.h
++++ b/fs/f2fs/f2fs.h
+@@@ -152,8 -151,9 +152,9 @@@ struct f2fs_mount_info 
+  #define F2FS_FEATURE_QUOTA_INO		0x0080
+  #define F2FS_FEATURE_INODE_CRTIME	0x0100
+  #define F2FS_FEATURE_LOST_FOUND		0x0200
+ -#define F2FS_FEATURE_VERITY		0x0400	/* reserved */
+ +#define F2FS_FEATURE_VERITY		0x0400
+  #define F2FS_FEATURE_SB_CHKSUM		0x0800
++ #define F2FS_FEATURE_CASEFOLD		0x1000
+  
+  #define __F2FS_HAS_FEATURE(raw_super, mask)				\
+  	((raw_super->feature & cpu_to_le32(mask)) != 0)
+@@@ -3574,8 -3584,8 +3597,9 @@@ F2FS_FEATURE_FUNCS(flexible_inline_xatt
+  F2FS_FEATURE_FUNCS(quota_ino, QUOTA_INO);
+  F2FS_FEATURE_FUNCS(inode_crtime, INODE_CRTIME);
+  F2FS_FEATURE_FUNCS(lost_found, LOST_FOUND);
+ +F2FS_FEATURE_FUNCS(verity, VERITY);
+  F2FS_FEATURE_FUNCS(sb_chksum, SB_CHKSUM);
++ F2FS_FEATURE_FUNCS(casefold, CASEFOLD);
+  
+  #ifdef CONFIG_BLK_DEV_ZONED
+  static inline bool f2fs_blkz_is_seq(struct f2fs_sb_info *sbi, int devi,
+diff --cc fs/f2fs/file.c
+index 56efde9d3659,e4b78fb3fc79..29bc0a542759
+--- a/fs/f2fs/file.c
++++ b/fs/f2fs/file.c
+@@@ -1717,7 -1722,7 +1733,8 @@@ static const struct 
+  		FS_ENCRYPT_FL |		\
+  		FS_INLINE_DATA_FL |	\
+  		FS_NOCOW_FL |		\
+- 		FS_VERITY_FL)
+++		FS_VERITY_FL |		\
++ 		FS_CASEFOLD_FL)
+  
+  #define F2FS_SETTABLE_FS_FL (		\
+  		FS_SYNC_FL |		\
+@@@ -3117,30 -3088,68 +3145,92 @@@ static int f2fs_ioc_resize_fs(struct fi
+  	return ret;
+  }
+  
+ +static int f2fs_ioc_enable_verity(struct file *filp, unsigned long arg)
+ +{
+ +	struct inode *inode = file_inode(filp);
+ +
+ +	f2fs_update_time(F2FS_I_SB(inode), REQ_TIME);
+ +
+ +	if (!f2fs_sb_has_verity(F2FS_I_SB(inode))) {
+ +		f2fs_warn(F2FS_I_SB(inode),
+ +			  "Can't enable fs-verity on inode %lu: the verity feature is not enabled on this filesystem.\n",
+ +			  inode->i_ino);
+ +		return -EOPNOTSUPP;
+ +	}
+ +
+ +	return fsverity_ioctl_enable(filp, (const void __user *)arg);
+ +}
+ +
+ +static int f2fs_ioc_measure_verity(struct file *filp, unsigned long arg)
+ +{
+ +	if (!f2fs_sb_has_verity(F2FS_I_SB(file_inode(filp))))
+ +		return -EOPNOTSUPP;
+ +
+ +	return fsverity_ioctl_measure(filp, (void __user *)arg);
+ +}
+ +
++ static int f2fs_get_volume_name(struct file *filp, unsigned long arg)
++ {
++ 	struct inode *inode = file_inode(filp);
++ 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
++ 	char *vbuf;
++ 	int count;
++ 	int err = 0;
++ 
++ 	vbuf = f2fs_kzalloc(sbi, MAX_VOLUME_NAME, GFP_KERNEL);
++ 	if (!vbuf)
++ 		return -ENOMEM;
++ 
++ 	down_read(&sbi->sb_lock);
++ 	count = utf16s_to_utf8s(sbi->raw_super->volume_name,
++ 			ARRAY_SIZE(sbi->raw_super->volume_name),
++ 			UTF16_LITTLE_ENDIAN, vbuf, MAX_VOLUME_NAME);
++ 	up_read(&sbi->sb_lock);
++ 
++ 	if (copy_to_user((char __user *)arg, vbuf,
++ 				min(FSLABEL_MAX, count)))
++ 		err = -EFAULT;
++ 
++ 	kvfree(vbuf);
++ 	return err;
++ }
++ 
++ static int f2fs_set_volume_name(struct file *filp, unsigned long arg)
++ {
++ 	struct inode *inode = file_inode(filp);
++ 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
++ 	char *vbuf;
++ 	int err = 0;
++ 
++ 	if (!capable(CAP_SYS_ADMIN))
++ 		return -EPERM;
++ 
++ 	vbuf = strndup_user((const char __user *)arg, FSLABEL_MAX);
++ 	if (IS_ERR(vbuf))
++ 		return PTR_ERR(vbuf);
++ 
++ 	err = mnt_want_write_file(filp);
++ 	if (err)
++ 		goto out;
++ 
++ 	down_write(&sbi->sb_lock);
++ 
++ 	memset(sbi->raw_super->volume_name, 0,
++ 			sizeof(sbi->raw_super->volume_name));
++ 	utf8s_to_utf16s(vbuf, strlen(vbuf), UTF16_LITTLE_ENDIAN,
++ 			sbi->raw_super->volume_name,
++ 			ARRAY_SIZE(sbi->raw_super->volume_name));
++ 
++ 	err = f2fs_commit_super(sbi, false);
++ 
++ 	up_write(&sbi->sb_lock);
++ 
++ 	mnt_drop_write_file(filp);
++ out:
++ 	kfree(vbuf);
++ 	return err;
++ }
++ 
+  long f2fs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+  {
+  	if (unlikely(f2fs_cp_error(F2FS_I_SB(file_inode(filp)))))
+@@@ -3209,10 -3210,10 +3301,14 @@@
+  		return f2fs_ioc_precache_extents(filp, arg);
+  	case F2FS_IOC_RESIZE_FS:
+  		return f2fs_ioc_resize_fs(filp, arg);
+ +	case FS_IOC_ENABLE_VERITY:
+ +		return f2fs_ioc_enable_verity(filp, arg);
+ +	case FS_IOC_MEASURE_VERITY:
+ +		return f2fs_ioc_measure_verity(filp, arg);
++ 	case F2FS_IOC_GET_VOLUME_NAME:
++ 		return f2fs_get_volume_name(filp, arg);
++ 	case F2FS_IOC_SET_VOLUME_NAME:
++ 		return f2fs_set_volume_name(filp, arg);
+  	default:
+  		return -ENOTTY;
+  	}
+@@@ -3332,8 -3324,8 +3424,10 @@@ long f2fs_compat_ioctl(struct file *fil
+  	case F2FS_IOC_SET_PIN_FILE:
+  	case F2FS_IOC_PRECACHE_EXTENTS:
+  	case F2FS_IOC_RESIZE_FS:
+ +	case FS_IOC_ENABLE_VERITY:
+ +	case FS_IOC_MEASURE_VERITY:
++ 	case F2FS_IOC_GET_VOLUME_NAME:
++ 	case F2FS_IOC_SET_VOLUME_NAME:
+  		break;
+  	default:
+  		return -ENOIOCTLCMD;
+diff --cc fs/f2fs/inode.c
+index 06da75d418e0,87214414936b..db4fec30c30d
+--- a/fs/f2fs/inode.c
++++ b/fs/f2fs/inode.c
+@@@ -46,11 -46,11 +46,13 @@@ void f2fs_set_inode_flags(struct inode 
+  		new_fl |= S_DIRSYNC;
+  	if (file_is_encrypt(inode))
+  		new_fl |= S_ENCRYPTED;
+ +	if (file_is_verity(inode))
+ +		new_fl |= S_VERITY;
++ 	if (flags & F2FS_CASEFOLD_FL)
++ 		new_fl |= S_CASEFOLD;
+  	inode_set_flags(inode, new_fl,
+  			S_SYNC|S_APPEND|S_IMMUTABLE|S_NOATIME|S_DIRSYNC|
+- 			S_ENCRYPTED|S_VERITY);
+ -			S_ENCRYPTED|S_CASEFOLD);
+++			S_ENCRYPTED|S_VERITY|S_CASEFOLD);
+  }
+  
+  static void __get_inode_rdev(struct inode *inode, struct f2fs_inode *ri)
+diff --cc fs/f2fs/sysfs.c
+index 0cd64f994068,f9fcca695db9..b558b64a4c9c
+--- a/fs/f2fs/sysfs.c
++++ b/fs/f2fs/sysfs.c
+@@@ -367,8 -381,8 +384,9 @@@ enum feat_id 
+  	FEAT_QUOTA_INO,
+  	FEAT_INODE_CRTIME,
+  	FEAT_LOST_FOUND,
+ +	FEAT_VERITY,
+  	FEAT_SB_CHECKSUM,
++ 	FEAT_CASEFOLD,
+  };
+  
+  static ssize_t f2fs_feature_show(struct f2fs_attr *a,
+@@@ -385,8 -399,8 +403,9 @@@
+  	case FEAT_QUOTA_INO:
+  	case FEAT_INODE_CRTIME:
+  	case FEAT_LOST_FOUND:
+ +	case FEAT_VERITY:
+  	case FEAT_SB_CHECKSUM:
++ 	case FEAT_CASEFOLD:
+  		return snprintf(buf, PAGE_SIZE, "supported\n");
+  	}
+  	return 0;
+@@@ -475,10 -490,8 +495,11 @@@ F2FS_FEATURE_RO_ATTR(flexible_inline_xa
+  F2FS_FEATURE_RO_ATTR(quota_ino, FEAT_QUOTA_INO);
+  F2FS_FEATURE_RO_ATTR(inode_crtime, FEAT_INODE_CRTIME);
+  F2FS_FEATURE_RO_ATTR(lost_found, FEAT_LOST_FOUND);
+ +#ifdef CONFIG_FS_VERITY
+ +F2FS_FEATURE_RO_ATTR(verity, FEAT_VERITY);
+ +#endif
+  F2FS_FEATURE_RO_ATTR(sb_checksum, FEAT_SB_CHECKSUM);
++ F2FS_FEATURE_RO_ATTR(casefold, FEAT_CASEFOLD);
+  
+  #define ATTR_LIST(name) (&f2fs_attr_##name.attr)
+  static struct attribute *f2fs_attrs[] = {
+@@@ -542,10 -556,8 +564,11 @@@ static struct attribute *f2fs_feat_attr
+  	ATTR_LIST(quota_ino),
+  	ATTR_LIST(inode_crtime),
+  	ATTR_LIST(lost_found),
+ +#ifdef CONFIG_FS_VERITY
+ +	ATTR_LIST(verity),
+ +#endif
+  	ATTR_LIST(sb_checksum),
++ 	ATTR_LIST(casefold),
+  	NULL,
+  };
+  ATTRIBUTE_GROUPS(f2fs_feat);

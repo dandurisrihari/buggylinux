@@ -1,0 +1,118 @@
+diff --git a/arch/powerpc/include/asm/book3s/32/kup.h b/arch/powerpc/include/asm/book3s/32/kup.h
+index b18cd931e325..32fd4452e960 100644
+--- a/arch/powerpc/include/asm/book3s/32/kup.h
++++ b/arch/powerpc/include/asm/book3s/32/kup.h
+@@ -177,8 +177,8 @@ static inline void restore_user_access(unsigned long flags)
+ 		allow_user_access(to, to, end - addr, KUAP_READ_WRITE);
+ }
+ 
+-static inline bool bad_kuap_fault(struct pt_regs *regs, unsigned long address,
+-				  bool is_write, unsigned long error_code)
++static inline bool
++bad_kuap_fault(struct pt_regs *regs, unsigned long address, bool is_write)
+ {
+ 	unsigned long begin = regs->kuap & 0xf0000000;
+ 	unsigned long end = regs->kuap << 28;
+diff --git a/arch/powerpc/include/asm/book3s/64/kup.h b/arch/powerpc/include/asm/book3s/64/kup.h
+index f2e6dd78d5e2..7075c92c320c 100644
+--- a/arch/powerpc/include/asm/book3s/64/kup.h
++++ b/arch/powerpc/include/asm/book3s/64/kup.h
+@@ -353,29 +353,29 @@ static inline void set_kuap(unsigned long value)
+ 	isync();
+ }
+ 
+-#define RADIX_KUAP_BLOCK_READ	UL(0x4000000000000000)
+-#define RADIX_KUAP_BLOCK_WRITE	UL(0x8000000000000000)
+-
+ static inline bool bad_kuap_fault(struct pt_regs *regs, unsigned long address,
+-				  bool is_write, unsigned long error_code)
++				  bool is_write)
+ {
+ 	if (!mmu_has_feature(MMU_FTR_BOOK3S_KUAP))
+ 		return false;
+-
+-	if (radix_enabled()) {
+-		/*
+-		 * Will be a storage protection fault.
+-		 * Only check the details of AMR[0]
+-		 */
+-		return WARN((regs->kuap & (is_write ? RADIX_KUAP_BLOCK_WRITE : RADIX_KUAP_BLOCK_READ)),
+-			    "Bug: %s fault blocked by AMR!", is_write ? "Write" : "Read");
+-	}
+ 	/*
+-	 * We don't want to WARN here because userspace can setup
+-	 * keys such that a kernel access to user address can cause
+-	 * fault
++	 * For radix this will be a storage protection fault (DSISR_PROTFAULT).
++	 * For hash this will be a key fault (DSISR_KEYFAULT)
+ 	 */
+-	return !!(error_code & DSISR_KEYFAULT);
++	/*
++	 * We do have exception table entry, but accessing the
++	 * userspace results in fault.  This could be because we
++	 * didn't unlock the AMR or access is denied by userspace
++	 * using a key value that blocks access. We are only interested
++	 * in catching the use case of accessing without unlocking
++	 * the AMR. Hence check for BLOCK_WRITE/READ against AMR.
++	 */
++	if (is_write) {
++		return WARN(((regs->amr & AMR_KUAP_BLOCK_WRITE) == AMR_KUAP_BLOCK_WRITE),
++			    "Bug: Write fault blocked by AMR!");
++	}
++	return WARN(((regs->amr & AMR_KUAP_BLOCK_READ) == AMR_KUAP_BLOCK_READ),
++		    "Bug: Read fault blocked by AMR!");
+ }
+ 
+ static __always_inline void allow_user_access(void __user *to, const void __user *from,
+diff --git a/arch/powerpc/include/asm/kup.h b/arch/powerpc/include/asm/kup.h
+index f8ec679bd2de..5a9820c54da9 100644
+--- a/arch/powerpc/include/asm/kup.h
++++ b/arch/powerpc/include/asm/kup.h
+@@ -62,8 +62,8 @@ void setup_kuap(bool disabled);
+ #else
+ static inline void setup_kuap(bool disabled) { }
+ 
+-static inline bool bad_kuap_fault(struct pt_regs *regs, unsigned long address,
+-				  bool is_write, unsigned long error_code)
++static inline bool
++bad_kuap_fault(struct pt_regs *regs, unsigned long address, bool is_write)
+ {
+ 	return false;
+ }
+diff --git a/arch/powerpc/include/asm/nohash/32/kup-8xx.h b/arch/powerpc/include/asm/nohash/32/kup-8xx.h
+index 7bdd9e5b63ed..567cdc557402 100644
+--- a/arch/powerpc/include/asm/nohash/32/kup-8xx.h
++++ b/arch/powerpc/include/asm/nohash/32/kup-8xx.h
+@@ -60,8 +60,8 @@ static inline void restore_user_access(unsigned long flags)
+ 	mtspr(SPRN_MD_AP, flags);
+ }
+ 
+-static inline bool bad_kuap_fault(struct pt_regs *regs, unsigned long address,
+-				  bool is_write, unsigned long error_code)
++static inline bool
++bad_kuap_fault(struct pt_regs *regs, unsigned long address, bool is_write)
+ {
+ 	return WARN(!((regs->kuap ^ MD_APG_KUAP) & 0xff000000),
+ 		    "Bug: fault blocked by AP register !");
+diff --git a/arch/powerpc/mm/fault.c b/arch/powerpc/mm/fault.c
+index c91621df0c61..b12595102525 100644
+--- a/arch/powerpc/mm/fault.c
++++ b/arch/powerpc/mm/fault.c
+@@ -210,7 +210,7 @@ static bool bad_kernel_fault(struct pt_regs *regs, unsigned long error_code,
+ 		return true;
+ 	}
+ 
+-	if (!is_exec && address < TASK_SIZE && (error_code & DSISR_PROTFAULT) &&
++	if (!is_exec && address < TASK_SIZE && (error_code & (DSISR_PROTFAULT | DSISR_KEYFAULT)) &&
+ 	    !search_exception_tables(regs->nip)) {
+ 		pr_crit_ratelimited("Kernel attempted to access user page (%lx) - exploit attempt? (uid: %d)\n",
+ 				    address,
+@@ -227,7 +227,7 @@ static bool bad_kernel_fault(struct pt_regs *regs, unsigned long error_code,
+ 
+ 	// Read/write fault in a valid region (the exception table search passed
+ 	// above), but blocked by KUAP is bad, it can never succeed.
+-	if (bad_kuap_fault(regs, address, is_write, error_code))
++	if (bad_kuap_fault(regs, address, is_write))
+ 		return true;
+ 
+ 	// What's left? Kernel fault on user in well defined regions (extable

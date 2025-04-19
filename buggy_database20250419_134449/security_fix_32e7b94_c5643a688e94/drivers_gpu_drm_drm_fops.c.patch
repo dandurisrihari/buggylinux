@@ -1,0 +1,52 @@
+commit 32e7b94a3fa8e137aab9f2c65dff86be73245fc8
+Author: David Rheinsberg <david@readahead.eu>
+Date:   Mon May 4 21:01:30 2015 +0200
+
+    drm: simplify authentication management
+    
+    The magic auth tokens we have are a simple map from cyclic IDs to drm_file
+    objects. Remove all the old bulk of code and replace it with a simple,
+    direct IDR.
+    
+    The previous behavior is kept. Especially calling authmagic multiple times
+    on the same magic results in EINVAL except on the first call. The only
+    difference in behavior is that we never allocate IDs multiple times as
+    long as a client has its FD open.
+    
+    v2:
+     - Fix return code of GetMagic()
+     - Use non-cyclic IDR allocator
+     - fix off-by-one in "magic > INT_MAX" sanity check
+    
+    v3:
+     - drop redundant "magic > INT_MAX" check
+    
+    Signed-off-by: David Herrmann <dh.herrmann@gmail.com>
+    Reviewed-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Signed-off-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+
+diff --git a/drivers/gpu/drm/drm_fops.c b/drivers/gpu/drm/drm_fops.c
+index 076dd606b580..0f6a5c8801e3 100644
+--- a/drivers/gpu/drm/drm_fops.c
++++ b/drivers/gpu/drm/drm_fops.c
+@@ -380,6 +380,8 @@ int drm_release(struct inode *inode, struct file *filp)
+ 
+ 	mutex_lock(&dev->struct_mutex);
+ 	list_del(&file_priv->lhead);
++	if (file_priv->magic)
++		idr_remove(&file_priv->master->magic_map, file_priv->magic);
+ 	mutex_unlock(&dev->struct_mutex);
+ 
+ 	if (dev->driver->preclose)
+@@ -394,11 +396,6 @@ int drm_release(struct inode *inode, struct file *filp)
+ 		  (long)old_encode_dev(file_priv->minor->kdev->devt),
+ 		  dev->open_count);
+ 
+-	/* Release any auth tokens that might point to this file_priv,
+-	   (do that under the drm_global_mutex) */
+-	if (file_priv->magic)
+-		(void) drm_remove_magic(file_priv->master, file_priv->magic);
+-
+ 	/* if the master has gone away we can't do anything with the lock */
+ 	if (file_priv->minor->master)
+ 		drm_master_release(dev, filp);

@@ -1,0 +1,108 @@
+diff --git a/arch/arm64/include/asm/compiler.h b/arch/arm64/include/asm/compiler.h
+index 9033a0b2f46a..b6d1d62474e5 100644
+--- a/arch/arm64/include/asm/compiler.h
++++ b/arch/arm64/include/asm/compiler.h
+@@ -15,15 +15,33 @@
+ #define ptrauth_user_pac_mask()		GENMASK_ULL(54, vabits_actual)
+ #define ptrauth_kernel_pac_mask()	GENMASK_ULL(63, vabits_actual)
+ 
+-/* Valid for EL0 TTBR0 and EL1 TTBR1 instruction pointers */
+-#define ptrauth_clear_pac(ptr)						\
+-	((ptr & BIT_ULL(55)) ? (ptr | ptrauth_kernel_pac_mask()) :	\
+-			       (ptr & ~ptrauth_user_pac_mask()))
++#define xpaclri(ptr)							\
++({									\
++	register unsigned long __xpaclri_ptr asm("x30") = (ptr);	\
++									\
++	asm(								\
++	ARM64_ASM_PREAMBLE						\
++	"	hint	#7\n"						\
++	: "+r" (__xpaclri_ptr));					\
++									\
++	__xpaclri_ptr;							\
++})
+ 
+-#if defined(CONFIG_ARM64_PTR_AUTH_KERNEL) &&				\
+-    !defined(CONFIG_BUILTIN_RETURN_ADDRESS_STRIPS_PAC)
++#ifdef CONFIG_ARM64_PTR_AUTH_KERNEL
++#define ptrauth_strip_kernel_insn_pac(ptr)	xpaclri(ptr)
++#else
++#define ptrauth_strip_kernel_insn_pac(ptr)	(ptr)
++#endif
++
++#ifdef CONFIG_ARM64_PTR_AUTH
++#define ptrauth_strip_user_insn_pac(ptr)	xpaclri(ptr)
++#else
++#define ptrauth_strip_user_insn_pac(ptr)	(ptr)
++#endif
++
++#if !defined(CONFIG_BUILTIN_RETURN_ADDRESS_STRIPS_PAC)
+ #define __builtin_return_address(val)					\
+-	(void *)(ptrauth_clear_pac((unsigned long)__builtin_return_address(val)))
++	(void *)(ptrauth_strip_kernel_insn_pac((unsigned long)__builtin_return_address(val)))
+ #endif
+ 
+ #endif /* __ASM_COMPILER_H */
+diff --git a/arch/arm64/include/asm/pointer_auth.h b/arch/arm64/include/asm/pointer_auth.h
+index efb098de3a84..b0665db86aa6 100644
+--- a/arch/arm64/include/asm/pointer_auth.h
++++ b/arch/arm64/include/asm/pointer_auth.h
+@@ -97,11 +97,6 @@ extern int ptrauth_set_enabled_keys(struct task_struct *tsk, unsigned long keys,
+ 				    unsigned long enabled);
+ extern int ptrauth_get_enabled_keys(struct task_struct *tsk);
+ 
+-static inline unsigned long ptrauth_strip_insn_pac(unsigned long ptr)
+-{
+-	return ptrauth_clear_pac(ptr);
+-}
+-
+ static __always_inline void ptrauth_enable(void)
+ {
+ 	if (!system_supports_address_auth())
+@@ -133,7 +128,6 @@ static __always_inline void ptrauth_enable(void)
+ #define ptrauth_prctl_reset_keys(tsk, arg)	(-EINVAL)
+ #define ptrauth_set_enabled_keys(tsk, keys, enabled)	(-EINVAL)
+ #define ptrauth_get_enabled_keys(tsk)	(-EINVAL)
+-#define ptrauth_strip_insn_pac(lr)	(lr)
+ #define ptrauth_suspend_exit()
+ #define ptrauth_thread_init_user()
+ #define ptrauth_thread_switch_user(tsk)
+diff --git a/arch/arm64/kernel/perf_callchain.c b/arch/arm64/kernel/perf_callchain.c
+index 65b196e3ca6c..6d157f32187b 100644
+--- a/arch/arm64/kernel/perf_callchain.c
++++ b/arch/arm64/kernel/perf_callchain.c
+@@ -38,7 +38,7 @@ user_backtrace(struct frame_tail __user *tail,
+ 	if (err)
+ 		return NULL;
+ 
+-	lr = ptrauth_strip_insn_pac(buftail.lr);
++	lr = ptrauth_strip_user_insn_pac(buftail.lr);
+ 
+ 	perf_callchain_store(entry, lr);
+ 
+diff --git a/arch/arm64/kernel/process.c b/arch/arm64/kernel/process.c
+index 71d59b5abede..b5bed62483cb 100644
+--- a/arch/arm64/kernel/process.c
++++ b/arch/arm64/kernel/process.c
+@@ -217,7 +217,7 @@ void __show_regs(struct pt_regs *regs)
+ 
+ 	if (!user_mode(regs)) {
+ 		printk("pc : %pS\n", (void *)regs->pc);
+-		printk("lr : %pS\n", (void *)ptrauth_strip_insn_pac(lr));
++		printk("lr : %pS\n", (void *)ptrauth_strip_kernel_insn_pac(lr));
+ 	} else {
+ 		printk("pc : %016llx\n", regs->pc);
+ 		printk("lr : %016llx\n", lr);
+diff --git a/arch/arm64/kernel/stacktrace.c b/arch/arm64/kernel/stacktrace.c
+index f527fadcb33b..17f66a74c745 100644
+--- a/arch/arm64/kernel/stacktrace.c
++++ b/arch/arm64/kernel/stacktrace.c
+@@ -120,7 +120,7 @@ unwind_next(struct unwind_state *state)
+ 	if (err)
+ 		return err;
+ 
+-	state->pc = ptrauth_strip_insn_pac(state->pc);
++	state->pc = ptrauth_strip_kernel_insn_pac(state->pc);
+ 
+ 	return unwind_recover_return_address(state);
+ }

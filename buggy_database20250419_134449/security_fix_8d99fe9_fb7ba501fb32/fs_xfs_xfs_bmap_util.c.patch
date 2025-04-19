@@ -1,0 +1,167 @@
+commit 8d99fe92fed019e203f458370129fb28b3fb5740
+Author: Brian Foster <bfoster@redhat.com>
+Date:   Wed Aug 19 09:51:16 2015 +1000
+
+    xfs: fix efi/efd error handling to avoid fs shutdown hangs
+    
+    Freeing an extent in XFS involves logging an EFI (extent free
+    intention), freeing the actual extent, and logging an EFD (extent
+    free done). The EFI object is created with a reference count of 2:
+    one for the current transaction and one for the subsequently created
+    EFD. Under normal circumstances, the first reference is dropped when
+    the EFI is unpinned and the second reference is dropped when the EFD
+    is committed to the on-disk log.
+    
+    In event of errors or filesystem shutdown, there are various
+    potential cleanup scenarios depending on the state of the EFI/EFD.
+    The cleanup scenarios are confusing and racy, as demonstrated by the
+    following test sequence:
+    
+            # mount $dev $mnt
+            # fsstress -d $mnt -n 99999 -p 16 -z -f fallocate=1 \
+                    -f punch=1 -f creat=1 -f unlink=1 &
+            # sleep 5
+            # killall -9 fsstress; wait
+            # godown -f $mnt
+            # umount
+    
+    ... in which the final umount can hang due to the AIL being pinned
+    indefinitely by one or more EFI items. This can occur due to several
+    conditions. For example, if the shutdown occurs after the EFI is
+    committed to the on-disk log and the EFD committed to the CIL, but
+    before the EFD committed to the log, the EFD iop_committed() abort
+    handler does not drop its reference to the EFI. Alternatively,
+    manual error injection in the xfs_bmap_finish() codepath shows that
+    if an error occurs after the EFI transaction is committed but before
+    the EFD is constructed and logged, the EFI is never released from
+    the AIL.
+    
+    Update the EFI/EFD item handling code to use a more straightforward
+    and reliable approach to error handling. If an error occurs after
+    the EFI transaction is committed and before the EFD is constructed,
+    release the EFI explicitly from xfs_bmap_finish(). If the EFI
+    transaction is cancelled, release the EFI in the unlock handler.
+    
+    Once the EFD is constructed, it is responsible for releasing the EFI
+    under any circumstances (including whether the EFI item aborts due
+    to log I/O error). Update the EFD item handlers to release the EFI
+    if the transaction is cancelled or aborts due to log I/O error.
+    Finally, update xfs_bmap_finish() to log at least one EFD extent to
+    the transaction before xfs_free_extent() errors are handled to
+    ensure the transaction is dirty and EFD item error handling is
+    triggered.
+    
+    Signed-off-by: Brian Foster <bfoster@redhat.com>
+    Reviewed-by: Dave Chinner <dchinner@redhat.com>
+    Signed-off-by: Dave Chinner <david@fromorbit.com>
+
+diff --git a/fs/xfs/xfs_bmap_util.c b/fs/xfs/xfs_bmap_util.c
+index 0f34886cf726..fa65f67737c5 100644
+--- a/fs/xfs/xfs_bmap_util.c
++++ b/fs/xfs/xfs_bmap_util.c
+@@ -67,16 +67,15 @@ xfs_fsb_to_db(struct xfs_inode *ip, xfs_fsblock_t fsb)
+  */
+ int						/* error */
+ xfs_bmap_finish(
+-	xfs_trans_t		**tp,		/* transaction pointer addr */
+-	xfs_bmap_free_t		*flist,		/* i/o: list extents to free */
+-	int			*committed)	/* xact committed or not */
++	struct xfs_trans		**tp,	/* transaction pointer addr */
++	struct xfs_bmap_free		*flist,	/* i/o: list extents to free */
++	int				*committed)/* xact committed or not */
+ {
+-	xfs_efd_log_item_t	*efd;		/* extent free data */
+-	xfs_efi_log_item_t	*efi;		/* extent free intention */
+-	int			error;		/* error return value */
+-	xfs_bmap_free_item_t	*free;		/* free extent item */
+-	xfs_mount_t		*mp;		/* filesystem mount structure */
+-	xfs_bmap_free_item_t	*next;		/* next item on free list */
++	struct xfs_efd_log_item		*efd;	/* extent free data */
++	struct xfs_efi_log_item		*efi;	/* extent free intention */
++	int				error;	/* error return value */
++	struct xfs_bmap_free_item	*free;	/* free extent item */
++	struct xfs_bmap_free_item	*next;	/* next item on free list */
+ 
+ 	ASSERT((*tp)->t_flags & XFS_TRANS_PERM_LOG_RES);
+ 	if (flist->xbf_count == 0) {
+@@ -88,40 +87,55 @@ xfs_bmap_finish(
+ 		xfs_trans_log_efi_extent(*tp, efi, free->xbfi_startblock,
+ 			free->xbfi_blockcount);
+ 
+-	error = xfs_trans_roll(tp, NULL);
+-	*committed = 1;
+-	/*
+-	 * We have a new transaction, so we should return committed=1,
+-	 * even though we're returning an error.
+-	 */
+-	if (error)
++	error = __xfs_trans_roll(tp, NULL, committed);
++	if (error) {
++		/*
++		 * If the transaction was committed, drop the EFD reference
++		 * since we're bailing out of here. The other reference is
++		 * dropped when the EFI hits the AIL.
++		 *
++		 * If the transaction was not committed, the EFI is freed by the
++		 * EFI item unlock handler on abort. Also, we have a new
++		 * transaction so we should return committed=1 even though we're
++		 * returning an error.
++		 */
++		if (*committed) {
++			xfs_efi_release(efi);
++			xfs_force_shutdown((*tp)->t_mountp,
++				(error == -EFSCORRUPTED) ?
++					SHUTDOWN_CORRUPT_INCORE :
++					SHUTDOWN_META_IO_ERROR);
++		} else {
++			*committed = 1;
++		}
++
+ 		return error;
++	}
+ 
+ 	efd = xfs_trans_get_efd(*tp, efi, flist->xbf_count);
+ 	for (free = flist->xbf_first; free != NULL; free = next) {
+ 		next = free->xbfi_next;
+-		if ((error = xfs_free_extent(*tp, free->xbfi_startblock,
+-				free->xbfi_blockcount))) {
+-			/*
+-			 * The bmap free list will be cleaned up at a
+-			 * higher level.  The EFI will be canceled when
+-			 * this transaction is aborted.
+-			 * Need to force shutdown here to make sure it
+-			 * happens, since this transaction may not be
+-			 * dirty yet.
+-			 */
+-			mp = (*tp)->t_mountp;
+-			if (!XFS_FORCED_SHUTDOWN(mp))
+-				xfs_force_shutdown(mp,
+-						   (error == -EFSCORRUPTED) ?
+-						   SHUTDOWN_CORRUPT_INCORE :
+-						   SHUTDOWN_META_IO_ERROR);
+-			return error;
+-		}
++
++		/*
++		 * Free the extent and log the EFD to dirty the transaction
++		 * before handling errors. This ensures that the transaction is
++		 * aborted, which:
++		 *
++		 * 1.) releases the EFI and frees the EFD
++		 * 2.) shuts down the filesystem
++		 *
++		 * The bmap free list is cleaned up at a higher level.
++		 */
++		error = xfs_free_extent(*tp, free->xbfi_startblock,
++					free->xbfi_blockcount);
+ 		xfs_trans_log_efd_extent(*tp, efd, free->xbfi_startblock,
+-			free->xbfi_blockcount);
++					 free->xbfi_blockcount);
++		if (error)
++			return error;
++
+ 		xfs_bmap_del_free(flist, NULL, free);
+ 	}
++
+ 	return 0;
+ }

@@ -1,0 +1,165 @@
+diff --cc arch/arm64/include/asm/cpufeature.h
+index 3d63c20ccefc,93fe8e6beb64..b64e49bd9d10
+--- a/arch/arm64/include/asm/cpufeature.h
++++ b/arch/arm64/include/asm/cpufeature.h
+@@@ -835,21 -841,20 +842,31 @@@ static inline bool system_supports_lpa2
+  
+  static inline bool system_supports_poe(void)
+  {
+ -	return IS_ENABLED(CONFIG_ARM64_POE) &&
+ -		alternative_has_cap_unlikely(ARM64_HAS_S1POE);
+ +	return alternative_has_cap_unlikely(ARM64_HAS_S1POE);
+ +}
+ +
+ +static inline bool system_supports_gcs(void)
+ +{
+ +	return IS_ENABLED(CONFIG_ARM64_GCS) &&
+ +		alternative_has_cap_unlikely(ARM64_HAS_GCS);
+ +}
+ +
+ +static inline bool system_supports_haft(void)
+ +{
+ +	return IS_ENABLED(CONFIG_ARM64_HAFT) &&
+ +		cpus_have_final_cap(ARM64_HAFT);
+  }
+  
++ static __always_inline bool system_supports_mpam(void)
++ {
++ 	return alternative_has_cap_unlikely(ARM64_MPAM);
++ }
++ 
++ static __always_inline bool system_supports_mpam_hcr(void)
++ {
++ 	return alternative_has_cap_unlikely(ARM64_MPAM_HCR);
++ }
++ 
+  int do_emulate_mrs(struct pt_regs *regs, u32 sys_reg, u32 rt);
+  bool try_emulate_mrs(struct pt_regs *regs, u32 isn);
+  
+diff --cc arch/arm64/kvm/guest.c
+index e738a353b20e,4cd7ffa76794..12dad841f2a5
+--- a/arch/arm64/kvm/guest.c
++++ b/arch/arm64/kvm/guest.c
+@@@ -1051,13 -1051,11 +1051,12 @@@ int kvm_vm_ioctl_mte_copy_tags(struct k
+  	}
+  
+  	while (length > 0) {
+- 		kvm_pfn_t pfn = gfn_to_pfn_prot(kvm, gfn, write, NULL);
++ 		struct page *page = __gfn_to_page(kvm, gfn, write);
+  		void *maddr;
+  		unsigned long num_tags;
+- 		struct page *page;
+ +		struct folio *folio;
+  
+- 		if (is_error_noslot_pfn(pfn)) {
++ 		if (!page) {
+  			ret = -EFAULT;
+  			goto out;
+  		}
+@@@ -1099,12 -1090,8 +1097,12 @@@
+  			/* uaccess failed, don't leave stale tags */
+  			if (num_tags != MTE_GRANULES_PER_PAGE)
+  				mte_clear_page_tags(maddr);
+ -			set_page_mte_tagged(page);
+ +			if (folio_test_hugetlb(folio))
+ +				folio_set_hugetlb_mte_tagged(folio);
+ +			else
+ +				set_page_mte_tagged(page);
+ +
+- 			kvm_release_pfn_dirty(pfn);
++ 			kvm_release_page_dirty(page);
+  		}
+  
+  		if (num_tags != MTE_GRANULES_PER_PAGE) {
+diff --cc arch/riscv/include/asm/perf_event.h
+index 665bbc9b2f84,38926b4a902d..bcc928fd3785
+--- a/arch/riscv/include/asm/perf_event.h
++++ b/arch/riscv/include/asm/perf_event.h
+@@@ -8,7 -8,11 +8,8 @@@
+  #ifndef _ASM_RISCV_PERF_EVENT_H
+  #define _ASM_RISCV_PERF_EVENT_H
+  
++ #ifdef CONFIG_PERF_EVENTS
+  #include <linux/perf_event.h>
+ -extern unsigned long perf_instruction_pointer(struct pt_regs *regs);
+ -extern unsigned long perf_misc_flags(struct pt_regs *regs);
+ -#define perf_misc_flags(regs) perf_misc_flags(regs)
+  #define perf_arch_bpf_user_pt_regs(regs) (struct user_regs_struct *)regs
+  
+  #define perf_arch_fetch_caller_regs(regs, __ip) { \
+diff --cc arch/riscv/kernel/perf_callchain.c
+index c7468af77c66,c2c81a80f816..b465bc9eb870
+--- a/arch/riscv/kernel/perf_callchain.c
++++ b/arch/riscv/kernel/perf_callchain.c
+@@@ -34,5 -39,38 +39,10 @@@ void perf_callchain_user(struct perf_ca
+  void perf_callchain_kernel(struct perf_callchain_entry_ctx *entry,
+  			   struct pt_regs *regs)
+  {
++ 	if (perf_guest_state()) {
++ 		/* TODO: We don't support guest os callchain now */
++ 		return;
++ 	}
++ 
+  	walk_stackframe(NULL, regs, fill_callchain, entry);
+  }
+ -
+ -unsigned long perf_instruction_pointer(struct pt_regs *regs)
+ -{
+ -	if (perf_guest_state())
+ -		return perf_guest_get_ip();
+ -
+ -	return instruction_pointer(regs);
+ -}
+ -
+ -unsigned long perf_misc_flags(struct pt_regs *regs)
+ -{
+ -	unsigned int guest_state = perf_guest_state();
+ -	unsigned long misc = 0;
+ -
+ -	if (guest_state) {
+ -		if (guest_state & PERF_GUEST_USER)
+ -			misc |= PERF_RECORD_MISC_GUEST_USER;
+ -		else
+ -			misc |= PERF_RECORD_MISC_GUEST_KERNEL;
+ -	} else {
+ -		if (user_mode(regs))
+ -			misc |= PERF_RECORD_MISC_USER;
+ -		else
+ -			misc |= PERF_RECORD_MISC_KERNEL;
+ -	}
+ -
+ -	return misc;
+ -}
+diff --cc arch/s390/kvm/kvm-s390.c
+index deeb32034ad5,0676c41ac9b8..442d4a227c0e
+--- a/arch/s390/kvm/kvm-s390.c
++++ b/arch/s390/kvm/kvm-s390.c
+@@@ -341,13 -340,24 +341,23 @@@ static inline int plo_test_bit(unsigne
+  		"	lgr	0,%[function]\n"
+  		/* Parameter registers are ignored for "test bit" */
+  		"	plo	0,0,0,0(0)\n"
+ -		"	ipm	%0\n"
+ -		"	srl	%0,28\n"
+ -		: "=d" (cc)
+ +		CC_IPM(cc)
+ +		: CC_OUT(cc, cc)
+  		: [function] "d" (function)
+ -		: "cc", "0");
+ -	return cc == 0;
+ +		: CC_CLOBBER_LIST("0"));
+ +	return CC_TRANSFORM(cc) == 0;
+  }
+  
++ static __always_inline void pfcr_query(u8 (*query)[16])
++ {
++ 	asm volatile(
++ 		"	lghi	0,0\n"
++ 		"	.insn   rsy,0xeb0000000016,0,0,%[query]\n"
++ 		: [query] "=QS" (*query)
++ 		:
++ 		: "cc", "0");
++ }
++ 
+  static __always_inline void __sortl_query(u8 (*query)[32])
+  {
+  	asm volatile(

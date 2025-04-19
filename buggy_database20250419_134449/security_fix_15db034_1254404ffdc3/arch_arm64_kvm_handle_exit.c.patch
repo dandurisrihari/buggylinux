@@ -1,0 +1,61 @@
+commit 15db034733e4df3ca8ab4bf0a593a8a9b4860541
+Author: Marc Zyngier <maz@kernel.org>
+Date:   Fri Apr 19 11:29:30 2024 +0100
+
+    KVM: arm64: nv: Reinject PAC exceptions caused by HCR_EL2.API==0
+    
+    In order for a L1 hypervisor to correctly handle PAuth instructions,
+    it must observe traps caused by a L1 PAuth instruction when
+    HCR_EL2.API==0. Since we already handle the case for API==1 as
+    a fixup, only the exception injection case needs to be handled.
+    
+    Rework the kvm_handle_ptrauth() callback to reinject the trap
+    in this case. Note that APK==0 is already handled by the exising
+    triage_sysreg_trap() helper.
+    
+    Reviewed-by: Oliver Upton <oliver.upton@linux.dev>
+    Link: https://lore.kernel.org/r/20240419102935.1935571-11-maz@kernel.org
+    Signed-off-by: Marc Zyngier <maz@kernel.org>
+
+diff --git a/arch/arm64/kvm/handle_exit.c b/arch/arm64/kvm/handle_exit.c
+index 6a88ec024e2f..1ba2f788b2c3 100644
+--- a/arch/arm64/kvm/handle_exit.c
++++ b/arch/arm64/kvm/handle_exit.c
+@@ -214,12 +214,34 @@ static int handle_sve(struct kvm_vcpu *vcpu)
+ }
+ 
+ /*
+- * Guest usage of a ptrauth instruction (which the guest EL1 did not turn into
+- * a NOP). If we get here, it is that we didn't fixup ptrauth on exit, and all
+- * that we can do is give the guest an UNDEF.
++ * Two possibilities to handle a trapping ptrauth instruction:
++ *
++ * - Guest usage of a ptrauth instruction (which the guest EL1 did not
++ *   turn into a NOP). If we get here, it is that we didn't fixup
++ *   ptrauth on exit, and all that we can do is give the guest an
++ *   UNDEF (as the guest isn't supposed to use ptrauth without being
++ *   told it could).
++ *
++ * - Running an L2 NV guest while L1 has left HCR_EL2.API==0, and for
++ *   which we reinject the exception into L1. API==1 is handled as a
++ *   fixup so the only way to get here is when API==0.
++ *
++ * Anything else is an emulation bug (hence the WARN_ON + UNDEF).
+  */
+ static int kvm_handle_ptrauth(struct kvm_vcpu *vcpu)
+ {
++	if (!vcpu_has_ptrauth(vcpu)) {
++		kvm_inject_undefined(vcpu);
++		return 1;
++	}
++
++	if (vcpu_has_nv(vcpu) && !is_hyp_ctxt(vcpu)) {
++		kvm_inject_nested_sync(vcpu, kvm_vcpu_get_esr(vcpu));
++		return 1;
++	}
++
++	/* Really shouldn't be here! */
++	WARN_ON_ONCE(1);
+ 	kvm_inject_undefined(vcpu);
+ 	return 1;
+ }

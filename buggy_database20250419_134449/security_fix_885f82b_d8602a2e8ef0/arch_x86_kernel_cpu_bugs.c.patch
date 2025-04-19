@@ -1,0 +1,88 @@
+commit 885f82bfbc6fefb6664ea27965c3ab9ac4194b8c
+Author: Thomas Gleixner <tglx@linutronix.de>
+Date:   Sun Apr 29 15:21:42 2018 +0200
+
+    x86/process: Allow runtime control of Speculative Store Bypass
+    
+    The Speculative Store Bypass vulnerability can be mitigated with the
+    Reduced Data Speculation (RDS) feature. To allow finer grained control of
+    this eventually expensive mitigation a per task mitigation control is
+    required.
+    
+    Add a new TIF_RDS flag and put it into the group of TIF flags which are
+    evaluated for mismatch in switch_to(). If these bits differ in the previous
+    and the next task, then the slow path function __switch_to_xtra() is
+    invoked. Implement the TIF_RDS dependent mitigation control in the slow
+    path.
+    
+    If the prctl for controlling Speculative Store Bypass is disabled or no
+    task uses the prctl then there is no overhead in the switch_to() fast
+    path.
+    
+    Update the KVM related speculation control functions to take TID_RDS into
+    account as well.
+    
+    Based on a patch from Tim Chen. Completely rewritten.
+    
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Reviewed-by: Ingo Molnar <mingo@kernel.org>
+    Reviewed-by: Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+
+diff --git a/arch/x86/kernel/cpu/bugs.c b/arch/x86/kernel/cpu/bugs.c
+index ec171873167a..2bc109d0f8ae 100644
+--- a/arch/x86/kernel/cpu/bugs.c
++++ b/arch/x86/kernel/cpu/bugs.c
+@@ -33,7 +33,7 @@ static void __init ssb_select_mitigation(void);
+  * Our boot-time value of the SPEC_CTRL MSR. We read it once so that any
+  * writes to SPEC_CTRL contain whatever reserved bits have been set.
+  */
+-static u64 __ro_after_init x86_spec_ctrl_base;
++u64 __ro_after_init x86_spec_ctrl_base;
+ 
+ /*
+  * The vendor and possibly platform specific bits which can be modified in
+@@ -140,25 +140,41 @@ EXPORT_SYMBOL_GPL(x86_spec_ctrl_set);
+ 
+ u64 x86_spec_ctrl_get_default(void)
+ {
+-	return x86_spec_ctrl_base;
++	u64 msrval = x86_spec_ctrl_base;
++
++	if (boot_cpu_data.x86_vendor == X86_VENDOR_INTEL)
++		msrval |= rds_tif_to_spec_ctrl(current_thread_info()->flags);
++	return msrval;
+ }
+ EXPORT_SYMBOL_GPL(x86_spec_ctrl_get_default);
+ 
+ void x86_spec_ctrl_set_guest(u64 guest_spec_ctrl)
+ {
++	u64 host = x86_spec_ctrl_base;
++
+ 	if (!boot_cpu_has(X86_FEATURE_IBRS))
+ 		return;
+-	if (x86_spec_ctrl_base != guest_spec_ctrl)
++
++	if (boot_cpu_data.x86_vendor == X86_VENDOR_INTEL)
++		host |= rds_tif_to_spec_ctrl(current_thread_info()->flags);
++
++	if (host != guest_spec_ctrl)
+ 		wrmsrl(MSR_IA32_SPEC_CTRL, guest_spec_ctrl);
+ }
+ EXPORT_SYMBOL_GPL(x86_spec_ctrl_set_guest);
+ 
+ void x86_spec_ctrl_restore_host(u64 guest_spec_ctrl)
+ {
++	u64 host = x86_spec_ctrl_base;
++
+ 	if (!boot_cpu_has(X86_FEATURE_IBRS))
+ 		return;
+-	if (x86_spec_ctrl_base != guest_spec_ctrl)
+-		wrmsrl(MSR_IA32_SPEC_CTRL, x86_spec_ctrl_base);
++
++	if (boot_cpu_data.x86_vendor == X86_VENDOR_INTEL)
++		host |= rds_tif_to_spec_ctrl(current_thread_info()->flags);
++
++	if (host != guest_spec_ctrl)
++		wrmsrl(MSR_IA32_SPEC_CTRL, host);
+ }
+ EXPORT_SYMBOL_GPL(x86_spec_ctrl_restore_host);

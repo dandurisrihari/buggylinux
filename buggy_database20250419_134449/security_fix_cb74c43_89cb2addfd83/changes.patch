@@ -1,0 +1,147 @@
+diff --git a/include/net/ieee80211softmac.h b/include/net/ieee80211softmac.h
+index 7a483ab4022f..00ad810eb883 100644
+--- a/include/net/ieee80211softmac.h
++++ b/include/net/ieee80211softmac.h
+@@ -104,6 +104,7 @@ struct ieee80211softmac_assoc_info {
+ 	 */
+ 	u8 static_essid:1,
+ 	   associating:1,
++	   assoc_wait:1,
+ 	   bssvalid:1,
+ 	   bssfixed:1;
+ 
+diff --git a/net/ieee80211/softmac/ieee80211softmac_assoc.c b/net/ieee80211/softmac/ieee80211softmac_assoc.c
+index 5e9a90651d04..0af360d9e9a5 100644
+--- a/net/ieee80211/softmac/ieee80211softmac_assoc.c
++++ b/net/ieee80211/softmac/ieee80211softmac_assoc.c
+@@ -47,9 +47,7 @@ ieee80211softmac_assoc(struct ieee80211softmac_device *mac, struct ieee80211soft
+ 	
+ 	dprintk(KERN_INFO PFX "sent association request!\n");
+ 
+-	/* Change the state to associating */
+ 	spin_lock_irqsave(&mac->lock, flags);
+-	mac->associnfo.associating = 1;
+ 	mac->associated = 0; /* just to make sure */
+ 
+ 	/* Set a timer for timeout */
+@@ -203,6 +201,10 @@ ieee80211softmac_assoc_work(void *d)
+ 	if (mac->associated)
+ 		ieee80211softmac_send_disassoc_req(mac, WLAN_REASON_DISASSOC_STA_HAS_LEFT);
+ 
++	spin_lock_irqsave(&mac->lock, flags);
++	mac->associnfo.associating = 1;
++	spin_unlock_irqrestore(&mac->lock, flags);
++
+ 	/* try to find the requested network in our list, if we found one already */
+ 	if (bssvalid || mac->associnfo.bssfixed)
+ 		found = ieee80211softmac_get_network_by_bssid(mac, mac->associnfo.bssid);	
+@@ -295,19 +297,32 @@ ieee80211softmac_assoc_work(void *d)
+ 	memcpy(mac->associnfo.associate_essid.data, found->essid.data, IW_ESSID_MAX_SIZE + 1);
+ 	
+ 	/* we found a network! authenticate (if necessary) and associate to it. */
+-	if (!found->authenticated) {
++	if (found->authenticating) {
++		dprintk(KERN_INFO PFX "Already requested authentication, waiting...\n");
++		if(!mac->associnfo.assoc_wait) {
++			mac->associnfo.assoc_wait = 1;
++			ieee80211softmac_notify_internal(mac, IEEE80211SOFTMAC_EVENT_ANY, found, ieee80211softmac_assoc_notify, NULL, GFP_KERNEL);
++		}
++		return;
++	}
++	if (!found->authenticated && !found->authenticating) {
+ 		/* This relies on the fact that _auth_req only queues the work,
+ 		 * otherwise adding the notification would be racy. */
+ 		if (!ieee80211softmac_auth_req(mac, found)) {
+-			dprintk(KERN_INFO PFX "cannot associate without being authenticated, requested authentication\n");
+-			ieee80211softmac_notify_internal(mac, IEEE80211SOFTMAC_EVENT_ANY, found, ieee80211softmac_assoc_notify_auth, NULL, GFP_KERNEL);
++			if(!mac->associnfo.assoc_wait) {
++				dprintk(KERN_INFO PFX "Cannot associate without being authenticated, requested authentication\n");
++				mac->associnfo.assoc_wait = 1;
++				ieee80211softmac_notify_internal(mac, IEEE80211SOFTMAC_EVENT_ANY, found, ieee80211softmac_assoc_notify, NULL, GFP_KERNEL);
++			}
+ 		} else {
+ 			printkl(KERN_WARNING PFX "Not authenticated, but requesting authentication failed. Giving up to associate\n");
++			mac->associnfo.assoc_wait = 0;
+ 			ieee80211softmac_call_events(mac, IEEE80211SOFTMAC_EVENT_ASSOCIATE_FAILED, found);
+ 		}
+ 		return;
+ 	}
+ 	/* finally! now we can start associating */
++	mac->associnfo.assoc_wait = 0;
+ 	ieee80211softmac_assoc(mac, found);
+ }
+ 
+diff --git a/net/ieee80211/softmac/ieee80211softmac_auth.c b/net/ieee80211/softmac/ieee80211softmac_auth.c
+index 90b8484e509b..ebc33ca6e692 100644
+--- a/net/ieee80211/softmac/ieee80211softmac_auth.c
++++ b/net/ieee80211/softmac/ieee80211softmac_auth.c
+@@ -36,8 +36,9 @@ ieee80211softmac_auth_req(struct ieee80211softmac_device *mac,
+ 	struct ieee80211softmac_auth_queue_item *auth;
+ 	unsigned long flags;
+ 	
+-	if (net->authenticating)
++	if (net->authenticating || net->authenticated)
+ 		return 0;
++	net->authenticating = 1;
+ 
+ 	/* Add the network if it's not already added */
+ 	ieee80211softmac_add_network(mac, net);
+@@ -92,7 +93,6 @@ ieee80211softmac_auth_queue(void *data)
+ 			return;
+ 		}
+ 		net->authenticated = 0;
+-		net->authenticating = 1;
+ 		/* add a timeout call so we eventually give up waiting for an auth reply */
+ 		schedule_delayed_work(&auth->work, IEEE80211SOFTMAC_AUTH_TIMEOUT);
+ 		auth->retry--;
+diff --git a/net/ieee80211/softmac/ieee80211softmac_wx.c b/net/ieee80211/softmac/ieee80211softmac_wx.c
+index 0e65ff4e33fc..75320b6842ab 100644
+--- a/net/ieee80211/softmac/ieee80211softmac_wx.c
++++ b/net/ieee80211/softmac/ieee80211softmac_wx.c
+@@ -70,12 +70,44 @@ ieee80211softmac_wx_set_essid(struct net_device *net_dev,
+ 			      char *extra)
+ {
+ 	struct ieee80211softmac_device *sm = ieee80211_priv(net_dev);
++	struct ieee80211softmac_network *n;
++	struct ieee80211softmac_auth_queue_item *authptr;
+ 	int length = 0;
+ 	unsigned long flags;
+-	
++
++	/* Check if we're already associating to this or another network
++	 * If it's another network, cancel and start over with our new network
++	 * If it's our network, ignore the change, we're already doing it!
++	 */
++	if((sm->associnfo.associating || sm->associated) &&
++	   (data->essid.flags && data->essid.length && extra)) {
++		/* Get the associating network */
++		n = ieee80211softmac_get_network_by_bssid(sm, sm->associnfo.bssid);
++		if(n && n->essid.len == (data->essid.length - 1) &&
++		   !memcmp(n->essid.data, extra, n->essid.len)) {
++			dprintk(KERN_INFO PFX "Already associating or associated to "MAC_FMT"\n",
++				MAC_ARG(sm->associnfo.bssid));
++			return 0;
++		} else {
++			dprintk(KERN_INFO PFX "Canceling existing associate request!\n");
++			spin_lock_irqsave(&sm->lock,flags);
++			/* Cancel assoc work */
++			cancel_delayed_work(&sm->associnfo.work);
++			/* We don't have to do this, but it's a little cleaner */
++			list_for_each_entry(authptr, &sm->auth_queue, list)
++				cancel_delayed_work(&authptr->work);
++			sm->associnfo.bssvalid = 0;
++			sm->associnfo.bssfixed = 0;
++			spin_unlock_irqrestore(&sm->lock,flags);
++			flush_scheduled_work();
++		}
++	}
++
++
+ 	spin_lock_irqsave(&sm->lock, flags);
+-	
++
+ 	sm->associnfo.static_essid = 0;
++	sm->associnfo.assoc_wait = 0;
+ 
+ 	if (data->essid.flags && data->essid.length && extra /*required?*/) {
+ 		length = min(data->essid.length - 1, IW_ESSID_MAX_SIZE);

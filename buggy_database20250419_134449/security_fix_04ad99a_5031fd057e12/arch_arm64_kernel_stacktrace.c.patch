@@ -1,0 +1,54 @@
+commit 04ad99a0b160450ae615e41b839e444eccb5c99b
+Author: Mark Rutland <mark.rutland@arm.com>
+Date:   Fri Mar 13 14:34:59 2020 +0530
+
+    arm64: unwind: strip PAC from kernel addresses
+    
+    When we enable pointer authentication in the kernel, LR values saved to
+    the stack will have a PAC which we must strip in order to retrieve the
+    real return address.
+    
+    Strip PACs when unwinding the stack in order to account for this.
+    
+    When function graph tracer is used with patchable-function-entry then
+    return_to_handler will also have pac bits so strip it too.
+    
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Acked-by: Catalin Marinas <catalin.marinas@arm.com>
+    Reviewed-by: James Morse <james.morse@arm.com>
+    Signed-off-by: Mark Rutland <mark.rutland@arm.com>
+    Signed-off-by: Kristina Martsenko <kristina.martsenko@arm.com>
+    [Amit: Re-position ptrauth_strip_insn_pac, comment]
+    Signed-off-by: Amit Daniel Kachhap <amit.kachhap@arm.com>
+    Signed-off-by: Catalin Marinas <catalin.marinas@arm.com>
+
+diff --git a/arch/arm64/kernel/stacktrace.c b/arch/arm64/kernel/stacktrace.c
+index a336cb124320..139679c745bf 100644
+--- a/arch/arm64/kernel/stacktrace.c
++++ b/arch/arm64/kernel/stacktrace.c
+@@ -14,6 +14,7 @@
+ #include <linux/stacktrace.h>
+ 
+ #include <asm/irq.h>
++#include <asm/pointer_auth.h>
+ #include <asm/stack_pointer.h>
+ #include <asm/stacktrace.h>
+ 
+@@ -86,7 +87,7 @@ int notrace unwind_frame(struct task_struct *tsk, struct stackframe *frame)
+ 
+ #ifdef CONFIG_FUNCTION_GRAPH_TRACER
+ 	if (tsk->ret_stack &&
+-			(frame->pc == (unsigned long)return_to_handler)) {
++		(ptrauth_strip_insn_pac(frame->pc) == (unsigned long)return_to_handler)) {
+ 		struct ftrace_ret_stack *ret_stack;
+ 		/*
+ 		 * This is a case where function graph tracer has
+@@ -101,6 +102,8 @@ int notrace unwind_frame(struct task_struct *tsk, struct stackframe *frame)
+ 	}
+ #endif /* CONFIG_FUNCTION_GRAPH_TRACER */
+ 
++	frame->pc = ptrauth_strip_insn_pac(frame->pc);
++
+ 	/*
+ 	 * Frames created upon entry from EL0 have NULL FP and PC values, so
+ 	 * don't bother reporting these. Frames created by __noreturn functions

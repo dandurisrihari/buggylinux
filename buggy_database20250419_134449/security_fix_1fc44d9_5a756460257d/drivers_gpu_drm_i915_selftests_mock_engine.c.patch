@@ -1,0 +1,97 @@
+commit 1fc44d9b1afb0afe46acd99bdfdf793805a850e1
+Author: Chris Wilson <chris@chris-wilson.co.uk>
+Date:   Thu May 17 22:26:32 2018 +0100
+
+    drm/i915: Store a pointer to intel_context in i915_request
+    
+    To ease the frequent and ugly pointer dance of
+    &request->gem_context->engine[request->engine->id] during request
+    submission, store that pointer as request->hw_context. One major
+    advantage that we will exploit later is that this decouples the logical
+    context state from the engine itself.
+    
+    v2: Set mock_context->ops so we don't crash and burn in selftests.
+        Cleanups from Tvrtko.
+    
+    Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+    Acked-by: Zhenyu Wang <zhenyuw@linux.intel.com>
+    Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+    Link: https://patchwork.freedesktop.org/patch/msgid/20180517212633.24934-3-chris@chris-wilson.co.uk
+
+diff --git a/drivers/gpu/drm/i915/selftests/mock_engine.c b/drivers/gpu/drm/i915/selftests/mock_engine.c
+index 26bf29d97007..33eddfc1f8ce 100644
+--- a/drivers/gpu/drm/i915/selftests/mock_engine.c
++++ b/drivers/gpu/drm/i915/selftests/mock_engine.c
+@@ -72,25 +72,37 @@ static void hw_delay_complete(struct timer_list *t)
+ 	spin_unlock(&engine->hw_lock);
+ }
+ 
+-static struct intel_ring *
+-mock_context_pin(struct intel_engine_cs *engine,
+-		 struct i915_gem_context *ctx)
++static void mock_context_unpin(struct intel_context *ce)
+ {
+-	struct intel_context *ce = to_intel_context(ctx, engine);
++	if (--ce->pin_count)
++		return;
+ 
+-	if (!ce->pin_count++)
+-		i915_gem_context_get(ctx);
++	i915_gem_context_put(ce->gem_context);
++}
+ 
+-	return engine->buffer;
++static void mock_context_destroy(struct intel_context *ce)
++{
++	GEM_BUG_ON(ce->pin_count);
+ }
+ 
+-static void mock_context_unpin(struct intel_engine_cs *engine,
+-			       struct i915_gem_context *ctx)
++static const struct intel_context_ops mock_context_ops = {
++	.unpin = mock_context_unpin,
++	.destroy = mock_context_destroy,
++};
++
++static struct intel_context *
++mock_context_pin(struct intel_engine_cs *engine,
++		 struct i915_gem_context *ctx)
+ {
+ 	struct intel_context *ce = to_intel_context(ctx, engine);
+ 
+-	if (!--ce->pin_count)
+-		i915_gem_context_put(ctx);
++	if (!ce->pin_count++) {
++		i915_gem_context_get(ctx);
++		ce->ring = engine->buffer;
++		ce->ops = &mock_context_ops;
++	}
++
++	return ce;
+ }
+ 
+ static int mock_request_alloc(struct i915_request *request)
+@@ -185,7 +197,6 @@ struct intel_engine_cs *mock_engine(struct drm_i915_private *i915,
+ 	engine->base.status_page.page_addr = (void *)(engine + 1);
+ 
+ 	engine->base.context_pin = mock_context_pin;
+-	engine->base.context_unpin = mock_context_unpin;
+ 	engine->base.request_alloc = mock_request_alloc;
+ 	engine->base.emit_flush = mock_emit_flush;
+ 	engine->base.emit_breadcrumb = mock_emit_breadcrumb;
+@@ -238,11 +249,13 @@ void mock_engine_free(struct intel_engine_cs *engine)
+ {
+ 	struct mock_engine *mock =
+ 		container_of(engine, typeof(*mock), base);
++	struct intel_context *ce;
+ 
+ 	GEM_BUG_ON(timer_pending(&mock->hw_delay));
+ 
+-	if (engine->last_retired_context)
+-		intel_context_unpin(engine->last_retired_context, engine);
++	ce = fetch_and_zero(&engine->last_retired_context);
++	if (ce)
++		intel_context_unpin(ce);
+ 
+ 	mock_ring_free(engine->buffer);

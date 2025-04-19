@@ -1,0 +1,68 @@
+commit 1f258ec13b82d3d947b515a007a748ffcbe29f9a
+Author: Chao Yu <chao@kernel.org>
+Date:   Wed Jun 7 11:17:35 2017 +0800
+
+    f2fs: fix to avoid panic when encountering corrupt node
+    
+    With fault_injection option, generic/361 of fstests will complain us
+    with below message:
+    
+    Call Trace:
+     get_node_page+0x12/0x20 [f2fs]
+     f2fs_iget+0x92/0x7d0 [f2fs]
+     f2fs_fill_super+0x10fb/0x15e0 [f2fs]
+     mount_bdev+0x184/0x1c0
+     f2fs_mount+0x15/0x20 [f2fs]
+     mount_fs+0x39/0x150
+     vfs_kern_mount+0x67/0x110
+     do_mount+0x1bb/0xc70
+     SyS_mount+0x83/0xd0
+     do_syscall_64+0x6e/0x160
+     entry_SYSCALL64_slow_path+0x25/0x25
+    
+    Since mkfs loop device in f2fs partition can be failed silently due to
+    checkpoint error injection, so root inode page can be corrupted, in order
+    to avoid needless panic, in get_node_page, it's better to leave message
+    and return error to caller, and let fsck repaire it later.
+    
+    Signed-off-by: Chao Yu <yuchao0@huawei.com>
+    Signed-off-by: Jaegeuk Kim <jaegeuk@kernel.org>
+
+diff --git a/fs/f2fs/node.c b/fs/f2fs/node.c
+index 05700e54f91e..f522378224aa 100644
+--- a/fs/f2fs/node.c
++++ b/fs/f2fs/node.c
+@@ -1157,6 +1157,7 @@ static struct page *__get_node_page(struct f2fs_sb_info *sbi, pgoff_t nid,
+ 		f2fs_put_page(page, 1);
+ 		return ERR_PTR(err);
+ 	} else if (err == LOCKED_PAGE) {
++		err = 0;
+ 		goto page_hit;
+ 	}
+ 
+@@ -1170,15 +1171,22 @@ static struct page *__get_node_page(struct f2fs_sb_info *sbi, pgoff_t nid,
+ 		goto repeat;
+ 	}
+ 
+-	if (unlikely(!PageUptodate(page)))
++	if (unlikely(!PageUptodate(page))) {
++		err = -EIO;
+ 		goto out_err;
++	}
+ page_hit:
+ 	if(unlikely(nid != nid_of_node(page))) {
+-		f2fs_bug_on(sbi, 1);
++		f2fs_msg(sbi->sb, KERN_WARNING, "inconsistent node block, "
++			"nid:%lu, node_footer[nid:%u,ino:%u,ofs:%u,cpver:%llu,blkaddr:%u]",
++			nid, nid_of_node(page), ino_of_node(page),
++			ofs_of_node(page), cpver_of_node(page),
++			next_blkaddr_of_node(page));
+ 		ClearPageUptodate(page);
++		err = -EINVAL;
+ out_err:
+ 		f2fs_put_page(page, 1);
+-		return ERR_PTR(-EIO);
++		return ERR_PTR(err);
+ 	}
+ 	return page;
+ }

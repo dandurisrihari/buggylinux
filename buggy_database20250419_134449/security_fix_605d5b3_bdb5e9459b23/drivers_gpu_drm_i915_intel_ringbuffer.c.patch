@@ -1,0 +1,71 @@
+commit 605d5b3297687cce9d3c4298c699188e61486a4c
+Author: Chris Wilson <chris@chris-wilson.co.uk>
+Date:   Thu May 4 14:08:44 2017 +0100
+
+    drm/i915: Avoid the branch in computing intel_ring_space()
+    
+    Exploit the power-of-two ring size to compute the space across the
+    wraparound using a mask rather than a if. Convert to unsigned integers
+    so the operation is well defined.
+    
+    References: https://bugs.freedesktop.org/show_bug.cgi?id=99671
+    Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Cc: Mika Kuoppala <mika.kuoppala@intel.com>
+    Reviewed-by: Mika Kuoppala <mika.kuoppala@intel.com>
+    Link: http://patchwork.freedesktop.org/patch/msgid/20170504130846.4807-1-chris@chris-wilson.co.uk
+
+diff --git a/drivers/gpu/drm/i915/intel_ringbuffer.c b/drivers/gpu/drm/i915/intel_ringbuffer.c
+index 3ce1c87dec46..46f2696bf886 100644
+--- a/drivers/gpu/drm/i915/intel_ringbuffer.c
++++ b/drivers/gpu/drm/i915/intel_ringbuffer.c
+@@ -39,12 +39,17 @@
+  */
+ #define LEGACY_REQUEST_SIZE 200
+ 
+-static int __intel_ring_space(int head, int tail, int size)
++static unsigned int __intel_ring_space(unsigned int head,
++				       unsigned int tail,
++				       unsigned int size)
+ {
+-	int space = head - tail;
+-	if (space <= 0)
+-		space += size;
+-	return space - I915_RING_FREE_SPACE;
++	/*
++	 * "If the Ring Buffer Head Pointer and the Tail Pointer are on the
++	 * same cacheline, the Head Pointer must not be greater than the Tail
++	 * Pointer."
++	 */
++	GEM_BUG_ON(!is_power_of_2(size));
++	return (head - tail - CACHELINE_BYTES) & (size - 1);
+ }
+ 
+ void intel_ring_update_space(struct intel_ring *ring)
+@@ -1670,12 +1675,9 @@ static int wait_for_space(struct drm_i915_gem_request *req, int bytes)
+ 	GEM_BUG_ON(!req->reserved_space);
+ 
+ 	list_for_each_entry(target, &ring->request_list, ring_link) {
+-		unsigned space;
+-
+ 		/* Would completion of this request free enough space? */
+-		space = __intel_ring_space(target->postfix, ring->emit,
+-					   ring->size);
+-		if (space >= bytes)
++		if (bytes <= __intel_ring_space(target->postfix,
++						ring->emit, ring->size))
+ 			break;
+ 	}
+ 
+@@ -1744,11 +1746,11 @@ u32 *intel_ring_begin(struct drm_i915_gem_request *req, int num_dwords)
+ 	}
+ 
+ 	GEM_BUG_ON(ring->emit > ring->size - bytes);
++	GEM_BUG_ON(ring->space < bytes);
+ 	cs = ring->vaddr + ring->emit;
+ 	GEM_DEBUG_EXEC(memset(cs, POISON_INUSE, bytes));
+ 	ring->emit += bytes;
+ 	ring->space -= bytes;
+-	GEM_BUG_ON(ring->space < 0);
+ 
+ 	return cs;
+ }

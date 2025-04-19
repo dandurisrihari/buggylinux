@@ -1,0 +1,237 @@
+commit ba17674fe02909fef049fd4b620a2805bdb8c693
+Author: Latchesar Ionkov <lucho@ionkov.net>
+Date:   Wed Oct 17 14:31:07 2007 -0500
+
+    9p: attach-per-user
+    
+    The 9P2000 protocol requires the authentication and permission checks to be
+    done in the file server. For that reason every user that accesses the file
+    server tree has to authenticate and attach to the server separately.
+    Multiple users can share the same connection to the server.
+    
+    Currently v9fs does a single attach and executes all I/O operations as a
+    single user. This makes using v9fs in multiuser environment unsafe as it
+    depends on the client doing the permission checking.
+    
+    This patch improves the 9P2000 support by allowing every user to attach
+    separately. The patch defines three modes of access (new mount option
+    'access'):
+    
+    - attach-per-user (access=user) (default mode for 9P2000.u)
+     If a user tries to access a file served by v9fs for the first time, v9fs
+     sends an attach command to the server (Tattach) specifying the user. If
+     the attach succeeds, the user can access the v9fs tree.
+     As there is no uname->uid (string->integer) mapping yet, this mode works
+     only with the 9P2000.u dialect.
+    
+    - allow only one user to access the tree (access=<uid>)
+     Only the user with uid can access the v9fs tree. Other users that attempt
+     to access it will get EPERM error.
+    
+    - do all operations as a single user (access=any) (default for 9P2000)
+     V9fs does a single attach and all operations are done as a single user.
+     If this mode is selected, the v9fs behavior is identical with the current
+     one.
+    
+    Signed-off-by: Latchesar Ionkov <lucho@ionkov.net>
+    Signed-off-by: Eric Van Hensbergen <ericvh@gmail.com>
+
+diff --git a/fs/9p/fid.c b/fs/9p/fid.c
+index 15e05a15b575..b364da70ff28 100644
+--- a/fs/9p/fid.c
++++ b/fs/9p/fid.c
+@@ -1,6 +1,7 @@
+ /*
+  * V9FS FID Management
+  *
++ *  Copyright (C) 2007 by Latchesar Ionkov <lucho@ionkov.net>
+  *  Copyright (C) 2005, 2006 by Eric Van Hensbergen <ericvh@gmail.com>
+  *
+  *  This program is free software; you can redistribute it and/or modify
+@@ -34,9 +35,9 @@
+ #include "fid.h"
+ 
+ /**
+- * v9fs_fid_insert - add a fid to a dentry
++ * v9fs_fid_add - add a fid to a dentry
++ * @dentry: dentry that the fid is being added to
+  * @fid: fid to add
+- * @dentry: dentry that it is being added to
+  *
+  */
+ 
+@@ -66,52 +67,144 @@ int v9fs_fid_add(struct dentry *dentry, struct p9_fid *fid)
+ }
+ 
+ /**
+- * v9fs_fid_lookup - return a locked fid from a dentry
++ * v9fs_fid_find - retrieve a fid that belongs to the specified uid
+  * @dentry: dentry to look for fid in
+- *
+- * find a fid in the dentry, obtain its semaphore and return a reference to it.
+- * code calling lookup is responsible for releasing lock
+- *
+- * TODO: only match fids that have the same uid as current user
++ * @uid: return fid that belongs to the specified user
++ * @any: if non-zero, return any fid associated with the dentry
+  *
+  */
+ 
+-struct p9_fid *v9fs_fid_lookup(struct dentry *dentry)
++static struct p9_fid *v9fs_fid_find(struct dentry *dentry, u32 uid, int any)
+ {
+ 	struct v9fs_dentry *dent;
+-	struct p9_fid *fid;
+-
+-	P9_DPRINTK(P9_DEBUG_VFS, " dentry: %s (%p)\n", dentry->d_iname, dentry);
+-	dent = dentry->d_fsdata;
+-	if (dent)
+-		fid = list_entry(dent->fidlist.next, struct p9_fid, dlist);
+-	else
+-		fid = ERR_PTR(-EBADF);
++	struct p9_fid *fid, *ret;
++
++	P9_DPRINTK(P9_DEBUG_VFS, " dentry: %s (%p) uid %d any %d\n",
++		dentry->d_iname, dentry, uid, any);
++	dent = (struct v9fs_dentry *) dentry->d_fsdata;
++	ret = NULL;
++	if (dent) {
++		spin_lock(&dent->lock);
++		list_for_each_entry(fid, &dent->fidlist, dlist) {
++			if (any || fid->uid == uid) {
++				ret = fid;
++				break;
++			}
++		}
++		spin_unlock(&dent->lock);
++	}
+ 
+-	P9_DPRINTK(P9_DEBUG_VFS, " fid: %p\n", fid);
+-	return fid;
++	return ret;
+ }
+ 
+ /**
+- * v9fs_fid_clone - lookup the fid for a dentry, clone a private copy and
+- * 	release it
++ * v9fs_fid_lookup - lookup for a fid, try to walk if not found
+  * @dentry: dentry to look for fid in
+  *
+- * find a fid in the dentry and then clone to a new private fid
+- *
+- * TODO: only match fids that have the same uid as current user
+- *
++ * Look for a fid in the specified dentry for the current user.
++ * If no fid is found, try to create one walking from a fid from the parent
++ * dentry (if it has one), or the root dentry. If the user haven't accessed
++ * the fs yet, attach now and walk from the root.
+  */
+ 
+-struct p9_fid *v9fs_fid_clone(struct dentry *dentry)
++struct p9_fid *v9fs_fid_lookup(struct dentry *dentry)
+ {
+-	struct p9_fid *ofid, *fid;
++	int i, n, l, clone, any, access;
++	u32 uid;
++	struct p9_fid *fid;
++	struct dentry *d, *ds;
++	struct v9fs_session_info *v9ses;
++	char **wnames, *uname;
++
++	v9ses = v9fs_inode2v9ses(dentry->d_inode);
++	access = v9ses->flags & V9FS_ACCESS_MASK;
++	switch (access) {
++	case V9FS_ACCESS_SINGLE:
++	case V9FS_ACCESS_USER:
++		uid = current->fsuid;
++		any = 0;
++		break;
++
++	case V9FS_ACCESS_ANY:
++		uid = v9ses->uid;
++		any = 1;
++		break;
++
++	default:
++		uid = ~0;
++		any = 0;
++		break;
++	}
+ 
+-	P9_DPRINTK(P9_DEBUG_VFS, " dentry: %s (%p)\n", dentry->d_iname, dentry);
+-	ofid = v9fs_fid_lookup(dentry);
+-	if (IS_ERR(ofid))
+-		return ofid;
++	fid = v9fs_fid_find(dentry, uid, any);
++	if (fid)
++		return fid;
++
++	ds = dentry->d_parent;
++	fid = v9fs_fid_find(ds, uid, any);
++	if (!fid) { /* walk from the root */
++		n = 0;
++		for (ds = dentry; !IS_ROOT(ds); ds = ds->d_parent)
++			n++;
++
++		fid = v9fs_fid_find(ds, uid, any);
++		if (!fid) { /* the user is not attached to the fs yet */
++			if (access == V9FS_ACCESS_SINGLE)
++				return ERR_PTR(-EPERM);
++
++			if (v9fs_extended(v9ses))
++				uname = NULL;
++			else
++				uname = v9ses->uname;
++
++			fid = p9_client_attach(v9ses->clnt, NULL, uname, uid,
++				v9ses->aname);
++
++			if (IS_ERR(fid))
++				return fid;
++
++			v9fs_fid_add(ds, fid);
++		}
++	} else /* walk from the parent */
++		n = 1;
++
++	if (ds == dentry)
++		return fid;
++
++	wnames = kmalloc(sizeof(char *) * n, GFP_KERNEL);
++	if (!wnames)
++		return ERR_PTR(-ENOMEM);
++
++	for (d = dentry, i = n; i >= 0; i--, d = d->d_parent)
++		wnames[i] = (char *) d->d_name.name;
++
++	clone = 1;
++	i = 0;
++	while (i < n) {
++		l = min(n - i, P9_MAXWELEM);
++		fid = p9_client_walk(fid, l, &wnames[i], clone);
++		if (!fid) {
++			kfree(wnames);
++			return fid;
++		}
++
++		i += l;
++		clone = 0;
++	}
+ 
+-	fid = p9_client_walk(ofid, 0, NULL, 1);
++	kfree(wnames);
++	v9fs_fid_add(dentry, fid);
+ 	return fid;
+ }
++
++struct p9_fid *v9fs_fid_clone(struct dentry *dentry)
++{
++	struct p9_fid *fid, *ret;
++
++	fid = v9fs_fid_lookup(dentry);
++	if (IS_ERR(fid))
++		return fid;
++
++	ret = p9_client_walk(fid, 0, NULL, 1);
++	return ret;
++}

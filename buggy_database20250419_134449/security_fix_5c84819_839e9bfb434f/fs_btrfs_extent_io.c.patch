@@ -1,0 +1,58 @@
+commit 5c848198aad3ad1c68309aa7002fa571a540568c
+Author: Nikolay Borisov <nborisov@suse.com>
+Date:   Thu Nov 1 14:09:52 2018 +0200
+
+    btrfs: Remove extent_io_ops::merge_extent_hook callback
+    
+    This callback is used only for data and free space inodes. Such inodes
+    are guaranteed to have their extent_io_tree::private_data set to the
+    inode struct. Exploit this fact to directly call the function. Also give
+    it a more descriptive name. No functional changes.
+    
+    Reviewed-by: Josef Bacik <josef@toxicpanda.com>
+    Signed-off-by: Nikolay Borisov <nborisov@suse.com>
+    Reviewed-by: David Sterba <dsterba@suse.com>
+    Signed-off-by: David Sterba <dsterba@suse.com>
+
+diff --git a/fs/btrfs/extent_io.c b/fs/btrfs/extent_io.c
+index b9aadbf1a9f9..861a087025a9 100644
+--- a/fs/btrfs/extent_io.c
++++ b/fs/btrfs/extent_io.c
+@@ -353,13 +353,6 @@ static inline struct rb_node *tree_search(struct extent_io_tree *tree,
+ 	return tree_search_for_insert(tree, offset, NULL, NULL);
+ }
+ 
+-static void merge_cb(struct extent_io_tree *tree, struct extent_state *new,
+-		     struct extent_state *other)
+-{
+-	if (tree->ops && tree->ops->merge_extent_hook)
+-		tree->ops->merge_extent_hook(tree->private_data, new, other);
+-}
+-
+ /*
+  * utility function to look for merge candidates inside a given range.
+  * Any extents with matching state are merged together into a single
+@@ -383,7 +376,10 @@ static void merge_state(struct extent_io_tree *tree,
+ 		other = rb_entry(other_node, struct extent_state, rb_node);
+ 		if (other->end == state->start - 1 &&
+ 		    other->state == state->state) {
+-			merge_cb(tree, state, other);
++			if (tree->private_data &&
++			    is_data_inode(tree->private_data))
++				btrfs_merge_delalloc_extent(tree->private_data,
++							    state, other);
+ 			state->start = other->start;
+ 			rb_erase(&other->rb_node, &tree->state);
+ 			RB_CLEAR_NODE(&other->rb_node);
+@@ -395,7 +391,10 @@ static void merge_state(struct extent_io_tree *tree,
+ 		other = rb_entry(other_node, struct extent_state, rb_node);
+ 		if (other->start == state->end + 1 &&
+ 		    other->state == state->state) {
+-			merge_cb(tree, state, other);
++			if (tree->private_data &&
++			    is_data_inode(tree->private_data))
++				btrfs_merge_delalloc_extent(tree->private_data,
++							    state, other);
+ 			state->end = other->end;
+ 			rb_erase(&other->rb_node, &tree->state);
+ 			RB_CLEAR_NODE(&other->rb_node);

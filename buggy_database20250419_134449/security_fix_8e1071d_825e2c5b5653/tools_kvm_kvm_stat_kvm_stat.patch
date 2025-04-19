@@ -1,0 +1,51 @@
+commit 8e1071d0ad300fcce2e2b4e46cb15e41d0166bdc
+Author: Matthias Gerstner <matthias.gerstner@suse.de>
+Date:   Thu Nov 3 14:59:27 2022 +0100
+
+    tools/kvm_stat: fix incorrect detection of debugfs
+    
+    The first field in /proc/mounts can be influenced by unprivileged users
+    through the widespread `fusermount` setuid-root program. Example:
+    
+    ```
+    user$ mkdir ~/mydebugfs
+    user$ export _FUSE_COMMFD=0
+    user$ fusermount ~/mydebugfs -ononempty,fsname=debugfs
+    user$ grep debugfs /proc/mounts
+    debugfs /home/user/mydebugfs fuse rw,nosuid,nodev,relatime,user_id=1000,group_id=100 0 0
+    ```
+    
+    If there is no debugfs already mounted in the system then this can be
+    used by unprivileged users to trick kvm_stat into using a user
+    controlled file system location for obtaining KVM statistics.
+    Even though the root user is not allowed to access non-root FUSE mounts
+    for security reasons, the unprivileged user can unmount the FUSE mount
+    before kvm_stat uses the mounted path.  If it wins the race, kvm_stat
+    will read from the location where the FUSE mount resided.
+    
+    Note that the files in debugfs are only opened for reading, so the
+    attacker can cause very large data to be read in by kvm_stat, or fake
+    data to be processed, but there should be no viable way to turn this
+    into a privilege escalation.
+    
+    The fix is simply to use the file system type field instead. Whitespace
+    in the mount path is escaped in /proc/mounts thus no further safety
+    measures in the parsing should be necessary to make this correct.
+    
+    Message-Id: <20221103135927.13656-1-matthias.gerstner@suse.de>
+    Signed-off-by: Matthias Gerstner <matthias.gerstner@suse.de>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/tools/kvm/kvm_stat/kvm_stat b/tools/kvm/kvm_stat/kvm_stat
+index 9c366b3a676d..88a73999aa58 100755
+--- a/tools/kvm/kvm_stat/kvm_stat
++++ b/tools/kvm/kvm_stat/kvm_stat
+@@ -1756,7 +1756,7 @@ def assign_globals():
+ 
+     debugfs = ''
+     for line in open('/proc/mounts'):
+-        if line.split(' ')[0] == 'debugfs':
++        if line.split(' ')[2] == 'debugfs':
+             debugfs = line.split(' ')[1]
+             break
+     if debugfs == '':

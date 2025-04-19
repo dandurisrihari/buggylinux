@@ -1,0 +1,53 @@
+commit 79e87a103de1eda0cb4d726cd8581798e2d38f3e
+Author: Jens Freimann <jfrei@linux.vnet.ibm.com>
+Date:   Thu Mar 19 15:12:12 2015 +0100
+
+    KVM: s390: refactor vcpu injection function
+    
+    Let's provide a version of kvm_s390_inject_vcpu() that
+    does not acquire the local-interrupt lock and skips
+    waking up the vcpu.
+    To be used in a later patch for vcpu-local interrupt migration,
+    where we are already holding the lock.
+    
+    Reviewed-by: David Hildenbrand <dahi@linux.vnet.ibm.com>
+    Signed-off-by: Jens Freimann <jfrei@linux.vnet.ibm.com>
+    Signed-off-by: Christian Borntraeger <borntraeger@de.ibm.com>
+    Acked-by: Cornelia Huck <cornelia.huck@de.ibm.com>
+
+diff --git a/arch/s390/kvm/interrupt.c b/arch/s390/kvm/interrupt.c
+index 8a0786ccaf68..bc0988093c5b 100644
+--- a/arch/s390/kvm/interrupt.c
++++ b/arch/s390/kvm/interrupt.c
+@@ -1514,12 +1514,10 @@ void kvm_s390_clear_stop_irq(struct kvm_vcpu *vcpu)
+ 	spin_unlock(&li->lock);
+ }
+ 
+-int kvm_s390_inject_vcpu(struct kvm_vcpu *vcpu, struct kvm_s390_irq *irq)
++static int do_inject_vcpu(struct kvm_vcpu *vcpu, struct kvm_s390_irq *irq)
+ {
+-	struct kvm_s390_local_interrupt *li = &vcpu->arch.local_int;
+ 	int rc;
+ 
+-	spin_lock(&li->lock);
+ 	switch (irq->type) {
+ 	case KVM_S390_PROGRAM_INT:
+ 		VCPU_EVENT(vcpu, 3, "inject: program check %d (from user)",
+@@ -1559,6 +1557,17 @@ int kvm_s390_inject_vcpu(struct kvm_vcpu *vcpu, struct kvm_s390_irq *irq)
+ 	default:
+ 		rc = -EINVAL;
+ 	}
++
++	return rc;
++}
++
++int kvm_s390_inject_vcpu(struct kvm_vcpu *vcpu, struct kvm_s390_irq *irq)
++{
++	struct kvm_s390_local_interrupt *li = &vcpu->arch.local_int;
++	int rc;
++
++	spin_lock(&li->lock);
++	rc = do_inject_vcpu(vcpu, irq);
+ 	spin_unlock(&li->lock);
+ 	if (!rc)
+ 		kvm_s390_vcpu_wakeup(vcpu);

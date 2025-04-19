@@ -1,0 +1,93 @@
+commit 8d99fe92fed019e203f458370129fb28b3fb5740
+Author: Brian Foster <bfoster@redhat.com>
+Date:   Wed Aug 19 09:51:16 2015 +1000
+
+    xfs: fix efi/efd error handling to avoid fs shutdown hangs
+    
+    Freeing an extent in XFS involves logging an EFI (extent free
+    intention), freeing the actual extent, and logging an EFD (extent
+    free done). The EFI object is created with a reference count of 2:
+    one for the current transaction and one for the subsequently created
+    EFD. Under normal circumstances, the first reference is dropped when
+    the EFI is unpinned and the second reference is dropped when the EFD
+    is committed to the on-disk log.
+    
+    In event of errors or filesystem shutdown, there are various
+    potential cleanup scenarios depending on the state of the EFI/EFD.
+    The cleanup scenarios are confusing and racy, as demonstrated by the
+    following test sequence:
+    
+            # mount $dev $mnt
+            # fsstress -d $mnt -n 99999 -p 16 -z -f fallocate=1 \
+                    -f punch=1 -f creat=1 -f unlink=1 &
+            # sleep 5
+            # killall -9 fsstress; wait
+            # godown -f $mnt
+            # umount
+    
+    ... in which the final umount can hang due to the AIL being pinned
+    indefinitely by one or more EFI items. This can occur due to several
+    conditions. For example, if the shutdown occurs after the EFI is
+    committed to the on-disk log and the EFD committed to the CIL, but
+    before the EFD committed to the log, the EFD iop_committed() abort
+    handler does not drop its reference to the EFI. Alternatively,
+    manual error injection in the xfs_bmap_finish() codepath shows that
+    if an error occurs after the EFI transaction is committed but before
+    the EFD is constructed and logged, the EFI is never released from
+    the AIL.
+    
+    Update the EFI/EFD item handling code to use a more straightforward
+    and reliable approach to error handling. If an error occurs after
+    the EFI transaction is committed and before the EFD is constructed,
+    release the EFI explicitly from xfs_bmap_finish(). If the EFI
+    transaction is cancelled, release the EFI in the unlock handler.
+    
+    Once the EFD is constructed, it is responsible for releasing the EFI
+    under any circumstances (including whether the EFI item aborts due
+    to log I/O error). Update the EFD item handlers to release the EFI
+    if the transaction is cancelled or aborts due to log I/O error.
+    Finally, update xfs_bmap_finish() to log at least one EFD extent to
+    the transaction before xfs_free_extent() errors are handled to
+    ensure the transaction is dirty and EFD item error handling is
+    triggered.
+    
+    Signed-off-by: Brian Foster <bfoster@redhat.com>
+    Reviewed-by: Dave Chinner <dchinner@redhat.com>
+    Signed-off-by: Dave Chinner <david@fromorbit.com>
+
+diff --git a/fs/xfs/xfs_extfree_item.h b/fs/xfs/xfs_extfree_item.h
+index 399562eaf4f5..8fa8651705e1 100644
+--- a/fs/xfs/xfs_extfree_item.h
++++ b/fs/xfs/xfs_extfree_item.h
+@@ -39,9 +39,28 @@ struct kmem_zone;
+  * "extent free done" log item described below.
+  *
+  * The EFI is reference counted so that it is not freed prior to both the EFI
+- * and EFD being committed and unpinned. This ensures that when the last
+- * reference goes away the EFI will always be in the AIL as it has been
+- * unpinned, regardless of whether the EFD is processed before or after the EFI.
++ * and EFD being committed and unpinned. This ensures the EFI is inserted into
++ * the AIL even in the event of out of order EFI/EFD processing. In other words,
++ * an EFI is born with two references:
++ *
++ * 	1.) an EFI held reference to track EFI AIL insertion
++ * 	2.) an EFD held reference to track EFD commit
++ *
++ * On allocation, both references are the responsibility of the caller. Once the
++ * EFI is added to and dirtied in a transaction, ownership of reference one
++ * transfers to the transaction. The reference is dropped once the EFI is
++ * inserted to the AIL or in the event of failure along the way (e.g., commit
++ * failure, log I/O error, etc.). Note that the caller remains responsible for
++ * the EFD reference under all circumstances to this point. The caller has no
++ * means to detect failure once the transaction is committed, however.
++ * Therefore, an EFD is required after this point, even in the event of
++ * unrelated failure.
++ *
++ * Once an EFD is allocated and dirtied in a transaction, reference two
++ * transfers to the transaction. The EFD reference is dropped once it reaches
++ * the unpin handler. Similar to the EFI, the reference also drops in the event
++ * of commit failure or log I/O errors. Note that the EFD is not inserted in the
++ * AIL, so at this point both the EFI and EFD are freed.
+  */
+ typedef struct xfs_efi_log_item {
+ 	xfs_log_item_t		efi_item;

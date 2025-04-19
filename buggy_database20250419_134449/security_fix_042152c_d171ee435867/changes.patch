@@ -1,0 +1,51 @@
+diff --git a/arch/arm64/net/bpf_jit.h b/arch/arm64/net/bpf_jit.h
+index 3920213244f0..194c95ccc1cf 100644
+--- a/arch/arm64/net/bpf_jit.h
++++ b/arch/arm64/net/bpf_jit.h
+@@ -263,6 +263,9 @@
+ /* HINTs */
+ #define A64_HINT(x) aarch64_insn_gen_hint(x)
+ 
++#define A64_PACIASP A64_HINT(AARCH64_INSN_HINT_PACIASP)
++#define A64_AUTIASP A64_HINT(AARCH64_INSN_HINT_AUTIASP)
++
+ /* BTI */
+ #define A64_BTI_C  A64_HINT(AARCH64_INSN_HINT_BTIC)
+ #define A64_BTI_J  A64_HINT(AARCH64_INSN_HINT_BTIJ)
+diff --git a/arch/arm64/net/bpf_jit_comp.c b/arch/arm64/net/bpf_jit_comp.c
+index 093fa9ea1083..8ab4035dea27 100644
+--- a/arch/arm64/net/bpf_jit_comp.c
++++ b/arch/arm64/net/bpf_jit_comp.c
+@@ -236,7 +236,8 @@ static bool is_lsi_offset(int offset, int scale)
+ }
+ 
+ /* Tail call offset to jump into */
+-#if IS_ENABLED(CONFIG_ARM64_BTI_KERNEL)
++#if IS_ENABLED(CONFIG_ARM64_BTI_KERNEL) || \
++	IS_ENABLED(CONFIG_ARM64_PTR_AUTH_KERNEL)
+ #define PROLOGUE_OFFSET 9
+ #else
+ #define PROLOGUE_OFFSET 8
+@@ -278,8 +279,11 @@ static int build_prologue(struct jit_ctx *ctx, bool ebpf_from_cbpf)
+ 	 *
+ 	 */
+ 
++	/* Sign lr */
++	if (IS_ENABLED(CONFIG_ARM64_PTR_AUTH_KERNEL))
++		emit(A64_PACIASP, ctx);
+ 	/* BTI landing pad */
+-	if (IS_ENABLED(CONFIG_ARM64_BTI_KERNEL))
++	else if (IS_ENABLED(CONFIG_ARM64_BTI_KERNEL))
+ 		emit(A64_BTI_C, ctx);
+ 
+ 	/* Save FP and LR registers to stay align with ARM64 AAPCS */
+@@ -580,6 +584,10 @@ static void build_epilogue(struct jit_ctx *ctx)
+ 	/* Set return value */
+ 	emit(A64_MOV(1, A64_R(0), r0), ctx);
+ 
++	/* Authenticate lr */
++	if (IS_ENABLED(CONFIG_ARM64_PTR_AUTH_KERNEL))
++		emit(A64_AUTIASP, ctx);
++
+ 	emit(A64_RET(A64_LR), ctx);
+ }

@@ -1,0 +1,60 @@
+diff --cc drivers/target/iscsi/iscsi_target.c
+index 77d64251af40,5d75bb418696..34871a628b11
+--- a/drivers/target/iscsi/iscsi_target.c
++++ b/drivers/target/iscsi/iscsi_target.c
+@@@ -4261,19 -4233,30 +4238,36 @@@ int iscsit_close_connection
+  	pr_debug("Closing iSCSI connection CID %hu on SID:"
+  		" %u\n", conn->cid, sess->sid);
+  	/*
+ -	 * Always up conn_logout_comp just in case the RX Thread is sleeping
+ -	 * and the logout response never got sent because the connection
+ -	 * failed.
+ +	 * Always up conn_logout_comp for the traditional TCP case just in case
+ +	 * the RX Thread in iscsi_target_rx_opcode() is sleeping and the logout
+ +	 * response never got sent because the connection failed.
+ +	 *
+ +	 * However for iser-target, isert_wait4logout() is using conn_logout_comp
+ +	 * to signal logout response TX interrupt completion.  Go ahead and skip
+ +	 * this for iser since isert_rx_opcode() does not wait on logout failure,
+ +	 * and to avoid iscsi_conn pointer dereference in iser-target code.
+  	 */
+ -	complete(&conn->conn_logout_comp);
+ +	if (conn->conn_transport->transport_type == ISCSI_TCP)
+ +		complete(&conn->conn_logout_comp);
+  
+- 	iscsi_release_thread_set(conn);
++ 	if (!strcmp(current->comm, ISCSI_RX_THREAD_NAME)) {
++ 		if (conn->tx_thread &&
++ 		    cmpxchg(&conn->tx_thread_active, true, false)) {
++ 			send_sig(SIGINT, conn->tx_thread, 1);
++ 			kthread_stop(conn->tx_thread);
++ 		}
++ 	} else if (!strcmp(current->comm, ISCSI_TX_THREAD_NAME)) {
++ 		if (conn->rx_thread &&
++ 		    cmpxchg(&conn->rx_thread_active, true, false)) {
++ 			send_sig(SIGINT, conn->rx_thread, 1);
++ 			kthread_stop(conn->rx_thread);
++ 		}
++ 	}
++ 
++ 	spin_lock(&iscsit_global->ts_bitmap_lock);
++ 	bitmap_release_region(iscsit_global->ts_bitmap, conn->bitmap_id,
++ 			      get_order(1));
++ 	spin_unlock(&iscsit_global->ts_bitmap_lock);
+  
+  	iscsit_stop_timers_for_cmds(conn);
+  	iscsit_stop_nopin_response_timer(conn);
+diff --cc drivers/target/iscsi/iscsi_target_erl0.c
+index bdd8731a4daa,e1f4c7eedb08..959a14c9dd5d
+--- a/drivers/target/iscsi/iscsi_target_erl0.c
++++ b/drivers/target/iscsi/iscsi_target_erl0.c
+@@@ -22,8 -22,8 +22,7 @@@
+  #include <target/target_core_fabric.h>
+  
+  #include <target/iscsi/iscsi_target_core.h>
+ -#include <target/iscsi/iscsi_transport.h>
+  #include "iscsi_target_seq_pdu_list.h"
+- #include "iscsi_target_tq.h"
+  #include "iscsi_target_erl0.h"
+  #include "iscsi_target_erl1.h"
+  #include "iscsi_target_erl2.h"

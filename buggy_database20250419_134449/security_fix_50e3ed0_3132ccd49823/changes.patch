@@ -1,0 +1,235 @@
+diff --git a/arch/arm64/Kconfig b/arch/arm64/Kconfig
+index 160856de9bbb..7761ffc6dbcf 100644
+--- a/arch/arm64/Kconfig
++++ b/arch/arm64/Kconfig
+@@ -1608,6 +1608,17 @@ config RODATA_FULL_DEFAULT_ENABLED
+ 	  This requires the linear region to be mapped down to pages,
+ 	  which may adversely affect performance in some cases.
+ 
++config ARM64_WXN
++	bool "Enable WXN attribute so all writable mappings are non-exec"
++	help
++	  Set the WXN bit in the SCTLR system register so that all writable
++	  mappings are treated as if the PXN/UXN bit is set as well.
++	  If this is set to Y, it can still be disabled at runtime by
++	  passing 'arm64.nowxn' on the kernel command line.
++
++	  This should only be set if no software needs to be supported that
++	  relies on being able to execute from writable mappings.
++
+ config ARM64_SW_TTBR0_PAN
+ 	bool "Emulate Privileged Access Never using TTBR0_EL1 switching"
+ 	help
+diff --git a/arch/arm64/include/asm/cpufeature.h b/arch/arm64/include/asm/cpufeature.h
+index a8f97690ce1f..ee33b7e52da7 100644
+--- a/arch/arm64/include/asm/cpufeature.h
++++ b/arch/arm64/include/asm/cpufeature.h
+@@ -18,6 +18,7 @@
+ #define ARM64_SW_FEATURE_OVERRIDE_NOKASLR	0
+ #define ARM64_SW_FEATURE_OVERRIDE_HVHE		4
+ #define ARM64_SW_FEATURE_OVERRIDE_RODATA_OFF	8
++#define ARM64_SW_FEATURE_OVERRIDE_NOWXN		12
+ 
+ #ifndef __ASSEMBLY__
+ 
+@@ -962,6 +963,13 @@ static inline bool kaslr_disabled_cmdline(void)
+ 	return arm64_test_sw_feature_override(ARM64_SW_FEATURE_OVERRIDE_NOKASLR);
+ }
+ 
++static inline bool arm64_wxn_enabled(void)
++{
++	if (!IS_ENABLED(CONFIG_ARM64_WXN))
++		return false;
++	return !arm64_test_sw_feature_override(ARM64_SW_FEATURE_OVERRIDE_NOWXN);
++}
++
+ u32 get_kvm_ipa_limit(void);
+ void dump_cpu_features(void);
+ 
+diff --git a/arch/arm64/include/asm/mman.h b/arch/arm64/include/asm/mman.h
+index 5966ee4a6154..6d4940342ba7 100644
+--- a/arch/arm64/include/asm/mman.h
++++ b/arch/arm64/include/asm/mman.h
+@@ -35,11 +35,40 @@ static inline unsigned long arch_calc_vm_flag_bits(unsigned long flags)
+ }
+ #define arch_calc_vm_flag_bits(flags) arch_calc_vm_flag_bits(flags)
+ 
++static inline bool arm64_check_wx_prot(unsigned long prot,
++				       struct task_struct *tsk)
++{
++	/*
++	 * When we are running with SCTLR_ELx.WXN==1, writable mappings are
++	 * implicitly non-executable. This means we should reject such mappings
++	 * when user space attempts to create them using mmap() or mprotect().
++	 */
++	if (arm64_wxn_enabled() &&
++	    ((prot & (PROT_WRITE | PROT_EXEC)) == (PROT_WRITE | PROT_EXEC))) {
++		/*
++		 * User space libraries such as libffi carry elaborate
++		 * heuristics to decide whether it is worth it to even attempt
++		 * to create writable executable mappings, as PaX or selinux
++		 * enabled systems will outright reject it. They will usually
++		 * fall back to something else (e.g., two separate shared
++		 * mmap()s of a temporary file) on failure.
++		 */
++		pr_info_ratelimited(
++			"process %s (%d) attempted to create PROT_WRITE+PROT_EXEC mapping\n",
++			tsk->comm, tsk->pid);
++		return false;
++	}
++	return true;
++}
++
+ static inline bool arch_validate_prot(unsigned long prot,
+ 	unsigned long addr __always_unused)
+ {
+ 	unsigned long supported = PROT_READ | PROT_WRITE | PROT_EXEC | PROT_SEM;
+ 
++	if (!arm64_check_wx_prot(prot, current))
++		return false;
++
+ 	if (system_supports_bti())
+ 		supported |= PROT_BTI;
+ 
+@@ -50,6 +79,13 @@ static inline bool arch_validate_prot(unsigned long prot,
+ }
+ #define arch_validate_prot(prot, addr) arch_validate_prot(prot, addr)
+ 
++static inline bool arch_validate_mmap_prot(unsigned long prot,
++					   unsigned long addr)
++{
++	return arm64_check_wx_prot(prot, current);
++}
++#define arch_validate_mmap_prot arch_validate_mmap_prot
++
+ static inline bool arch_validate_flags(unsigned long vm_flags)
+ {
+ 	if (!system_supports_mte())
+diff --git a/arch/arm64/include/asm/mmu_context.h b/arch/arm64/include/asm/mmu_context.h
+index c768d16b81a4..f0fe2d09d139 100644
+--- a/arch/arm64/include/asm/mmu_context.h
++++ b/arch/arm64/include/asm/mmu_context.h
+@@ -20,13 +20,41 @@
+ #include <asm/cpufeature.h>
+ #include <asm/daifflags.h>
+ #include <asm/proc-fns.h>
+-#include <asm-generic/mm_hooks.h>
+ #include <asm/cputype.h>
+ #include <asm/sysreg.h>
+ #include <asm/tlbflush.h>
+ 
+ extern bool rodata_full;
+ 
++static inline int arch_dup_mmap(struct mm_struct *oldmm,
++				struct mm_struct *mm)
++{
++	return 0;
++}
++
++static inline void arch_exit_mmap(struct mm_struct *mm)
++{
++}
++
++static inline void arch_unmap(struct mm_struct *mm,
++			unsigned long start, unsigned long end)
++{
++}
++
++static inline bool arch_vma_access_permitted(struct vm_area_struct *vma,
++		bool write, bool execute, bool foreign)
++{
++	if (IS_ENABLED(CONFIG_ARM64_WXN) && execute &&
++	    (vma->vm_flags & (VM_WRITE | VM_EXEC)) == (VM_WRITE | VM_EXEC)) {
++		pr_warn_ratelimited(
++			"process %s (%d) attempted to execute from writable memory\n",
++			current->comm, current->pid);
++		/* disallow unless the nowxn override is set */
++		return !arm64_wxn_enabled();
++	}
++	return true;
++}
++
+ static inline void contextidr_thread_switch(struct task_struct *next)
+ {
+ 	if (!IS_ENABLED(CONFIG_PID_IN_CONTEXTIDR))
+diff --git a/arch/arm64/kernel/pi/idreg-override.c b/arch/arm64/kernel/pi/idreg-override.c
+index aad399796e81..bccfee34f62f 100644
+--- a/arch/arm64/kernel/pi/idreg-override.c
++++ b/arch/arm64/kernel/pi/idreg-override.c
+@@ -189,6 +189,7 @@ static const struct ftr_set_desc sw_features __prel64_initconst = {
+ 		FIELD("nokaslr", ARM64_SW_FEATURE_OVERRIDE_NOKASLR, NULL),
+ 		FIELD("hvhe", ARM64_SW_FEATURE_OVERRIDE_HVHE, hvhe_filter),
+ 		FIELD("rodataoff", ARM64_SW_FEATURE_OVERRIDE_RODATA_OFF, NULL),
++		FIELD("nowxn", ARM64_SW_FEATURE_OVERRIDE_NOWXN, NULL),
+ 		{}
+ 	},
+ };
+@@ -221,8 +222,9 @@ static const struct {
+ 	{ "arm64.nomops",		"id_aa64isar2.mops=0" },
+ 	{ "arm64.nomte",		"id_aa64pfr1.mte=0" },
+ 	{ "nokaslr",			"arm64_sw.nokaslr=1" },
+-	{ "rodata=off",			"arm64_sw.rodataoff=1" },
++	{ "rodata=off",			"arm64_sw.rodataoff=1 arm64_sw.nowxn=1" },
+ 	{ "arm64.nolva",		"id_aa64mmfr2.varange=0" },
++	{ "arm64.nowxn",		"arm64_sw.nowxn=1" },
+ };
+ 
+ static int __init parse_hexdigit(const char *p, u64 *v)
+diff --git a/arch/arm64/kernel/pi/map_kernel.c b/arch/arm64/kernel/pi/map_kernel.c
+index 5fa08e13e17e..cac1e1f63c44 100644
+--- a/arch/arm64/kernel/pi/map_kernel.c
++++ b/arch/arm64/kernel/pi/map_kernel.c
+@@ -132,6 +132,25 @@ static void __init map_kernel(u64 kaslr_offset, u64 va_offset, int root_level)
+ 	idmap_cpu_replace_ttbr1(swapper_pg_dir);
+ }
+ 
++static void noinline __section(".idmap.text") disable_wxn(void)
++{
++	u64 sctlr = read_sysreg(sctlr_el1) & ~SCTLR_ELx_WXN;
++
++	/*
++	 * We cannot safely clear the WXN bit while the MMU and caches are on,
++	 * so turn the MMU off, flush the TLBs and turn it on again but with
++	 * the WXN bit cleared this time.
++	 */
++	asm("	msr	sctlr_el1, %0		;"
++	    "	isb				;"
++	    "	tlbi    vmalle1			;"
++	    "	dsb     nsh			;"
++	    "	isb				;"
++	    "	msr     sctlr_el1, %1		;"
++	    "	isb				;"
++	    ::	"r"(sctlr & ~SCTLR_ELx_M), "r"(sctlr));
++}
++
+ static void noinline __section(".idmap.text") set_ttbr0_for_lpa2(u64 ttbr)
+ {
+ 	u64 sctlr = read_sysreg(sctlr_el1);
+@@ -229,6 +248,10 @@ asmlinkage void __init early_map_kernel(u64 boot_status, void *fdt)
+ 	if (va_bits > VA_BITS_MIN)
+ 		sysreg_clear_set(tcr_el1, TCR_T1SZ_MASK, TCR_T1SZ(va_bits));
+ 
++	if (IS_ENABLED(CONFIG_ARM64_WXN) &&
++	    arm64_test_sw_feature_override(ARM64_SW_FEATURE_OVERRIDE_NOWXN))
++		disable_wxn();
++
+ 	/*
+ 	 * The virtual KASLR displacement modulo 2MiB is decided by the
+ 	 * physical placement of the image, as otherwise, we might not be able
+diff --git a/arch/arm64/mm/proc.S b/arch/arm64/mm/proc.S
+index 9d40f3ffd8d2..bfd2ad896108 100644
+--- a/arch/arm64/mm/proc.S
++++ b/arch/arm64/mm/proc.S
+@@ -546,6 +546,12 @@ alternative_else_nop_endif
+ 	 * Prepare SCTLR
+ 	 */
+ 	mov_q	x0, INIT_SCTLR_EL1_MMU_ON
++#ifdef CONFIG_ARM64_WXN
++	ldr_l	x1, arm64_sw_feature_override + FTR_OVR_VAL_OFFSET
++	tst	x1, #0xf << ARM64_SW_FEATURE_OVERRIDE_NOWXN
++	orr	x1, x0, #SCTLR_ELx_WXN
++	csel	x0, x0, x1, ne
++#endif
+ 	ret					// return to head.S
+ 
+ 	.unreq	mair

@@ -1,0 +1,114 @@
+commit d4e7ac68f771addc19352121706d8584eb0166cd
+Author: Andrew Jeffery <andrew@aj.id.au>
+Date:   Tue Jun 8 20:17:48 2021 +0930
+
+    ipmi: kcs_bmc: Strip private client data from struct kcs_bmc
+    
+    Move all client-private data out of `struct kcs_bmc` into the KCS client
+    implementation.
+    
+    With this change the KCS BMC core code now only concerns itself with
+    abstract `struct kcs_bmc` and `struct kcs_bmc_client` types, achieving
+    expected separation of concerns. Further, the change clears the path for
+    implementation of alternative userspace interfaces.
+    
+    The chardev data-structures are rearranged in the same manner applied to
+    the KCS device driver data-structures in an earlier patch - `struct
+    kcs_bmc_client` is embedded in the client's private data and we exploit
+    container_of() to translate as required.
+    
+    Finally, now that it is free of client data, `struct kcs_bmc` is renamed
+    to `struct kcs_bmc_device` to contrast `struct kcs_bmc_client`.
+    
+    Signed-off-by: Andrew Jeffery <andrew@aj.id.au>
+    Reviewed-by: Zev Weiss <zweiss@equinix.com>
+    Message-Id: <20210608104757.582199-8-andrew@aj.id.au>
+    Signed-off-by: Corey Minyard <cminyard@mvista.com>
+
+diff --git a/drivers/char/ipmi/kcs_bmc_npcm7xx.c b/drivers/char/ipmi/kcs_bmc_npcm7xx.c
+index ebb691af28c5..3b96486c25c3 100644
+--- a/drivers/char/ipmi/kcs_bmc_npcm7xx.c
++++ b/drivers/char/ipmi/kcs_bmc_npcm7xx.c
+@@ -65,7 +65,7 @@ struct npcm7xx_kcs_reg {
+ };
+ 
+ struct npcm7xx_kcs_bmc {
+-	struct kcs_bmc kcs_bmc;
++	struct kcs_bmc_device kcs_bmc;
+ 
+ 	struct regmap *map;
+ 
+@@ -78,12 +78,12 @@ static const struct npcm7xx_kcs_reg npcm7xx_kcs_reg_tbl[KCS_CHANNEL_MAX] = {
+ 	{ .sts = KCS3ST, .dob = KCS3DO, .dib = KCS3DI, .ctl = KCS3CTL, .ie = KCS3IE },
+ };
+ 
+-static inline struct npcm7xx_kcs_bmc *to_npcm7xx_kcs_bmc(struct kcs_bmc *kcs_bmc)
++static inline struct npcm7xx_kcs_bmc *to_npcm7xx_kcs_bmc(struct kcs_bmc_device *kcs_bmc)
+ {
+ 	return container_of(kcs_bmc, struct npcm7xx_kcs_bmc, kcs_bmc);
+ }
+ 
+-static u8 npcm7xx_kcs_inb(struct kcs_bmc *kcs_bmc, u32 reg)
++static u8 npcm7xx_kcs_inb(struct kcs_bmc_device *kcs_bmc, u32 reg)
+ {
+ 	struct npcm7xx_kcs_bmc *priv = to_npcm7xx_kcs_bmc(kcs_bmc);
+ 	u32 val = 0;
+@@ -95,7 +95,7 @@ static u8 npcm7xx_kcs_inb(struct kcs_bmc *kcs_bmc, u32 reg)
+ 	return rc == 0 ? (u8)val : 0;
+ }
+ 
+-static void npcm7xx_kcs_outb(struct kcs_bmc *kcs_bmc, u32 reg, u8 data)
++static void npcm7xx_kcs_outb(struct kcs_bmc_device *kcs_bmc, u32 reg, u8 data)
+ {
+ 	struct npcm7xx_kcs_bmc *priv = to_npcm7xx_kcs_bmc(kcs_bmc);
+ 	int rc;
+@@ -104,7 +104,7 @@ static void npcm7xx_kcs_outb(struct kcs_bmc *kcs_bmc, u32 reg, u8 data)
+ 	WARN(rc != 0, "regmap_write() failed: %d\n", rc);
+ }
+ 
+-static void npcm7xx_kcs_updateb(struct kcs_bmc *kcs_bmc, u32 reg, u8 mask, u8 data)
++static void npcm7xx_kcs_updateb(struct kcs_bmc_device *kcs_bmc, u32 reg, u8 mask, u8 data)
+ {
+ 	struct npcm7xx_kcs_bmc *priv = to_npcm7xx_kcs_bmc(kcs_bmc);
+ 	int rc;
+@@ -113,7 +113,7 @@ static void npcm7xx_kcs_updateb(struct kcs_bmc *kcs_bmc, u32 reg, u8 mask, u8 da
+ 	WARN(rc != 0, "regmap_update_bits() failed: %d\n", rc);
+ }
+ 
+-static void npcm7xx_kcs_enable_channel(struct kcs_bmc *kcs_bmc, bool enable)
++static void npcm7xx_kcs_enable_channel(struct kcs_bmc_device *kcs_bmc, bool enable)
+ {
+ 	struct npcm7xx_kcs_bmc *priv = to_npcm7xx_kcs_bmc(kcs_bmc);
+ 
+@@ -126,12 +126,12 @@ static void npcm7xx_kcs_enable_channel(struct kcs_bmc *kcs_bmc, bool enable)
+ 
+ static irqreturn_t npcm7xx_kcs_irq(int irq, void *arg)
+ {
+-	struct kcs_bmc *kcs_bmc = arg;
++	struct kcs_bmc_device *kcs_bmc = arg;
+ 
+ 	return kcs_bmc_handle_event(kcs_bmc);
+ }
+ 
+-static int npcm7xx_kcs_config_irq(struct kcs_bmc *kcs_bmc,
++static int npcm7xx_kcs_config_irq(struct kcs_bmc_device *kcs_bmc,
+ 				  struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+@@ -155,7 +155,7 @@ static int npcm7xx_kcs_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+ 	struct npcm7xx_kcs_bmc *priv;
+-	struct kcs_bmc *kcs_bmc;
++	struct kcs_bmc_device *kcs_bmc;
+ 	u32 chan;
+ 	int rc;
+ 
+@@ -207,7 +207,7 @@ static int npcm7xx_kcs_probe(struct platform_device *pdev)
+ static int npcm7xx_kcs_remove(struct platform_device *pdev)
+ {
+ 	struct npcm7xx_kcs_bmc *priv = platform_get_drvdata(pdev);
+-	struct kcs_bmc *kcs_bmc = &priv->kcs_bmc;
++	struct kcs_bmc_device *kcs_bmc = &priv->kcs_bmc;
+ 
+ 	kcs_bmc_remove_device(kcs_bmc);

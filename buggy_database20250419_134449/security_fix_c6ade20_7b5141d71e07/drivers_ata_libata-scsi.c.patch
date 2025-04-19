@@ -1,0 +1,36 @@
+commit c6ade20f5e50e188d20b711a618b20dd1d50457e
+Author: Christoph Hellwig <hch@lst.de>
+Date:   Tue Apr 25 13:39:54 2017 +0200
+
+    libata: reject passthrough WRITE SAME requests
+    
+    The WRITE SAME to TRIM translation rewrites the DATA OUT buffer.  While
+    the SCSI code accomodates for this by passing a read-writable buffer
+    userspace applications don't cater for this behavior.  In fact it can
+    be used to rewrite e.g. a readonly file through mmap and should be
+    considered as a security fix.
+    
+    Signed-off-by: Christoph Hellwig <hch@lst.de>
+    Cc: stable@vger.kernel.org
+    Reviewed-by: Martin K. Petersen <martin.petersen@oracle.com>
+    Signed-off-by: Tejun Heo <tj@kernel.org>
+
+diff --git a/drivers/ata/libata-scsi.c b/drivers/ata/libata-scsi.c
+index 1ac70744ae7b..50f56d066936 100644
+--- a/drivers/ata/libata-scsi.c
++++ b/drivers/ata/libata-scsi.c
+@@ -3462,6 +3462,14 @@ static unsigned int ata_scsi_write_same_xlat(struct ata_queued_cmd *qc)
+ 	if (unlikely(!dev->dma_mode))
+ 		goto invalid_opcode;
+ 
++	/*
++	 * We only allow sending this command through the block layer,
++	 * as it modifies the DATA OUT buffer, which would corrupt user
++	 * memory for SG_IO commands.
++	 */
++	if (unlikely(blk_rq_is_passthrough(scmd->request)))
++		goto invalid_opcode;
++
+ 	if (unlikely(scmd->cmd_len < 16)) {
+ 		fp = 15;
+ 		goto invalid_fld;

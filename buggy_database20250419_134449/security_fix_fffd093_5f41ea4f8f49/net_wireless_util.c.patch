@@ -1,0 +1,93 @@
+commit fffd0934b9390f34bec45762192b7edd3b12b4b5
+Author: Johannes Berg <johannes@sipsolutions.net>
+Date:   Wed Jul 8 14:22:54 2009 +0200
+
+    cfg80211: rework key operation
+    
+    This reworks the key operation in cfg80211, and now only
+    allows, from userspace, configuring keys (via nl80211)
+    after the connection has been established (in managed
+    mode), the IBSS been joined (in IBSS mode), at any time
+    (in AP[_VLAN] modes) or never for all the other modes.
+    
+    In order to do shared key authentication correctly, it
+    is now possible to give a WEP key to the AUTH command.
+    To configure static WEP keys, these are given to the
+    CONNECT or IBSS_JOIN command directly, for a userspace
+    SME it is assumed it will configure it properly after
+    the connection has been established.
+    
+    Since mac80211 used to check the default key in IBSS
+    mode to see whether or not the network is protected,
+    it needs an update in that area, as well as an update
+    to make use of the WEP key passed to auth() for shared
+    key authentication.
+    
+    Signed-off-by: Johannes Berg <johannes@sipsolutions.net>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/wireless/util.c b/net/wireless/util.c
+index 28f8f96801d4..4bab380a1204 100644
+--- a/net/wireless/util.c
++++ b/net/wireless/util.c
+@@ -141,9 +141,12 @@ void ieee80211_set_bitrate_flags(struct wiphy *wiphy)
+ 			set_mandatory_flags_band(wiphy->bands[band], band);
+ }
+ 
+-int cfg80211_validate_key_settings(struct key_params *params, int key_idx,
++int cfg80211_validate_key_settings(struct cfg80211_registered_device *rdev,
++				   struct key_params *params, int key_idx,
+ 				   const u8 *mac_addr)
+ {
++	int i;
++
+ 	if (key_idx > 5)
+ 		return -EINVAL;
+ 
+@@ -197,6 +200,12 @@ int cfg80211_validate_key_settings(struct key_params *params, int key_idx,
+ 		}
+ 	}
+ 
++	for (i = 0; i < rdev->wiphy.n_cipher_suites; i++)
++		if (params->cipher == rdev->wiphy.cipher_suites[i])
++			break;
++	if (i == rdev->wiphy.n_cipher_suites)
++		return -EINVAL;
++
+ 	return 0;
+ }
+ 
+@@ -523,3 +532,33 @@ const u8 *ieee80211_bss_get_ie(struct cfg80211_bss *bss, u8 ie)
+ 	return NULL;
+ }
+ EXPORT_SYMBOL(ieee80211_bss_get_ie);
++
++void cfg80211_upload_connect_keys(struct wireless_dev *wdev)
++{
++	struct cfg80211_registered_device *rdev = wiphy_to_dev(wdev->wiphy);
++	struct net_device *dev = wdev->netdev;
++	int i;
++
++	if (!wdev->connect_keys)
++		return;
++
++	for (i = 0; i < 6; i++) {
++		if (!wdev->connect_keys->params[i].cipher)
++			continue;
++		if (rdev->ops->add_key(wdev->wiphy, dev, i, NULL,
++					&wdev->connect_keys->params[i]))
++			printk(KERN_ERR "%s: failed to set key %d\n",
++				dev->name, i);
++		if (wdev->connect_keys->def == i)
++			if (rdev->ops->set_default_key(wdev->wiphy, dev, i))
++				printk(KERN_ERR "%s: failed to set defkey %d\n",
++					dev->name, i);
++		if (wdev->connect_keys->defmgmt == i)
++			if (rdev->ops->set_default_mgmt_key(wdev->wiphy, dev, i))
++				printk(KERN_ERR "%s: failed to set mgtdef %d\n",
++					dev->name, i);
++	}
++
++	kfree(wdev->connect_keys);
++	wdev->connect_keys = NULL;
++}

@@ -1,0 +1,109 @@
+diff --git a/drivers/net/wireless/intel/iwlwifi/mvm/ftm-initiator.c b/drivers/net/wireless/intel/iwlwifi/mvm/ftm-initiator.c
+index 379da4bec5dd..3963a0d4ed04 100644
+--- a/drivers/net/wireless/intel/iwlwifi/mvm/ftm-initiator.c
++++ b/drivers/net/wireless/intel/iwlwifi/mvm/ftm-initiator.c
+@@ -25,6 +25,10 @@ struct iwl_mvm_smooth_entry {
+ 	u64 host_time;
+ };
+ 
++enum iwl_mvm_pasn_flags {
++	IWL_MVM_PASN_FLAG_HAS_HLTK = BIT(0),
++};
++
+ struct iwl_mvm_ftm_pasn_entry {
+ 	struct list_head list;
+ 	u8 addr[ETH_ALEN];
+@@ -33,6 +37,7 @@ struct iwl_mvm_ftm_pasn_entry {
+ 	u8 cipher;
+ 	u8 tx_pn[IEEE80211_CCMP_PN_LEN];
+ 	u8 rx_pn[IEEE80211_CCMP_PN_LEN];
++	u32 flags;
+ };
+ 
+ int iwl_mvm_ftm_add_pasn_sta(struct iwl_mvm *mvm, struct ieee80211_vif *vif,
+@@ -79,14 +84,24 @@ int iwl_mvm_ftm_add_pasn_sta(struct iwl_mvm *mvm, struct ieee80211_vif *vif,
+ 		rcu_read_unlock();
+ 	}
+ 
+-	if (tk_len != expected_tk_len || hltk_len != sizeof(pasn->hltk)) {
++	if (tk_len != expected_tk_len ||
++	    (hltk_len && hltk_len != sizeof(pasn->hltk))) {
+ 		IWL_ERR(mvm, "Invalid key length: tk_len=%u hltk_len=%u\n",
+ 			tk_len, hltk_len);
+ 		goto out;
+ 	}
+ 
++	if (!expected_tk_len && !hltk_len) {
++		IWL_ERR(mvm, "TK and HLTK not set\n");
++		goto out;
++	}
++
+ 	memcpy(pasn->addr, addr, sizeof(pasn->addr));
+-	memcpy(pasn->hltk, hltk, sizeof(pasn->hltk));
++
++	if (hltk_len) {
++		memcpy(pasn->hltk, hltk, sizeof(pasn->hltk));
++		pasn->flags |= IWL_MVM_PASN_FLAG_HAS_HLTK;
++	}
+ 
+ 	if (tk && tk_len)
+ 		memcpy(pasn->tk, tk, sizeof(pasn->tk));
+@@ -691,7 +706,11 @@ iwl_mvm_ftm_set_secured_ranging(struct iwl_mvm *mvm, struct ieee80211_vif *vif,
+ 			continue;
+ 
+ 		target->cipher = entry->cipher;
+-		memcpy(target->hltk, entry->hltk, sizeof(target->hltk));
++
++		if (entry->flags & IWL_MVM_PASN_FLAG_HAS_HLTK)
++			memcpy(target->hltk, entry->hltk, sizeof(target->hltk));
++		else
++			memset(target->hltk, 0, sizeof(target->hltk));
+ 
+ 		if (vif->cfg.assoc &&
+ 		    !memcmp(vif->bss_conf.bssid, target->bssid,
+diff --git a/drivers/net/wireless/intel/iwlwifi/mvm/ftm-responder.c b/drivers/net/wireless/intel/iwlwifi/mvm/ftm-responder.c
+index c37d793d6a4a..1b6fb73ddfc7 100644
+--- a/drivers/net/wireless/intel/iwlwifi/mvm/ftm-responder.c
++++ b/drivers/net/wireless/intel/iwlwifi/mvm/ftm-responder.c
+@@ -317,6 +317,8 @@ int iwl_mvm_ftm_respoder_add_pasn_sta(struct iwl_mvm *mvm,
+ 		.addr = addr,
+ 		.hltk = hltk,
+ 	};
++	struct iwl_mvm_pasn_hltk_data *hltk_data_ptr = NULL;
++
+ 	u8 cmd_ver = iwl_fw_lookup_cmd_ver(mvm->fw,
+ 					   WIDE_ID(LOCATION_GROUP, TOF_RESPONDER_DYN_CONFIG_CMD),
+ 					   2);
+@@ -328,12 +330,21 @@ int iwl_mvm_ftm_respoder_add_pasn_sta(struct iwl_mvm *mvm,
+ 		return -ENOTSUPP;
+ 	}
+ 
+-	hltk_data.cipher = iwl_mvm_cipher_to_location_cipher(cipher);
+-	if (hltk_data.cipher == IWL_LOCATION_CIPHER_INVALID) {
+-		IWL_ERR(mvm, "invalid cipher: %u\n", cipher);
++	if ((!hltk || !hltk_len) && (!tk || !tk_len)) {
++		IWL_ERR(mvm, "TK and HLTK not set\n");
+ 		return -EINVAL;
+ 	}
+ 
++	if (hltk && hltk_len) {
++		hltk_data.cipher = iwl_mvm_cipher_to_location_cipher(cipher);
++		if (hltk_data.cipher == IWL_LOCATION_CIPHER_INVALID) {
++			IWL_ERR(mvm, "invalid cipher: %u\n", cipher);
++			return -EINVAL;
++		}
++
++		hltk_data_ptr = &hltk_data;
++	}
++
+ 	if (tk && tk_len) {
+ 		sta = kzalloc(sizeof(*sta), GFP_KERNEL);
+ 		if (!sta)
+@@ -350,7 +361,7 @@ int iwl_mvm_ftm_respoder_add_pasn_sta(struct iwl_mvm *mvm,
+ 		list_add_tail(&sta->list, &mvm->resp_pasn_list);
+ 	}
+ 
+-	ret = iwl_mvm_ftm_responder_dyn_cfg_v3(mvm, vif, NULL, &hltk_data);
++	ret = iwl_mvm_ftm_responder_dyn_cfg_v3(mvm, vif, NULL, hltk_data_ptr);
+ 	if (ret && sta)
+ 		iwl_mvm_resp_del_pasn_sta(mvm, vif, sta);

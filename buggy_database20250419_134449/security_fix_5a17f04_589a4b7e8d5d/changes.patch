@@ -1,0 +1,146 @@
+diff --git a/drivers/base/firmware_loader/main.c b/drivers/base/firmware_loader/main.c
+index 7c3590fd97c2..017c4cdb219e 100644
+--- a/drivers/base/firmware_loader/main.c
++++ b/drivers/base/firmware_loader/main.c
+@@ -821,7 +821,7 @@ _request_firmware(const struct firmware **firmware_p, const char *name,
+ 	 * called by a driver when serving an unrelated request from userland, we use
+ 	 * the kernel credentials to read the file.
+ 	 */
+-	kern_cred = prepare_kernel_cred(NULL);
++	kern_cred = prepare_kernel_cred(&init_task);
+ 	if (!kern_cred) {
+ 		ret = -ENOMEM;
+ 		goto out;
+diff --git a/fs/cifs/cifs_spnego.c b/fs/cifs/cifs_spnego.c
+index 342717bf1dc2..6f3285f1dfee 100644
+--- a/fs/cifs/cifs_spnego.c
++++ b/fs/cifs/cifs_spnego.c
+@@ -189,7 +189,7 @@ init_cifs_spnego(void)
+ 	 * spnego upcalls.
+ 	 */
+ 
+-	cred = prepare_kernel_cred(NULL);
++	cred = prepare_kernel_cred(&init_task);
+ 	if (!cred)
+ 		return -ENOMEM;
+ 
+diff --git a/fs/cifs/cifsacl.c b/fs/cifs/cifsacl.c
+index fa480d62f313..574de2b225ae 100644
+--- a/fs/cifs/cifsacl.c
++++ b/fs/cifs/cifsacl.c
+@@ -465,7 +465,7 @@ init_cifs_idmap(void)
+ 	 * this is used to prevent malicious redirections from being installed
+ 	 * with add_key().
+ 	 */
+-	cred = prepare_kernel_cred(NULL);
++	cred = prepare_kernel_cred(&init_task);
+ 	if (!cred)
+ 		return -ENOMEM;
+ 
+diff --git a/fs/ksmbd/smb_common.c b/fs/ksmbd/smb_common.c
+index d96da872d70a..2a4fbbd55b91 100644
+--- a/fs/ksmbd/smb_common.c
++++ b/fs/ksmbd/smb_common.c
+@@ -623,7 +623,7 @@ int ksmbd_override_fsids(struct ksmbd_work *work)
+ 	if (share->force_gid != KSMBD_SHARE_INVALID_GID)
+ 		gid = share->force_gid;
+ 
+-	cred = prepare_kernel_cred(NULL);
++	cred = prepare_kernel_cred(&init_task);
+ 	if (!cred)
+ 		return -ENOMEM;
+ 
+diff --git a/fs/nfs/flexfilelayout/flexfilelayout.c b/fs/nfs/flexfilelayout/flexfilelayout.c
+index 1ec79ccf89ad..7deb3cd76abe 100644
+--- a/fs/nfs/flexfilelayout/flexfilelayout.c
++++ b/fs/nfs/flexfilelayout/flexfilelayout.c
+@@ -493,10 +493,10 @@ ff_layout_alloc_lseg(struct pnfs_layout_hdr *lh,
+ 		gid = make_kgid(&init_user_ns, id);
+ 
+ 		if (gfp_flags & __GFP_FS)
+-			kcred = prepare_kernel_cred(NULL);
++			kcred = prepare_kernel_cred(&init_task);
+ 		else {
+ 			unsigned int nofs_flags = memalloc_nofs_save();
+-			kcred = prepare_kernel_cred(NULL);
++			kcred = prepare_kernel_cred(&init_task);
+ 			memalloc_nofs_restore(nofs_flags);
+ 		}
+ 		rc = -ENOMEM;
+diff --git a/fs/nfs/nfs4idmap.c b/fs/nfs/nfs4idmap.c
+index e3fdd2f45b01..25a7c771cfd8 100644
+--- a/fs/nfs/nfs4idmap.c
++++ b/fs/nfs/nfs4idmap.c
+@@ -203,7 +203,7 @@ int nfs_idmap_init(void)
+ 	printk(KERN_NOTICE "NFS: Registering the %s key type\n",
+ 		key_type_id_resolver.name);
+ 
+-	cred = prepare_kernel_cred(NULL);
++	cred = prepare_kernel_cred(&init_task);
+ 	if (!cred)
+ 		return -ENOMEM;
+ 
+diff --git a/fs/nfsd/nfs4callback.c b/fs/nfsd/nfs4callback.c
+index f0e69edf5f0f..4a9e8d17e56a 100644
+--- a/fs/nfsd/nfs4callback.c
++++ b/fs/nfsd/nfs4callback.c
+@@ -870,7 +870,7 @@ static const struct cred *get_backchannel_cred(struct nfs4_client *clp, struct r
+ 	} else {
+ 		struct cred *kcred;
+ 
+-		kcred = prepare_kernel_cred(NULL);
++		kcred = prepare_kernel_cred(&init_task);
+ 		if (!kcred)
+ 			return NULL;
+ 
+diff --git a/kernel/cred.c b/kernel/cred.c
+index e10c15f51c1f..811ad654abd1 100644
+--- a/kernel/cred.c
++++ b/kernel/cred.c
+@@ -701,9 +701,9 @@ void __init cred_init(void)
+  * override a task's own credentials so that work can be done on behalf of that
+  * task that requires a different subjective context.
+  *
+- * @daemon is used to provide a base for the security record, but can be NULL.
+- * If @daemon is supplied, then the security data will be derived from that;
+- * otherwise they'll be set to 0 and no groups, full capabilities and no keys.
++ * @daemon is used to provide a base cred, with the security data derived from
++ * that; if this is "&init_task", they'll be set to 0, no groups, full
++ * capabilities, and no keys.
+  *
+  * The caller may change these controls afterwards if desired.
+  *
+@@ -714,17 +714,16 @@ struct cred *prepare_kernel_cred(struct task_struct *daemon)
+ 	const struct cred *old;
+ 	struct cred *new;
+ 
++	if (WARN_ON_ONCE(!daemon))
++		return NULL;
++
+ 	new = kmem_cache_alloc(cred_jar, GFP_KERNEL);
+ 	if (!new)
+ 		return NULL;
+ 
+ 	kdebug("prepare_kernel_cred() alloc %p", new);
+ 
+-	if (daemon)
+-		old = get_task_cred(daemon);
+-	else
+-		old = get_cred(&init_cred);
+-
++	old = get_task_cred(daemon);
+ 	validate_creds(old);
+ 
+ 	*new = *old;
+diff --git a/net/dns_resolver/dns_key.c b/net/dns_resolver/dns_key.c
+index 3aced951d5ab..01e54b46ae0b 100644
+--- a/net/dns_resolver/dns_key.c
++++ b/net/dns_resolver/dns_key.c
+@@ -337,7 +337,7 @@ static int __init init_dns_resolver(void)
+ 	 * this is used to prevent malicious redirections from being installed
+ 	 * with add_key().
+ 	 */
+-	cred = prepare_kernel_cred(NULL);
++	cred = prepare_kernel_cred(&init_task);
+ 	if (!cred)
+ 		return -ENOMEM;

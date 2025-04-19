@@ -1,0 +1,56 @@
+commit de734831224e74fcaf8917386e33644c4243db95
+Author: Chuck Lever <chuck.lever@oracle.com>
+Date:   Wed Jul 11 16:30:50 2012 -0400
+
+    NFS: Treat NFS4ERR_CLID_INUSE as a fatal error
+    
+    For NFSv4 minor version 0, currently the cl_id_uniquifier allows the
+    Linux client to generate a unique nfs_client_id4 string whenever a
+    server replies with NFS4ERR_CLID_INUSE.
+    
+    This implementation seems to be based on a flawed reading of RFC
+    3530.  NFS4ERR_CLID_INUSE actually means that the client has presented
+    this nfs_client_id4 string with a different principal at some time in
+    the past, and that lease is still in use on the server.
+    
+    For a Linux client this might be rather difficult to achieve: the
+    authentication flavor is named right in the nfs_client_id4.id
+    string.  If we change flavors, we change strings automatically.
+    
+    So, practically speaking, NFS4ERR_CLID_INUSE means there is some other
+    client using our string.  There is not much that can be done to
+    recover automatically.  Let's make it a permanent error.
+    
+    Remove the recovery logic in nfs4_proc_setclientid(), and remove the
+    cl_id_uniquifier field from the nfs_client data structure.  And,
+    remove the authentication flavor from the nfs_client_id4 string.
+    
+    Keeping the authentication flavor in the nfs_client_id4.id string
+    means that we could have a separate lease for each authentication
+    flavor used by mounts on the client.  But we want just one lease for
+    all the mounts on this client.
+    
+    Signed-off-by: Chuck Lever <chuck.lever@oracle.com>
+    Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+
+diff --git a/fs/nfs/nfs4state.c b/fs/nfs/nfs4state.c
+index 1cfc4603fd9a..81eabcdad0e5 100644
+--- a/fs/nfs/nfs4state.c
++++ b/fs/nfs/nfs4state.c
+@@ -1606,10 +1606,15 @@ static int nfs4_handle_reclaim_lease_error(struct nfs_client *clp, int status)
+ 			return -ESERVERFAULT;
+ 		/* Lease confirmation error: retry after purging the lease */
+ 		ssleep(1);
+-	case -NFS4ERR_CLID_INUSE:
+ 	case -NFS4ERR_STALE_CLIENTID:
+ 		clear_bit(NFS4CLNT_LEASE_CONFIRM, &clp->cl_state);
+ 		break;
++	case -NFS4ERR_CLID_INUSE:
++		pr_err("NFS: Server %s reports our clientid is in use\n",
++			clp->cl_hostname);
++		nfs_mark_client_ready(clp, -EPERM);
++		clear_bit(NFS4CLNT_LEASE_CONFIRM, &clp->cl_state);
++		return -EPERM;
+ 	case -EACCES:
+ 		if (clp->cl_machine_cred == NULL)
+ 			return -EACCES;

@@ -1,0 +1,126 @@
+diff --git a/tools/perf/builtin-inject.c b/tools/perf/builtin-inject.c
+index 670157db2502..248cd9f3e5bb 100644
+--- a/tools/perf/builtin-inject.c
++++ b/tools/perf/builtin-inject.c
+@@ -24,9 +24,10 @@
+ #include "util/synthetic-events.h"
+ #include "util/thread.h"
+ #include "util/namespaces.h"
+-#include <linux/err.h>
+ 
++#include <linux/err.h>
+ #include <subcmd/parse-options.h>
++#include <uapi/linux/mman.h> /* To get things like MAP_HUGETLB even on older libc headers */
+ 
+ #include <linux/list.h>
+ #include <errno.h>
+@@ -436,21 +437,22 @@ static int dso__read_build_id(struct dso *dso)
+ }
+ 
+ static int dso__inject_build_id(struct dso *dso, struct perf_tool *tool,
+-				struct machine *machine)
++				struct machine *machine, u8 cpumode, u32 flags)
+ {
+-	u16 misc = PERF_RECORD_MISC_USER;
+ 	int err;
+ 
++	if (is_anon_memory(dso->long_name) || flags & MAP_HUGETLB)
++		return 0;
++	if (is_no_dso_memory(dso->long_name))
++		return 0;
++
+ 	if (dso__read_build_id(dso) < 0) {
+ 		pr_debug("no build_id found for %s\n", dso->long_name);
+ 		return -1;
+ 	}
+ 
+-	if (dso->kernel)
+-		misc = PERF_RECORD_MISC_KERNEL;
+-
+-	err = perf_event__synthesize_build_id(tool, dso, misc, perf_event__repipe,
+-					      machine);
++	err = perf_event__synthesize_build_id(tool, dso, cpumode,
++					      perf_event__repipe, machine);
+ 	if (err) {
+ 		pr_err("Can't synthesize build_id event for %s\n", dso->long_name);
+ 		return -1;
+@@ -477,19 +479,8 @@ int perf_event__inject_buildid(struct perf_tool *tool, union perf_event *event,
+ 	if (thread__find_map(thread, sample->cpumode, sample->ip, &al)) {
+ 		if (!al.map->dso->hit) {
+ 			al.map->dso->hit = 1;
+-			if (map__load(al.map) >= 0) {
+-				dso__inject_build_id(al.map->dso, tool, machine);
+-				/*
+-				 * If this fails, too bad, let the other side
+-				 * account this as unresolved.
+-				 */
+-			} else {
+-#ifdef HAVE_LIBELF_SUPPORT
+-				pr_warning("no symbols found in %s, maybe "
+-					   "install a debug package?\n",
+-					   al.map->dso->long_name);
+-#endif
+-			}
++			dso__inject_build_id(al.map->dso, tool, machine,
++					     sample->cpumode, al.map->flags);
+ 		}
+ 	}
+ 
+diff --git a/tools/perf/util/map.c b/tools/perf/util/map.c
+index cc0faf8f1321..8b305e624124 100644
+--- a/tools/perf/util/map.c
++++ b/tools/perf/util/map.c
+@@ -27,21 +27,6 @@
+ 
+ static void __maps__insert(struct maps *maps, struct map *map);
+ 
+-static inline int is_anon_memory(const char *filename, u32 flags)
+-{
+-	return flags & MAP_HUGETLB ||
+-	       !strcmp(filename, "//anon") ||
+-	       !strncmp(filename, "/dev/zero", sizeof("/dev/zero") - 1) ||
+-	       !strncmp(filename, "/anon_hugepage", sizeof("/anon_hugepage") - 1);
+-}
+-
+-static inline int is_no_dso_memory(const char *filename)
+-{
+-	return !strncmp(filename, "[stack", 6) ||
+-	       !strncmp(filename, "/SYSV",5)   ||
+-	       !strcmp(filename, "[heap]");
+-}
+-
+ static inline int is_android_lib(const char *filename)
+ {
+ 	return strstarts(filename, "/data/app-lib/") ||
+@@ -158,7 +143,7 @@ struct map *map__new(struct machine *machine, u64 start, u64 len,
+ 		int anon, no_dso, vdso, android;
+ 
+ 		android = is_android_lib(filename);
+-		anon = is_anon_memory(filename, flags);
++		anon = is_anon_memory(filename) || flags & MAP_HUGETLB;
+ 		vdso = is_vdso_map(filename);
+ 		no_dso = is_no_dso_memory(filename);
+ 		map->prot = prot;
+diff --git a/tools/perf/util/map.h b/tools/perf/util/map.h
+index c2f5d28fe73a..b1c0686db1b7 100644
+--- a/tools/perf/util/map.h
++++ b/tools/perf/util/map.h
+@@ -171,4 +171,18 @@ static inline bool is_bpf_image(const char *name)
+ 	return strncmp(name, "bpf_trampoline_", sizeof("bpf_trampoline_") - 1) == 0 ||
+ 	       strncmp(name, "bpf_dispatcher_", sizeof("bpf_dispatcher_") - 1) == 0;
+ }
++
++static inline int is_anon_memory(const char *filename)
++{
++	return !strcmp(filename, "//anon") ||
++	       !strncmp(filename, "/dev/zero", sizeof("/dev/zero") - 1) ||
++	       !strncmp(filename, "/anon_hugepage", sizeof("/anon_hugepage") - 1);
++}
++
++static inline int is_no_dso_memory(const char *filename)
++{
++	return !strncmp(filename, "[stack", 6) ||
++	       !strncmp(filename, "/SYSV", 5)  ||
++	       !strcmp(filename, "[heap]");
++}
+ #endif /* __PERF_MAP_H */

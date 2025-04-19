@@ -1,0 +1,55 @@
+commit 8526eb7fc75abcd09d8bd061610215baf0ca948a
+Author: Srinivas Pandruvada <srinivas.pandruvada@linux.intel.com>
+Date:   Wed Feb 1 10:28:53 2023 -0800
+
+    thermal: intel: powerclamp: Use powercap idle-inject feature
+    
+    There are two idle injection implementation in the Linux kernel. One
+    via intel_powerclamp and the other using powercap/idle_inject. Both
+    implementation end up in calling play_idle* function from a FIFO
+    priority thread. Both can't be used at the same time.
+    
+    It is better to use one idle injection framework for better
+    maintainability. In this way, there is only one caller for play_idle.
+    
+    Here powercap/idle_inject can be used for both per-core and for system
+    wide idle injection. This framework has a well defined interface which
+    allow registry for per-core or for all CPUs (system wide).
+    
+    This reduces code complexity in the intel powerclamp driver as all the
+    per CPU kthreads, delayed work and calls to play_idle can be removed.
+    
+    The changes include:
+     - Remove unneeded include files
+     - Remove per CPU kthread workers: balancing_work and idle_injection_work.
+     - Reuse the compensation related code by moving from previous worker
+       thread to idle_injection callback.
+     - Adjust the idle_duration and runtime by using powercap/idle_inject
+       interface.
+     - Remove all variables, which are not required once powercap/idle_inject
+       is used.
+     - Add mutex to avoid race during removal of idle injection during module
+       unload and user action to change idle inject percent. Also for
+       protection during dynamic adjustment of run and idle time from
+       update() callback.
+     - Remove online/offline callbacks to designate control CPU
+     - Use cpu_present_mask global variable for CPU mask
+     - Remove hot plug locks
+    
+    Signed-off-by: Srinivas Pandruvada <srinivas.pandruvada@linux.intel.com>
+    Signed-off-by: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
+
+diff --git a/drivers/thermal/intel/Kconfig b/drivers/thermal/intel/Kconfig
+index e50fd260484a..b5808f92702d 100644
+--- a/drivers/thermal/intel/Kconfig
++++ b/drivers/thermal/intel/Kconfig
+@@ -3,6 +3,9 @@ config INTEL_POWERCLAMP
+ 	tristate "Intel PowerClamp idle injection driver"
+ 	depends on X86
+ 	depends on CPU_SUP_INTEL
++	depends on CPU_IDLE
++	select POWERCAP
++	select IDLE_INJECT
+ 	help
+ 	  Enable this to enable Intel PowerClamp idle injection driver. This
+ 	  enforce idle time which results in more package C-state residency. The

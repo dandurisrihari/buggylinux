@@ -1,0 +1,65 @@
+commit 67e7fdfcc6824a4f768d76d89377b33baad58fad
+Author: Steve Capper <steve.capper@arm.com>
+Date:   Thu Dec 6 22:50:41 2018 +0000
+
+    arm64: mm: introduce 52-bit userspace support
+    
+    On arm64 there is optional support for a 52-bit virtual address space.
+    To exploit this one has to be running with a 64KB page size and be
+    running on hardware that supports this.
+    
+    For an arm64 kernel supporting a 48 bit VA with a 64KB page size,
+    some changes are needed to support a 52-bit userspace:
+     * TCR_EL1.T0SZ needs to be 12 instead of 16,
+     * TASK_SIZE needs to reflect the new size.
+    
+    This patch implements the above when the support for 52-bit VAs is
+    detected at early boot time.
+    
+    On arm64 userspace addresses translation is controlled by TTBR0_EL1. As
+    well as userspace, TTBR0_EL1 controls:
+     * The identity mapping,
+     * EFI runtime code.
+    
+    It is possible to run a kernel with an identity mapping that has a
+    larger VA size than userspace (and for this case __cpu_set_tcr_t0sz()
+    would set TCR_EL1.T0SZ as appropriate). However, when the conditions for
+    52-bit userspace are met; it is possible to keep TCR_EL1.T0SZ fixed at
+    12. Thus in this patch, the TCR_EL1.T0SZ size changing logic is
+    disabled.
+    
+    Reviewed-by: Catalin Marinas <catalin.marinas@arm.com>
+    Signed-off-by: Steve Capper <steve.capper@arm.com>
+    Signed-off-by: Will Deacon <will.deacon@arm.com>
+
+diff --git a/arch/arm64/include/asm/processor.h b/arch/arm64/include/asm/processor.h
+index 759927faf7f6..7ff75e52b762 100644
+--- a/arch/arm64/include/asm/processor.h
++++ b/arch/arm64/include/asm/processor.h
+@@ -19,10 +19,12 @@
+ #ifndef __ASM_PROCESSOR_H
+ #define __ASM_PROCESSOR_H
+ 
+-#define TASK_SIZE_64		(UL(1) << VA_BITS)
+-
+-#define KERNEL_DS	UL(-1)
+-#define USER_DS		(TASK_SIZE_64 - 1)
++#define KERNEL_DS		UL(-1)
++#ifdef CONFIG_ARM64_52BIT_VA
++#define USER_DS			((UL(1) << 52) - 1)
++#else
++#define USER_DS			((UL(1) << VA_BITS) - 1)
++#endif /* CONFIG_ARM64_52BIT_VA */
+ 
+ /*
+  * On arm64 systems, unaligned accesses by the CPU are cheap, and so there is
+@@ -56,6 +58,9 @@
+ 
+ #define DEFAULT_MAP_WINDOW_64	(UL(1) << VA_BITS)
+ 
++extern u64 vabits_user;
++#define TASK_SIZE_64		(UL(1) << vabits_user)
++
+ #ifdef CONFIG_COMPAT
+ #define TASK_SIZE_32		UL(0x100000000)
+ #define TASK_SIZE		(test_thread_flag(TIF_32BIT) ? \

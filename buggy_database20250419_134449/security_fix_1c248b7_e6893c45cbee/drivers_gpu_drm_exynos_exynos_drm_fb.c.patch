@@ -1,0 +1,404 @@
+commit 1c248b7d2960faec3e1b8f3f9c5d9d0df28e0a3c
+Author: Inki Dae <inki.dae@samsung.com>
+Date:   Tue Oct 4 19:19:01 2011 +0900
+
+    DRM: add DRM Driver for Samsung SoC EXYNOS4210.
+    
+    This patch is a DRM Driver for Samsung SoC Exynos4210 and now enables
+    only FIMD yet but we will add HDMI support also in the future.
+    
+    this patch is based on git repository below:
+    git://people.freedesktop.org/~airlied/linux.git
+    branch name: drm-next
+    commit-id: 88ef4e3f4f616462b78a7838eb3ffc3818d30f67
+    
+    you can refer to our working repository below:
+    http://git.infradead.org/users/kmpark/linux-2.6-samsung
+    branch name: samsung-drm
+    
+    We tried to re-use lowlevel codes of the FIMD driver(s3c-fb.c
+    based on Linux framebuffer) but couldn't so because lowlevel codes
+    of s3c-fb.c are included internally and so FIMD module of this driver has
+    its own lowlevel codes.
+    
+    We used GEM framework for buffer management and DMA APIs(dma_alloc_*)
+    for buffer allocation so we can allocate physically continuous memory
+    for DMA through it and also we could use CMA later if CMA is applied to
+    mainline.
+    
+    Refer to this link for CMA(Continuous Memory Allocator):
+    http://lkml.org/lkml/2011/7/20/45
+    
+    this driver supports only physically continuous memory(non-iommu).
+    
+    Links to previous versions of the patchset:
+    v1: < https://lwn.net/Articles/454380/ >
+    v2: < http://www.spinics.net/lists/kernel/msg1224275.html >
+    v3: < http://www.spinics.net/lists/dri-devel/msg13755.html >
+    v4: < http://permalink.gmane.org/gmane.comp.video.dri.devel/60439 >
+    v5: < http://comments.gmane.org/gmane.comp.video.dri.devel/60802 >
+    
+    Changelog v2:
+    DRM: add DRM_IOCTL_SAMSUNG_GEM_MMAP ioctl command.
+    
+        this feature maps user address space to physical memory region
+        once user application requests DRM_IOCTL_SAMSUNG_GEM_MMAP ioctl.
+    
+    DRM: code clean and add exception codes.
+    
+    Changelog v3:
+    DRM: Support multiple irq.
+    
+        FIMD and HDMI have their own irq handler but DRM Framework can regiter
+        only one irq handler this patch supports mutiple irq for Samsung SoC.
+    
+    DRM: Consider modularization.
+    
+        each DRM, FIMD could be built as a module.
+    
+    DRM: Have indenpendent crtc object.
+    
+        crtc isn't specific to SoC Platform so this patch gets a crtc
+        to be used as common object.
+        created crtc could be attached to any encoder object.
+    
+    DRM: code clean and add exception codes.
+    
+    Changelog v4:
+    DRM: remove is_defult from samsung_fb.
+    
+        is_default isn't used for default framebuffer.
+    
+    DRM: code refactoring to fimd module.
+        this patch is be considered with multiple display objects and
+        would use its own request_irq() to register a irq handler instead of
+        drm framework's one.
+    
+    DRM: remove find_samsung_drm_gem_object()
+    
+    DRM: move kernel private data structures and definitions to driver folder.
+    
+        samsung_drm.h would contain only public information for userspace
+        ioctl interface.
+    
+    DRM: code refactoring to gem modules.
+        buffer module isn't dependent of gem module anymore.
+    
+    DRM: fixed security issue.
+    
+    DRM: remove encoder porinter from specific connector.
+    
+        samsung connector doesn't need to have generic encoder.
+    
+    DRM: code clean and add exception codes.
+    
+    Changelog v5:
+    DRM: updated fimd(display controller) driver.
+        added various pixel formats, color key and pixel blending features.
+    
+    DRM: removed end_buf_off from samsung_drm_overlay structure.
+        this variable isn't used and end buffer address would be
+        calculated by each sub driver.
+    
+    DRM: use generic function for mmap_offset.
+        replaced samsung_drm_gem_create_mmap_offset() and
+        samsung_drm_free_mmap_offset() with generic ones applied
+        to mainline recentrly.
+    
+    DRM: removed unnecessary codes and added exception codes.
+    
+    DRM: added comments and code clean.
+    
+    Changelog v6:
+    DRM: added default config options.
+    
+    DRM: added padding for 64-bit align.
+    
+    DRM: changed prefix 'samsung' to 'exynos'
+    
+    Signed-off-by: Inki Dae <inki.dae@samsung.com>
+    Signed-off-by: Joonyoung Shim <jy0922.shim@samsung.com>
+    Signed-off-by: Seung-Woo Kim <sw0312.kim@samsung.com>
+    Signed-off-by: Kyungmin Park <kyungmin.park@samsung.com>
+    Reviewed-by: Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+    Reviewed-by: Dave Airlie <airlied@redhat.com>
+    Reviewed-by: Rob Clark <robdclark@gmail.com>
+    Signed-off-by: Dave Airlie <airlied@redhat.com>
+
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_fb.c b/drivers/gpu/drm/exynos/exynos_drm_fb.c
+new file mode 100644
+index 000000000000..4505d90d657a
+--- /dev/null
++++ b/drivers/gpu/drm/exynos/exynos_drm_fb.c
+@@ -0,0 +1,271 @@
++/* exynos_drm_fb.c
++ *
++ * Copyright (c) 2011 Samsung Electronics Co., Ltd.
++ * Authors:
++ *	Inki Dae <inki.dae@samsung.com>
++ *	Joonyoung Shim <jy0922.shim@samsung.com>
++ *	Seung-Woo Kim <sw0312.kim@samsung.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * VA LINUX SYSTEMS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
++ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
++ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ * OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#include "drmP.h"
++#include "drm_crtc.h"
++#include "drm_crtc_helper.h"
++
++#include "exynos_drm_fb.h"
++#include "exynos_drm_buf.h"
++#include "exynos_drm_gem.h"
++
++#define to_exynos_fb(x)	container_of(x, struct exynos_drm_fb, fb)
++
++/*
++ * exynos specific framebuffer structure.
++ *
++ * @fb: drm framebuffer obejct.
++ * @exynos_gem_obj: exynos specific gem object containing a gem object.
++ * @entry: pointer to exynos drm buffer entry object.
++ *	- containing only the information to physically continuous memory
++ *	region allocated at default framebuffer creation.
++ */
++struct exynos_drm_fb {
++	struct drm_framebuffer		fb;
++	struct exynos_drm_gem_obj	*exynos_gem_obj;
++	struct exynos_drm_buf_entry	*entry;
++};
++
++static void exynos_drm_fb_destroy(struct drm_framebuffer *fb)
++{
++	struct exynos_drm_fb *exynos_fb = to_exynos_fb(fb);
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	drm_framebuffer_cleanup(fb);
++
++	/*
++	 * default framebuffer has no gem object so
++	 * a buffer of the default framebuffer should be released at here.
++	 */
++	if (!exynos_fb->exynos_gem_obj && exynos_fb->entry)
++		exynos_drm_buf_destroy(fb->dev, exynos_fb->entry);
++
++	kfree(exynos_fb);
++	exynos_fb = NULL;
++}
++
++static int exynos_drm_fb_create_handle(struct drm_framebuffer *fb,
++					struct drm_file *file_priv,
++					unsigned int *handle)
++{
++	struct exynos_drm_fb *exynos_fb = to_exynos_fb(fb);
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	return drm_gem_handle_create(file_priv,
++			&exynos_fb->exynos_gem_obj->base, handle);
++}
++
++static int exynos_drm_fb_dirty(struct drm_framebuffer *fb,
++				struct drm_file *file_priv, unsigned flags,
++				unsigned color, struct drm_clip_rect *clips,
++				unsigned num_clips)
++{
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	/* TODO */
++
++	return 0;
++}
++
++static struct drm_framebuffer_funcs exynos_drm_fb_funcs = {
++	.destroy	= exynos_drm_fb_destroy,
++	.create_handle	= exynos_drm_fb_create_handle,
++	.dirty		= exynos_drm_fb_dirty,
++};
++
++static struct drm_framebuffer *
++exynos_drm_fb_init(struct drm_file *file_priv, struct drm_device *dev,
++		    struct drm_mode_fb_cmd *mode_cmd)
++{
++	struct exynos_drm_fb *exynos_fb;
++	struct drm_framebuffer *fb;
++	struct exynos_drm_gem_obj *exynos_gem_obj = NULL;
++	struct drm_gem_object *obj;
++	unsigned int size;
++	int ret;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	mode_cmd->pitch = max(mode_cmd->pitch,
++			mode_cmd->width * (mode_cmd->bpp >> 3));
++
++	DRM_LOG_KMS("drm fb create(%dx%d)\n",
++			mode_cmd->width, mode_cmd->height);
++
++	exynos_fb = kzalloc(sizeof(*exynos_fb), GFP_KERNEL);
++	if (!exynos_fb) {
++		DRM_ERROR("failed to allocate exynos drm framebuffer.\n");
++		return ERR_PTR(-ENOMEM);
++	}
++
++	fb = &exynos_fb->fb;
++	ret = drm_framebuffer_init(dev, fb, &exynos_drm_fb_funcs);
++	if (ret) {
++		DRM_ERROR("failed to initialize framebuffer.\n");
++		goto err_init;
++	}
++
++	DRM_LOG_KMS("create: fb id: %d\n", fb->base.id);
++
++	size = mode_cmd->pitch * mode_cmd->height;
++
++	/*
++	 * mode_cmd->handle could be NULL at booting time or
++	 * with user request. if NULL, a new buffer or a gem object
++	 * would be allocated.
++	 */
++	if (!mode_cmd->handle) {
++		if (!file_priv) {
++			struct exynos_drm_buf_entry *entry;
++
++			/*
++			 * in case that file_priv is NULL, it allocates
++			 * only buffer and this buffer would be used
++			 * for default framebuffer.
++			 */
++			entry = exynos_drm_buf_create(dev, size);
++			if (IS_ERR(entry)) {
++				ret = PTR_ERR(entry);
++				goto err_buffer;
++			}
++
++			exynos_fb->entry = entry;
++
++			DRM_LOG_KMS("default fb: paddr = 0x%lx, size = 0x%x\n",
++					(unsigned long)entry->paddr, size);
++
++			goto out;
++		} else {
++			exynos_gem_obj = exynos_drm_gem_create(file_priv, dev,
++							size,
++							&mode_cmd->handle);
++			if (IS_ERR(exynos_gem_obj)) {
++				ret = PTR_ERR(exynos_gem_obj);
++				goto err_buffer;
++			}
++		}
++	} else {
++		obj = drm_gem_object_lookup(dev, file_priv, mode_cmd->handle);
++		if (!obj) {
++			DRM_ERROR("failed to lookup gem object.\n");
++			goto err_buffer;
++		}
++
++		exynos_gem_obj = to_exynos_gem_obj(obj);
++
++		drm_gem_object_unreference_unlocked(obj);
++	}
++
++	/*
++	 * if got a exynos_gem_obj from either a handle or
++	 * a new creation then exynos_fb->exynos_gem_obj is NULL
++	 * so that default framebuffer has no its own gem object,
++	 * only its own buffer object.
++	 */
++	exynos_fb->entry = exynos_gem_obj->entry;
++
++	DRM_LOG_KMS("paddr = 0x%lx, size = 0x%x, gem object = 0x%x\n",
++			(unsigned long)exynos_fb->entry->paddr, size,
++			(unsigned int)&exynos_gem_obj->base);
++
++out:
++	exynos_fb->exynos_gem_obj = exynos_gem_obj;
++
++	drm_helper_mode_fill_fb_struct(fb, mode_cmd);
++
++	return fb;
++
++err_buffer:
++	drm_framebuffer_cleanup(fb);
++
++err_init:
++	kfree(exynos_fb);
++
++	return ERR_PTR(ret);
++}
++
++struct drm_framebuffer *exynos_drm_fb_create(struct drm_device *dev,
++					      struct drm_file *file_priv,
++					      struct drm_mode_fb_cmd *mode_cmd)
++{
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	return exynos_drm_fb_init(file_priv, dev, mode_cmd);
++}
++
++void exynos_drm_fb_update_buf_off(struct drm_framebuffer *fb,
++				   unsigned int x, unsigned int y,
++				   struct exynos_drm_buffer_info *info)
++{
++	struct exynos_drm_fb *exynos_fb = to_exynos_fb(fb);
++	struct exynos_drm_buf_entry *entry;
++	unsigned long offset;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	offset = x * (fb->bits_per_pixel >> 3);
++	offset += y * fb->pitch;
++
++	entry = exynos_fb->entry;
++
++	info->base_addr = entry->paddr;
++	info->vaddr = entry->vaddr + offset;
++	info->paddr = entry->paddr + offset;
++
++	DRM_DEBUG_KMS("updated vaddr = 0x%lx, paddr = 0x%lx, offset = 0x%x\n",
++			(unsigned long)info->vaddr, (unsigned long)info->paddr,
++			(unsigned int)offset);
++}
++
++static struct drm_mode_config_funcs exynos_drm_mode_config_funcs = {
++	.fb_create = exynos_drm_fb_create,
++};
++
++void exynos_drm_mode_config_init(struct drm_device *dev)
++{
++	dev->mode_config.min_width = 0;
++	dev->mode_config.min_height = 0;
++
++	/*
++	 * set max width and height as default value(4096x4096).
++	 * this value would be used to check framebuffer size limitation
++	 * at drm_mode_addfb().
++	 */
++	dev->mode_config.max_width = 4096;
++	dev->mode_config.max_height = 4096;
++
++	dev->mode_config.funcs = &exynos_drm_mode_config_funcs;
++}
++
++MODULE_AUTHOR("Inki Dae <inki.dae@samsung.com>");
++MODULE_AUTHOR("Joonyoung Shim <jy0922.shim@samsung.com>");
++MODULE_AUTHOR("Seung-Woo Kim <sw0312.kim@samsung.com>");
++MODULE_DESCRIPTION("Samsung SoC DRM FB Driver");
++MODULE_LICENSE("GPL");

@@ -1,0 +1,57 @@
+commit 1662cea4623f75d8251adf07370bbaa958f0355d
+Author: Yang Yingliang <yangyingliang@huawei.com>
+Date:   Tue Oct 25 15:15:49 2022 +0800
+
+    kset: fix memory leak when kset_register() returns error
+    
+    Inject fault while loading module, kset_register() may fail.
+    If it fails, the kset.kobj.name allocated by kobject_set_name()
+    which must be called before a call to kset_register() may be
+    leaked, since refcount of kobj was set in kset_init().
+    
+    To mitigate this, we free the name in kset_register() when an
+    error is encountered, i.e. when kset_register() returns an error.
+    
+    A kset may be embedded in a larger structure which may be dynamically
+    allocated in callers, it needs to be freed in ktype.release() or error
+    path in callers, in this case, we can not call kset_put() in kset_register(),
+    or it will cause double free, so just call kfree_const() to free the
+    name and set it to NULL to avoid accessing bad pointer in callers.
+    
+    With this fix, the callers don't need care about freeing the name
+    and may call kset_put() if kset_register() fails.
+    
+    Suggested-by: Luben Tuikov <luben.tuikov@amd.com>
+    Signed-off-by: Yang Yingliang <yangyingliang@huawei.com>
+    Reviewed-by: <luben.tuikov@amd.com>
+    Link: https://lore.kernel.org/r/20221025071549.1280528-1-yangyingliang@huawei.com
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/lib/kobject.c b/lib/kobject.c
+index 0380ec889a6a..ba1017cd67d1 100644
+--- a/lib/kobject.c
++++ b/lib/kobject.c
+@@ -834,6 +834,9 @@ EXPORT_SYMBOL_GPL(kobj_sysfs_ops);
+ /**
+  * kset_register() - Initialize and add a kset.
+  * @k: kset.
++ *
++ * NOTE: On error, the kset.kobj.name allocated by() kobj_set_name()
++ * is freed, it can not be used any more.
+  */
+ int kset_register(struct kset *k)
+ {
+@@ -844,8 +847,12 @@ int kset_register(struct kset *k)
+ 
+ 	kset_init(k);
+ 	err = kobject_add_internal(&k->kobj);
+-	if (err)
++	if (err) {
++		kfree_const(k->kobj.name);
++		/* Set it to NULL to avoid accessing bad pointer in callers. */
++		k->kobj.name = NULL;
+ 		return err;
++	}
+ 	kobject_uevent(&k->kobj, KOBJ_ADD);
+ 	return 0;
+ }

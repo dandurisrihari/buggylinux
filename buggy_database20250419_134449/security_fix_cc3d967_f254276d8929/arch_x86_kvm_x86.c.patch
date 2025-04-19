@@ -1,0 +1,56 @@
+commit cc3d967f7e32ceeb9b78dc962126ebcf1a2b24b2
+Author: Ladi Prosek <lprosek@redhat.com>
+Date:   Tue Oct 17 16:02:39 2017 +0200
+
+    KVM: SVM: detect opening of SMI window using STGI intercept
+    
+    Commit 05cade71cf3b ("KVM: nSVM: fix SMI injection in guest mode") made
+    KVM mask SMI if GIF=0 but it didn't do anything to unmask it when GIF is
+    enabled.
+    
+    The issue manifests for me as a significantly longer boot time of Windows
+    guests when running with SMM-enabled OVMF.
+    
+    This commit fixes it by intercepting STGI instead of requesting immediate
+    exit if the reason why SMM was masked is GIF.
+    
+    Fixes: 05cade71cf3b ("KVM: nSVM: fix SMI injection in guest mode")
+    Signed-off-by: Ladi Prosek <lprosek@redhat.com>
+    Signed-off-by: Radim Krčmář <rkrcmar@redhat.com>
+
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 5669af09b732..3b51c8659741 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -6892,17 +6892,23 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 		if (inject_pending_event(vcpu, req_int_win) != 0)
+ 			req_immediate_exit = true;
+ 		else {
+-			/* Enable NMI/IRQ window open exits if needed.
++			/* Enable SMI/NMI/IRQ window open exits if needed.
+ 			 *
+-			 * SMIs have two cases: 1) they can be nested, and
+-			 * then there is nothing to do here because RSM will
+-			 * cause a vmexit anyway; 2) or the SMI can be pending
+-			 * because inject_pending_event has completed the
+-			 * injection of an IRQ or NMI from the previous vmexit,
+-			 * and then we request an immediate exit to inject the SMI.
++			 * SMIs have three cases:
++			 * 1) They can be nested, and then there is nothing to
++			 *    do here because RSM will cause a vmexit anyway.
++			 * 2) There is an ISA-specific reason why SMI cannot be
++			 *    injected, and the moment when this changes can be
++			 *    intercepted.
++			 * 3) Or the SMI can be pending because
++			 *    inject_pending_event has completed the injection
++			 *    of an IRQ or NMI from the previous vmexit, and
++			 *    then we request an immediate exit to inject the
++			 *    SMI.
+ 			 */
+ 			if (vcpu->arch.smi_pending && !is_smm(vcpu))
+-				req_immediate_exit = true;
++				if (!kvm_x86_ops->enable_smi_window(vcpu))
++					req_immediate_exit = true;
+ 			if (vcpu->arch.nmi_pending)
+ 				kvm_x86_ops->enable_nmi_window(vcpu);
+ 			if (kvm_cpu_has_injectable_intr(vcpu) || req_int_win)

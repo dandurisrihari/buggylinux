@@ -1,0 +1,91 @@
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index 0cd9f0f75c13..147347028a20 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -120,6 +120,7 @@ struct kvm_arch {
+ 	unsigned int pmuver;
+ 
+ 	u8 pfr0_csv2;
++	u8 pfr0_csv3;
+ };
+ 
+ struct kvm_vcpu_fault_info {
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index c0ffb019ca8b..dc3fa6a0f9e5 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -102,7 +102,7 @@ static int kvm_arm_default_max_vcpus(void)
+ 	return vgic_present ? kvm_vgic_get_max_vcpus() : KVM_MAX_VCPUS;
+ }
+ 
+-static void set_default_csv2(struct kvm *kvm)
++static void set_default_spectre(struct kvm *kvm)
+ {
+ 	/*
+ 	 * The default is to expose CSV2 == 1 if the HW isn't affected.
+@@ -114,6 +114,8 @@ static void set_default_csv2(struct kvm *kvm)
+ 	 */
+ 	if (arm64_get_spectre_v2_state() == SPECTRE_UNAFFECTED)
+ 		kvm->arch.pfr0_csv2 = 1;
++	if (arm64_get_meltdown_state() == SPECTRE_UNAFFECTED)
++		kvm->arch.pfr0_csv3 = 1;
+ }
+ 
+ /**
+@@ -141,7 +143,7 @@ int kvm_arch_init_vm(struct kvm *kvm, unsigned long type)
+ 	/* The maximum number of VCPUs is limited by the host's GIC model */
+ 	kvm->arch.max_vcpus = kvm_arm_default_max_vcpus();
+ 
+-	set_default_csv2(kvm);
++	set_default_spectre(kvm);
+ 
+ 	return ret;
+ out_free_stage2_pgd:
+diff --git a/arch/arm64/kvm/sys_regs.c b/arch/arm64/kvm/sys_regs.c
+index c1fac9836af1..6f653c0f60ec 100644
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@ -1122,6 +1122,8 @@ static u64 read_id_reg(const struct kvm_vcpu *vcpu,
+ 		val &= ~(0xfUL << ID_AA64PFR0_AMU_SHIFT);
+ 		val &= ~(0xfUL << ID_AA64PFR0_CSV2_SHIFT);
+ 		val |= ((u64)vcpu->kvm->arch.pfr0_csv2 << ID_AA64PFR0_CSV2_SHIFT);
++		val &= ~(0xfUL << ID_AA64PFR0_CSV3_SHIFT);
++		val |= ((u64)vcpu->kvm->arch.pfr0_csv3 << ID_AA64PFR0_CSV3_SHIFT);
+ 	} else if (id == SYS_ID_AA64PFR1_EL1) {
+ 		val &= ~(0xfUL << ID_AA64PFR1_MTE_SHIFT);
+ 	} else if (id == SYS_ID_AA64ISAR1_EL1 && !vcpu_has_ptrauth(vcpu)) {
+@@ -1209,9 +1211,9 @@ static int set_id_aa64pfr0_el1(struct kvm_vcpu *vcpu,
+ 			       const struct kvm_one_reg *reg, void __user *uaddr)
+ {
+ 	const u64 id = sys_reg_to_index(rd);
++	u8 csv2, csv3;
+ 	int err;
+ 	u64 val;
+-	u8 csv2;
+ 
+ 	err = reg_from_user(&val, uaddr, id);
+ 	if (err)
+@@ -1227,13 +1229,21 @@ static int set_id_aa64pfr0_el1(struct kvm_vcpu *vcpu,
+ 	    (csv2 && arm64_get_spectre_v2_state() != SPECTRE_UNAFFECTED))
+ 		return -EINVAL;
+ 
+-	/* We can only differ with CSV2, and anything else is an error */
++	/* Same thing for CSV3 */
++	csv3 = cpuid_feature_extract_unsigned_field(val, ID_AA64PFR0_CSV3_SHIFT);
++	if (csv3 > 1 ||
++	    (csv3 && arm64_get_meltdown_state() != SPECTRE_UNAFFECTED))
++		return -EINVAL;
++
++	/* We can only differ with CSV[23], and anything else is an error */
+ 	val ^= read_id_reg(vcpu, rd, false);
+-	val &= ~(0xFUL << ID_AA64PFR0_CSV2_SHIFT);
++	val &= ~((0xFUL << ID_AA64PFR0_CSV2_SHIFT) |
++		 (0xFUL << ID_AA64PFR0_CSV3_SHIFT));
+ 	if (val)
+ 		return -EINVAL;
+ 
+ 	vcpu->kvm->arch.pfr0_csv2 = csv2;
++	vcpu->kvm->arch.pfr0_csv3 = csv3 ;
+ 
+ 	return 0;
+ }

@@ -1,0 +1,52 @@
+commit 4cc9b9f2bf4dfe13fe573da978e626e2248df388
+Author: NeilBrown <neilb@suse.de>
+Date:   Fri Oct 18 08:42:31 2024 +1100
+
+    nfsd: refine and rename NFSD_MAY_LOCK
+    
+    NFSD_MAY_LOCK means a few different things.
+    - it means that GSS is not required.
+    - it means that with NFSEXP_NOAUTHNLM, authentication is not required
+    - it means that OWNER_OVERRIDE is allowed.
+    
+    None of these are specific to locking, they are specific to the NLM
+    protocol.
+    So:
+     - rename to NFSD_MAY_NLM
+     - set NFSD_MAY_OWNER_OVERRIDE and NFSD_MAY_BYPASS_GSS in nlm_fopen()
+       so that NFSD_MAY_NLM doesn't need to imply these.
+     - move the test on NFSEXP_NOAUTHNLM out of nfsd_permission() and
+       into fh_verify where other special-case tests on the MAY flags
+       happen.  nfsd_permission() can be called from other places than
+       fh_verify(), but none of these will have NFSD_MAY_NLM.
+    
+    Signed-off-by: NeilBrown <neilb@suse.de>
+    Signed-off-by: Chuck Lever <chuck.lever@oracle.com>
+
+diff --git a/fs/nfsd/lockd.c b/fs/nfsd/lockd.c
+index 46a7f9b813e5..edc9f75dc75c 100644
+--- a/fs/nfsd/lockd.c
++++ b/fs/nfsd/lockd.c
+@@ -38,11 +38,20 @@ nlm_fopen(struct svc_rqst *rqstp, struct nfs_fh *f, struct file **filp,
+ 	memcpy(&fh.fh_handle.fh_raw, f->data, f->size);
+ 	fh.fh_export = NULL;
+ 
++	/*
++	 * Allow BYPASS_GSS as some client implementations use AUTH_SYS
++	 * for NLM even when GSS is used for NFS.
++	 * Allow OWNER_OVERRIDE as permission might have been changed
++	 * after the file was opened.
++	 * Pass MAY_NLM so that authentication can be completely bypassed
++	 * if NFSEXP_NOAUTHNLM is set.  Some older clients use AUTH_NULL
++	 * for NLM requests.
++	 */
+ 	access = (mode == O_WRONLY) ? NFSD_MAY_WRITE : NFSD_MAY_READ;
+-	access |= NFSD_MAY_LOCK;
++	access |= NFSD_MAY_NLM | NFSD_MAY_OWNER_OVERRIDE | NFSD_MAY_BYPASS_GSS;
+ 	nfserr = nfsd_open(rqstp, &fh, S_IFREG, access, filp);
+ 	fh_put(&fh);
+- 	/* We return nlm error codes as nlm doesn't know
++	/* We return nlm error codes as nlm doesn't know
+ 	 * about nfsd, but nfsd does know about nlm..
+ 	 */
+ 	switch (nfserr) {

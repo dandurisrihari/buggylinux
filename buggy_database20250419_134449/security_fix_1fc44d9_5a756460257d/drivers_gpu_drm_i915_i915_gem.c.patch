@@ -1,0 +1,59 @@
+commit 1fc44d9b1afb0afe46acd99bdfdf793805a850e1
+Author: Chris Wilson <chris@chris-wilson.co.uk>
+Date:   Thu May 17 22:26:32 2018 +0100
+
+    drm/i915: Store a pointer to intel_context in i915_request
+    
+    To ease the frequent and ugly pointer dance of
+    &request->gem_context->engine[request->engine->id] during request
+    submission, store that pointer as request->hw_context. One major
+    advantage that we will exploit later is that this decouples the logical
+    context state from the engine itself.
+    
+    v2: Set mock_context->ops so we don't crash and burn in selftests.
+        Cleanups from Tvrtko.
+    
+    Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+    Acked-by: Zhenyu Wang <zhenyuw@linux.intel.com>
+    Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+    Link: https://patchwork.freedesktop.org/patch/msgid/20180517212633.24934-3-chris@chris-wilson.co.uk
+
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index a20f8db5729d..03874b50ada9 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -3181,14 +3181,14 @@ void i915_gem_reset(struct drm_i915_private *dev_priv,
+ 	i915_retire_requests(dev_priv);
+ 
+ 	for_each_engine(engine, dev_priv, id) {
+-		struct i915_gem_context *ctx;
++		struct intel_context *ce;
+ 
+ 		i915_gem_reset_engine(engine,
+ 				      engine->hangcheck.active_request,
+ 				      stalled_mask & ENGINE_MASK(id));
+-		ctx = fetch_and_zero(&engine->last_retired_context);
+-		if (ctx)
+-			intel_context_unpin(ctx, engine);
++		ce = fetch_and_zero(&engine->last_retired_context);
++		if (ce)
++			intel_context_unpin(ce);
+ 
+ 		/*
+ 		 * Ostensibily, we always want a context loaded for powersaving,
+@@ -4897,13 +4897,13 @@ void __i915_gem_object_release_unless_active(struct drm_i915_gem_object *obj)
+ 
+ static void assert_kernel_context_is_current(struct drm_i915_private *i915)
+ {
+-	struct i915_gem_context *kernel_context = i915->kernel_context;
++	struct i915_gem_context *kctx = i915->kernel_context;
+ 	struct intel_engine_cs *engine;
+ 	enum intel_engine_id id;
+ 
+ 	for_each_engine(engine, i915, id) {
+ 		GEM_BUG_ON(__i915_gem_active_peek(&engine->timeline.last_request));
+-		GEM_BUG_ON(engine->last_retired_context != kernel_context);
++		GEM_BUG_ON(engine->last_retired_context->gem_context != kctx);
+ 	}
+ }

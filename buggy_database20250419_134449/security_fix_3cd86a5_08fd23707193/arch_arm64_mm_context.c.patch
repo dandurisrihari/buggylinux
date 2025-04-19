@@ -1,0 +1,116 @@
+commit 3cd86a58f7734bf9cef38f6f899608ebcaa3da13
+Merge: a8222fd5b80c b2a84de2a2de
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Tue Mar 31 10:05:01 2020 -0700
+
+    Merge tag 'arm64-upstream' of git://git.kernel.org/pub/scm/linux/kernel/git/arm64/linux
+    
+    Pull arm64 updates from Catalin Marinas:
+     "The bulk is in-kernel pointer authentication, activity monitors and
+      lots of asm symbol annotations. I also queued the sys_mremap() patch
+      commenting the asymmetry in the address untagging.
+    
+      Summary:
+    
+       - In-kernel Pointer Authentication support (previously only offered
+         to user space).
+    
+       - ARM Activity Monitors (AMU) extension support allowing better CPU
+         utilisation numbers for the scheduler (frequency invariance).
+    
+       - Memory hot-remove support for arm64.
+    
+       - Lots of asm annotations (SYM_*) in preparation for the in-kernel
+         Branch Target Identification (BTI) support.
+    
+       - arm64 perf updates: ARMv8.5-PMU 64-bit counters, refactoring the
+         PMU init callbacks, support for new DT compatibles.
+    
+       - IPv6 header checksum optimisation.
+    
+       - Fixes: SDEI (software delegated exception interface) double-lock on
+         hibernate with shared events.
+    
+       - Minor clean-ups and refactoring: cpu_ops accessor,
+         cpu_do_switch_mm() converted to C, cpufeature finalisation helper.
+    
+       - sys_mremap() comment explaining the asymmetric address untagging
+         behaviour"
+    
+    * tag 'arm64-upstream' of git://git.kernel.org/pub/scm/linux/kernel/git/arm64/linux: (81 commits)
+      mm/mremap: Add comment explaining the untagging behaviour of mremap()
+      arm64: head: Convert install_el2_stub to SYM_INNER_LABEL
+      arm64: Introduce get_cpu_ops() helper function
+      arm64: Rename cpu_read_ops() to init_cpu_ops()
+      arm64: Declare ACPI parking protocol CPU operation if needed
+      arm64: move kimage_vaddr to .rodata
+      arm64: use mov_q instead of literal ldr
+      arm64: Kconfig: verify binutils support for ARM64_PTR_AUTH
+      lkdtm: arm64: test kernel pointer authentication
+      arm64: compile the kernel with ptrauth return address signing
+      kconfig: Add support for 'as-option'
+      arm64: suspend: restore the kernel ptrauth keys
+      arm64: __show_regs: strip PAC from lr in printk
+      arm64: unwind: strip PAC from kernel addresses
+      arm64: mask PAC bits of __builtin_return_address
+      arm64: initialize ptrauth keys for kernel booting task
+      arm64: initialize and switch ptrauth kernel keys
+      arm64: enable ptrauth earlier
+      arm64: cpufeature: handle conflicts based on capability
+      arm64: cpufeature: Move cpu capability helpers inside C file
+      ...
+
+diff --cc arch/arm64/mm/context.c
+index d89bb22589f6,8524f03d629c..9b26f9a88724
+--- a/arch/arm64/mm/context.c
++++ b/arch/arm64/mm/context.c
+@@@ -254,18 -255,42 +255,45 @@@ switch_mm_fastpath
+  /* Errata workaround post TTBRx_EL1 update. */
+  asmlinkage void post_ttbr_update_workaround(void)
+  {
++ 	if (!IS_ENABLED(CONFIG_CAVIUM_ERRATUM_27456))
++ 		return;
++ 
+  	asm(ALTERNATIVE("nop; nop; nop",
+  			"ic iallu; dsb nsh; isb",
+- 			ARM64_WORKAROUND_CAVIUM_27456,
+- 			CONFIG_CAVIUM_ERRATUM_27456));
++ 			ARM64_WORKAROUND_CAVIUM_27456));
++ }
++ 
++ void cpu_do_switch_mm(phys_addr_t pgd_phys, struct mm_struct *mm)
++ {
++ 	unsigned long ttbr1 = read_sysreg(ttbr1_el1);
++ 	unsigned long asid = ASID(mm);
++ 	unsigned long ttbr0 = phys_to_ttbr(pgd_phys);
++ 
++ 	/* Skip CNP for the reserved ASID */
++ 	if (system_supports_cnp() && asid)
++ 		ttbr0 |= TTBR_CNP_BIT;
++ 
++ 	/* SW PAN needs a copy of the ASID in TTBR0 for entry */
++ 	if (IS_ENABLED(CONFIG_ARM64_SW_TTBR0_PAN))
++ 		ttbr0 |= FIELD_PREP(TTBR_ASID_MASK, asid);
++ 
++ 	/* Set ASID in TTBR1 since TCR.A1 is set */
++ 	ttbr1 &= ~TTBR_ASID_MASK;
++ 	ttbr1 |= FIELD_PREP(TTBR_ASID_MASK, asid);
++ 
++ 	write_sysreg(ttbr1, ttbr1_el1);
++ 	isb();
++ 	write_sysreg(ttbr0, ttbr0_el1);
++ 	isb();
++ 	post_ttbr_update_workaround();
+  }
+  
+ -static int asids_init(void)
+ +static int asids_update_limit(void)
+  {
+ -	asid_bits = get_cpu_asid_bits();
+ +	unsigned long num_available_asids = NUM_USER_ASIDS;
+ +
+ +	if (arm64_kernel_unmapped_at_el0())
+ +		num_available_asids /= 2;
+  	/*
+  	 * Expect allocation after rollover to fail if we don't have at least
+  	 * one more ASID than CPUs. ASID #0 is reserved for init_mm.

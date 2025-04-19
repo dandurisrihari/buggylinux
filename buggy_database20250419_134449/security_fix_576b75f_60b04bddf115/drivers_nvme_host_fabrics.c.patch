@@ -1,0 +1,65 @@
+commit 576b75f93b3d3c408235808f689453f1ed891486
+Author: Justin Stitt <justinstitt@google.com>
+Date:   Wed Oct 18 22:48:49 2023 +0000
+
+    nvme-fabrics: replace deprecated strncpy with strscpy
+    
+    strncpy() is deprecated for use on NUL-terminated destination strings
+    [1] and as such we should prefer more robust and less ambiguous string
+    interfaces.
+    
+    We expect both data->subsysnqn and data->hostnqn to be NUL-terminated
+    based on their usage with format specifier ("%s"):
+    fabrics.c:
+    322: dev_err(ctrl->device,
+    323:   "%s, subsysnqn \"%s\"\n",
+    324:   inv_data, data->subsysnqn);
+    ...
+    349: dev_err(ctrl->device,
+    350:     "Connect for subsystem %s is not allowed, hostnqn: %s\n",
+    351:     data->subsysnqn, data->hostnqn);
+    
+    Moreover, there's no need to NUL-pad since `data` is zero-allocated
+    already in fabrics.c:
+    383: data = kzalloc(sizeof(*data), GFP_KERNEL);
+    ... therefore any further NUL-padding is rendered useless.
+    
+    Considering the above, a suitable replacement is `strscpy` [2] due to
+    the fact that it guarantees NUL-termination on the destination buffer
+    without unnecessarily NUL-padding.
+    
+    I opted not to switch NVMF_NQN_SIZE to sizeof(data->xyz) because the
+    size is defined as:
+    |       /* NQN names in commands fields specified one size */
+    |       #define NVMF_NQN_FIELD_LEN      256
+    
+    ... while NVMF_NQN_SIZE is defined as:
+    |       /* However the max length of a qualified name is another size */
+    |       #define NVMF_NQN_SIZE           223
+    
+    Since 223 seems pretty magic, I'm not going to touch it.
+    
+    Link: https://www.kernel.org/doc/html/latest/process/deprecated.html#strncpy-on-nul-terminated-strings [1]
+    Link: https://manpages.debian.org/testing/linux-manual-4.8/strscpy.9.en.html [2]
+    Link: https://github.com/KSPP/linux/issues/90
+    Cc: linux-hardening@vger.kernel.org
+    Signed-off-by: Justin Stitt <justinstitt@google.com>
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Link: https://lore.kernel.org/r/20231018-strncpy-drivers-nvme-host-fabrics-c-v1-1-b6677df40a35@google.com
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+
+diff --git a/drivers/nvme/host/fabrics.c b/drivers/nvme/host/fabrics.c
+index 4673ead69c5f..830bf01df4b8 100644
+--- a/drivers/nvme/host/fabrics.c
++++ b/drivers/nvme/host/fabrics.c
+@@ -387,8 +387,8 @@ static struct nvmf_connect_data *nvmf_connect_data_prep(struct nvme_ctrl *ctrl,
+ 
+ 	uuid_copy(&data->hostid, &ctrl->opts->host->id);
+ 	data->cntlid = cpu_to_le16(cntlid);
+-	strncpy(data->subsysnqn, ctrl->opts->subsysnqn, NVMF_NQN_SIZE);
+-	strncpy(data->hostnqn, ctrl->opts->host->nqn, NVMF_NQN_SIZE);
++	strscpy(data->subsysnqn, ctrl->opts->subsysnqn, NVMF_NQN_SIZE);
++	strscpy(data->hostnqn, ctrl->opts->host->nqn, NVMF_NQN_SIZE);
+ 
+ 	return data;
+ }

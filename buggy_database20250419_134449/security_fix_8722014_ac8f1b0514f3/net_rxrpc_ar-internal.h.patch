@@ -1,0 +1,42 @@
+commit 8722014311e613244f33952354956a82fa4b0472
+Author: David Howells <dhowells@redhat.com>
+Date:   Tue Jan 9 15:10:48 2024 +0000
+
+    rxrpc: Fix use of Don't Fragment flag
+    
+    rxrpc normally has the Don't Fragment flag set on the UDP packets it
+    transmits, except when it has decided that DATA packets aren't getting
+    through - in which case it turns it off just for the DATA transmissions.
+    This can be a problem, however, for RESPONSE packets that convey
+    authentication and crypto data from the client to the server as ticket may
+    be larger than can fit in the MTU.
+    
+    In such a case, rxrpc gets itself into an infinite loop as the sendmsg
+    returns an error (EMSGSIZE), which causes rxkad_send_response() to return
+    -EAGAIN - and the CHALLENGE packet is put back on the Rx queue to retry,
+    leading to the I/O thread endlessly attempting to perform the transmission.
+    
+    Fix this by disabling DF on RESPONSE packets for now.  The use of DF and
+    best data MTU determination needs reconsidering at some point in the
+    future.
+    
+    Fixes: 17926a79320a ("[AF_RXRPC]: Provide secure RxRPC sockets for use by userspace and kernel both")
+    Reported-by: Marc Dionne <marc.dionne@auristor.com>
+    Signed-off-by: David Howells <dhowells@redhat.com>
+    cc: linux-afs@lists.infradead.org
+    Acked-by: Paolo Abeni <pabeni@redhat.com>
+    Link: https://lore.kernel.org/r/1581852.1704813048@warthog.procyon.org.uk
+    Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+diff --git a/net/rxrpc/ar-internal.h b/net/rxrpc/ar-internal.h
+index 2f8b39a614c3..dbeb75c29857 100644
+--- a/net/rxrpc/ar-internal.h
++++ b/net/rxrpc/ar-internal.h
+@@ -1079,6 +1079,7 @@ void rxrpc_send_version_request(struct rxrpc_local *local,
+ /*
+  * local_object.c
+  */
++void rxrpc_local_dont_fragment(const struct rxrpc_local *local, bool set);
+ struct rxrpc_local *rxrpc_lookup_local(struct net *, const struct sockaddr_rxrpc *);
+ struct rxrpc_local *rxrpc_get_local(struct rxrpc_local *, enum rxrpc_local_trace);
+ struct rxrpc_local *rxrpc_get_local_maybe(struct rxrpc_local *, enum rxrpc_local_trace);

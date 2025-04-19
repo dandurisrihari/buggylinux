@@ -1,0 +1,148 @@
+commit 4a06825839889cc1756d0dd8a52d6b1071ee0263
+Author: Chuck Lever <chuck.lever@oracle.com>
+Date:   Mon May 11 14:02:25 2015 -0400
+
+    SUNRPC: Transport fault injection
+    
+    It has been exceptionally useful to exercise the logic that handles
+    local immediate errors and RDMA connection loss.  To enable
+    developers to test this regularly and repeatably, add logic to
+    simulate connection loss every so often.
+    
+    Fault injection is disabled by default. It is enabled with
+    
+      $ sudo echo xxx > /sys/kernel/debug/sunrpc/inject_fault/disconnect
+    
+    where "xxx" is a large positive number of transport method calls
+    before a disconnect. A value of several thousand is usually a good
+    number that allows reasonable forward progress while still causing a
+    lot of connection drops.
+    
+    These hooks are disabled when SUNRPC_DEBUG is turned off.
+    
+    Signed-off-by: Chuck Lever <chuck.lever@oracle.com>
+    Signed-off-by: Trond Myklebust <trond.myklebust@primarydata.com>
+
+diff --git a/net/sunrpc/debugfs.c b/net/sunrpc/debugfs.c
+index 82962f7e6e88..7cc1b8a6ef6d 100644
+--- a/net/sunrpc/debugfs.c
++++ b/net/sunrpc/debugfs.c
+@@ -10,9 +10,12 @@
+ #include "netns.h"
+ 
+ static struct dentry *topdir;
++static struct dentry *rpc_fault_dir;
+ static struct dentry *rpc_clnt_dir;
+ static struct dentry *rpc_xprt_dir;
+ 
++unsigned int rpc_inject_disconnect;
++
+ struct rpc_clnt_iter {
+ 	struct rpc_clnt	*clnt;
+ 	loff_t		pos;
+@@ -257,6 +260,8 @@ rpc_xprt_debugfs_register(struct rpc_xprt *xprt)
+ 		debugfs_remove_recursive(xprt->debugfs);
+ 		xprt->debugfs = NULL;
+ 	}
++
++	atomic_set(&xprt->inject_disconnect, rpc_inject_disconnect);
+ }
+ 
+ void
+@@ -266,11 +271,78 @@ rpc_xprt_debugfs_unregister(struct rpc_xprt *xprt)
+ 	xprt->debugfs = NULL;
+ }
+ 
++static int
++fault_open(struct inode *inode, struct file *filp)
++{
++	filp->private_data = kmalloc(128, GFP_KERNEL);
++	if (!filp->private_data)
++		return -ENOMEM;
++	return 0;
++}
++
++static int
++fault_release(struct inode *inode, struct file *filp)
++{
++	kfree(filp->private_data);
++	return 0;
++}
++
++static ssize_t
++fault_disconnect_read(struct file *filp, char __user *user_buf,
++		      size_t len, loff_t *offset)
++{
++	char *buffer = (char *)filp->private_data;
++	size_t size;
++
++	size = sprintf(buffer, "%u\n", rpc_inject_disconnect);
++	return simple_read_from_buffer(user_buf, len, offset, buffer, size);
++}
++
++static ssize_t
++fault_disconnect_write(struct file *filp, const char __user *user_buf,
++		       size_t len, loff_t *offset)
++{
++	char buffer[16];
++
++	len = min(len, sizeof(buffer) - 1);
++	if (copy_from_user(buffer, user_buf, len))
++		return -EFAULT;
++	buffer[len] = '\0';
++	if (kstrtouint(buffer, 10, &rpc_inject_disconnect))
++		return -EINVAL;
++	return len;
++}
++
++static const struct file_operations fault_disconnect_fops = {
++	.owner		= THIS_MODULE,
++	.open		= fault_open,
++	.read		= fault_disconnect_read,
++	.write		= fault_disconnect_write,
++	.release	= fault_release,
++};
++
++static struct dentry *
++inject_fault_dir(struct dentry *topdir)
++{
++	struct dentry *faultdir;
++
++	faultdir = debugfs_create_dir("inject_fault", topdir);
++	if (!faultdir)
++		return NULL;
++
++	if (!debugfs_create_file("disconnect", S_IFREG | S_IRUSR, faultdir,
++				 NULL, &fault_disconnect_fops))
++		return NULL;
++
++	return faultdir;
++}
++
+ void __exit
+ sunrpc_debugfs_exit(void)
+ {
+ 	debugfs_remove_recursive(topdir);
+ 	topdir = NULL;
++	rpc_fault_dir = NULL;
+ 	rpc_clnt_dir = NULL;
+ 	rpc_xprt_dir = NULL;
+ }
+@@ -282,6 +354,10 @@ sunrpc_debugfs_init(void)
+ 	if (!topdir)
+ 		return;
+ 
++	rpc_fault_dir = inject_fault_dir(topdir);
++	if (!rpc_fault_dir)
++		goto out_remove;
++
+ 	rpc_clnt_dir = debugfs_create_dir("rpc_clnt", topdir);
+ 	if (!rpc_clnt_dir)
+ 		goto out_remove;
+@@ -294,5 +370,6 @@ sunrpc_debugfs_init(void)
+ out_remove:
+ 	debugfs_remove_recursive(topdir);
+ 	topdir = NULL;
++	rpc_fault_dir = NULL;
+ 	rpc_clnt_dir = NULL;
+ }

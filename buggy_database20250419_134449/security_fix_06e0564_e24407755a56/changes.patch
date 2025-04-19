@@ -1,0 +1,56 @@
+diff --git a/arch/x86/kvm/i8254.c b/arch/x86/kvm/i8254.c
+index f2f5d260874e..3829aa7b663f 100644
+--- a/arch/x86/kvm/i8254.c
++++ b/arch/x86/kvm/i8254.c
+@@ -200,9 +200,12 @@ int __pit_timer_fn(struct kvm_kpit_state *ps)
+ 
+ 	atomic_inc(&pt->pending);
+ 	smp_mb__after_atomic_inc();
+-	if (vcpu0 && waitqueue_active(&vcpu0->wq)) {
+-		vcpu0->arch.mp_state = KVM_MP_STATE_RUNNABLE;
+-		wake_up_interruptible(&vcpu0->wq);
++	if (vcpu0) {
++		set_bit(KVM_REQ_PENDING_TIMER, &vcpu0->requests);
++		if (waitqueue_active(&vcpu0->wq)) {
++			vcpu0->arch.mp_state = KVM_MP_STATE_RUNNABLE;
++			wake_up_interruptible(&vcpu0->wq);
++		}
+ 	}
+ 
+ 	pt->timer.expires = ktime_add_ns(pt->timer.expires, pt->period);
+diff --git a/arch/x86/kvm/lapic.c b/arch/x86/kvm/lapic.c
+index c297c50eba63..ebc03f5ae162 100644
+--- a/arch/x86/kvm/lapic.c
++++ b/arch/x86/kvm/lapic.c
+@@ -940,6 +940,7 @@ static int __apic_timer_fn(struct kvm_lapic *apic)
+ 	wait_queue_head_t *q = &apic->vcpu->wq;
+ 
+ 	atomic_inc(&apic->timer.pending);
++	set_bit(KVM_REQ_PENDING_TIMER, &apic->vcpu->requests);
+ 	if (waitqueue_active(q)) {
+ 		apic->vcpu->arch.mp_state = KVM_MP_STATE_RUNNABLE;
+ 		wake_up_interruptible(q);
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index b90744a1dc3a..b08812d6b34c 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -2774,6 +2774,7 @@ static int __vcpu_run(struct kvm_vcpu *vcpu, struct kvm_run *kvm_run)
+ 		}
+ 	}
+ 
++	clear_bit(KVM_REQ_PENDING_TIMER, &vcpu->requests);
+ 	kvm_inject_pending_timer_irqs(vcpu);
+ 
+ 	preempt_disable();
+diff --git a/include/linux/kvm_host.h b/include/linux/kvm_host.h
+index 092b1b25291d..de9d1df4bba2 100644
+--- a/include/linux/kvm_host.h
++++ b/include/linux/kvm_host.h
+@@ -33,6 +33,7 @@
+ #define KVM_REQ_REPORT_TPR_ACCESS  2
+ #define KVM_REQ_MMU_RELOAD         3
+ #define KVM_REQ_TRIPLE_FAULT       4
++#define KVM_REQ_PENDING_TIMER      5
+ 
+ struct kvm_vcpu;
+ extern struct kmem_cache *kvm_vcpu_cache;

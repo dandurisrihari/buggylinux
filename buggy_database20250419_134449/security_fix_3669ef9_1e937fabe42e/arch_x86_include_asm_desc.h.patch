@@ -1,0 +1,66 @@
+commit 3669ef9fa7d35f573ec9c0e0341b29251c2734a7
+Author: Andy Lutomirski <luto@amacapital.net>
+Date:   Thu Jan 22 11:27:59 2015 -0800
+
+    x86, tls: Interpret an all-zero struct user_desc as "no segment"
+    
+    The Witcher 2 did something like this to allocate a TLS segment index:
+    
+            struct user_desc u_info;
+            bzero(&u_info, sizeof(u_info));
+            u_info.entry_number = (uint32_t)-1;
+    
+            syscall(SYS_set_thread_area, &u_info);
+    
+    Strictly speaking, this code was never correct.  It should have set
+    read_exec_only and seg_not_present to 1 to indicate that it wanted
+    to find a free slot without putting anything there, or it should
+    have put something sensible in the TLS slot if it wanted to allocate
+    a TLS entry for real.  The actual effect of this code was to
+    allocate a bogus segment that could be used to exploit espfix.
+    
+    The set_thread_area hardening patches changed the behavior, causing
+    set_thread_area to return -EINVAL and crashing the game.
+    
+    This changes set_thread_area to interpret this as a request to find
+    a free slot and to leave it empty, which isn't *quite* what the game
+    expects but should be close enough to keep it working.  In
+    particular, using the code above to allocate two segments will
+    allocate the same segment both times.
+    
+    According to FrostbittenKing on Github, this fixes The Witcher 2.
+    
+    If this somehow still causes problems, we could instead allocate
+    a limit==0 32-bit data segment, but that seems rather ugly to me.
+    
+    Fixes: 41bdc78544b8 x86/tls: Validate TLS entries to protect espfix
+    Signed-off-by: Andy Lutomirski <luto@amacapital.net>
+    Cc: stable@vger.kernel.org
+    Cc: torvalds@linux-foundation.org
+    Link: http://lkml.kernel.org/r/0cb251abe1ff0958b8e468a9a9a905b80ae3a746.1421954363.git.luto@amacapital.net
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+
+diff --git a/arch/x86/include/asm/desc.h b/arch/x86/include/asm/desc.h
+index fc237fd0259a..a94b82e8f156 100644
+--- a/arch/x86/include/asm/desc.h
++++ b/arch/x86/include/asm/desc.h
+@@ -262,6 +262,19 @@ static inline void native_load_tls(struct thread_struct *t, unsigned int cpu)
+ 	 (info)->seg_not_present	== 1	&&	\
+ 	 (info)->useable		== 0)
+ 
++/* Lots of programs expect an all-zero user_desc to mean "no segment at all". */
++static inline bool LDT_zero(const struct user_desc *info)
++{
++	return (info->base_addr		== 0 &&
++		info->limit		== 0 &&
++		info->contents		== 0 &&
++		info->read_exec_only	== 0 &&
++		info->seg_32bit		== 0 &&
++		info->limit_in_pages	== 0 &&
++		info->seg_not_present	== 0 &&
++		info->useable		== 0);
++}
++
+ static inline void clear_LDT(void)
+ {
+ 	set_ldt(NULL, 0);

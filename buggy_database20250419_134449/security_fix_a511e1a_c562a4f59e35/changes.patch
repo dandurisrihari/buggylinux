@@ -1,0 +1,357 @@
+diff --git a/certs/system_keyring.c b/certs/system_keyring.c
+index 417d65882870..4e2fa8ab01d6 100644
+--- a/certs/system_keyring.c
++++ b/certs/system_keyring.c
+@@ -18,12 +18,26 @@
+ #include <keys/system_keyring.h>
+ #include <crypto/pkcs7.h>
+ 
+-struct key *system_trusted_keyring;
+-EXPORT_SYMBOL_GPL(system_trusted_keyring);
++static struct key *system_trusted_keyring;
+ 
+ extern __initconst const u8 system_certificate_list[];
+ extern __initconst const unsigned long system_certificate_list_size;
+ 
++/**
++ * restrict_link_by_builtin_trusted - Restrict keyring addition by system CA
++ *
++ * Restrict the addition of keys into a keyring based on the key-to-be-added
++ * being vouched for by a key in the system keyring.
++ */
++int restrict_link_by_builtin_trusted(struct key *keyring,
++				     const struct key_type *type,
++				     unsigned long flags,
++				     const union key_payload *payload)
++{
++	return restrict_link_by_signature(system_trusted_keyring,
++					  type, payload);
++}
++
+ /*
+  * Load the compiled-in keys
+  */
+@@ -37,7 +51,7 @@ static __init int system_trusted_keyring_init(void)
+ 			      ((KEY_POS_ALL & ~KEY_POS_SETATTR) |
+ 			      KEY_USR_VIEW | KEY_USR_READ | KEY_USR_SEARCH),
+ 			      KEY_ALLOC_NOT_IN_QUOTA,
+-			      keyring_restrict_trusted_only, NULL);
++			      restrict_link_by_builtin_trusted, NULL);
+ 	if (IS_ERR(system_trusted_keyring))
+ 		panic("Can't allocate system trusted keyring\n");
+ 	return 0;
+diff --git a/crypto/asymmetric_keys/restrict.c b/crypto/asymmetric_keys/restrict.c
+index b4c10f2f5034..ac4bddf669de 100644
+--- a/crypto/asymmetric_keys/restrict.c
++++ b/crypto/asymmetric_keys/restrict.c
+@@ -1,6 +1,6 @@
+ /* Instantiate a public key crypto key from an X.509 Certificate
+  *
+- * Copyright (C) 2012 Red Hat, Inc. All Rights Reserved.
++ * Copyright (C) 2012, 2016 Red Hat, Inc. All Rights Reserved.
+  * Written by David Howells (dhowells@redhat.com)
+  *
+  * This program is free software; you can redistribute it and/or
+@@ -9,20 +9,12 @@
+  * 2 of the Licence, or (at your option) any later version.
+  */
+ 
+-#define pr_fmt(fmt) "X.509: "fmt
++#define pr_fmt(fmt) "ASYM: "fmt
+ #include <linux/module.h>
+ #include <linux/kernel.h>
+-#include <linux/slab.h>
+ #include <linux/err.h>
+-#include <linux/mpi.h>
+-#include <linux/asn1_decoder.h>
+-#include <keys/asymmetric-subtype.h>
+-#include <keys/asymmetric-parser.h>
+-#include <keys/system_keyring.h>
+-#include <crypto/hash.h>
+ #include <crypto/public_key.h>
+ #include "asymmetric_keys.h"
+-#include "x509_parser.h"
+ 
+ static bool use_builtin_keys;
+ static struct asymmetric_key_id *ca_keyid;
+@@ -62,45 +54,55 @@ static int __init ca_keys_setup(char *str)
+ __setup("ca_keys=", ca_keys_setup);
+ #endif
+ 
+-/*
++/**
++ * restrict_link_by_signature - Restrict additions to a ring of public keys
++ * @trust_keyring: A ring of keys that can be used to vouch for the new cert.
++ * @type: The type of key being added.
++ * @payload: The payload of the new key.
++ *
+  * Check the new certificate against the ones in the trust keyring.  If one of
+  * those is the signing key and validates the new certificate, then mark the
+  * new certificate as being trusted.
+  *
+- * Return 0 if the new certificate was successfully validated, 1 if we couldn't
+- * find a matching parent certificate in the trusted list and an error if there
+- * is a matching certificate but the signature check fails.
++ * Returns 0 if the new certificate was accepted, -ENOKEY if we couldn't find a
++ * matching parent certificate in the trusted list, -EKEYREJECTED if the
++ * signature check fails or the key is blacklisted and some other error if
++ * there is a matching certificate but the signature check cannot be performed.
+  */
+-int x509_validate_trust(struct x509_certificate *cert,
+-			struct key *trust_keyring)
++int restrict_link_by_signature(struct key *trust_keyring,
++			       const struct key_type *type,
++			       const union key_payload *payload)
+ {
+-	struct public_key_signature *sig = cert->sig;
++	const struct public_key_signature *sig;
+ 	struct key *key;
+-	int ret = 1;
++	int ret;
+ 
+-	if (!sig->auth_ids[0] && !sig->auth_ids[1])
+-		return 1;
++	pr_devel("==>%s()\n", __func__);
+ 
+ 	if (!trust_keyring)
++		return -ENOKEY;
++
++	if (type != &key_type_asymmetric)
+ 		return -EOPNOTSUPP;
++
++	sig = payload->data[asym_auth];
++	if (!sig->auth_ids[0] && !sig->auth_ids[1])
++		return 0;
++
+ 	if (ca_keyid && !asymmetric_key_id_partial(sig->auth_ids[1], ca_keyid))
+ 		return -EPERM;
+-	if (cert->unsupported_sig)
+-		return -ENOPKG;
+ 
++	/* See if we have a key that signed this one. */
+ 	key = find_asymmetric_key(trust_keyring,
+ 				  sig->auth_ids[0], sig->auth_ids[1],
+ 				  false);
+ 	if (IS_ERR(key))
+-		return PTR_ERR(key);
++		return -ENOKEY;
+ 
+-	if (!use_builtin_keys ||
+-	    test_bit(KEY_FLAG_BUILTIN, &key->flags)) {
+-		ret = verify_signature(key, cert->sig);
+-		if (ret == -ENOPKG)
+-			cert->unsupported_sig = true;
+-	}
++	if (use_builtin_keys && !test_bit(KEY_FLAG_BUILTIN, &key->flags))
++		ret = -ENOKEY;
++	else
++		ret = verify_signature(key, sig);
+ 	key_put(key);
+ 	return ret;
+ }
+-EXPORT_SYMBOL_GPL(x509_validate_trust);
+diff --git a/crypto/asymmetric_keys/x509_parser.h b/crypto/asymmetric_keys/x509_parser.h
+index 7a802b09a509..05eef1c68881 100644
+--- a/crypto/asymmetric_keys/x509_parser.h
++++ b/crypto/asymmetric_keys/x509_parser.h
+@@ -58,9 +58,3 @@ extern int x509_decode_time(time64_t *_t,  size_t hdrlen,
+  */
+ extern int x509_get_sig_params(struct x509_certificate *cert);
+ extern int x509_check_for_self_signed(struct x509_certificate *cert);
+-
+-/*
+- * public_key_trust.c
+- */
+-extern int x509_validate_trust(struct x509_certificate *cert,
+-			       struct key *trust_keyring);
+diff --git a/crypto/asymmetric_keys/x509_public_key.c b/crypto/asymmetric_keys/x509_public_key.c
+index 6d7f42f0de9a..fb732296cd36 100644
+--- a/crypto/asymmetric_keys/x509_public_key.c
++++ b/crypto/asymmetric_keys/x509_public_key.c
+@@ -178,31 +178,12 @@ static int x509_key_preparse(struct key_preparsed_payload *prep)
+ 
+ 	cert->pub->id_type = "X509";
+ 
+-	/* See if we can derive the trustability of this certificate.
+-	 *
+-	 * When it comes to self-signed certificates, we cannot evaluate
+-	 * trustedness except by the fact that we obtained it from a trusted
+-	 * location.  So we just rely on x509_validate_trust() failing in this
+-	 * case.
+-	 *
+-	 * Note that there's a possibility of a self-signed cert matching a
+-	 * cert that we have (most likely a duplicate that we already trust) -
+-	 * in which case it will be marked trusted.
+-	 */
+-	if (cert->unsupported_sig || cert->self_signed) {
++	if (cert->unsupported_sig) {
+ 		public_key_signature_free(cert->sig);
+ 		cert->sig = NULL;
+ 	} else {
+ 		pr_devel("Cert Signature: %s + %s\n",
+ 			 cert->sig->pkey_algo, cert->sig->hash_algo);
+-
+-		ret = x509_validate_trust(cert, get_system_trusted_keyring());
+-		if (ret)
+-			ret = x509_validate_trust(cert, get_ima_mok_keyring());
+-		if (ret == -EKEYREJECTED)
+-			goto error_free_cert;
+-		if (!ret)
+-			prep->trusted = true;
+ 	}
+ 
+ 	/* Propose a description */
+diff --git a/include/crypto/public_key.h b/include/crypto/public_key.h
+index 96ef27b8dd41..882ca0e1e7a5 100644
+--- a/include/crypto/public_key.h
++++ b/include/crypto/public_key.h
+@@ -47,6 +47,13 @@ extern void public_key_signature_free(struct public_key_signature *sig);
+ extern struct asymmetric_key_subtype public_key_subtype;
+ 
+ struct key;
++struct key_type;
++union key_payload;
++
++extern int restrict_link_by_signature(struct key *trust_keyring,
++				      const struct key_type *type,
++				      const union key_payload *payload);
++
+ extern int verify_signature(const struct key *key,
+ 			    const struct public_key_signature *sig);
+ 
+diff --git a/include/keys/system_keyring.h b/include/keys/system_keyring.h
+index b2d645ac35a0..93715913a0b1 100644
+--- a/include/keys/system_keyring.h
++++ b/include/keys/system_keyring.h
+@@ -12,22 +12,17 @@
+ #ifndef _KEYS_SYSTEM_KEYRING_H
+ #define _KEYS_SYSTEM_KEYRING_H
+ 
++#include <linux/key.h>
++
+ #ifdef CONFIG_SYSTEM_TRUSTED_KEYRING
+ 
+-#include <linux/key.h>
+-#include <linux/verification.h>
+-#include <crypto/public_key.h>
++extern int restrict_link_by_builtin_trusted(struct key *keyring,
++					    const struct key_type *type,
++					    unsigned long flags,
++					    const union key_payload *payload);
+ 
+-extern struct key *system_trusted_keyring;
+-static inline struct key *get_system_trusted_keyring(void)
+-{
+-	return system_trusted_keyring;
+-}
+ #else
+-static inline struct key *get_system_trusted_keyring(void)
+-{
+-	return NULL;
+-}
++#define restrict_link_by_builtin_trusted restrict_link_reject
+ #endif
+ 
+ #ifdef CONFIG_IMA_MOK_KEYRING
+diff --git a/kernel/module_signing.c b/kernel/module_signing.c
+index 6a64e03b9f44..937c844bee4a 100644
+--- a/kernel/module_signing.c
++++ b/kernel/module_signing.c
+@@ -12,7 +12,7 @@
+ #include <linux/kernel.h>
+ #include <linux/errno.h>
+ #include <linux/string.h>
+-#include <keys/system_keyring.h>
++#include <linux/verification.h>
+ #include <crypto/public_key.h>
+ #include "module-internal.h"
+ 
+diff --git a/security/integrity/digsig.c b/security/integrity/digsig.c
+index 659566c2200b..d647178c6bbd 100644
+--- a/security/integrity/digsig.c
++++ b/security/integrity/digsig.c
+@@ -18,6 +18,8 @@
+ #include <linux/cred.h>
+ #include <linux/key-type.h>
+ #include <linux/digsig.h>
++#include <crypto/public_key.h>
++#include <keys/system_keyring.h>
+ 
+ #include "integrity.h"
+ 
+@@ -40,6 +42,35 @@ static bool init_keyring __initdata = true;
+ static bool init_keyring __initdata;
+ #endif
+ 
++#ifdef CONFIG_SYSTEM_TRUSTED_KEYRING
++/*
++ * Restrict the addition of keys into the IMA keyring.
++ *
++ * Any key that needs to go in .ima keyring must be signed by CA in
++ * either .system or .ima_mok keyrings.
++ */
++static int restrict_link_by_ima_mok(struct key *keyring,
++				    const struct key_type *type,
++				    unsigned long flags,
++				    const union key_payload *payload)
++{
++	int ret;
++
++	ret = restrict_link_by_builtin_trusted(keyring, type, flags, payload);
++	if (ret != -ENOKEY)
++		return ret;
++
++	return restrict_link_by_signature(get_ima_mok_keyring(),
++					  type, payload);
++}
++#else
++/*
++ * If there's no system trusted keyring, then keys cannot be loaded into
++ * .ima_mok and added keys cannot be marked trusted.
++ */
++#define restrict_link_by_ima_mok restrict_link_reject
++#endif
++
+ int integrity_digsig_verify(const unsigned int id, const char *sig, int siglen,
+ 			    const char *digest, int digestlen)
+ {
+@@ -84,7 +115,7 @@ int __init integrity_init_keyring(const unsigned int id)
+ 				     KEY_USR_VIEW | KEY_USR_READ |
+ 				     KEY_USR_WRITE | KEY_USR_SEARCH),
+ 				    KEY_ALLOC_NOT_IN_QUOTA,
+-				    NULL, NULL);
++				    restrict_link_by_ima_mok, NULL);
+ 	if (IS_ERR(keyring[id])) {
+ 		err = PTR_ERR(keyring[id]);
+ 		pr_info("Can't allocate %s keyring (%d)\n",
+diff --git a/security/integrity/ima/ima_mok.c b/security/integrity/ima/ima_mok.c
+index ef91248cb934..2988726d30d6 100644
+--- a/security/integrity/ima/ima_mok.c
++++ b/security/integrity/ima/ima_mok.c
+@@ -17,7 +17,7 @@
+ #include <linux/cred.h>
+ #include <linux/err.h>
+ #include <linux/init.h>
+-#include <keys/asymmetric-type.h>
++#include <keys/system_keyring.h>
+ 
+ 
+ struct key *ima_mok_keyring;
+@@ -36,7 +36,7 @@ __init int ima_mok_init(void)
+ 			      KEY_USR_VIEW | KEY_USR_READ |
+ 			      KEY_USR_WRITE | KEY_USR_SEARCH,
+ 			      KEY_ALLOC_NOT_IN_QUOTA,
+-			      keyring_restrict_trusted_only, NULL);
++			      restrict_link_by_builtin_trusted, NULL);
+ 
+ 	ima_blacklist_keyring = keyring_alloc(".ima_blacklist",
+ 				KUIDT_INIT(0), KGIDT_INIT(0), current_cred(),
+@@ -44,7 +44,7 @@ __init int ima_mok_init(void)
+ 				KEY_USR_VIEW | KEY_USR_READ |
+ 				KEY_USR_WRITE | KEY_USR_SEARCH,
+ 				KEY_ALLOC_NOT_IN_QUOTA,
+-				keyring_restrict_trusted_only, NULL);
++				restrict_link_by_builtin_trusted, NULL);
+ 
+ 	if (IS_ERR(ima_mok_keyring) || IS_ERR(ima_blacklist_keyring))
+ 		panic("Can't allocate IMA MOK or blacklist keyrings.");

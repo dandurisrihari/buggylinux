@@ -1,0 +1,64 @@
+commit e8b7db38449ac5b950a3f00519171c4be3e226ff
+Author: Andres Beltran <lkmlabelt@gmail.com>
+Date:   Mon Nov 9 11:04:00 2020 +0100
+
+    Drivers: hv: vmbus: Add vmbus_requestor data structure for VMBus hardening
+    
+    Currently, VMbus drivers use pointers into guest memory as request IDs
+    for interactions with Hyper-V. To be more robust in the face of errors
+    or malicious behavior from a compromised Hyper-V, avoid exposing
+    guest memory addresses to Hyper-V. Also avoid Hyper-V giving back a
+    bad request ID that is then treated as the address of a guest data
+    structure with no validation. Instead, encapsulate these memory
+    addresses and provide small integers as request IDs.
+    
+    Signed-off-by: Andres Beltran <lkmlabelt@gmail.com>
+    Co-developed-by: Andrea Parri (Microsoft) <parri.andrea@gmail.com>
+    Signed-off-by: Andrea Parri (Microsoft) <parri.andrea@gmail.com>
+    Reviewed-by: Michael Kelley <mikelley@microsoft.com>
+    Reviewed-by: Wei Liu <wei.liu@kernel.org>
+    Link: https://lore.kernel.org/r/20201109100402.8946-2-parri.andrea@gmail.com
+    Signed-off-by: Wei Liu <wei.liu@kernel.org>
+
+diff --git a/include/linux/hyperv.h b/include/linux/hyperv.h
+index 1ce131f29f3b..5b6d5c4e3711 100644
+--- a/include/linux/hyperv.h
++++ b/include/linux/hyperv.h
+@@ -764,6 +764,22 @@ enum vmbus_device_type {
+ 	HV_UNKNOWN,
+ };
+ 
++/*
++ * Provides request ids for VMBus. Encapsulates guest memory
++ * addresses and stores the next available slot in req_arr
++ * to generate new ids in constant time.
++ */
++struct vmbus_requestor {
++	u64 *req_arr;
++	unsigned long *req_bitmap; /* is a given slot available? */
++	u32 size;
++	u64 next_request_id;
++	spinlock_t req_lock; /* provides atomicity */
++};
++
++#define VMBUS_NO_RQSTOR U64_MAX
++#define VMBUS_RQST_ERROR (U64_MAX - 1)
++
+ struct vmbus_device {
+ 	u16  dev_type;
+ 	guid_t guid;
+@@ -988,8 +1004,14 @@ struct vmbus_channel {
+ 	u32 fuzz_testing_interrupt_delay;
+ 	u32 fuzz_testing_message_delay;
+ 
++	/* request/transaction ids for VMBus */
++	struct vmbus_requestor requestor;
++	u32 rqstor_size;
+ };
+ 
++u64 vmbus_next_request_id(struct vmbus_requestor *rqstor, u64 rqst_addr);
++u64 vmbus_request_addr(struct vmbus_requestor *rqstor, u64 trans_id);
++
+ static inline bool is_hvsock_channel(const struct vmbus_channel *c)
+ {
+ 	return !!(c->offermsg.offer.chn_flags &

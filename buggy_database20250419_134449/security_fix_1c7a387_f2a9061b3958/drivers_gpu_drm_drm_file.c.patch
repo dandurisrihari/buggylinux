@@ -1,0 +1,146 @@
+commit 1c7a387ffef894b1ab3942f0482dac7a6e0a909c
+Author: Tvrtko Ursulin <tursulin@ursulin.net>
+Date:   Wed Jun 21 10:48:24 2023 +0100
+
+    drm: Update file owner during use
+    
+    With the typical model where the display server opens the file descriptor
+    and then hands it over to the client(*), we were showing stale data in
+    debugfs.
+    
+    Fix it by updating the drm_file->pid on ioctl access from a different
+    process.
+    
+    The field is also made RCU protected to allow for lockless readers. Update
+    side is protected with dev->filelist_mutex.
+    
+    Before:
+    
+    $ cat /sys/kernel/debug/dri/0/clients
+                 command   pid dev master a   uid      magic
+                    Xorg  2344   0   y    y     0          0
+                    Xorg  2344   0   n    y     0          2
+                    Xorg  2344   0   n    y     0          3
+                    Xorg  2344   0   n    y     0          4
+    
+    After:
+    
+    $ cat /sys/kernel/debug/dri/0/clients
+                 command  tgid dev master a   uid      magic
+                    Xorg   830   0   y    y     0          0
+           xfce4-session   880   0   n    y     0          1
+                   xfwm4   943   0   n    y     0          2
+               neverball  1095   0   n    y     0          3
+    
+    *)
+    More detailed and historically accurate description of various handover
+    implementation kindly provided by Emil Velikov:
+    
+    """
+    The traditional model, the server was the orchestrator managing the
+    primary device node. From the fd, to the master status and
+    authentication. But looking at the fd alone, this has varied across
+    the years.
+    
+    IIRC in the DRI1 days, Xorg (libdrm really) would have a list of open
+    fd(s) and reuse those whenever needed, DRI2 the client was responsible
+    for open() themselves and with DRI3 the fd was passed to the client.
+    
+    Around the inception of DRI3 and systemd-logind, the latter became
+    another possible orchestrator. Whereby Xorg and Wayland compositors
+    could ask it for the fd. For various reasons (hysterical and genuine
+    ones) Xorg has a fallback path going the open(), whereas Wayland
+    compositors are moving to solely relying on logind... some never had
+    fallback even.
+    
+    Over the past few years, more projects have emerged which provide
+    functionality similar (be that on API level, Dbus, or otherwise) to
+    systemd-logind.
+    """
+    
+    v2:
+     * Fixed typo in commit text and added a fine historical explanation
+       from Emil.
+    
+    Signed-off-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+    Cc: "Christian König" <christian.koenig@amd.com>
+    Cc: Daniel Vetter <daniel@ffwll.ch>
+    Acked-by: Christian König <christian.koenig@amd.com>
+    Reviewed-by: Emil Velikov <emil.l.velikov@gmail.com>
+    Reviewed-by: Rob Clark <robdclark@gmail.com>
+    Tested-by: Rob Clark <robdclark@gmail.com>
+    Link: https://patchwork.freedesktop.org/patch/msgid/20230621094824.2348732-1-tvrtko.ursulin@linux.intel.com
+    Signed-off-by: Christian König <christian.koenig@amd.com>
+
+diff --git a/drivers/gpu/drm/drm_file.c b/drivers/gpu/drm/drm_file.c
+index 883d83bc0e3d..e692770ef6d3 100644
+--- a/drivers/gpu/drm/drm_file.c
++++ b/drivers/gpu/drm/drm_file.c
+@@ -160,7 +160,7 @@ struct drm_file *drm_file_alloc(struct drm_minor *minor)
+ 
+ 	/* Get a unique identifier for fdinfo: */
+ 	file->client_id = atomic64_inc_return(&ident);
+-	file->pid = get_pid(task_tgid(current));
++	rcu_assign_pointer(file->pid, get_pid(task_tgid(current)));
+ 	file->minor = minor;
+ 
+ 	/* for compatibility root is always authenticated */
+@@ -200,7 +200,7 @@ struct drm_file *drm_file_alloc(struct drm_minor *minor)
+ 		drm_syncobj_release(file);
+ 	if (drm_core_check_feature(dev, DRIVER_GEM))
+ 		drm_gem_release(dev, file);
+-	put_pid(file->pid);
++	put_pid(rcu_access_pointer(file->pid));
+ 	kfree(file);
+ 
+ 	return ERR_PTR(ret);
+@@ -291,7 +291,7 @@ void drm_file_free(struct drm_file *file)
+ 
+ 	WARN_ON(!list_empty(&file->event_list));
+ 
+-	put_pid(file->pid);
++	put_pid(rcu_access_pointer(file->pid));
+ 	kfree(file);
+ }
+ 
+@@ -505,6 +505,40 @@ int drm_release(struct inode *inode, struct file *filp)
+ }
+ EXPORT_SYMBOL(drm_release);
+ 
++void drm_file_update_pid(struct drm_file *filp)
++{
++	struct drm_device *dev;
++	struct pid *pid, *old;
++
++	/*
++	 * Master nodes need to keep the original ownership in order for
++	 * drm_master_check_perm to keep working correctly. (See comment in
++	 * drm_auth.c.)
++	 */
++	if (filp->was_master)
++		return;
++
++	pid = task_tgid(current);
++
++	/*
++	 * Quick unlocked check since the model is a single handover followed by
++	 * exclusive repeated use.
++	 */
++	if (pid == rcu_access_pointer(filp->pid))
++		return;
++
++	dev = filp->minor->dev;
++	mutex_lock(&dev->filelist_mutex);
++	old = rcu_replace_pointer(filp->pid, pid, 1);
++	mutex_unlock(&dev->filelist_mutex);
++
++	if (pid != old) {
++		get_pid(pid);
++		synchronize_rcu();
++		put_pid(old);
++	}
++}
++
+ /**
+  * drm_release_noglobal - release method for DRM file
+  * @inode: device inode

@@ -1,0 +1,48 @@
+commit 82a1273713df37375a75d6a700deef70c0d21360
+Author: Jason J. Herne <jjherne@us.ibm.com>
+Date:   Tue Oct 2 16:25:36 2012 +0200
+
+    s390/kvm: Interrupt injection bugfix
+    
+    EXTERNAL_CALL and EMERGENCY type interrupts need to preserve their interrupt
+    code parameter when being injected from user space.
+    
+    Signed-off-by: Jason J. Herne <jjherne@us.ibm.com>
+    Reviewed-by: Cornelia Huck <cornelia.huck@de.ibm.com>
+    Signed-off-by: Martin Schwidefsky <schwidefsky@de.ibm.com>
+    Signed-off-by: Christian Borntraeger <borntraeger@de.ibm.com>
+    Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
+
+diff --git a/arch/s390/kvm/interrupt.c b/arch/s390/kvm/interrupt.c
+index ff1e2f8ef94a..c30615e605ac 100644
+--- a/arch/s390/kvm/interrupt.c
++++ b/arch/s390/kvm/interrupt.c
+@@ -629,10 +629,27 @@ int kvm_s390_inject_vcpu(struct kvm_vcpu *vcpu,
+ 		break;
+ 	case KVM_S390_SIGP_STOP:
+ 	case KVM_S390_RESTART:
++		VCPU_EVENT(vcpu, 3, "inject: type %x", s390int->type);
++		inti->type = s390int->type;
++		break;
+ 	case KVM_S390_INT_EXTERNAL_CALL:
++		if (s390int->parm & 0xffff0000) {
++			kfree(inti);
++			return -EINVAL;
++		}
++		VCPU_EVENT(vcpu, 3, "inject: external call source-cpu:%u",
++			   s390int->parm);
++		inti->type = s390int->type;
++		inti->extcall.code = s390int->parm;
++		break;
+ 	case KVM_S390_INT_EMERGENCY:
+-		VCPU_EVENT(vcpu, 3, "inject: type %x", s390int->type);
++		if (s390int->parm & 0xffff0000) {
++			kfree(inti);
++			return -EINVAL;
++		}
++		VCPU_EVENT(vcpu, 3, "inject: emergency %u\n", s390int->parm);
+ 		inti->type = s390int->type;
++		inti->emerg.code = s390int->parm;
+ 		break;
+ 	case KVM_S390_INT_VIRTIO:
+ 	case KVM_S390_INT_SERVICE:

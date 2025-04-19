@@ -1,0 +1,156 @@
+diff --cc arch/powerpc/mm/nohash/Makefile
+index 86d0fe434824,90e846f0c46c..cf60c776c883
+--- a/arch/powerpc/mm/nohash/Makefile
++++ b/arch/powerpc/mm/nohash/Makefile
+@@@ -1,7 -1,8 +1,7 @@@
+  # SPDX-License-Identifier: GPL-2.0
+  
+  obj-y				+= mmu_context.o tlb.o tlb_low.o kup.o
+- obj-$(CONFIG_PPC_BOOK3E_64)  	+= tlb_low_64e.o book3e_pgtable.o
++ obj-$(CONFIG_PPC_BOOK3E_64)  	+= tlb_64e.o tlb_low_64e.o book3e_pgtable.o
+ -obj-$(CONFIG_40x)		+= 40x.o
+  obj-$(CONFIG_44x)		+= 44x.o
+  obj-$(CONFIG_PPC_8xx)		+= 8xx.o
+  obj-$(CONFIG_PPC_E500)		+= e500.o
+diff --cc drivers/acpi/numa/hmat.c
+index febd9e51350b,a2f9e7a4b479..1a902a02390f
+--- a/drivers/acpi/numa/hmat.c
++++ b/drivers/acpi/numa/hmat.c
+@@@ -933,7 -933,7 +933,7 @@@ static int hmat_callback(struct notifie
+  	return NOTIFY_OK;
+  }
+  
+--static int hmat_set_default_dram_perf(void)
+++static int __init hmat_set_default_dram_perf(void)
+  {
+  	int rc;
+  	int nid, pxm;
+diff --cc fs/netfs/buffered_read.c
+index 4c0401dbbfcf,a688d4c75d99..a6d5d07cd436
+--- a/fs/netfs/buffered_read.c
++++ b/fs/netfs/buffered_read.c
+@@@ -268,10 -268,10 +268,10 @@@ int netfs_read_folio(struct file *file
+  	struct folio *sink = NULL;
+  	int ret;
+  
+ -	_enter("%lx", folio->index);
+ +	kenter("%lx", folio->index);
+  
+  	rreq = netfs_alloc_request(mapping, file,
+- 				   folio_file_pos(folio), folio_size(folio),
++ 				   folio_pos(folio), folio_size(folio),
+  				   NETFS_READPAGE);
+  	if (IS_ERR(rreq)) {
+  		ret = PTR_ERR(rreq);
+diff --cc fs/netfs/buffered_write.c
+index ecbc99ec7d36,8294da4af52f..68a3f1383cee
+--- a/fs/netfs/buffered_write.c
++++ b/fs/netfs/buffered_write.c
+@@@ -54,9 -54,9 +54,9 @@@ static enum netfs_how_to_modify netfs_h
+  {
+  	struct netfs_folio *finfo = netfs_folio_info(folio);
+  	struct netfs_group *group = netfs_folio_group(folio);
+- 	loff_t pos = folio_file_pos(folio);
++ 	loff_t pos = folio_pos(folio);
+  
+ -	_enter("");
+ +	kenter("");
+  
+  	if (group != netfs_group && group != NETFS_FOLIO_COPY_TO_CACHE)
+  		return NETFS_FLUSH_CONTENT;
+diff --cc fs/nfs/write.c
+index 190c1fa8882c,3573cdc4b28f..d074d0ceb4f0
+--- a/fs/nfs/write.c
++++ b/fs/nfs/write.c
+@@@ -180,9 -279,9 +180,9 @@@ static void nfs_grow_file(struct folio 
+  	spin_lock(&inode->i_lock);
+  	i_size = i_size_read(inode);
+  	end_index = ((i_size - 1) >> folio_shift(folio)) << folio_order(folio);
+ -	if (i_size > 0 && folio_index(folio) < end_index)
+ +	if (i_size > 0 && folio->index < end_index)
+  		goto out;
+- 	end = folio_file_pos(folio) + (loff_t)offset + (loff_t)count;
++ 	end = folio_pos(folio) + (loff_t)offset + (loff_t)count;
+  	if (i_size >= end)
+  		goto out;
+  	trace_nfs_size_grow(inode, end);
+diff --cc include/linux/hid_bpf.h
+index 9ca96fc90449,99a3edb6cf07..d4d063cf63b5
+--- a/include/linux/hid_bpf.h
++++ b/include/linux/hid_bpf.h
+@@@ -227,7 -151,12 +227,12 @@@ static inline int dispatch_hid_bpf_outp
+  static inline int hid_bpf_connect_device(struct hid_device *hdev) { return 0; }
+  static inline void hid_bpf_disconnect_device(struct hid_device *hdev) {}
+  static inline void hid_bpf_destroy_device(struct hid_device *hid) {}
+ -static inline void hid_bpf_device_init(struct hid_device *hid) {}
+ +static inline int hid_bpf_device_init(struct hid_device *hid) { return 0; }
++ /*
++  * This specialized allocator has to be a macro for its allocations to be
++  * accounted separately (to have a separate alloc_tag). The typecast is
++  * intentional to enforce typesafety.
++  */
+  #define call_hid_bpf_rdesc_fixup(_hdev, _rdesc, _size)	\
+  		((u8 *)kmemdup(_rdesc, *(_size), GFP_KERNEL))
+  
+diff --cc include/uapi/linux/fs.h
+index 191a7e88a8ab,2a4a5f50c98e..753971770733
+--- a/include/uapi/linux/fs.h
++++ b/include/uapi/linux/fs.h
+@@@ -329,15 -329,14 +329,17 @@@ typedef int __bitwise __kernel_rwf_t
+  /* per-IO negation of O_APPEND */
+  #define RWF_NOAPPEND	((__force __kernel_rwf_t)0x00000020)
+  
+ +/* Atomic Write */
+ +#define RWF_ATOMIC	((__force __kernel_rwf_t)0x00000040)
+ +
+  /* mask of flags supported by the kernel */
+  #define RWF_SUPPORTED	(RWF_HIPRI | RWF_DSYNC | RWF_SYNC | RWF_NOWAIT |\
+ -			 RWF_APPEND | RWF_NOAPPEND)
+ +			 RWF_APPEND | RWF_NOAPPEND | RWF_ATOMIC)
+  
++ #define PROCFS_IOCTL_MAGIC 'f'
++ 
+  /* Pagemap ioctl */
+- #define PAGEMAP_SCAN	_IOWR('f', 16, struct pm_scan_arg)
++ #define PAGEMAP_SCAN	_IOWR(PROCFS_IOCTL_MAGIC, 16, struct pm_scan_arg)
+  
+  /* Bitmasks provided in pm_scan_args masks and reported in page_region.categories. */
+  #define PAGE_IS_WPALLOWED	(1 << 0)
+diff --cc mm/slub.c
+index 829a1f08e8a2,b5aaaa3ca756..3520acaf9afa
+--- a/mm/slub.c
++++ b/mm/slub.c
+@@@ -2123,10 -2102,9 +2140,10 @@@ alloc_tagging_slab_free_hook(struct kme
+  {
+  }
+  
+ -#endif /* CONFIG_SLAB_OBJ_EXT */
+ +#endif /* CONFIG_MEM_ALLOC_PROFILING */
+ +
+  
+- #ifdef CONFIG_MEMCG_KMEM
++ #ifdef CONFIG_MEMCG
+  
+  static void memcg_alloc_abort_single(struct kmem_cache *s, void *object);
+  
+diff --cc tools/testing/selftests/exec/Makefile
+index ab67d58cfab7,c5bdb653422b..ba012bc5aab9
+--- a/tools/testing/selftests/exec/Makefile
++++ b/tools/testing/selftests/exec/Makefile
+@@@ -1,15 -1,9 +1,14 @@@
+  # SPDX-License-Identifier: GPL-2.0
+  CFLAGS = -Wall
+  CFLAGS += -Wno-nonnull
+- CFLAGS += -D_GNU_SOURCE
+  
+ +ALIGNS := 0x1000 0x200000 0x1000000
+ +ALIGN_PIES        := $(patsubst %,load_address.%,$(ALIGNS))
+ +ALIGN_STATIC_PIES := $(patsubst %,load_address.static.%,$(ALIGNS))
+ +ALIGNMENT_TESTS   := $(ALIGN_PIES) $(ALIGN_STATIC_PIES)
+ +
+  TEST_PROGS := binfmt_script.py
+ -TEST_GEN_PROGS := execveat load_address_4096 load_address_2097152 load_address_16777216 non-regular
+ +TEST_GEN_PROGS := execveat non-regular $(ALIGNMENT_TESTS)
+  TEST_GEN_FILES := execveat.symlink execveat.denatured script subdir
+  # Makefile is a run-time dependency, since it's accessed by the execveat test
+  TEST_FILES := Makefile

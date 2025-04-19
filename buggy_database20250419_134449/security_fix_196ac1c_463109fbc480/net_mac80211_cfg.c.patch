@@ -1,0 +1,61 @@
+commit 196ac1c13d4db6c276dbb1c9190c8d7d45a83f1f
+Author: Johannes Berg <johannes.berg@intel.com>
+Date:   Tue Jun 5 14:28:40 2012 +0200
+
+    mac80211: do remain-on-channel while idle
+    
+    The IDLE handling in HW off-channel is broken right
+    now since we turn off IDLE only when the off-channel
+    period already started. Therefore, all drivers that
+    use it today (only iwlwifi!) must support off-channel
+    while idle, so playing with idle isn't needed at all.
+    
+    Off-channel in general, since it's no longer used for
+    authentication/association, shouldn't affect PS, so
+    also remove that logic.
+    
+    Also document a small caveat for reporting TX status
+    from off-channel frames in HW remain-on-channel.
+    
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/mac80211/cfg.c b/net/mac80211/cfg.c
+index d99359a6f76d..a16907919709 100644
+--- a/net/mac80211/cfg.c
++++ b/net/mac80211/cfg.c
+@@ -2187,8 +2187,6 @@ static int ieee80211_cancel_remain_on_channel_hw(struct ieee80211_local *local,
+ 	local->hw_roc_cookie = 0;
+ 	local->hw_roc_channel = NULL;
+ 
+-	ieee80211_recalc_idle(local);
+-
+ 	return 0;
+ }
+ 
+@@ -2248,7 +2246,7 @@ static int ieee80211_mgmt_tx(struct wiphy *wiphy, struct net_device *dev,
+ 	struct ieee80211_work *wk;
+ 	const struct ieee80211_mgmt *mgmt = (void *)buf;
+ 	u32 flags;
+-	bool is_offchan = false;
++	bool is_offchan = false, in_hw_roc = false;
+ 
+ 	if (dont_wait_for_ack)
+ 		flags = IEEE80211_TX_CTL_NO_ACK;
+@@ -2268,6 +2266,7 @@ static int ieee80211_mgmt_tx(struct wiphy *wiphy, struct net_device *dev,
+ 	if (chan == local->hw_roc_channel) {
+ 		/* TODO: check channel type? */
+ 		is_offchan = false;
++		in_hw_roc = true;
+ 		flags |= IEEE80211_TX_CTL_TX_OFFCHAN;
+ 	}
+ 
+@@ -2370,7 +2369,7 @@ static int ieee80211_mgmt_tx(struct wiphy *wiphy, struct net_device *dev,
+ 	 * wait is involved, we might otherwise not be on
+ 	 * the right channel for long enough!
+ 	 */
+-	if (!is_offchan && !wait && !sdata->vif.bss_conf.idle) {
++	if (!is_offchan && !wait && (in_hw_roc || !sdata->vif.bss_conf.idle)) {
+ 		ieee80211_tx_skb(sdata, skb);
+ 		return 0;
+ 	}

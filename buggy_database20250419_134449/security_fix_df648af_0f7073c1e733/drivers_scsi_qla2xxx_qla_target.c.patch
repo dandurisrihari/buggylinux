@@ -1,0 +1,69 @@
+commit df648afa39da9c4d3af99c6c03dc3e9c7dfa99b0
+Author: Quinn Tran <qutran@marvell.com>
+Date:   Mon Jun 6 21:46:19 2022 -0700
+
+    scsi: qla2xxx: edif: Wait for app to ack on sess down
+    
+    On session deletion, wait for app to acknowledge before moving on. This
+    allows both app and driver to stay in sync. In addition, this gives a
+    chance for authentication app to do any type of cleanup before moving on.
+    
+    Link: https://lore.kernel.org/r/20220607044627.19563-4-njavali@marvell.com
+    Fixes: dd30706e73b7 ("scsi: qla2xxx: edif: Add key update")
+    Signed-off-by: Quinn Tran <qutran@marvell.com>
+    Signed-off-by: Nilesh Javali <njavali@marvell.com>
+    Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+
+diff --git a/drivers/scsi/qla2xxx/qla_target.c b/drivers/scsi/qla2xxx/qla_target.c
+index cb97f625970d..2b2f68288375 100644
+--- a/drivers/scsi/qla2xxx/qla_target.c
++++ b/drivers/scsi/qla2xxx/qla_target.c
+@@ -981,22 +981,6 @@ void qlt_free_session_done(struct work_struct *work)
+ 		sess->send_els_logo);
+ 
+ 	if (!IS_SW_RESV_ADDR(sess->d_id)) {
+-		if (ha->flags.edif_enabled &&
+-		    (!own || own->iocb.u.isp24.status_subcode == ELS_PLOGI)) {
+-			sess->edif.authok = 0;
+-			if (!ha->flags.host_shutting_down) {
+-				ql_dbg(ql_dbg_edif, vha, 0x911e,
+-					"%s wwpn %8phC calling qla2x00_release_all_sadb\n",
+-					__func__, sess->port_name);
+-				qla2x00_release_all_sadb(vha, sess);
+-			} else {
+-				ql_dbg(ql_dbg_edif, vha, 0x911e,
+-					"%s bypassing release_all_sadb\n",
+-					__func__);
+-			}
+-			qla_edif_clear_appdata(vha, sess);
+-			qla_edif_sess_down(vha, sess);
+-		}
+ 		qla2x00_mark_device_lost(vha, sess, 0);
+ 
+ 		if (sess->send_els_logo) {
+@@ -1042,6 +1026,25 @@ void qlt_free_session_done(struct work_struct *work)
+ 			sess->nvme_flag |= NVME_FLAG_DELETING;
+ 			qla_nvme_unregister_remote_port(sess);
+ 		}
++
++		if (ha->flags.edif_enabled &&
++		    (!own || (own &&
++			      own->iocb.u.isp24.status_subcode == ELS_PLOGI))) {
++			sess->edif.authok = 0;
++			if (!ha->flags.host_shutting_down) {
++				ql_dbg(ql_dbg_edif, vha, 0x911e,
++				       "%s wwpn %8phC calling qla2x00_release_all_sadb\n",
++				       __func__, sess->port_name);
++				qla2x00_release_all_sadb(vha, sess);
++			} else {
++				ql_dbg(ql_dbg_edif, vha, 0x911e,
++				       "%s bypassing release_all_sadb\n",
++				       __func__);
++			}
++
++			qla_edif_clear_appdata(vha, sess);
++			qla_edif_sess_down(vha, sess);
++		}
+ 	}
+ 
+ 	/*

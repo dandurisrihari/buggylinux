@@ -1,0 +1,166 @@
+commit d6793ff974e07e4eea151d1f0805e92d042825a1
+Author: Lukas Wunner <lukas@wunner.de>
+Date:   Tue Sep 10 16:30:25 2024 +0200
+
+    crypto: ecdsa - Move X9.62 signature decoding into template
+    
+    Unlike the rsa driver, which separates signature decoding and
+    signature verification into two steps, the ecdsa driver does both in one.
+    
+    This restricts users to the one signature format currently supported
+    (X9.62) and prevents addition of others such as P1363, which is needed
+    by the forthcoming SPDM library (Security Protocol and Data Model) for
+    PCI device authentication.
+    
+    Per Herbert's suggestion, change ecdsa to use a "raw" signature encoding
+    and then implement X9.62 and P1363 as templates which convert their
+    respective encodings to the raw one.  One may then specify
+    "x962(ecdsa-nist-XXX)" or "p1363(ecdsa-nist-XXX)" to pick the encoding.
+    
+    The present commit moves X9.62 decoding to a template.  A separate
+    commit is going to introduce another template for P1363 decoding.
+    
+    The ecdsa driver internally represents a signature as two u64 arrays of
+    size ECC_MAX_BYTES.  This appears to be the most natural choice for the
+    raw format as it can directly be used for verification without having to
+    further decode signature data or copy it around.
+    
+    Repurpose all the existing test vectors for "x962(ecdsa-nist-XXX)" and
+    create a duplicate of them to test the raw encoding.
+    
+    Link: https://lore.kernel.org/all/ZoHXyGwRzVvYkcTP@gondor.apana.org.au/
+    Signed-off-by: Lukas Wunner <lukas@wunner.de>
+    Tested-by: Stefan Berger <stefanb@linux.ibm.com>
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+diff --git a/crypto/ecdsa.c b/crypto/ecdsa.c
+index 4a0ca93c99ea..1f7c29468a86 100644
+--- a/crypto/ecdsa.c
++++ b/crypto/ecdsa.c
+@@ -8,9 +8,6 @@
+ #include <crypto/internal/sig.h>
+ #include <crypto/ecdh.h>
+ #include <crypto/sig.h>
+-#include <linux/asn1_decoder.h>
+-
+-#include "ecdsasignature.asn1.h"
+ 
+ struct ecc_ctx {
+ 	unsigned int curve_id;
+@@ -22,61 +19,6 @@ struct ecc_ctx {
+ 	struct ecc_point pub_key;
+ };
+ 
+-struct ecdsa_signature_ctx {
+-	const struct ecc_curve *curve;
+-	u64 r[ECC_MAX_DIGITS];
+-	u64 s[ECC_MAX_DIGITS];
+-};
+-
+-/*
+- * Get the r and s components of a signature from the X509 certificate.
+- */
+-static int ecdsa_get_signature_rs(u64 *dest, size_t hdrlen, unsigned char tag,
+-				  const void *value, size_t vlen, unsigned int ndigits)
+-{
+-	size_t bufsize = ndigits * sizeof(u64);
+-	const char *d = value;
+-
+-	if (!value || !vlen || vlen > bufsize + 1)
+-		return -EINVAL;
+-
+-	/*
+-	 * vlen may be 1 byte larger than bufsize due to a leading zero byte
+-	 * (necessary if the most significant bit of the integer is set).
+-	 */
+-	if (vlen > bufsize) {
+-		/* skip over leading zeros that make 'value' a positive int */
+-		if (*d == 0) {
+-			vlen -= 1;
+-			d++;
+-		} else {
+-			return -EINVAL;
+-		}
+-	}
+-
+-	ecc_digits_from_bytes(d, vlen, dest, ndigits);
+-
+-	return 0;
+-}
+-
+-int ecdsa_get_signature_r(void *context, size_t hdrlen, unsigned char tag,
+-			  const void *value, size_t vlen)
+-{
+-	struct ecdsa_signature_ctx *sig = context;
+-
+-	return ecdsa_get_signature_rs(sig->r, hdrlen, tag, value, vlen,
+-				      sig->curve->g.ndigits);
+-}
+-
+-int ecdsa_get_signature_s(void *context, size_t hdrlen, unsigned char tag,
+-			  const void *value, size_t vlen)
+-{
+-	struct ecdsa_signature_ctx *sig = context;
+-
+-	return ecdsa_get_signature_rs(sig->s, hdrlen, tag, value, vlen,
+-				      sig->curve->g.ndigits);
+-}
+-
+ static int _ecdsa_verify(struct ecc_ctx *ctx, const u64 *hash, const u64 *r, const u64 *s)
+ {
+ 	const struct ecc_curve *curve = ctx->curve;
+@@ -126,25 +68,21 @@ static int ecdsa_verify(struct crypto_sig *tfm,
+ {
+ 	struct ecc_ctx *ctx = crypto_sig_ctx(tfm);
+ 	size_t bufsize = ctx->curve->g.ndigits * sizeof(u64);
+-	struct ecdsa_signature_ctx sig_ctx = {
+-		.curve = ctx->curve,
+-	};
++	const struct ecdsa_raw_sig *sig = src;
+ 	u64 hash[ECC_MAX_DIGITS];
+-	int ret;
+ 
+ 	if (unlikely(!ctx->pub_key_set))
+ 		return -EINVAL;
+ 
+-	ret = asn1_ber_decoder(&ecdsasignature_decoder, &sig_ctx, src, slen);
+-	if (ret < 0)
+-		return ret;
++	if (slen != sizeof(*sig))
++		return -EINVAL;
+ 
+ 	if (bufsize > dlen)
+ 		bufsize = dlen;
+ 
+ 	ecc_digits_from_bytes(digest, bufsize, hash, ctx->curve->g.ndigits);
+ 
+-	return _ecdsa_verify(ctx, hash, sig_ctx.r, sig_ctx.s);
++	return _ecdsa_verify(ctx, hash, sig->r, sig->s);
+ }
+ 
+ static int ecdsa_ecc_ctx_init(struct ecc_ctx *ctx, unsigned int curve_id)
+@@ -340,8 +278,15 @@ static int __init ecdsa_init(void)
+ 	if (ret)
+ 		goto nist_p521_error;
+ 
++	ret = crypto_register_template(&ecdsa_x962_tmpl);
++	if (ret)
++		goto x962_tmpl_error;
++
+ 	return 0;
+ 
++x962_tmpl_error:
++	crypto_unregister_sig(&ecdsa_nist_p521);
++
+ nist_p521_error:
+ 	crypto_unregister_sig(&ecdsa_nist_p384);
+ 
+@@ -356,6 +301,8 @@ static int __init ecdsa_init(void)
+ 
+ static void __exit ecdsa_exit(void)
+ {
++	crypto_unregister_template(&ecdsa_x962_tmpl);
++
+ 	if (ecdsa_nist_p192_registered)
+ 		crypto_unregister_sig(&ecdsa_nist_p192);
+ 	crypto_unregister_sig(&ecdsa_nist_p256);

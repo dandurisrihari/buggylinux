@@ -1,0 +1,37 @@
+commit 7e5b5ef8dca3229a5226eabf53bdc7b67ebd07ad
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Mon May 2 00:07:30 2022 +0200
+
+    KVM: SVM: Re-inject INTn instead of retrying the insn on "failure"
+    
+    Re-inject INTn software interrupts instead of retrying the instruction if
+    the CPU encountered an intercepted exception while vectoring the INTn,
+    e.g. if KVM intercepted a #PF when utilizing shadow paging.  Retrying the
+    instruction is architecturally wrong e.g. will result in a spurious #DB
+    if there's a code breakpoint on the INT3/O, and lack of re-injection also
+    breaks nested virtualization, e.g. if L1 injects a software interrupt and
+    vectoring the injected interrupt encounters an exception that is
+    intercepted by L0 but not L1.
+    
+    Signed-off-by: Sean Christopherson <seanjc@google.com>
+    Signed-off-by: Maciej S. Szmigiero <maciej.szmigiero@oracle.com>
+    Message-Id: <1654ad502f860948e4f2d57b8bd881d67301f785.1651440202.git.maciej.szmigiero@oracle.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/svm/nested.c b/arch/x86/kvm/svm/nested.c
+index 525117a49c18..0d25dea40796 100644
+--- a/arch/x86/kvm/svm/nested.c
++++ b/arch/x86/kvm/svm/nested.c
+@@ -617,10 +617,9 @@ static inline bool is_evtinj_soft(u32 evtinj)
+ 	if (!(evtinj & SVM_EVTINJ_VALID))
+ 		return false;
+ 
+-	/*
+-	 * Intentionally return false for SOFT events, SVM doesn't yet support
+-	 * re-injecting soft interrupts.
+-	 */
++	if (type == SVM_EVTINJ_TYPE_SOFT)
++		return true;
++
+ 	return type == SVM_EVTINJ_TYPE_EXEPT && kvm_exception_is_soft(vector);
+ }

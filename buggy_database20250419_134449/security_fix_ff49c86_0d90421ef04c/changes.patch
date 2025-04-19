@@ -1,0 +1,96 @@
+diff --cc fs/ext4/dir.c
+index c6d16353326a,e757319a4472..5ed870614c8d
+--- a/fs/ext4/dir.c
++++ b/fs/ext4/dir.c
+@@@ -655,12 -664,6 +655,5 @@@ const struct file_operations ext4_dir_o
+  	.compat_ioctl	= ext4_compat_ioctl,
+  #endif
+  	.fsync		= ext4_sync_file,
+ -	.open		= ext4_dir_open,
+  	.release	= ext4_release_dir,
+  };
+- 
+- #ifdef CONFIG_UNICODE
+- const struct dentry_operations ext4_dentry_ops = {
+- 	.d_hash = generic_ci_d_hash,
+- 	.d_compare = generic_ci_d_compare,
+- };
+- #endif
+diff --cc fs/f2fs/checkpoint.c
+index 54a1905af052,617d0f6b0836..897edb7c951a
+--- a/fs/f2fs/checkpoint.c
++++ b/fs/f2fs/checkpoint.c
+@@@ -1385,6 -1385,27 +1385,26 @@@ static void commit_checkpoint(struct f2
+  	f2fs_submit_merged_write(sbi, META_FLUSH);
+  }
+  
++ static inline u64 get_sectors_written(struct block_device *bdev)
++ {
+ -	return bdev->bd_part ?
+ -		(u64)part_stat_read(bdev->bd_part, sectors[STAT_WRITE]) : 0;
+++	return (u64)part_stat_read(bdev, sectors[STAT_WRITE]);
++ }
++ 
++ u64 f2fs_get_sectors_written(struct f2fs_sb_info *sbi)
++ {
++ 	if (f2fs_is_multi_device(sbi)) {
++ 		u64 sectors = 0;
++ 		int i;
++ 
++ 		for (i = 0; i < sbi->s_ndevs; i++)
++ 			sectors += get_sectors_written(FDEV(i).bdev);
++ 
++ 		return sectors;
++ 	}
++ 
++ 	return get_sectors_written(sbi->sb->s_bdev);
++ }
++ 
+  static int do_checkpoint(struct f2fs_sb_info *sbi, struct cp_control *cpc)
+  {
+  	struct f2fs_checkpoint *ckpt = F2FS_CKPT(sbi);
+diff --cc fs/f2fs/sysfs.c
+index 24e876e849c5,989a649cfa8b..30bae57428d1
+--- a/fs/f2fs/sysfs.c
++++ b/fs/f2fs/sysfs.c
+@@@ -90,9 -90,15 +90,10 @@@ static ssize_t free_segments_show(struc
+  static ssize_t lifetime_write_kbytes_show(struct f2fs_attr *a,
+  		struct f2fs_sb_info *sbi, char *buf)
+  {
+ -	struct super_block *sb = sbi->sb;
+ -
+ -	if (!sb->s_bdev->bd_part)
+ -		return sprintf(buf, "0\n");
+ -
+  	return sprintf(buf, "%llu\n",
+  			(unsigned long long)(sbi->kbytes_written +
+- 			BD_PART_WRITTEN(sbi)));
++ 			((f2fs_get_sectors_written(sbi) -
++ 				sbi->sectors_written_start) >> 1)));
+  }
+  
+  static ssize_t features_show(struct f2fs_attr *a,
+diff --cc include/linux/fscrypt.h
+index d23156d1ac94,e72f80482671..2ea1387bb497
+--- a/include/linux/fscrypt.h
++++ b/include/linux/fscrypt.h
+@@@ -753,12 -738,14 +753,15 @@@ static inline int fscrypt_prepare_renam
+   *
+   * Prepare for ->lookup() in a directory which may be encrypted by determining
+   * the name that will actually be used to search the directory on-disk.  If the
+ - * directory's encryption key is available, then the lookup is assumed to be by
+ - * plaintext name; otherwise, it is assumed to be by no-key name.
+ + * directory's encryption policy is supported by this kernel and its encryption
+ + * key is available, then the lookup is assumed to be by plaintext name;
+ + * otherwise, it is assumed to be by no-key name.
+   *
+-  * This also installs a custom ->d_revalidate() method which will invalidate the
+-  * dentry if it was created without the key and the key is later added.
++  * This will set DCACHE_NOKEY_NAME on the dentry if the lookup is by no-key
++  * name.  In this case the filesystem must assign the dentry a dentry_operations
++  * which contains fscrypt_d_revalidate (or contains a d_revalidate method that
++  * calls fscrypt_d_revalidate), so that the dentry will be invalidated if the
++  * directory's encryption key is later added.
+   *
+   * Return: 0 on success; -ENOENT if the directory's key is unavailable but the
+   * filename isn't a valid no-key name, so a negative dentry should be created;

@@ -1,0 +1,42 @@
+commit f1001f3d3b6868998cab73d10fda1a5c99ddf963
+Author: Wei Xu <weixugc@google.com>
+Date:   Thu Oct 17 18:15:28 2024 +0000
+
+    mm/mglru: reset page lru tier bits when activating
+    
+    When a folio is activated, lru_gen_add_folio() moves the folio to the
+    youngest generation.  But unlike folio_update_gen()/folio_inc_gen(),
+    lru_gen_add_folio() doesn't reset the folio lru tier bits (LRU_REFS_MASK |
+    LRU_REFS_FLAGS).  This inconsistency can affect how pages are aged via
+    folio_mark_accessed() (e.g.  fd accesses), though no user visible impact
+    related to this has been detected yet.
+    
+    Note that lru_gen_add_folio() cannot clear PG_workingset if the activation
+    is due to workingset refault, otherwise PSI accounting will be skipped.
+    So fix lru_gen_add_folio() to clear the lru tier bits other than
+    PG_workingset when activating a folio, and also clear all the lru tier
+    bits when a folio is activated via folio_activate() in
+    lru_gen_look_around().
+    
+    Link: https://lkml.kernel.org/r/20241017181528.3358821-1-weixugc@google.com
+    Fixes: 018ee47f1489 ("mm: multi-gen LRU: exploit locality in rmap")
+    Signed-off-by: Wei Xu <weixugc@google.com>
+    Cc: Axel Rasmussen <axelrasmussen@google.com>
+    Cc: Brian Geffon <bgeffon@google.com>
+    Cc: Jan Alexander Steffens <heftig@archlinux.org>
+    Cc: Suleiman Souhlal <suleiman@google.com>
+    Cc: Yu Zhao <yuzhao@google.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+
+diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
+index 5b1c984daf45..2e8c4307c728 100644
+--- a/include/linux/mmzone.h
++++ b/include/linux/mmzone.h
+@@ -403,6 +403,8 @@ enum {
+ 	NR_LRU_GEN_CAPS
+ };
+ 
++#define LRU_REFS_FLAGS		(BIT(PG_referenced) | BIT(PG_workingset))
++
+ #define MIN_LRU_BATCH		BITS_PER_LONG
+ #define MAX_LRU_BATCH		(MIN_LRU_BATCH * 64)

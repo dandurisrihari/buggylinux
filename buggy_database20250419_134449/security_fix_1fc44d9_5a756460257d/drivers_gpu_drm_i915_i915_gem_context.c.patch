@@ -1,0 +1,62 @@
+commit 1fc44d9b1afb0afe46acd99bdfdf793805a850e1
+Author: Chris Wilson <chris@chris-wilson.co.uk>
+Date:   Thu May 17 22:26:32 2018 +0100
+
+    drm/i915: Store a pointer to intel_context in i915_request
+    
+    To ease the frequent and ugly pointer dance of
+    &request->gem_context->engine[request->engine->id] during request
+    submission, store that pointer as request->hw_context. One major
+    advantage that we will exploit later is that this decouples the logical
+    context state from the engine itself.
+    
+    v2: Set mock_context->ops so we don't crash and burn in selftests.
+        Cleanups from Tvrtko.
+    
+    Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+    Acked-by: Zhenyu Wang <zhenyuw@linux.intel.com>
+    Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+    Link: https://patchwork.freedesktop.org/patch/msgid/20180517212633.24934-3-chris@chris-wilson.co.uk
+
+diff --git a/drivers/gpu/drm/i915/i915_gem_context.c b/drivers/gpu/drm/i915/i915_gem_context.c
+index 9e70f4dfa703..b69b18ef8120 100644
+--- a/drivers/gpu/drm/i915/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/i915_gem_context.c
+@@ -127,14 +127,8 @@ static void i915_gem_context_free(struct i915_gem_context *ctx)
+ 	for (n = 0; n < ARRAY_SIZE(ctx->__engine); n++) {
+ 		struct intel_context *ce = &ctx->__engine[n];
+ 
+-		if (!ce->state)
+-			continue;
+-
+-		WARN_ON(ce->pin_count);
+-		if (ce->ring)
+-			intel_ring_free(ce->ring);
+-
+-		__i915_gem_object_release_unless_active(ce->state->obj);
++		if (ce->ops)
++			ce->ops->destroy(ce);
+ 	}
+ 
+ 	kfree(ctx->name);
+@@ -266,6 +260,7 @@ __create_hw_context(struct drm_i915_private *dev_priv,
+ 		    struct drm_i915_file_private *file_priv)
+ {
+ 	struct i915_gem_context *ctx;
++	unsigned int n;
+ 	int ret;
+ 
+ 	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+@@ -283,6 +278,12 @@ __create_hw_context(struct drm_i915_private *dev_priv,
+ 	ctx->i915 = dev_priv;
+ 	ctx->sched.priority = I915_PRIORITY_NORMAL;
+ 
++	for (n = 0; n < ARRAY_SIZE(ctx->__engine); n++) {
++		struct intel_context *ce = &ctx->__engine[n];
++
++		ce->gem_context = ctx;
++	}
++
+ 	INIT_RADIX_TREE(&ctx->handles_vma, GFP_KERNEL);
+ 	INIT_LIST_HEAD(&ctx->handles_list);

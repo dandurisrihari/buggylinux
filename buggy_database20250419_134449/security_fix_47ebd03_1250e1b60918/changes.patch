@@ -1,0 +1,124 @@
+diff --git a/include/linux/kmsan.h b/include/linux/kmsan.h
+index e38ae3c34618..c7ff3aefc5a1 100644
+--- a/include/linux/kmsan.h
++++ b/include/linux/kmsan.h
+@@ -134,11 +134,12 @@ void kmsan_kfree_large(const void *ptr);
+  * @page_shift:	page_shift passed to vmap_range_noflush().
+  *
+  * KMSAN maps shadow and origin pages of @pages into contiguous ranges in
+- * vmalloc metadata address range.
++ * vmalloc metadata address range. Returns 0 on success, callers must check
++ * for non-zero return value.
+  */
+-void kmsan_vmap_pages_range_noflush(unsigned long start, unsigned long end,
+-				    pgprot_t prot, struct page **pages,
+-				    unsigned int page_shift);
++int kmsan_vmap_pages_range_noflush(unsigned long start, unsigned long end,
++				   pgprot_t prot, struct page **pages,
++				   unsigned int page_shift);
+ 
+ /**
+  * kmsan_vunmap_kernel_range_noflush() - Notify KMSAN about a vunmap.
+@@ -281,12 +282,13 @@ static inline void kmsan_kfree_large(const void *ptr)
+ {
+ }
+ 
+-static inline void kmsan_vmap_pages_range_noflush(unsigned long start,
+-						  unsigned long end,
+-						  pgprot_t prot,
+-						  struct page **pages,
+-						  unsigned int page_shift)
++static inline int kmsan_vmap_pages_range_noflush(unsigned long start,
++						 unsigned long end,
++						 pgprot_t prot,
++						 struct page **pages,
++						 unsigned int page_shift)
+ {
++	return 0;
+ }
+ 
+ static inline void kmsan_vunmap_range_noflush(unsigned long start,
+diff --git a/mm/kmsan/shadow.c b/mm/kmsan/shadow.c
+index a787c04e9583..b8bb95eea5e3 100644
+--- a/mm/kmsan/shadow.c
++++ b/mm/kmsan/shadow.c
+@@ -216,27 +216,29 @@ void kmsan_free_page(struct page *page, unsigned int order)
+ 	kmsan_leave_runtime();
+ }
+ 
+-void kmsan_vmap_pages_range_noflush(unsigned long start, unsigned long end,
+-				    pgprot_t prot, struct page **pages,
+-				    unsigned int page_shift)
++int kmsan_vmap_pages_range_noflush(unsigned long start, unsigned long end,
++				   pgprot_t prot, struct page **pages,
++				   unsigned int page_shift)
+ {
+ 	unsigned long shadow_start, origin_start, shadow_end, origin_end;
+ 	struct page **s_pages, **o_pages;
+-	int nr, mapped;
++	int nr, mapped, err = 0;
+ 
+ 	if (!kmsan_enabled)
+-		return;
++		return 0;
+ 
+ 	shadow_start = vmalloc_meta((void *)start, KMSAN_META_SHADOW);
+ 	shadow_end = vmalloc_meta((void *)end, KMSAN_META_SHADOW);
+ 	if (!shadow_start)
+-		return;
++		return 0;
+ 
+ 	nr = (end - start) / PAGE_SIZE;
+ 	s_pages = kcalloc(nr, sizeof(*s_pages), GFP_KERNEL);
+ 	o_pages = kcalloc(nr, sizeof(*o_pages), GFP_KERNEL);
+-	if (!s_pages || !o_pages)
++	if (!s_pages || !o_pages) {
++		err = -ENOMEM;
+ 		goto ret;
++	}
+ 	for (int i = 0; i < nr; i++) {
+ 		s_pages[i] = shadow_page_for(pages[i]);
+ 		o_pages[i] = origin_page_for(pages[i]);
+@@ -249,10 +251,16 @@ void kmsan_vmap_pages_range_noflush(unsigned long start, unsigned long end,
+ 	kmsan_enter_runtime();
+ 	mapped = __vmap_pages_range_noflush(shadow_start, shadow_end, prot,
+ 					    s_pages, page_shift);
+-	KMSAN_WARN_ON(mapped);
++	if (mapped) {
++		err = mapped;
++		goto ret;
++	}
+ 	mapped = __vmap_pages_range_noflush(origin_start, origin_end, prot,
+ 					    o_pages, page_shift);
+-	KMSAN_WARN_ON(mapped);
++	if (mapped) {
++		err = mapped;
++		goto ret;
++	}
+ 	kmsan_leave_runtime();
+ 	flush_tlb_kernel_range(shadow_start, shadow_end);
+ 	flush_tlb_kernel_range(origin_start, origin_end);
+@@ -262,6 +270,7 @@ void kmsan_vmap_pages_range_noflush(unsigned long start, unsigned long end,
+ ret:
+ 	kfree(s_pages);
+ 	kfree(o_pages);
++	return err;
+ }
+ 
+ /* Allocate metadata for pages allocated at boot time. */
+diff --git a/mm/vmalloc.c b/mm/vmalloc.c
+index a50072066221..1355d95cce1c 100644
+--- a/mm/vmalloc.c
++++ b/mm/vmalloc.c
+@@ -605,7 +605,11 @@ int __vmap_pages_range_noflush(unsigned long addr, unsigned long end,
+ int vmap_pages_range_noflush(unsigned long addr, unsigned long end,
+ 		pgprot_t prot, struct page **pages, unsigned int page_shift)
+ {
+-	kmsan_vmap_pages_range_noflush(addr, end, prot, pages, page_shift);
++	int ret = kmsan_vmap_pages_range_noflush(addr, end, prot, pages,
++						 page_shift);
++
++	if (ret)
++		return ret;
+ 	return __vmap_pages_range_noflush(addr, end, prot, pages, page_shift);
+ }

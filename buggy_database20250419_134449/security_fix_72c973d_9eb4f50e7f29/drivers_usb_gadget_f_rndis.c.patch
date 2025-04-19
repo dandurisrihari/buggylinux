@@ -1,0 +1,74 @@
+commit 72c973dd2b01b212a159faa330a2bc641a3ed809
+Author: Tatyana Brokhman <tlinder@codeaurora.org>
+Date:   Tue Jun 28 16:33:48 2011 +0300
+
+    usb: gadget: add usb_endpoint_descriptor to struct usb_ep
+    
+    Change usb_ep_enable() prototype to use endpoint
+    descriptor from usb_ep.
+    
+    This optimization spares the FDs from saving the
+    endpoint chosen descriptor. This optimization is
+    not full though. To fully exploit this change, one
+    needs to update all the UDCs as well since in the
+    current implementation each of them saves the
+    endpoint descriptor in it's internal (and extended)
+    endpoint structure.
+    
+    Signed-off-by: Tatyana Brokhman <tlinder@codeaurora.org>
+    Signed-off-by: Felipe Balbi <balbi@ti.com>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+diff --git a/drivers/usb/gadget/f_rndis.c b/drivers/usb/gadget/f_rndis.c
+index fa12ec8364ef..4646254a8924 100644
+--- a/drivers/usb/gadget/f_rndis.c
++++ b/drivers/usb/gadget/f_rndis.c
+@@ -92,7 +92,6 @@ struct f_rndis {
+ 	struct rndis_ep_descs		hs;
+ 
+ 	struct usb_ep			*notify;
+-	struct usb_endpoint_descriptor	*notify_desc;
+ 	struct usb_request		*notify_req;
+ 	atomic_t			notify_count;
+ };
+@@ -486,11 +485,11 @@ static int rndis_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
+ 			usb_ep_disable(rndis->notify);
+ 		} else {
+ 			VDBG(cdev, "init rndis ctrl %d\n", intf);
+-			rndis->notify_desc = ep_choose(cdev->gadget,
++			rndis->notify->desc = ep_choose(cdev->gadget,
+ 					rndis->hs.notify,
+ 					rndis->fs.notify);
+ 		}
+-		usb_ep_enable(rndis->notify, rndis->notify_desc);
++		usb_ep_enable(rndis->notify);
+ 		rndis->notify->driver_data = rndis;
+ 
+ 	} else if (intf == rndis->data_id) {
+@@ -501,11 +500,11 @@ static int rndis_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
+ 			gether_disconnect(&rndis->port);
+ 		}
+ 
+-		if (!rndis->port.in) {
++		if (!rndis->port.in_ep->desc) {
+ 			DBG(cdev, "init rndis\n");
+-			rndis->port.in = ep_choose(cdev->gadget,
++			rndis->port.in_ep->desc = ep_choose(cdev->gadget,
+ 					rndis->hs.in, rndis->fs.in);
+-			rndis->port.out = ep_choose(cdev->gadget,
++			rndis->port.out_ep->desc = ep_choose(cdev->gadget,
+ 					rndis->hs.out, rndis->fs.out);
+ 		}
+ 
+@@ -738,9 +737,9 @@ rndis_bind(struct usb_configuration *c, struct usb_function *f)
+ 	/* we might as well release our claims on endpoints */
+ 	if (rndis->notify)
+ 		rndis->notify->driver_data = NULL;
+-	if (rndis->port.out)
++	if (rndis->port.out_ep->desc)
+ 		rndis->port.out_ep->driver_data = NULL;
+-	if (rndis->port.in)
++	if (rndis->port.in_ep->desc)
+ 		rndis->port.in_ep->driver_data = NULL;
+ 
+ 	ERROR(cdev, "%s: can't bind, err %d\n", f->name, status);

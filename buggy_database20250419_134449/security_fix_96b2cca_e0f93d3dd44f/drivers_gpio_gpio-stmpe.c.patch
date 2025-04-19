@@ -1,0 +1,51 @@
+commit 96b2cca64fa3e1a31b573bb308b2944c802aacf3
+Author: Linus Walleij <linus.walleij@linaro.org>
+Date:   Tue Sep 27 15:59:12 2016 -0700
+
+    gpio: stmpe: forbid unused lines to be mapped as IRQs
+    
+    Exploit the new mechanism for masking off disallowed IRQs
+    added by Mika Westerberg to properly manage the STMPE
+    "norequest mask" to disallow also mapping said lines as
+    IRQs.
+    
+    Reviewed-by: Mika Westerberg <mika.westerberg@linux.intel.com>
+    Reviewed-by: Patrice Chotard <patrice.chotard@st.com>
+    Signed-off-by: Linus Walleij <linus.walleij@linaro.org>
+
+diff --git a/drivers/gpio/gpio-stmpe.c b/drivers/gpio/gpio-stmpe.c
+index b51c5be55c3a..432b2ee173c7 100644
+--- a/drivers/gpio/gpio-stmpe.c
++++ b/drivers/gpio/gpio-stmpe.c
+@@ -13,6 +13,7 @@
+ #include <linux/of.h>
+ #include <linux/mfd/stmpe.h>
+ #include <linux/seq_file.h>
++#include <linux/bitops.h>
+ 
+ /*
+  * These registers are modified under the irq bus lock and cached to avoid
+@@ -449,6 +450,8 @@ static int stmpe_gpio_probe(struct platform_device *pdev)
+ 
+ 	of_property_read_u32(np, "st,norequest-mask",
+ 			&stmpe_gpio->norequest_mask);
++	if (stmpe_gpio->norequest_mask)
++		stmpe_gpio->chip.irq_need_valid_mask = true;
+ 
+ 	if (irq < 0)
+ 		dev_info(&pdev->dev,
+@@ -473,6 +476,14 @@ static int stmpe_gpio_probe(struct platform_device *pdev)
+ 			dev_err(&pdev->dev, "unable to get irq: %d\n", ret);
+ 			goto out_disable;
+ 		}
++		if (stmpe_gpio->norequest_mask) {
++			int i;
++
++			/* Forbid unused lines to be mapped as IRQs */
++			for (i = 0; i < sizeof(u32); i++)
++				if (stmpe_gpio->norequest_mask & BIT(i))
++					clear_bit(i, stmpe_gpio->chip.irq_valid_mask);
++		}
+ 		ret =  gpiochip_irqchip_add(&stmpe_gpio->chip,
+ 					    &stmpe_gpio_irq_chip,
+ 					    0,

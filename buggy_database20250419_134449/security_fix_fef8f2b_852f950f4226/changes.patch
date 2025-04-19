@@ -1,0 +1,148 @@
+diff --git a/arch/x86/kvm/ioapic.c b/arch/x86/kvm/ioapic.c
+index 042dee556125..995eb5054360 100644
+--- a/arch/x86/kvm/ioapic.c
++++ b/arch/x86/kvm/ioapic.c
+@@ -368,9 +368,39 @@ static void ioapic_write_indirect(struct kvm_ioapic *ioapic, u32 val)
+ 		mask_after = e->fields.mask;
+ 		if (mask_before != mask_after)
+ 			kvm_fire_mask_notifiers(ioapic->kvm, KVM_IRQCHIP_IOAPIC, index, mask_after);
+-		if (e->fields.trig_mode == IOAPIC_LEVEL_TRIG
+-		    && ioapic->irr & (1 << index))
+-			ioapic_service(ioapic, index, false);
++		if (e->fields.trig_mode == IOAPIC_LEVEL_TRIG &&
++		    ioapic->irr & (1 << index) && !e->fields.mask && !e->fields.remote_irr) {
++			/*
++			 * Pending status in irr may be outdated: the IRQ line may have
++			 * already been deasserted by a device while the IRQ was masked.
++			 * This occurs, for instance, if the interrupt is handled in a
++			 * Linux guest as a oneshot interrupt (IRQF_ONESHOT). In this
++			 * case the guest acknowledges the interrupt to the device in
++			 * its threaded irq handler, i.e. after the EOI but before
++			 * unmasking, so at the time of unmasking the IRQ line is
++			 * already down but our pending irr bit is still set. In such
++			 * cases, injecting this pending interrupt to the guest is
++			 * buggy: the guest will receive an extra unwanted interrupt.
++			 *
++			 * So we need to check here if the IRQ is actually still pending.
++			 * As we are generally not able to probe the IRQ line status
++			 * directly, we do it through irqfd resampler. Namely, we clear
++			 * the pending status and notify the resampler that this interrupt
++			 * is done, without actually injecting it into the guest. If the
++			 * IRQ line is actually already deasserted, we are done. If it is
++			 * still asserted, a new interrupt will be shortly triggered
++			 * through irqfd and injected into the guest.
++			 *
++			 * If, however, it's not possible to resample (no irqfd resampler
++			 * registered for this irq), then unconditionally inject this
++			 * pending interrupt into the guest, so the guest will not miss
++			 * an interrupt, although may get an extra unwanted interrupt.
++			 */
++			if (kvm_notify_irqfd_resampler(ioapic->kvm, KVM_IRQCHIP_IOAPIC, index))
++				ioapic->irr &= ~(1 << index);
++			else
++				ioapic_service(ioapic, index, false);
++		}
+ 		if (e->fields.delivery_mode == APIC_DM_FIXED) {
+ 			struct kvm_lapic_irq irq;
+ 
+diff --git a/include/linux/kvm_host.h b/include/linux/kvm_host.h
+index 9f508c8e66e1..a9adf75344be 100644
+--- a/include/linux/kvm_host.h
++++ b/include/linux/kvm_host.h
+@@ -1987,6 +1987,9 @@ int kvm_ioeventfd(struct kvm *kvm, struct kvm_ioeventfd *args);
+ #ifdef CONFIG_HAVE_KVM_IRQFD
+ int kvm_irqfd(struct kvm *kvm, struct kvm_irqfd *args);
+ void kvm_irqfd_release(struct kvm *kvm);
++bool kvm_notify_irqfd_resampler(struct kvm *kvm,
++				unsigned int irqchip,
++				unsigned int pin);
+ void kvm_irq_routing_update(struct kvm *);
+ #else
+ static inline int kvm_irqfd(struct kvm *kvm, struct kvm_irqfd *args)
+@@ -1995,6 +1998,13 @@ static inline int kvm_irqfd(struct kvm *kvm, struct kvm_irqfd *args)
+ }
+ 
+ static inline void kvm_irqfd_release(struct kvm *kvm) {}
++
++static inline bool kvm_notify_irqfd_resampler(struct kvm *kvm,
++					      unsigned int irqchip,
++					      unsigned int pin)
++{
++	return false;
++}
+ #endif
+ 
+ #else
+diff --git a/virt/kvm/eventfd.c b/virt/kvm/eventfd.c
+index 61aea70dd888..b0af834ffa95 100644
+--- a/virt/kvm/eventfd.c
++++ b/virt/kvm/eventfd.c
+@@ -55,6 +55,15 @@ irqfd_inject(struct work_struct *work)
+ 			    irqfd->gsi, 1, false);
+ }
+ 
++static void irqfd_resampler_notify(struct kvm_kernel_irqfd_resampler *resampler)
++{
++	struct kvm_kernel_irqfd *irqfd;
++
++	list_for_each_entry_srcu(irqfd, &resampler->list, resampler_link,
++				 srcu_read_lock_held(&resampler->kvm->irq_srcu))
++		eventfd_signal(irqfd->resamplefd, 1);
++}
++
+ /*
+  * Since resampler irqfds share an IRQ source ID, we de-assert once
+  * then notify all of the resampler irqfds using this GSI.  We can't
+@@ -65,7 +74,6 @@ irqfd_resampler_ack(struct kvm_irq_ack_notifier *kian)
+ {
+ 	struct kvm_kernel_irqfd_resampler *resampler;
+ 	struct kvm *kvm;
+-	struct kvm_kernel_irqfd *irqfd;
+ 	int idx;
+ 
+ 	resampler = container_of(kian,
+@@ -76,11 +84,7 @@ irqfd_resampler_ack(struct kvm_irq_ack_notifier *kian)
+ 		    resampler->notifier.gsi, 0, false);
+ 
+ 	idx = srcu_read_lock(&kvm->irq_srcu);
+-
+-	list_for_each_entry_srcu(irqfd, &resampler->list, resampler_link,
+-	    srcu_read_lock_held(&kvm->irq_srcu))
+-		eventfd_signal(irqfd->resamplefd, 1);
+-
++	irqfd_resampler_notify(resampler);
+ 	srcu_read_unlock(&kvm->irq_srcu, idx);
+ }
+ 
+@@ -648,6 +652,31 @@ void kvm_irq_routing_update(struct kvm *kvm)
+ 	spin_unlock_irq(&kvm->irqfds.lock);
+ }
+ 
++bool kvm_notify_irqfd_resampler(struct kvm *kvm,
++				unsigned int irqchip,
++				unsigned int pin)
++{
++	struct kvm_kernel_irqfd_resampler *resampler;
++	int gsi, idx;
++
++	idx = srcu_read_lock(&kvm->irq_srcu);
++	gsi = kvm_irq_map_chip_pin(kvm, irqchip, pin);
++	if (gsi != -1) {
++		list_for_each_entry_srcu(resampler,
++					 &kvm->irqfds.resampler_list, link,
++					 srcu_read_lock_held(&kvm->irq_srcu)) {
++			if (resampler->notifier.gsi == gsi) {
++				irqfd_resampler_notify(resampler);
++				srcu_read_unlock(&kvm->irq_srcu, idx);
++				return true;
++			}
++		}
++	}
++	srcu_read_unlock(&kvm->irq_srcu, idx);
++
++	return false;
++}
++
+ /*
+  * create a host-wide workqueue for issuing deferred shutdown requests
+  * aggregated from all vm* instances. We need our own isolated

@@ -1,0 +1,38 @@
+commit bc3e5f48b7ee021371dc37297678f7089be6ce28
+Author: Maciej Falkowski <maciej.falkowski@linux.intel.com>
+Date:   Tue Jan 7 18:32:28 2025 +0100
+
+    accel/ivpu: Use workqueue for IRQ handling
+    
+    Convert IRQ bottom half from the thread handler into workqueue.
+    This increases a stability in rare scenarios where driver on
+    debugging/hardening kernels processes IRQ too slow and misses
+    some interrupts due to it.
+    Workqueue handler also gives a very minor performance increase.
+    
+    Signed-off-by: Maciej Falkowski <maciej.falkowski@linux.intel.com>
+    Reviewed-by: Jacek Lawrynowicz <jacek.lawrynowicz@linux.intel.com>
+    Signed-off-by: Jacek Lawrynowicz <jacek.lawrynowicz@linux.intel.com>
+    Link: https://patchwork.freedesktop.org/patch/msgid/20250107173238.381120-6-maciej.falkowski@linux.intel.com
+
+diff --git a/drivers/accel/ivpu/ivpu_ipc.c b/drivers/accel/ivpu/ivpu_ipc.c
+index 01ebf88fe6ef..0e096fd9b95d 100644
+--- a/drivers/accel/ivpu/ivpu_ipc.c
++++ b/drivers/accel/ivpu/ivpu_ipc.c
+@@ -459,13 +459,12 @@ void ivpu_ipc_irq_handler(struct ivpu_device *vdev)
+ 		}
+ 	}
+ 
+-	if (!list_empty(&ipc->cb_msg_list))
+-		if (!kfifo_put(&vdev->hw->irq.fifo, IVPU_HW_IRQ_SRC_IPC))
+-			ivpu_err_ratelimited(vdev, "IRQ FIFO full\n");
++	queue_work(system_wq, &vdev->irq_ipc_work);
+ }
+ 
+-void ivpu_ipc_irq_thread_handler(struct ivpu_device *vdev)
++void ivpu_ipc_irq_work_fn(struct work_struct *work)
+ {
++	struct ivpu_device *vdev = container_of(work, struct ivpu_device, irq_ipc_work);
+ 	struct ivpu_ipc_info *ipc = vdev->ipc;
+ 	struct ivpu_ipc_rx_msg *rx_msg, *r;
+ 	struct list_head cb_msg_list;

@@ -1,0 +1,74 @@
+diff --git a/net/sunrpc/cache.c b/net/sunrpc/cache.c
+index bb1177395b99..c3c693b51c94 100644
+--- a/net/sunrpc/cache.c
++++ b/net/sunrpc/cache.c
+@@ -33,7 +33,9 @@
+ #include <linux/sunrpc/stats.h>
+ #include <linux/sunrpc/rpc_pipe_fs.h>
+ #include <trace/events/sunrpc.h>
++
+ #include "netns.h"
++#include "fail.h"
+ 
+ #define	 RPCDBG_FACILITY RPCDBG_CACHE
+ 
+@@ -688,16 +690,30 @@ static void cache_limit_defers(void)
+ 		discard->revisit(discard, 1);
+ }
+ 
++#if IS_ENABLED(CONFIG_FAIL_SUNRPC)
++static inline bool cache_defer_immediately(void)
++{
++	return !fail_sunrpc.ignore_cache_wait &&
++		should_fail(&fail_sunrpc.attr, 1);
++}
++#else
++static inline bool cache_defer_immediately(void)
++{
++	return false;
++}
++#endif
++
+ /* Return true if and only if a deferred request is queued. */
+ static bool cache_defer_req(struct cache_req *req, struct cache_head *item)
+ {
+ 	struct cache_deferred_req *dreq;
+ 
+-	if (req->thread_wait) {
++	if (!cache_defer_immediately()) {
+ 		cache_wait_req(req, item);
+ 		if (!test_bit(CACHE_PENDING, &item->flags))
+ 			return false;
+ 	}
++
+ 	dreq = req->defer(req);
+ 	if (dreq == NULL)
+ 		return false;
+diff --git a/net/sunrpc/debugfs.c b/net/sunrpc/debugfs.c
+index 7dc9cc929bfd..a176d5a0b0ee 100644
+--- a/net/sunrpc/debugfs.c
++++ b/net/sunrpc/debugfs.c
+@@ -262,6 +262,9 @@ static void fail_sunrpc_init(void)
+ 
+ 	debugfs_create_bool("ignore-server-disconnect", S_IFREG | 0600, dir,
+ 			    &fail_sunrpc.ignore_server_disconnect);
++
++	debugfs_create_bool("ignore-cache-wait", S_IFREG | 0600, dir,
++			    &fail_sunrpc.ignore_cache_wait);
+ }
+ #else
+ static void fail_sunrpc_init(void)
+diff --git a/net/sunrpc/fail.h b/net/sunrpc/fail.h
+index 69dc30cc44b8..4b4b500df428 100644
+--- a/net/sunrpc/fail.h
++++ b/net/sunrpc/fail.h
+@@ -14,8 +14,8 @@ struct fail_sunrpc_attr {
+ 	struct fault_attr	attr;
+ 
+ 	bool			ignore_client_disconnect;
+-
+ 	bool			ignore_server_disconnect;
++	bool			ignore_cache_wait;
+ };
+ 
+ extern struct fail_sunrpc_attr fail_sunrpc;

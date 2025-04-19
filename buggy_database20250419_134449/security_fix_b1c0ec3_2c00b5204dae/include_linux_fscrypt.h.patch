@@ -1,0 +1,123 @@
+commit b1c0ec3599f42ad372063b0235a3c33f65eb1e30
+Author: Eric Biggers <ebiggers@google.com>
+Date:   Sun Aug 4 19:35:46 2019 -0700
+
+    fscrypt: add FS_IOC_REMOVE_ENCRYPTION_KEY ioctl
+    
+    Add a new fscrypt ioctl, FS_IOC_REMOVE_ENCRYPTION_KEY.  This ioctl
+    removes an encryption key that was added by FS_IOC_ADD_ENCRYPTION_KEY.
+    It wipes the secret key itself, then "locks" the encrypted files and
+    directories that had been unlocked using that key -- implemented by
+    evicting the relevant dentries and inodes from the VFS caches.
+    
+    The problem this solves is that many fscrypt users want the ability to
+    remove encryption keys, causing the corresponding encrypted directories
+    to appear "locked" (presented in ciphertext form) again.  Moreover,
+    users want removing an encryption key to *really* remove it, in the
+    sense that the removed keys cannot be recovered even if kernel memory is
+    compromised, e.g. by the exploit of a kernel security vulnerability or
+    by a physical attack.  This is desirable after a user logs out of the
+    system, for example.  In many cases users even already assume this to be
+    the case and are surprised to hear when it's not.
+    
+    It is not sufficient to simply unlink the master key from the keyring
+    (or to revoke or invalidate it), since the actual encryption transform
+    objects are still pinned in memory by their inodes.  Therefore, to
+    really remove a key we must also evict the relevant inodes.
+    
+    Currently one workaround is to run 'sync && echo 2 >
+    /proc/sys/vm/drop_caches'.  But, that evicts all unused inodes in the
+    system rather than just the inodes associated with the key being
+    removed, causing severe performance problems.  Moreover, it requires
+    root privileges, so regular users can't "lock" their encrypted files.
+    
+    Another workaround, used in Chromium OS kernels, is to add a new
+    VFS-level ioctl FS_IOC_DROP_CACHE which is a more restricted version of
+    drop_caches that operates on a single super_block.  It does:
+    
+            shrink_dcache_sb(sb);
+            invalidate_inodes(sb, false);
+    
+    But it's still a hack.  Yet, the major users of filesystem encryption
+    want this feature badly enough that they are actually using these hacks.
+    
+    To properly solve the problem, start maintaining a list of the inodes
+    which have been "unlocked" using each master key.  Originally this
+    wasn't possible because the kernel didn't keep track of in-use master
+    keys at all.  But, with the ->s_master_keys keyring it is now possible.
+    
+    Then, add an ioctl FS_IOC_REMOVE_ENCRYPTION_KEY.  It finds the specified
+    master key in ->s_master_keys, then wipes the secret key itself, which
+    prevents any additional inodes from being unlocked with the key.  Then,
+    it syncs the filesystem and evicts the inodes in the key's list.  The
+    normal inode eviction code will free and wipe the per-file keys (in
+    ->i_crypt_info).  Note that freeing ->i_crypt_info without evicting the
+    inodes was also considered, but would have been racy.
+    
+    Some inodes may still be in use when a master key is removed, and we
+    can't simply revoke random file descriptors, mmap's, etc.  Thus, the
+    ioctl simply skips in-use inodes, and returns -EBUSY to indicate that
+    some inodes weren't evicted.  The master key *secret* is still removed,
+    but the fscrypt_master_key struct remains to keep track of the remaining
+    inodes.  Userspace can then retry the ioctl to evict the remaining
+    inodes.  Alternatively, if userspace adds the key again, the refreshed
+    secret will be associated with the existing list of inodes so they
+    remain correctly tracked for future key removals.
+    
+    The ioctl doesn't wipe pagecache pages.  Thus, we tolerate that after a
+    kernel compromise some portions of plaintext file contents may still be
+    recoverable from memory.  This can be solved by enabling page poisoning
+    system-wide, which security conscious users may choose to do.  But it's
+    very difficult to solve otherwise, e.g. note that plaintext file
+    contents may have been read in other places than pagecache pages.
+    
+    Like FS_IOC_ADD_ENCRYPTION_KEY, FS_IOC_REMOVE_ENCRYPTION_KEY is
+    initially restricted to privileged users only.  This is sufficient for
+    some use cases, but not all.  A later patch will relax this restriction,
+    but it will require introducing key hashes, among other changes.
+    
+    Reviewed-by: Theodore Ts'o <tytso@mit.edu>
+    Signed-off-by: Eric Biggers <ebiggers@google.com>
+
+diff --git a/include/linux/fscrypt.h b/include/linux/fscrypt.h
+index 46bf66cf76ef..b494c5f9c01f 100644
+--- a/include/linux/fscrypt.h
++++ b/include/linux/fscrypt.h
+@@ -141,11 +141,13 @@ extern int fscrypt_inherit_context(struct inode *, struct inode *,
+ /* keyring.c */
+ extern void fscrypt_sb_free(struct super_block *sb);
+ extern int fscrypt_ioctl_add_key(struct file *filp, void __user *arg);
++extern int fscrypt_ioctl_remove_key(struct file *filp, void __user *arg);
+ 
+ /* keysetup.c */
+ extern int fscrypt_get_encryption_info(struct inode *);
+ extern void fscrypt_put_encryption_info(struct inode *);
+ extern void fscrypt_free_inode(struct inode *);
++extern int fscrypt_drop_inode(struct inode *inode);
+ 
+ /* fname.c */
+ extern int fscrypt_setup_filename(struct inode *, const struct qstr *,
+@@ -381,6 +383,11 @@ static inline int fscrypt_ioctl_add_key(struct file *filp, void __user *arg)
+ 	return -EOPNOTSUPP;
+ }
+ 
++static inline int fscrypt_ioctl_remove_key(struct file *filp, void __user *arg)
++{
++	return -EOPNOTSUPP;
++}
++
+ /* keysetup.c */
+ static inline int fscrypt_get_encryption_info(struct inode *inode)
+ {
+@@ -396,6 +403,11 @@ static inline void fscrypt_free_inode(struct inode *inode)
+ {
+ }
+ 
++static inline int fscrypt_drop_inode(struct inode *inode)
++{
++	return 0;
++}
++
+  /* fname.c */
+ static inline int fscrypt_setup_filename(struct inode *dir,
+ 					 const struct qstr *iname,

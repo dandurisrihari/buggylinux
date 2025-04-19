@@ -1,0 +1,67 @@
+commit c778df140644142fb7e12b7e468b137721d85890
+Author: David Sterba <dsterba@suse.com>
+Date:   Fri Oct 4 02:47:39 2019 +0200
+
+    btrfs: compression: inline alloc_workspace
+    
+    Replace indirect calls to alloc_workspace by switch and calls to the
+    specific callbacks. This is mainly to get rid of the indirection due to
+    spectre vulnerability mitigations.
+    
+    Reviewed-by: Johannes Thumshirn <jthumshirn@suse.de>
+    Reviewed-by: Nikolay Borisov <nborisov@suse.com>
+    Signed-off-by: David Sterba <dsterba@suse.com>
+
+diff --git a/fs/btrfs/compression.c b/fs/btrfs/compression.c
+index ffc94e15d86e..4a8dab961f88 100644
+--- a/fs/btrfs/compression.c
++++ b/fs/btrfs/compression.c
+@@ -912,7 +912,6 @@ static struct list_head *alloc_heuristic_ws(unsigned int level)
+ 
+ const struct btrfs_compress_op btrfs_heuristic_compress = {
+ 	.workspace_manager = &heuristic_wsm,
+-	.alloc_workspace = alloc_heuristic_ws,
+ 	.free_workspace = free_heuristic_ws,
+ };
+ 
+@@ -924,6 +923,22 @@ static const struct btrfs_compress_op * const btrfs_compress_op[] = {
+ 	&btrfs_zstd_compress,
+ };
+ 
++static struct list_head *alloc_workspace(int type, unsigned int level)
++{
++	switch (type) {
++	case BTRFS_COMPRESS_NONE: return alloc_heuristic_ws(level);
++	case BTRFS_COMPRESS_ZLIB: return zlib_alloc_workspace(level);
++	case BTRFS_COMPRESS_LZO:  return lzo_alloc_workspace(level);
++	case BTRFS_COMPRESS_ZSTD: return zstd_alloc_workspace(level);
++	default:
++		/*
++		 * This can't happen, the type is validated several times
++		 * before we get here.
++		 */
++		BUG();
++	}
++}
++
+ static void btrfs_init_workspace_manager(int type)
+ {
+ 	const struct btrfs_compress_op *ops = btrfs_compress_op[type];
+@@ -941,7 +956,7 @@ static void btrfs_init_workspace_manager(int type)
+ 	 * Preallocate one workspace for each compression type so we can
+ 	 * guarantee forward progress in the worst case
+ 	 */
+-	workspace = wsm->ops->alloc_workspace(0);
++	workspace = alloc_workspace(type, 0);
+ 	if (IS_ERR(workspace)) {
+ 		pr_warn(
+ 	"BTRFS: cannot preallocate compression workspace, will try later\n");
+@@ -1020,7 +1035,7 @@ struct list_head *btrfs_get_workspace(int type, unsigned int level)
+ 	 * context of btrfs_compress_bio/btrfs_compress_pages
+ 	 */
+ 	nofs_flag = memalloc_nofs_save();
+-	workspace = wsm->ops->alloc_workspace(level);
++	workspace = alloc_workspace(type, level);
+ 	memalloc_nofs_restore(nofs_flag);
+ 
+ 	if (IS_ERR(workspace)) {

@@ -1,0 +1,262 @@
+diff --git a/arch/powerpc/include/asm/kvm_host.h b/arch/powerpc/include/asm/kvm_host.h
+index 6fe6ad64cba5..4273e799203d 100644
+--- a/arch/powerpc/include/asm/kvm_host.h
++++ b/arch/powerpc/include/asm/kvm_host.h
+@@ -401,7 +401,6 @@ struct kvmppc_mmu {
+ 	u32  (*mfsrin)(struct kvm_vcpu *vcpu, u32 srnum);
+ 	int  (*xlate)(struct kvm_vcpu *vcpu, gva_t eaddr,
+ 		      struct kvmppc_pte *pte, bool data, bool iswrite);
+-	void (*reset_msr)(struct kvm_vcpu *vcpu);
+ 	void (*tlbie)(struct kvm_vcpu *vcpu, ulong addr, bool large);
+ 	int  (*esid_to_vsid)(struct kvm_vcpu *vcpu, ulong esid, u64 *vsid);
+ 	u64  (*ea_to_vp)(struct kvm_vcpu *vcpu, gva_t eaddr, bool data);
+diff --git a/arch/powerpc/include/asm/kvm_ppc.h b/arch/powerpc/include/asm/kvm_ppc.h
+index ee62776e5433..d63f649fe713 100644
+--- a/arch/powerpc/include/asm/kvm_ppc.h
++++ b/arch/powerpc/include/asm/kvm_ppc.h
+@@ -271,6 +271,7 @@ struct kvmppc_ops {
+ 			   union kvmppc_one_reg *val);
+ 	void (*vcpu_load)(struct kvm_vcpu *vcpu, int cpu);
+ 	void (*vcpu_put)(struct kvm_vcpu *vcpu);
++	void (*inject_interrupt)(struct kvm_vcpu *vcpu, int vec, u64 srr1_flags);
+ 	void (*set_msr)(struct kvm_vcpu *vcpu, u64 msr);
+ 	int (*vcpu_run)(struct kvm_run *run, struct kvm_vcpu *vcpu);
+ 	struct kvm_vcpu *(*vcpu_create)(struct kvm *kvm, unsigned int id);
+diff --git a/arch/powerpc/kvm/book3s.c b/arch/powerpc/kvm/book3s.c
+index a2336c452905..58a59ee998e2 100644
+--- a/arch/powerpc/kvm/book3s.c
++++ b/arch/powerpc/kvm/book3s.c
+@@ -74,27 +74,6 @@ struct kvm_stats_debugfs_item debugfs_entries[] = {
+ 	{ NULL }
+ };
+ 
+-void kvmppc_unfixup_split_real(struct kvm_vcpu *vcpu)
+-{
+-	if (vcpu->arch.hflags & BOOK3S_HFLAG_SPLIT_HACK) {
+-		ulong pc = kvmppc_get_pc(vcpu);
+-		ulong lr = kvmppc_get_lr(vcpu);
+-		if ((pc & SPLIT_HACK_MASK) == SPLIT_HACK_OFFS)
+-			kvmppc_set_pc(vcpu, pc & ~SPLIT_HACK_MASK);
+-		if ((lr & SPLIT_HACK_MASK) == SPLIT_HACK_OFFS)
+-			kvmppc_set_lr(vcpu, lr & ~SPLIT_HACK_MASK);
+-		vcpu->arch.hflags &= ~BOOK3S_HFLAG_SPLIT_HACK;
+-	}
+-}
+-EXPORT_SYMBOL_GPL(kvmppc_unfixup_split_real);
+-
+-static inline unsigned long kvmppc_interrupt_offset(struct kvm_vcpu *vcpu)
+-{
+-	if (!is_kvmppc_hv_enabled(vcpu->kvm))
+-		return to_book3s(vcpu)->hior;
+-	return 0;
+-}
+-
+ static inline void kvmppc_update_int_pending(struct kvm_vcpu *vcpu,
+ 			unsigned long pending_now, unsigned long old_pending)
+ {
+@@ -134,11 +113,7 @@ static inline bool kvmppc_critical_section(struct kvm_vcpu *vcpu)
+ 
+ void kvmppc_inject_interrupt(struct kvm_vcpu *vcpu, int vec, u64 flags)
+ {
+-	kvmppc_unfixup_split_real(vcpu);
+-	kvmppc_set_srr0(vcpu, kvmppc_get_pc(vcpu));
+-	kvmppc_set_srr1(vcpu, (kvmppc_get_msr(vcpu) & SRR1_MSR_BITS) | flags);
+-	kvmppc_set_pc(vcpu, kvmppc_interrupt_offset(vcpu) + vec);
+-	vcpu->arch.mmu.reset_msr(vcpu);
++	vcpu->kvm->arch.kvm_ops->inject_interrupt(vcpu, vec, flags);
+ }
+ 
+ static int kvmppc_book3s_vec2irqprio(unsigned int vec)
+diff --git a/arch/powerpc/kvm/book3s_32_mmu.c b/arch/powerpc/kvm/book3s_32_mmu.c
+index 18f244aad7aa..f21e73492ce3 100644
+--- a/arch/powerpc/kvm/book3s_32_mmu.c
++++ b/arch/powerpc/kvm/book3s_32_mmu.c
+@@ -90,11 +90,6 @@ static u64 kvmppc_mmu_book3s_32_ea_to_vp(struct kvm_vcpu *vcpu, gva_t eaddr,
+ 	return (((u64)eaddr >> 12) & 0xffff) | (vsid << 16);
+ }
+ 
+-static void kvmppc_mmu_book3s_32_reset_msr(struct kvm_vcpu *vcpu)
+-{
+-	kvmppc_set_msr(vcpu, 0);
+-}
+-
+ static hva_t kvmppc_mmu_book3s_32_get_pteg(struct kvm_vcpu *vcpu,
+ 				      u32 sre, gva_t eaddr,
+ 				      bool primary)
+@@ -406,7 +401,6 @@ void kvmppc_mmu_book3s_32_init(struct kvm_vcpu *vcpu)
+ 	mmu->mtsrin = kvmppc_mmu_book3s_32_mtsrin;
+ 	mmu->mfsrin = kvmppc_mmu_book3s_32_mfsrin;
+ 	mmu->xlate = kvmppc_mmu_book3s_32_xlate;
+-	mmu->reset_msr = kvmppc_mmu_book3s_32_reset_msr;
+ 	mmu->tlbie = kvmppc_mmu_book3s_32_tlbie;
+ 	mmu->esid_to_vsid = kvmppc_mmu_book3s_32_esid_to_vsid;
+ 	mmu->ea_to_vp = kvmppc_mmu_book3s_32_ea_to_vp;
+diff --git a/arch/powerpc/kvm/book3s_64_mmu.c b/arch/powerpc/kvm/book3s_64_mmu.c
+index 5f63a5f7f24f..599133256a95 100644
+--- a/arch/powerpc/kvm/book3s_64_mmu.c
++++ b/arch/powerpc/kvm/book3s_64_mmu.c
+@@ -24,20 +24,6 @@
+ #define dprintk(X...) do { } while(0)
+ #endif
+ 
+-static void kvmppc_mmu_book3s_64_reset_msr(struct kvm_vcpu *vcpu)
+-{
+-	unsigned long msr = vcpu->arch.intr_msr;
+-	unsigned long cur_msr = kvmppc_get_msr(vcpu);
+-
+-	/* If transactional, change to suspend mode on IRQ delivery */
+-	if (MSR_TM_TRANSACTIONAL(cur_msr))
+-		msr |= MSR_TS_S;
+-	else
+-		msr |= cur_msr & MSR_TS_MASK;
+-
+-	kvmppc_set_msr(vcpu, msr);
+-}
+-
+ static struct kvmppc_slb *kvmppc_mmu_book3s_64_find_slbe(
+ 				struct kvm_vcpu *vcpu,
+ 				gva_t eaddr)
+@@ -676,7 +662,6 @@ void kvmppc_mmu_book3s_64_init(struct kvm_vcpu *vcpu)
+ 	mmu->slbie = kvmppc_mmu_book3s_64_slbie;
+ 	mmu->slbia = kvmppc_mmu_book3s_64_slbia;
+ 	mmu->xlate = kvmppc_mmu_book3s_64_xlate;
+-	mmu->reset_msr = kvmppc_mmu_book3s_64_reset_msr;
+ 	mmu->tlbie = kvmppc_mmu_book3s_64_tlbie;
+ 	mmu->esid_to_vsid = kvmppc_mmu_book3s_64_esid_to_vsid;
+ 	mmu->ea_to_vp = kvmppc_mmu_book3s_64_ea_to_vp;
+diff --git a/arch/powerpc/kvm/book3s_64_mmu_hv.c b/arch/powerpc/kvm/book3s_64_mmu_hv.c
+index f2b9aea43216..4c37e97c75a1 100644
+--- a/arch/powerpc/kvm/book3s_64_mmu_hv.c
++++ b/arch/powerpc/kvm/book3s_64_mmu_hv.c
+@@ -275,18 +275,6 @@ int kvmppc_mmu_hv_init(void)
+ 	return 0;
+ }
+ 
+-static void kvmppc_mmu_book3s_64_hv_reset_msr(struct kvm_vcpu *vcpu)
+-{
+-	unsigned long msr = vcpu->arch.intr_msr;
+-
+-	/* If transactional, change to suspend mode on IRQ delivery */
+-	if (MSR_TM_TRANSACTIONAL(vcpu->arch.shregs.msr))
+-		msr |= MSR_TS_S;
+-	else
+-		msr |= vcpu->arch.shregs.msr & MSR_TS_MASK;
+-	kvmppc_set_msr(vcpu, msr);
+-}
+-
+ static long kvmppc_virtmode_do_h_enter(struct kvm *kvm, unsigned long flags,
+ 				long pte_index, unsigned long pteh,
+ 				unsigned long ptel, unsigned long *pte_idx_ret)
+@@ -2162,7 +2150,6 @@ void kvmppc_mmu_book3s_hv_init(struct kvm_vcpu *vcpu)
+ 	vcpu->arch.slb_nr = 32;		/* POWER7/POWER8 */
+ 
+ 	mmu->xlate = kvmppc_mmu_book3s_64_hv_xlate;
+-	mmu->reset_msr = kvmppc_mmu_book3s_64_hv_reset_msr;
+ 
+ 	vcpu->arch.hflags |= BOOK3S_HFLAG_SLB;
+ }
+diff --git a/arch/powerpc/kvm/book3s_hv.c b/arch/powerpc/kvm/book3s_hv.c
+index 709cf1fd4cf4..94a0a9911b27 100644
+--- a/arch/powerpc/kvm/book3s_hv.c
++++ b/arch/powerpc/kvm/book3s_hv.c
+@@ -338,6 +338,27 @@ static void kvmppc_core_vcpu_put_hv(struct kvm_vcpu *vcpu)
+ 	spin_unlock_irqrestore(&vcpu->arch.tbacct_lock, flags);
+ }
+ 
++static void kvmppc_inject_interrupt_hv(struct kvm_vcpu *vcpu, int vec, u64 srr1_flags)
++{
++	unsigned long msr, pc, new_msr, new_pc;
++
++	msr = kvmppc_get_msr(vcpu);
++	pc = kvmppc_get_pc(vcpu);
++	new_msr = vcpu->arch.intr_msr;
++	new_pc = vec;
++
++	/* If transactional, change to suspend mode on IRQ delivery */
++	if (MSR_TM_TRANSACTIONAL(msr))
++		new_msr |= MSR_TS_S;
++	else
++		new_msr |= msr & MSR_TS_MASK;
++
++	kvmppc_set_srr0(vcpu, pc);
++	kvmppc_set_srr1(vcpu, (msr & SRR1_MSR_BITS) | srr1_flags);
++	kvmppc_set_pc(vcpu, new_pc);
++	kvmppc_set_msr(vcpu, new_msr);
++}
++
+ static void kvmppc_set_msr_hv(struct kvm_vcpu *vcpu, u64 msr)
+ {
+ 	/*
+@@ -5401,6 +5422,7 @@ static struct kvmppc_ops kvm_ops_hv = {
+ 	.set_one_reg = kvmppc_set_one_reg_hv,
+ 	.vcpu_load   = kvmppc_core_vcpu_load_hv,
+ 	.vcpu_put    = kvmppc_core_vcpu_put_hv,
++	.inject_interrupt = kvmppc_inject_interrupt_hv,
+ 	.set_msr     = kvmppc_set_msr_hv,
+ 	.vcpu_run    = kvmppc_vcpu_run_hv,
+ 	.vcpu_create = kvmppc_core_vcpu_create_hv,
+diff --git a/arch/powerpc/kvm/book3s_pr.c b/arch/powerpc/kvm/book3s_pr.c
+index cc65af8fe6f7..ce4fcf76e53e 100644
+--- a/arch/powerpc/kvm/book3s_pr.c
++++ b/arch/powerpc/kvm/book3s_pr.c
+@@ -90,7 +90,43 @@ static void kvmppc_fixup_split_real(struct kvm_vcpu *vcpu)
+ 	kvmppc_set_pc(vcpu, pc | SPLIT_HACK_OFFS);
+ }
+ 
+-void kvmppc_unfixup_split_real(struct kvm_vcpu *vcpu);
++static void kvmppc_unfixup_split_real(struct kvm_vcpu *vcpu)
++{
++	if (vcpu->arch.hflags & BOOK3S_HFLAG_SPLIT_HACK) {
++		ulong pc = kvmppc_get_pc(vcpu);
++		ulong lr = kvmppc_get_lr(vcpu);
++		if ((pc & SPLIT_HACK_MASK) == SPLIT_HACK_OFFS)
++			kvmppc_set_pc(vcpu, pc & ~SPLIT_HACK_MASK);
++		if ((lr & SPLIT_HACK_MASK) == SPLIT_HACK_OFFS)
++			kvmppc_set_lr(vcpu, lr & ~SPLIT_HACK_MASK);
++		vcpu->arch.hflags &= ~BOOK3S_HFLAG_SPLIT_HACK;
++	}
++}
++
++static void kvmppc_inject_interrupt_pr(struct kvm_vcpu *vcpu, int vec, u64 srr1_flags)
++{
++	unsigned long msr, pc, new_msr, new_pc;
++
++	kvmppc_unfixup_split_real(vcpu);
++
++	msr = kvmppc_get_msr(vcpu);
++	pc = kvmppc_get_pc(vcpu);
++	new_msr = vcpu->arch.intr_msr;
++	new_pc = to_book3s(vcpu)->hior + vec;
++
++#ifdef CONFIG_PPC_BOOK3S_64
++	/* If transactional, change to suspend mode on IRQ delivery */
++	if (MSR_TM_TRANSACTIONAL(msr))
++		new_msr |= MSR_TS_S;
++	else
++		new_msr |= msr & MSR_TS_MASK;
++#endif
++
++	kvmppc_set_srr0(vcpu, pc);
++	kvmppc_set_srr1(vcpu, (msr & SRR1_MSR_BITS) | srr1_flags);
++	kvmppc_set_pc(vcpu, new_pc);
++	kvmppc_set_msr(vcpu, new_msr);
++}
+ 
+ static void kvmppc_core_vcpu_load_pr(struct kvm_vcpu *vcpu, int cpu)
+ {
+@@ -1761,6 +1797,7 @@ static struct kvm_vcpu *kvmppc_core_vcpu_create_pr(struct kvm *kvm,
+ #else
+ 	/* default to book3s_32 (750) */
+ 	vcpu->arch.pvr = 0x84202;
++	vcpu->arch.intr_msr = 0;
+ #endif
+ 	kvmppc_set_pvr_pr(vcpu, vcpu->arch.pvr);
+ 	vcpu->arch.slb_nr = 64;
+@@ -2058,6 +2095,7 @@ static struct kvmppc_ops kvm_ops_pr = {
+ 	.set_one_reg = kvmppc_set_one_reg_pr,
+ 	.vcpu_load   = kvmppc_core_vcpu_load_pr,
+ 	.vcpu_put    = kvmppc_core_vcpu_put_pr,
++	.inject_interrupt = kvmppc_inject_interrupt_pr,
+ 	.set_msr     = kvmppc_set_msr_pr,
+ 	.vcpu_run    = kvmppc_vcpu_run_pr,
+ 	.vcpu_create = kvmppc_core_vcpu_create_pr,

@@ -1,0 +1,130 @@
+diff --git a/net/mac80211/tx.c b/net/mac80211/tx.c
+index f7aff2e97eea..8302c70da9a4 100644
+--- a/net/mac80211/tx.c
++++ b/net/mac80211/tx.c
+@@ -438,11 +438,7 @@ static ieee80211_txrx_result
+ ieee80211_tx_h_select_key(struct ieee80211_txrx_data *tx)
+ {
+ 	struct ieee80211_key *key;
+-	const struct ieee80211_hdr *hdr;
+-	u16 fc;
+-
+-	hdr = (const struct ieee80211_hdr *) tx->skb->data;
+-	fc = le16_to_cpu(hdr->frame_control);
++	u16 fc = tx->fc;
+ 
+ 	if (unlikely(tx->u.tx.control->flags & IEEE80211_TXCTL_DO_NOT_ENCRYPT))
+ 		tx->key = NULL;
+@@ -455,16 +451,34 @@ ieee80211_tx_h_select_key(struct ieee80211_txrx_data *tx)
+ 		 !(tx->flags & IEEE80211_TXRXD_TX_INJECTED)) {
+ 		I802_DEBUG_INC(tx->local->tx_handlers_drop_unencrypted);
+ 		return TXRX_DROP;
+-	} else {
++	} else
+ 		tx->key = NULL;
+-		tx->u.tx.control->flags |= IEEE80211_TXCTL_DO_NOT_ENCRYPT;
+-	}
+ 
+ 	if (tx->key) {
++		u16 ftype, stype;
++
+ 		tx->key->tx_rx_count++;
+ 		/* TODO: add threshold stuff again */
++
++		switch (tx->key->conf.alg) {
++		case ALG_WEP:
++			ftype = fc & IEEE80211_FCTL_FTYPE;
++			stype = fc & IEEE80211_FCTL_STYPE;
++
++			if (ftype == IEEE80211_FTYPE_MGMT &&
++			    stype == IEEE80211_STYPE_AUTH)
++				break;
++		case ALG_TKIP:
++		case ALG_CCMP:
++			if (!WLAN_FC_DATA_PRESENT(fc))
++				tx->key = NULL;
++			break;
++		}
+ 	}
+ 
++	if (!tx->key || !(tx->key->flags & KEY_FLAG_UPLOADED_TO_HARDWARE))
++		tx->u.tx.control->flags |= IEEE80211_TXCTL_DO_NOT_ENCRYPT;
++
+ 	return TXRX_CONTINUE;
+ }
+ 
+@@ -706,15 +720,6 @@ ieee80211_tx_h_misc(struct ieee80211_txrx_data *tx)
+ 		}
+ 	}
+ 
+-	/*
+-	 * Tell hardware to not encrypt when we had sw crypto.
+-	 * Because we use the same flag to internally indicate that
+-	 * no (software) encryption should be done, we have to set it
+-	 * after all crypto handlers.
+-	 */
+-	if (tx->key && !(tx->key->flags & KEY_FLAG_UPLOADED_TO_HARDWARE))
+-		tx->u.tx.control->flags |= IEEE80211_TXCTL_DO_NOT_ENCRYPT;
+-
+ 	return TXRX_CONTINUE;
+ }
+ 
+diff --git a/net/mac80211/wep.c b/net/mac80211/wep.c
+index b5f3413403bd..a0cff72a580b 100644
+--- a/net/mac80211/wep.c
++++ b/net/mac80211/wep.c
+@@ -349,16 +349,6 @@ static int wep_encrypt_skb(struct ieee80211_txrx_data *tx, struct sk_buff *skb)
+ ieee80211_txrx_result
+ ieee80211_crypto_wep_encrypt(struct ieee80211_txrx_data *tx)
+ {
+-	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *) tx->skb->data;
+-	u16 fc;
+-
+-	fc = le16_to_cpu(hdr->frame_control);
+-
+-	if (((fc & IEEE80211_FCTL_FTYPE) != IEEE80211_FTYPE_DATA &&
+-	     ((fc & IEEE80211_FCTL_FTYPE) != IEEE80211_FTYPE_MGMT ||
+-	      (fc & IEEE80211_FCTL_STYPE) != IEEE80211_STYPE_AUTH)))
+-		return TXRX_CONTINUE;
+-
+ 	tx->u.tx.control->iv_len = WEP_IV_LEN;
+ 	tx->u.tx.control->icv_len = WEP_ICV_LEN;
+ 	ieee80211_tx_set_iswep(tx);
+diff --git a/net/mac80211/wpa.c b/net/mac80211/wpa.c
+index 20cec1cb956f..6f04311cf0a0 100644
+--- a/net/mac80211/wpa.c
++++ b/net/mac80211/wpa.c
+@@ -245,16 +245,9 @@ static int tkip_encrypt_skb(struct ieee80211_txrx_data *tx,
+ ieee80211_txrx_result
+ ieee80211_crypto_tkip_encrypt(struct ieee80211_txrx_data *tx)
+ {
+-	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *) tx->skb->data;
+-	u16 fc;
+ 	struct sk_buff *skb = tx->skb;
+ 	int wpa_test = 0, test = 0;
+ 
+-	fc = le16_to_cpu(hdr->frame_control);
+-
+-	if (!WLAN_FC_DATA_PRESENT(fc))
+-		return TXRX_CONTINUE;
+-
+ 	tx->u.tx.control->icv_len = TKIP_ICV_LEN;
+ 	tx->u.tx.control->iv_len = TKIP_IV_LEN;
+ 	ieee80211_tx_set_iswep(tx);
+@@ -501,16 +494,9 @@ static int ccmp_encrypt_skb(struct ieee80211_txrx_data *tx,
+ ieee80211_txrx_result
+ ieee80211_crypto_ccmp_encrypt(struct ieee80211_txrx_data *tx)
+ {
+-	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *) tx->skb->data;
+-	u16 fc;
+ 	struct sk_buff *skb = tx->skb;
+ 	int test = 0;
+ 
+-	fc = le16_to_cpu(hdr->frame_control);
+-
+-	if (!WLAN_FC_DATA_PRESENT(fc))
+-		return TXRX_CONTINUE;
+-
+ 	tx->u.tx.control->icv_len = CCMP_MIC_LEN;
+ 	tx->u.tx.control->iv_len = CCMP_HDR_LEN;
+ 	ieee80211_tx_set_iswep(tx);

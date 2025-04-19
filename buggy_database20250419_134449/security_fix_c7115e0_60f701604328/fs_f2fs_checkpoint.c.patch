@@ -1,0 +1,76 @@
+commit c7115e094ca820bb72e0c89f158d16bc48c6fa04
+Author: Chao Yu <chao@kernel.org>
+Date:   Sat Jan 13 03:41:32 2024 +0800
+
+    f2fs: introduce FAULT_BLKADDR_CONSISTENCE
+    
+    We will encounter below inconsistent status when FAULT_BLKADDR type
+    fault injection is on.
+    
+    Info: checkpoint state = d6 :  nat_bits crc fsck compacted_summary orphan_inodes sudden-power-off
+    [ASSERT] (fsck_chk_inode_blk:1254)  --> ino: 0x1c100 has i_blocks: 000000c0, but has 191 blocks
+    [FIX] (fsck_chk_inode_blk:1260)  --> [0x1c100] i_blocks=0x000000c0 -> 0xbf
+    [FIX] (fsck_chk_inode_blk:1269)  --> [0x1c100] i_compr_blocks=0x00000026 -> 0x27
+    [ASSERT] (fsck_chk_inode_blk:1254)  --> ino: 0x1cadb has i_blocks: 0000002f, but has 46 blocks
+    [FIX] (fsck_chk_inode_blk:1260)  --> [0x1cadb] i_blocks=0x0000002f -> 0x2e
+    [FIX] (fsck_chk_inode_blk:1269)  --> [0x1cadb] i_compr_blocks=0x00000011 -> 0x12
+    [ASSERT] (fsck_chk_inode_blk:1254)  --> ino: 0x1c62c has i_blocks: 00000002, but has 1 blocks
+    [FIX] (fsck_chk_inode_blk:1260)  --> [0x1c62c] i_blocks=0x00000002 -> 0x1
+    
+    After we inject fault into f2fs_is_valid_blkaddr() during truncation,
+    a) it missed to increase @nr_free or @valid_blocks
+    b) it can cause in blkaddr leak in truncated dnode
+    Which may cause inconsistent status.
+    
+    This patch separates FAULT_BLKADDR_CONSISTENCE from FAULT_BLKADDR,
+    and rename FAULT_BLKADDR to FAULT_BLKADDR_VALIDITY
+    so that we can:
+    a) use FAULT_BLKADDR_CONSISTENCE in f2fs_truncate_data_blocks_range()
+    to simulate inconsistent issue independently, then it can verify fsck
+    repair flow.
+    b) FAULT_BLKADDR_VALIDITY fault will not cause any inconsistent status,
+    we can just use it to check error path handling in kernel side.
+    
+    Reviewed-by: Daeho Jeong <daehojeong@google.com>
+    Signed-off-by: Chao Yu <chao@kernel.org>
+    Signed-off-by: Jaegeuk Kim <jaegeuk@kernel.org>
+
+diff --git a/fs/f2fs/checkpoint.c b/fs/f2fs/checkpoint.c
+index b0597a539fc5..b85820e70f5e 100644
+--- a/fs/f2fs/checkpoint.c
++++ b/fs/f2fs/checkpoint.c
+@@ -170,12 +170,9 @@ static bool __is_bitmap_valid(struct f2fs_sb_info *sbi, block_t blkaddr,
+ 	return exist;
+ }
+ 
+-bool f2fs_is_valid_blkaddr(struct f2fs_sb_info *sbi,
++static bool __f2fs_is_valid_blkaddr(struct f2fs_sb_info *sbi,
+ 					block_t blkaddr, int type)
+ {
+-	if (time_to_inject(sbi, FAULT_BLKADDR))
+-		return false;
+-
+ 	switch (type) {
+ 	case META_NAT:
+ 		break;
+@@ -230,6 +227,20 @@ bool f2fs_is_valid_blkaddr(struct f2fs_sb_info *sbi,
+ 	return true;
+ }
+ 
++bool f2fs_is_valid_blkaddr(struct f2fs_sb_info *sbi,
++					block_t blkaddr, int type)
++{
++	if (time_to_inject(sbi, FAULT_BLKADDR_VALIDITY))
++		return false;
++	return __f2fs_is_valid_blkaddr(sbi, blkaddr, type);
++}
++
++bool f2fs_is_valid_blkaddr_raw(struct f2fs_sb_info *sbi,
++					block_t blkaddr, int type)
++{
++	return __f2fs_is_valid_blkaddr(sbi, blkaddr, type);
++}
++
+ /*
+  * Readahead CP/NAT/SIT/SSA/POR pages
+  */

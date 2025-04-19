@@ -1,0 +1,116 @@
+commit df3405245a8535d2f20bcbdbb615385671cd0792
+Author: Kees Cook <kees@kernel.org>
+Date:   Mon Jul 24 11:35:47 2017 -0700
+
+    x86/asm: Add suffix macro for GEN_*_RMWcc()
+    
+    The coming x86 refcount protection needs to be able to add trailing
+    instructions to the GEN_*_RMWcc() operations. This extracts the
+    difference between the goto/non-goto cases so the helper macros
+    can be defined outside the #ifdef cases. Additionally adds argument
+    naming to the resulting asm for referencing from suffixed
+    instructions, and adds clobbers for "cc", and "cx" to let suffixes
+    use _ASM_CX, and retain any set flags.
+    
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+    Cc: Alexey Dobriyan <adobriyan@gmail.com>
+    Cc: Andrew Morton <akpm@linux-foundation.org>
+    Cc: Arnd Bergmann <arnd@arndb.de>
+    Cc: Christoph Hellwig <hch@infradead.org>
+    Cc: David S. Miller <davem@davemloft.net>
+    Cc: Davidlohr Bueso <dave@stgolabs.net>
+    Cc: Elena Reshetova <elena.reshetova@intel.com>
+    Cc: Eric Biggers <ebiggers3@gmail.com>
+    Cc: Eric W. Biederman <ebiederm@xmission.com>
+    Cc: Greg KH <gregkh@linuxfoundation.org>
+    Cc: Hans Liljestrand <ishkamiel@gmail.com>
+    Cc: James Bottomley <James.Bottomley@hansenpartnership.com>
+    Cc: Jann Horn <jannh@google.com>
+    Cc: Josh Poimboeuf <jpoimboe@redhat.com>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Cc: Manfred Spraul <manfred@colorfullife.com>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Rik van Riel <riel@redhat.com>
+    Cc: Serge E. Hallyn <serge@hallyn.com>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Cc: arozansk@redhat.com
+    Cc: axboe@kernel.dk
+    Cc: kernel-hardening@lists.openwall.com
+    Cc: linux-arch <linux-arch@vger.kernel.org>
+    Link: http://lkml.kernel.org/r/1500921349-10803-2-git-send-email-keescook@chromium.org
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+diff --git a/arch/x86/include/asm/rmwcc.h b/arch/x86/include/asm/rmwcc.h
+index 661dd305694a..045f99211a99 100644
+--- a/arch/x86/include/asm/rmwcc.h
++++ b/arch/x86/include/asm/rmwcc.h
+@@ -1,45 +1,56 @@
+ #ifndef _ASM_X86_RMWcc
+ #define _ASM_X86_RMWcc
+ 
++#define __CLOBBERS_MEM		"memory"
++#define __CLOBBERS_MEM_CC_CX	"memory", "cc", "cx"
++
+ #if !defined(__GCC_ASM_FLAG_OUTPUTS__) && defined(CC_HAVE_ASM_GOTO)
+ 
+ /* Use asm goto */
+ 
+-#define __GEN_RMWcc(fullop, var, cc, ...)				\
++#define __GEN_RMWcc(fullop, var, cc, clobbers, ...)			\
+ do {									\
+ 	asm_volatile_goto (fullop "; j" #cc " %l[cc_label]"		\
+-			: : "m" (var), ## __VA_ARGS__ 			\
+-			: "memory" : cc_label);				\
++			: : [counter] "m" (var), ## __VA_ARGS__		\
++			: clobbers : cc_label);				\
+ 	return 0;							\
+ cc_label:								\
+ 	return 1;							\
+ } while (0)
+ 
+-#define GEN_UNARY_RMWcc(op, var, arg0, cc) 				\
+-	__GEN_RMWcc(op " " arg0, var, cc)
++#define __BINARY_RMWcc_ARG	" %1, "
+ 
+-#define GEN_BINARY_RMWcc(op, var, vcon, val, arg0, cc)			\
+-	__GEN_RMWcc(op " %1, " arg0, var, cc, vcon (val))
+ 
+ #else /* defined(__GCC_ASM_FLAG_OUTPUTS__) || !defined(CC_HAVE_ASM_GOTO) */
+ 
+ /* Use flags output or a set instruction */
+ 
+-#define __GEN_RMWcc(fullop, var, cc, ...)				\
++#define __GEN_RMWcc(fullop, var, cc, clobbers, ...)			\
+ do {									\
+ 	bool c;								\
+ 	asm volatile (fullop ";" CC_SET(cc)				\
+-			: "+m" (var), CC_OUT(cc) (c)			\
+-			: __VA_ARGS__ : "memory");			\
++			: [counter] "+m" (var), CC_OUT(cc) (c)		\
++			: __VA_ARGS__ : clobbers);			\
+ 	return c;							\
+ } while (0)
+ 
++#define __BINARY_RMWcc_ARG	" %2, "
++
++#endif /* defined(__GCC_ASM_FLAG_OUTPUTS__) || !defined(CC_HAVE_ASM_GOTO) */
++
+ #define GEN_UNARY_RMWcc(op, var, arg0, cc)				\
+-	__GEN_RMWcc(op " " arg0, var, cc)
++	__GEN_RMWcc(op " " arg0, var, cc, __CLOBBERS_MEM)
++
++#define GEN_UNARY_SUFFIXED_RMWcc(op, suffix, var, arg0, cc)		\
++	__GEN_RMWcc(op " " arg0 "\n\t" suffix, var, cc,			\
++		    __CLOBBERS_MEM_CC_CX)
+ 
+ #define GEN_BINARY_RMWcc(op, var, vcon, val, arg0, cc)			\
+-	__GEN_RMWcc(op " %2, " arg0, var, cc, vcon (val))
++	__GEN_RMWcc(op __BINARY_RMWcc_ARG arg0, var, cc,		\
++		    __CLOBBERS_MEM, vcon (val))
+ 
+-#endif /* defined(__GCC_ASM_FLAG_OUTPUTS__) || !defined(CC_HAVE_ASM_GOTO) */
++#define GEN_BINARY_SUFFIXED_RMWcc(op, suffix, var, vcon, val, arg0, cc)	\
++	__GEN_RMWcc(op __BINARY_RMWcc_ARG arg0 "\n\t" suffix, var, cc,	\
++		    __CLOBBERS_MEM_CC_CX, vcon (val))
+ 
+ #endif /* _ASM_X86_RMWcc */

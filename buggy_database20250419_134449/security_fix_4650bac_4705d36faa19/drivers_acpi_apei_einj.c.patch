@@ -1,0 +1,76 @@
+commit 4650bac1fc45d64aef62ab99aa4db93d41dedbd9
+Author: Toshi Kani <toshi.kani@hpe.com>
+Date:   Tue Jan 26 21:57:33 2016 +0100
+
+    ACPI/EINJ: Allow memory error injection to NVDIMM
+    
+    In the case of memory error injection, einj_error_inject()
+    checks if a target address is System RAM. Change this check to
+    allow injecting a memory error into NVDIMM memory by calling
+    region_intersects() with IORES_DESC_PERSISTENT_MEMORY. This
+    enables memory error testing on both System RAM and NVDIMM.
+    
+    In addition, page_is_ram() is replaced with region_intersects()
+    with IORESOURCE_SYSTEM_RAM, so that it can verify a target
+    address range with the requested size.
+    
+    Signed-off-by: Toshi Kani <toshi.kani@hpe.com>
+    Signed-off-by: Borislav Petkov <bp@suse.de>
+    Reviewed-by: Dan Williams <dan.j.williams@intel.com>
+    Acked-by: Tony Luck <tony.luck@intel.com>
+    Cc: Andrew Morton <akpm@linux-foundation.org>
+    Cc: Andy Lutomirski <luto@amacapital.net>
+    Cc: Borislav Petkov <bp@alien8.de>
+    Cc: Brian Gerst <brgerst@gmail.com>
+    Cc: Denys Vlasenko <dvlasenk@redhat.com>
+    Cc: H. Peter Anvin <hpa@zytor.com>
+    Cc: Jarkko Nikula <jarkko.nikula@linux.intel.com>
+    Cc: Len Brown <lenb@kernel.org>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Cc: Luis R. Rodriguez <mcgrof@suse.com>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Rafael J. Wysocki <rjw@rjwysocki.net>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Toshi Kani <toshi.kani@hp.com>
+    Cc: Vishal Verma <vishal.l.verma@intel.com>
+    Cc: linux-acpi@vger.kernel.org
+    Cc: linux-arch@vger.kernel.org
+    Cc: linux-mm <linux-mm@kvack.org>
+    Cc: linux-nvdimm@lists.01.org
+    Link: http://lkml.kernel.org/r/1453841853-11383-18-git-send-email-bp@alien8.de
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+diff --git a/drivers/acpi/apei/einj.c b/drivers/acpi/apei/einj.c
+index 0431883653be..559c1173de1c 100644
+--- a/drivers/acpi/apei/einj.c
++++ b/drivers/acpi/apei/einj.c
+@@ -519,7 +519,7 @@ static int einj_error_inject(u32 type, u32 flags, u64 param1, u64 param2,
+ 			     u64 param3, u64 param4)
+ {
+ 	int rc;
+-	unsigned long pfn;
++	u64 base_addr, size;
+ 
+ 	/* If user manually set "flags", make sure it is legal */
+ 	if (flags && (flags &
+@@ -545,10 +545,17 @@ static int einj_error_inject(u32 type, u32 flags, u64 param1, u64 param2,
+ 	/*
+ 	 * Disallow crazy address masks that give BIOS leeway to pick
+ 	 * injection address almost anywhere. Insist on page or
+-	 * better granularity and that target address is normal RAM.
++	 * better granularity and that target address is normal RAM or
++	 * NVDIMM.
+ 	 */
+-	pfn = PFN_DOWN(param1 & param2);
+-	if (!page_is_ram(pfn) || ((param2 & PAGE_MASK) != PAGE_MASK))
++	base_addr = param1 & param2;
++	size = ~param2 + 1;
++
++	if (((param2 & PAGE_MASK) != PAGE_MASK) ||
++	    ((region_intersects(base_addr, size, IORESOURCE_SYSTEM_RAM, IORES_DESC_NONE)
++				!= REGION_INTERSECTS) &&
++	     (region_intersects(base_addr, size, IORESOURCE_MEM, IORES_DESC_PERSISTENT_MEMORY)
++				!= REGION_INTERSECTS)))
+ 		return -EINVAL;
+ 
+ inject:

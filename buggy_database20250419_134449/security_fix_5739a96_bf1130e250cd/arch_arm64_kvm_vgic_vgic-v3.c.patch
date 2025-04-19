@@ -1,0 +1,52 @@
+commit 5739a961b542530626cb3afb721efa688b290cce
+Author: Marc Zyngier <maz@kernel.org>
+Date:   Tue Aug 27 16:25:08 2024 +0100
+
+    KVM: arm64: Force SRE traps when SRE access is not enabled
+    
+    We so far only write the ICH_HCR_EL2 config in two situations:
+    
+    - when we need to emulate the GICv3 CPU interface due to HW bugs
+    
+    - when we do direct injection, as the virtual CPU interface needs
+      to be enabled
+    
+    This is all good. But it also means that we don't do anything special
+    when we emulate a GICv2, or that there is no GIC at all.
+    
+    What happens in this case when the guest uses the GICv3 system
+    registers? The *guest* gets a trap for a sysreg access (EC=0x18)
+    while we'd really like it to get an UNDEF.
+    
+    Fixing this is a bit involved:
+    
+    - we need to set all the required trap bits (TC, TALL0, TALL1, TDIR)
+    
+    - for these traps to take effect, we need to (counter-intuitively)
+      set ICC_SRE_EL1.SRE to 1 so that the above traps take priority.
+    
+    Note that doesn't fully work when GICv2 emulation is enabled, as
+    we cannot set ICC_SRE_EL1.SRE to 1 (it breaks Group0 delivery as
+    IRQ).
+    
+    Reviewed-by: Oliver Upton <oliver.upton@linux.dev>
+    Link: https://lore.kernel.org/r/20240827152517.3909653-3-maz@kernel.org
+    Signed-off-by: Marc Zyngier <maz@kernel.org>
+
+diff --git a/arch/arm64/kvm/vgic/vgic-v3.c b/arch/arm64/kvm/vgic/vgic-v3.c
+index 11718412921f..b217b256853c 100644
+--- a/arch/arm64/kvm/vgic/vgic-v3.c
++++ b/arch/arm64/kvm/vgic/vgic-v3.c
+@@ -298,8 +298,11 @@ void vcpu_set_ich_hcr(struct kvm_vcpu *vcpu)
+ {
+ 	struct vgic_v3_cpu_if *vgic_v3 = &vcpu->arch.vgic_cpu.vgic_v3;
+ 
+-	if (!kvm_has_gicv3(vcpu->kvm))
++	/* Hide GICv3 sysreg if necessary */
++	if (!kvm_has_gicv3(vcpu->kvm)) {
++		vgic_v3->vgic_hcr |= ICH_HCR_TALL0 | ICH_HCR_TALL1 | ICH_HCR_TC;
+ 		return;
++	}
+ 
+ 	if (group0_trap)
+ 		vgic_v3->vgic_hcr |= ICH_HCR_TALL0;

@@ -1,0 +1,122 @@
+diff --git a/include/net/cfg80211.h b/include/net/cfg80211.h
+index d1e05aeb0c09..a6492e9bca97 100644
+--- a/include/net/cfg80211.h
++++ b/include/net/cfg80211.h
+@@ -1838,6 +1838,18 @@ void cfg80211_send_rx_auth(struct net_device *dev, const u8 *buf, size_t len);
+  */
+ void cfg80211_send_auth_timeout(struct net_device *dev, const u8 *addr);
+ 
++/**
++ * __cfg80211_auth_canceled - notify cfg80211 that authentication was canceled
++ * @dev: network device
++ * @addr: The MAC address of the device with which the authentication timed out
++ *
++ * When a pending authentication had no action yet, the driver may decide
++ * to not send a deauth frame, but in that case must calls this function
++ * to tell cfg80211 about this decision. It is only valid to call this
++ * function within the deauth() callback.
++ */
++void __cfg80211_auth_canceled(struct net_device *dev, const u8 *addr);
++
+ /**
+  * cfg80211_send_rx_assoc - notification of processed association
+  * @dev: network device
+diff --git a/net/mac80211/mlme.c b/net/mac80211/mlme.c
+index f399547306c3..6dc7b5ad9a41 100644
+--- a/net/mac80211/mlme.c
++++ b/net/mac80211/mlme.c
+@@ -2508,6 +2508,7 @@ int ieee80211_mgd_deauth(struct ieee80211_sub_if_data *sdata,
+ 	struct ieee80211_if_managed *ifmgd = &sdata->u.mgd;
+ 	struct ieee80211_mgd_work *wk;
+ 	const u8 *bssid = NULL;
++	bool not_auth_yet = false;
+ 
+ 	mutex_lock(&ifmgd->mtx);
+ 
+@@ -2517,12 +2518,28 @@ int ieee80211_mgd_deauth(struct ieee80211_sub_if_data *sdata,
+ 	} else list_for_each_entry(wk, &ifmgd->work_list, list) {
+ 		if (&wk->bss->cbss == req->bss) {
+ 			bssid = req->bss->bssid;
++			if (wk->state == IEEE80211_MGD_STATE_PROBE)
++				not_auth_yet = true;
+ 			list_del(&wk->list);
+ 			kfree(wk);
+ 			break;
+ 		}
+ 	}
+ 
++	/*
++	 * If somebody requests authentication and we haven't
++	 * sent out an auth frame yet there's no need to send
++	 * out a deauth frame either. If the state was PROBE,
++	 * then this is the case. If it's AUTH we have sent a
++	 * frame, and if it's IDLE we have completed the auth
++	 * process already.
++	 */
++	if (not_auth_yet) {
++		mutex_unlock(&ifmgd->mtx);
++		__cfg80211_auth_canceled(sdata->dev, bssid);
++		return 0;
++	}
++
+ 	/*
+ 	 * cfg80211 should catch this ... but it's racy since
+ 	 * we can receive a deauth frame, process it, hand it
+diff --git a/net/wireless/mlme.c b/net/wireless/mlme.c
+index 622af5649b9a..1001db4912f7 100644
+--- a/net/wireless/mlme.c
++++ b/net/wireless/mlme.c
+@@ -243,21 +243,12 @@ void cfg80211_send_disassoc(struct net_device *dev, const u8 *buf, size_t len)
+ }
+ EXPORT_SYMBOL(cfg80211_send_disassoc);
+ 
+-void cfg80211_send_auth_timeout(struct net_device *dev, const u8 *addr)
++static void __cfg80211_auth_remove(struct wireless_dev *wdev, const u8 *addr)
+ {
+-	struct wireless_dev *wdev = dev->ieee80211_ptr;
+-	struct wiphy *wiphy = wdev->wiphy;
+-	struct cfg80211_registered_device *rdev = wiphy_to_dev(wiphy);
+ 	int i;
+ 	bool done = false;
+ 
+-	wdev_lock(wdev);
+-
+-	nl80211_send_auth_timeout(rdev, dev, addr, GFP_KERNEL);
+-	if (wdev->sme_state == CFG80211_SME_CONNECTING)
+-		__cfg80211_connect_result(dev, addr, NULL, 0, NULL, 0,
+-					  WLAN_STATUS_UNSPECIFIED_FAILURE,
+-					  false, NULL);
++	ASSERT_WDEV_LOCK(wdev);
+ 
+ 	for (i = 0; addr && i < MAX_AUTH_BSSES; i++) {
+ 		if (wdev->authtry_bsses[i] &&
+@@ -272,6 +263,29 @@ void cfg80211_send_auth_timeout(struct net_device *dev, const u8 *addr)
+ 	}
+ 
+ 	WARN_ON(!done);
++}
++
++void __cfg80211_auth_canceled(struct net_device *dev, const u8 *addr)
++{
++	__cfg80211_auth_remove(dev->ieee80211_ptr, addr);
++}
++EXPORT_SYMBOL(__cfg80211_auth_canceled);
++
++void cfg80211_send_auth_timeout(struct net_device *dev, const u8 *addr)
++{
++	struct wireless_dev *wdev = dev->ieee80211_ptr;
++	struct wiphy *wiphy = wdev->wiphy;
++	struct cfg80211_registered_device *rdev = wiphy_to_dev(wiphy);
++
++	wdev_lock(wdev);
++
++	nl80211_send_auth_timeout(rdev, dev, addr, GFP_KERNEL);
++	if (wdev->sme_state == CFG80211_SME_CONNECTING)
++		__cfg80211_connect_result(dev, addr, NULL, 0, NULL, 0,
++					  WLAN_STATUS_UNSPECIFIED_FAILURE,
++					  false, NULL);
++
++	__cfg80211_auth_remove(wdev, addr);
+ 
+ 	wdev_unlock(wdev);
+ }

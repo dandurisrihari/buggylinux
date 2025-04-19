@@ -1,0 +1,57 @@
+commit 37a8f7c38339b22b69876d6f5a0ab851565284e3
+Author: Andy Lutomirski <luto@kernel.org>
+Date:   Sun Jan 28 10:38:50 2018 -0800
+
+    x86/asm: Move 'status' from thread_struct to thread_info
+    
+    The TS_COMPAT bit is very hot and is accessed from code paths that mostly
+    also touch thread_info::flags.  Move it into struct thread_info to improve
+    cache locality.
+    
+    The only reason it was in thread_struct is that there was a brief period
+    during which arch-specific fields were not allowed in struct thread_info.
+    
+    Linus suggested further changing:
+    
+      ti->status &= ~(TS_COMPAT|TS_I386_REGS_POKED);
+    
+    to:
+    
+      if (unlikely(ti->status & (TS_COMPAT|TS_I386_REGS_POKED)))
+              ti->status &= ~(TS_COMPAT|TS_I386_REGS_POKED);
+    
+    on the theory that frequently dirtying the cacheline even in pure 64-bit
+    code that never needs to modify status hurts performance.  That could be a
+    reasonable followup patch, but I suspect it matters less on top of this
+    patch.
+    
+    Suggested-by: Linus Torvalds <torvalds@linux-foundation.org>
+    Signed-off-by: Andy Lutomirski <luto@kernel.org>
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Reviewed-by: Ingo Molnar <mingo@kernel.org>
+    Acked-by: Linus Torvalds <torvalds@linux-foundation.org>
+    Cc: Borislav Petkov <bp@alien8.de>
+    Cc: Kernel Hardening <kernel-hardening@lists.openwall.com>
+    Link: https://lkml.kernel.org/r/03148bcc1b217100e6e8ecf6a5468c45cf4304b6.1517164461.git.luto@kernel.org
+
+diff --git a/arch/x86/include/asm/thread_info.h b/arch/x86/include/asm/thread_info.h
+index 00223333821a..eda3b6823ca4 100644
+--- a/arch/x86/include/asm/thread_info.h
++++ b/arch/x86/include/asm/thread_info.h
+@@ -55,6 +55,7 @@ struct task_struct;
+ 
+ struct thread_info {
+ 	unsigned long		flags;		/* low level flags */
++	u32			status;		/* thread synchronous flags */
+ };
+ 
+ #define INIT_THREAD_INFO(tsk)			\
+@@ -221,7 +222,7 @@ static inline int arch_within_stack_frames(const void * const stack,
+ #define in_ia32_syscall() true
+ #else
+ #define in_ia32_syscall() (IS_ENABLED(CONFIG_IA32_EMULATION) && \
+-			   current->thread.status & TS_COMPAT)
++			   current_thread_info()->status & TS_COMPAT)
+ #endif
+ 
+ /*

@@ -1,0 +1,375 @@
+diff --git a/arch/arm/net/bpf_jit_32.c b/arch/arm/net/bpf_jit_32.c
+index a37b989a2f91..a76623bcf722 100644
+--- a/arch/arm/net/bpf_jit_32.c
++++ b/arch/arm/net/bpf_jit_32.c
+@@ -930,5 +930,6 @@ void bpf_jit_free(struct bpf_prog *fp)
+ {
+ 	if (fp->jited)
+ 		module_free(NULL, fp->bpf_func);
+-	kfree(fp);
++
++	bpf_prog_unlock_free(fp);
+ }
+diff --git a/arch/mips/net/bpf_jit.c b/arch/mips/net/bpf_jit.c
+index 05a56619ece2..cfa83cf2447d 100644
+--- a/arch/mips/net/bpf_jit.c
++++ b/arch/mips/net/bpf_jit.c
+@@ -1427,5 +1427,6 @@ void bpf_jit_free(struct bpf_prog *fp)
+ {
+ 	if (fp->jited)
+ 		module_free(NULL, fp->bpf_func);
+-	kfree(fp);
++
++	bpf_prog_unlock_free(fp);
+ }
+diff --git a/arch/powerpc/net/bpf_jit_comp.c b/arch/powerpc/net/bpf_jit_comp.c
+index 3afa6f4c1957..40c53ff59124 100644
+--- a/arch/powerpc/net/bpf_jit_comp.c
++++ b/arch/powerpc/net/bpf_jit_comp.c
+@@ -697,5 +697,6 @@ void bpf_jit_free(struct bpf_prog *fp)
+ {
+ 	if (fp->jited)
+ 		module_free(NULL, fp->bpf_func);
+-	kfree(fp);
++
++	bpf_prog_unlock_free(fp);
+ }
+diff --git a/arch/s390/net/bpf_jit_comp.c b/arch/s390/net/bpf_jit_comp.c
+index 61e45b7c04d7..f2833c5b218a 100644
+--- a/arch/s390/net/bpf_jit_comp.c
++++ b/arch/s390/net/bpf_jit_comp.c
+@@ -887,5 +887,5 @@ void bpf_jit_free(struct bpf_prog *fp)
+ 	module_free(NULL, header);
+ 
+ free_filter:
+-	kfree(fp);
++	bpf_prog_unlock_free(fp);
+ }
+diff --git a/arch/sparc/net/bpf_jit_comp.c b/arch/sparc/net/bpf_jit_comp.c
+index 1f76c22a6a75..f7a736b645e8 100644
+--- a/arch/sparc/net/bpf_jit_comp.c
++++ b/arch/sparc/net/bpf_jit_comp.c
+@@ -812,5 +812,6 @@ void bpf_jit_free(struct bpf_prog *fp)
+ {
+ 	if (fp->jited)
+ 		module_free(NULL, fp->bpf_func);
+-	kfree(fp);
++
++	bpf_prog_unlock_free(fp);
+ }
+diff --git a/arch/x86/net/bpf_jit_comp.c b/arch/x86/net/bpf_jit_comp.c
+index b08a98c59530..39ccfbb4a723 100644
+--- a/arch/x86/net/bpf_jit_comp.c
++++ b/arch/x86/net/bpf_jit_comp.c
+@@ -972,23 +972,17 @@ void bpf_int_jit_compile(struct bpf_prog *prog)
+ 	kfree(addrs);
+ }
+ 
+-static void bpf_jit_free_deferred(struct work_struct *work)
++void bpf_jit_free(struct bpf_prog *fp)
+ {
+-	struct bpf_prog *fp = container_of(work, struct bpf_prog, work);
+ 	unsigned long addr = (unsigned long)fp->bpf_func & PAGE_MASK;
+ 	struct bpf_binary_header *header = (void *)addr;
+ 
++	if (!fp->jited)
++		goto free_filter;
++
+ 	set_memory_rw(addr, header->pages);
+ 	module_free(NULL, header);
+-	kfree(fp);
+-}
+ 
+-void bpf_jit_free(struct bpf_prog *fp)
+-{
+-	if (fp->jited) {
+-		INIT_WORK(&fp->work, bpf_jit_free_deferred);
+-		schedule_work(&fp->work);
+-	} else {
+-		kfree(fp);
+-	}
++free_filter:
++	bpf_prog_unlock_free(fp);
+ }
+diff --git a/include/linux/filter.h b/include/linux/filter.h
+index a5227ab8ccb1..c78994593355 100644
+--- a/include/linux/filter.h
++++ b/include/linux/filter.h
+@@ -9,6 +9,11 @@
+ #include <linux/skbuff.h>
+ #include <linux/workqueue.h>
+ #include <uapi/linux/filter.h>
++#include <asm/cacheflush.h>
++
++struct sk_buff;
++struct sock;
++struct seccomp_data;
+ 
+ /* Internally used and optimized filter representation with extended
+  * instruction set based on top of classic BPF.
+@@ -320,20 +325,23 @@ struct sock_fprog_kern {
+ 	struct sock_filter	*filter;
+ };
+ 
+-struct sk_buff;
+-struct sock;
+-struct seccomp_data;
++struct bpf_work_struct {
++	struct bpf_prog *prog;
++	struct work_struct work;
++};
+ 
+ struct bpf_prog {
++	u32			pages;		/* Number of allocated pages */
+ 	u32			jited:1,	/* Is our filter JIT'ed? */
+ 				len:31;		/* Number of filter blocks */
+ 	struct sock_fprog_kern	*orig_prog;	/* Original BPF program */
++	struct bpf_work_struct	*work;		/* Deferred free work struct */
+ 	unsigned int		(*bpf_func)(const struct sk_buff *skb,
+ 					    const struct bpf_insn *filter);
++	/* Instructions for interpreter */
+ 	union {
+ 		struct sock_filter	insns[0];
+ 		struct bpf_insn		insnsi[0];
+-		struct work_struct	work;
+ 	};
+ };
+ 
+@@ -353,6 +361,26 @@ static inline unsigned int bpf_prog_size(unsigned int proglen)
+ 
+ #define bpf_classic_proglen(fprog) (fprog->len * sizeof(fprog->filter[0]))
+ 
++#ifdef CONFIG_DEBUG_SET_MODULE_RONX
++static inline void bpf_prog_lock_ro(struct bpf_prog *fp)
++{
++	set_memory_ro((unsigned long)fp, fp->pages);
++}
++
++static inline void bpf_prog_unlock_ro(struct bpf_prog *fp)
++{
++	set_memory_rw((unsigned long)fp, fp->pages);
++}
++#else
++static inline void bpf_prog_lock_ro(struct bpf_prog *fp)
++{
++}
++
++static inline void bpf_prog_unlock_ro(struct bpf_prog *fp)
++{
++}
++#endif /* CONFIG_DEBUG_SET_MODULE_RONX */
++
+ int sk_filter(struct sock *sk, struct sk_buff *skb);
+ 
+ void bpf_prog_select_runtime(struct bpf_prog *fp);
+@@ -361,6 +389,17 @@ void bpf_prog_free(struct bpf_prog *fp);
+ int bpf_convert_filter(struct sock_filter *prog, int len,
+ 		       struct bpf_insn *new_prog, int *new_len);
+ 
++struct bpf_prog *bpf_prog_alloc(unsigned int size, gfp_t gfp_extra_flags);
++struct bpf_prog *bpf_prog_realloc(struct bpf_prog *fp_old, unsigned int size,
++				  gfp_t gfp_extra_flags);
++void __bpf_prog_free(struct bpf_prog *fp);
++
++static inline void bpf_prog_unlock_free(struct bpf_prog *fp)
++{
++	bpf_prog_unlock_ro(fp);
++	__bpf_prog_free(fp);
++}
++
+ int bpf_prog_create(struct bpf_prog **pfp, struct sock_fprog_kern *fprog);
+ void bpf_prog_destroy(struct bpf_prog *fp);
+ 
+@@ -450,7 +489,7 @@ static inline void bpf_jit_compile(struct bpf_prog *fp)
+ 
+ static inline void bpf_jit_free(struct bpf_prog *fp)
+ {
+-	kfree(fp);
++	bpf_prog_unlock_free(fp);
+ }
+ #endif /* CONFIG_BPF_JIT */
+ 
+diff --git a/kernel/bpf/core.c b/kernel/bpf/core.c
+index 7f0dbcbb34af..b54bb2c2e494 100644
+--- a/kernel/bpf/core.c
++++ b/kernel/bpf/core.c
+@@ -22,6 +22,7 @@
+  */
+ #include <linux/filter.h>
+ #include <linux/skbuff.h>
++#include <linux/vmalloc.h>
+ #include <asm/unaligned.h>
+ 
+ /* Registers */
+@@ -63,6 +64,67 @@ void *bpf_internal_load_pointer_neg_helper(const struct sk_buff *skb, int k, uns
+ 	return NULL;
+ }
+ 
++struct bpf_prog *bpf_prog_alloc(unsigned int size, gfp_t gfp_extra_flags)
++{
++	gfp_t gfp_flags = GFP_KERNEL | __GFP_HIGHMEM | __GFP_ZERO |
++			  gfp_extra_flags;
++	struct bpf_work_struct *ws;
++	struct bpf_prog *fp;
++
++	size = round_up(size, PAGE_SIZE);
++	fp = __vmalloc(size, gfp_flags, PAGE_KERNEL);
++	if (fp == NULL)
++		return NULL;
++
++	ws = kmalloc(sizeof(*ws), GFP_KERNEL | gfp_extra_flags);
++	if (ws == NULL) {
++		vfree(fp);
++		return NULL;
++	}
++
++	fp->pages = size / PAGE_SIZE;
++	fp->work = ws;
++
++	return fp;
++}
++EXPORT_SYMBOL_GPL(bpf_prog_alloc);
++
++struct bpf_prog *bpf_prog_realloc(struct bpf_prog *fp_old, unsigned int size,
++				  gfp_t gfp_extra_flags)
++{
++	gfp_t gfp_flags = GFP_KERNEL | __GFP_HIGHMEM | __GFP_ZERO |
++			  gfp_extra_flags;
++	struct bpf_prog *fp;
++
++	BUG_ON(fp_old == NULL);
++
++	size = round_up(size, PAGE_SIZE);
++	if (size <= fp_old->pages * PAGE_SIZE)
++		return fp_old;
++
++	fp = __vmalloc(size, gfp_flags, PAGE_KERNEL);
++	if (fp != NULL) {
++		memcpy(fp, fp_old, fp_old->pages * PAGE_SIZE);
++		fp->pages = size / PAGE_SIZE;
++
++		/* We keep fp->work from fp_old around in the new
++		 * reallocated structure.
++		 */
++		fp_old->work = NULL;
++		__bpf_prog_free(fp_old);
++	}
++
++	return fp;
++}
++EXPORT_SYMBOL_GPL(bpf_prog_realloc);
++
++void __bpf_prog_free(struct bpf_prog *fp)
++{
++	kfree(fp->work);
++	vfree(fp);
++}
++EXPORT_SYMBOL_GPL(__bpf_prog_free);
++
+ /* Base function for offset calculation. Needs to go into .text section,
+  * therefore keeping it non-static as well; will also be used by JITs
+  * anyway later on, so do not let the compiler omit it.
+@@ -523,12 +585,26 @@ void bpf_prog_select_runtime(struct bpf_prog *fp)
+ 
+ 	/* Probe if internal BPF can be JITed */
+ 	bpf_int_jit_compile(fp);
++	/* Lock whole bpf_prog as read-only */
++	bpf_prog_lock_ro(fp);
+ }
+ EXPORT_SYMBOL_GPL(bpf_prog_select_runtime);
+ 
+-/* free internal BPF program */
++static void bpf_prog_free_deferred(struct work_struct *work)
++{
++	struct bpf_work_struct *ws;
++
++	ws = container_of(work, struct bpf_work_struct, work);
++	bpf_jit_free(ws->prog);
++}
++
++/* Free internal BPF program */
+ void bpf_prog_free(struct bpf_prog *fp)
+ {
+-	bpf_jit_free(fp);
++	struct bpf_work_struct *ws = fp->work;
++
++	INIT_WORK(&ws->work, bpf_prog_free_deferred);
++	ws->prog = fp;
++	schedule_work(&ws->work);
+ }
+ EXPORT_SYMBOL_GPL(bpf_prog_free);
+diff --git a/kernel/seccomp.c b/kernel/seccomp.c
+index 44eb005c6695..84922befea84 100644
+--- a/kernel/seccomp.c
++++ b/kernel/seccomp.c
+@@ -395,16 +395,15 @@ static struct seccomp_filter *seccomp_prepare_filter(struct sock_fprog *fprog)
+ 	if (!filter)
+ 		goto free_prog;
+ 
+-	filter->prog = kzalloc(bpf_prog_size(new_len),
+-			       GFP_KERNEL|__GFP_NOWARN);
++	filter->prog = bpf_prog_alloc(bpf_prog_size(new_len), __GFP_NOWARN);
+ 	if (!filter->prog)
+ 		goto free_filter;
+ 
+ 	ret = bpf_convert_filter(fp, fprog->len, filter->prog->insnsi, &new_len);
+ 	if (ret)
+ 		goto free_filter_prog;
+-	kfree(fp);
+ 
++	kfree(fp);
+ 	atomic_set(&filter->usage, 1);
+ 	filter->prog->len = new_len;
+ 
+@@ -413,7 +412,7 @@ static struct seccomp_filter *seccomp_prepare_filter(struct sock_fprog *fprog)
+ 	return filter;
+ 
+ free_filter_prog:
+-	kfree(filter->prog);
++	__bpf_prog_free(filter->prog);
+ free_filter:
+ 	kfree(filter);
+ free_prog:
+diff --git a/lib/test_bpf.c b/lib/test_bpf.c
+index 8c66c6aace04..9a67456ba29a 100644
+--- a/lib/test_bpf.c
++++ b/lib/test_bpf.c
+@@ -1836,7 +1836,7 @@ static struct bpf_prog *generate_filter(int which, int *err)
+ 		break;
+ 
+ 	case INTERNAL:
+-		fp = kzalloc(bpf_prog_size(flen), GFP_KERNEL);
++		fp = bpf_prog_alloc(bpf_prog_size(flen), 0);
+ 		if (fp == NULL) {
+ 			pr_cont("UNEXPECTED_FAIL no memory left\n");
+ 			*err = -ENOMEM;
+diff --git a/net/core/filter.c b/net/core/filter.c
+index d814b8a89d0f..37f8eb06fdee 100644
+--- a/net/core/filter.c
++++ b/net/core/filter.c
+@@ -933,7 +933,7 @@ static struct bpf_prog *bpf_migrate_filter(struct bpf_prog *fp)
+ 
+ 	/* Expand fp for appending the new filter representation. */
+ 	old_fp = fp;
+-	fp = krealloc(old_fp, bpf_prog_size(new_len), GFP_KERNEL);
++	fp = bpf_prog_realloc(old_fp, bpf_prog_size(new_len), 0);
+ 	if (!fp) {
+ 		/* The old_fp is still around in case we couldn't
+ 		 * allocate new memory, so uncharge on that one.
+@@ -1013,7 +1013,7 @@ int bpf_prog_create(struct bpf_prog **pfp, struct sock_fprog_kern *fprog)
+ 	if (fprog->filter == NULL)
+ 		return -EINVAL;
+ 
+-	fp = kmalloc(bpf_prog_size(fprog->len), GFP_KERNEL);
++	fp = bpf_prog_alloc(bpf_prog_size(fprog->len), 0);
+ 	if (!fp)
+ 		return -ENOMEM;
+ 
+@@ -1069,7 +1069,7 @@ int sk_attach_filter(struct sock_fprog *fprog, struct sock *sk)
+ 	if (fprog->filter == NULL)
+ 		return -EINVAL;
+ 
+-	prog = kmalloc(bpf_fsize, GFP_KERNEL);
++	prog = bpf_prog_alloc(bpf_fsize, 0);
+ 	if (!prog)
+ 		return -ENOMEM;

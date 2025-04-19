@@ -1,0 +1,117 @@
+commit 6a98bc4614de8fac8c6d520a6b20b194e23c9936
+Author: Sascha Hauer <s.hauer@pengutronix.de>
+Date:   Fri Sep 7 14:36:36 2018 +0200
+
+    ubifs: Add authentication nodes to journal
+    
+    Nodes that are written to flash can only be authenticated through the
+    index after the next commit. When a journal replay is necessary the
+    nodes are not yet referenced by the index and thus can't be
+    authenticated.
+    
+    This patch overcomes this situation by creating a hash over all nodes
+    beginning from the commit start node over the reference node(s) and
+    the buds themselves. From
+    time to time we insert authentication nodes. Authentication nodes
+    contain a HMAC from the current hash state, so that they can be
+    used to authenticate a journal replay up to the point where the
+    authentication node is. The hash is continued afterwards
+    so that theoretically we would only have to check the HMAC of
+    the last authentication node we find.
+    
+    Overall we get this picture:
+    
+    ,,,,,,,,
+    ,......,...........................................
+    ,. CS  ,               hash1.----.           hash2.----.
+    ,.  |  ,                    .    |hmac            .    |hmac
+    ,.  v  ,                    .    v                .    v
+    ,.REF#0,-> bud -> bud -> bud.-> auth -> bud -> bud.-> auth ...
+    ,..|...,...........................................
+    ,  |   ,
+    ,  |   ,,,,,,,,,,,,,,,
+    .  |            hash3,----.
+    ,  |                 ,    |hmac
+    ,  v                 ,    v
+    , REF#1 -> bud -> bud,-> auth ...
+    ,,,|,,,,,,,,,,,,,,,,,,
+       v
+      REF#2 -> ...
+       |
+       V
+      ...
+    
+    Note how hash3 covers CS, REF#0 and REF#1 so that it is not possible to
+    exchange or skip any reference nodes. Unlike the picture suggests the
+    auth nodes themselves are not hashed.
+    
+    With this it is possible for an offline attacker to cut each journal
+    head or to drop the last reference node(s), but not to skip any journal
+    heads or to reorder any operations.
+    
+    Signed-off-by: Sascha Hauer <s.hauer@pengutronix.de>
+    Signed-off-by: Richard Weinberger <richard@nod.at>
+
+diff --git a/fs/ubifs/log.c b/fs/ubifs/log.c
+index 86b0828f5499..15fd854149bb 100644
+--- a/fs/ubifs/log.c
++++ b/fs/ubifs/log.c
+@@ -236,6 +236,7 @@ int ubifs_add_bud_to_log(struct ubifs_info *c, int jhead, int lnum, int offs)
+ 	bud->lnum = lnum;
+ 	bud->start = offs;
+ 	bud->jhead = jhead;
++	bud->log_hash = NULL;
+ 
+ 	ref->ch.node_type = UBIFS_REF_NODE;
+ 	ref->lnum = cpu_to_le32(bud->lnum);
+@@ -275,6 +276,14 @@ int ubifs_add_bud_to_log(struct ubifs_info *c, int jhead, int lnum, int offs)
+ 	if (err)
+ 		goto out_unlock;
+ 
++	err = ubifs_shash_update(c, c->log_hash, ref, UBIFS_REF_NODE_SZ);
++	if (err)
++		goto out_unlock;
++
++	err = ubifs_shash_copy_state(c, c->log_hash, c->jheads[jhead].log_hash);
++	if (err)
++		goto out_unlock;
++
+ 	c->lhead_offs += c->ref_node_alsz;
+ 
+ 	ubifs_add_bud(c, bud);
+@@ -377,6 +386,14 @@ int ubifs_log_start_commit(struct ubifs_info *c, int *ltail_lnum)
+ 	cs->cmt_no = cpu_to_le64(c->cmt_no);
+ 	ubifs_prepare_node(c, cs, UBIFS_CS_NODE_SZ, 0);
+ 
++	err = ubifs_shash_init(c, c->log_hash);
++	if (err)
++		goto out;
++
++	err = ubifs_shash_update(c, c->log_hash, cs, UBIFS_CS_NODE_SZ);
++	if (err < 0)
++		goto out;
++
+ 	/*
+ 	 * Note, we do not lock 'c->log_mutex' because this is the commit start
+ 	 * phase and we are exclusively using the log. And we do not lock
+@@ -402,6 +419,12 @@ int ubifs_log_start_commit(struct ubifs_info *c, int *ltail_lnum)
+ 
+ 		ubifs_prepare_node(c, ref, UBIFS_REF_NODE_SZ, 0);
+ 		len += UBIFS_REF_NODE_SZ;
++
++		err = ubifs_shash_update(c, c->log_hash, ref,
++					 UBIFS_REF_NODE_SZ);
++		if (err)
++			goto out;
++		ubifs_shash_copy_state(c, c->log_hash, c->jheads[i].log_hash);
+ 	}
+ 
+ 	ubifs_pad(c, buf + len, ALIGN(len, c->min_io_size) - len);
+@@ -516,6 +539,7 @@ int ubifs_log_post_commit(struct ubifs_info *c, int old_ltail_lnum)
+ 		if (err)
+ 			return err;
+ 		list_del(&bud->list);
++		kfree(bud->log_hash);
+ 		kfree(bud);
+ 	}
+ 	mutex_lock(&c->log_mutex);

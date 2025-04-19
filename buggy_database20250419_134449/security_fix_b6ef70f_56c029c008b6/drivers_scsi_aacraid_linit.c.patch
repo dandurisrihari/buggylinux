@@ -1,0 +1,71 @@
+commit b6ef70f33ca2a3084b4fea12414550724a9114dc
+Author: Salyzyn, Mark <Mark_Salyzyn@adaptec.com>
+Date:   Tue Jan 8 13:26:43 2008 -0800
+
+    [SCSI] aacraid: OS panic after Adapter panic (hardening).
+    
+    In experiments in the lab we managed to trigger an Adapter firmware
+    panic (BlinkLED) coincidentally while several pass-through ioctl
+    command from the management software were outstanding on a bug only
+    present on a class of RAID Adapters that require a hardware reset
+    rather than a commanded reset. The net result was an attempt to time
+    out the management software command as if it came from the SCSI layer
+    resulting in an OS panic.
+    
+    Adapters that use commanded reset, management commands are returned
+    failed by the Adapter correctly. The adapter firmware panic that
+    resulted in this condition was also resolved, and there were no
+    adapters in the field with this specific firmware bug so we do not
+    expect any field reports. This is a rare or unlikely corner condition,
+    and no reports have ever been forwarded from the field.
+    
+    Signed-off-by: Mark Salyzyn <aacraid@adaptec.com>
+    Signed-off-by: James Bottomley <James.Bottomley@HansenPartnership.com>
+
+diff --git a/drivers/scsi/aacraid/linit.c b/drivers/scsi/aacraid/linit.c
+index 742e1a8edc60..6a553ea730db 100644
+--- a/drivers/scsi/aacraid/linit.c
++++ b/drivers/scsi/aacraid/linit.c
+@@ -536,17 +536,33 @@ static int aac_eh_abort(struct scsi_cmnd* cmd)
+ 			break;
+ 	case INQUIRY:
+ 	case READ_CAPACITY:
+-	case TEST_UNIT_READY:
+ 		/* Mark associated FIB to not complete, eh handler does this */
+ 		for (count = 0; count < (host->can_queue + AAC_NUM_MGT_FIB); ++count) {
+ 			struct fib * fib = &aac->fibs[count];
+ 			if (fib->hw_fib_va->header.XferState &&
++			  (fib->flags & FIB_CONTEXT_FLAG) &&
+ 			  (fib->callback_data == cmd)) {
+ 				fib->flags |= FIB_CONTEXT_FLAG_TIMED_OUT;
+ 				cmd->SCp.phase = AAC_OWNER_ERROR_HANDLER;
+ 				ret = SUCCESS;
+ 			}
+ 		}
++		break;
++	case TEST_UNIT_READY:
++		/* Mark associated FIB to not complete, eh handler does this */
++		for (count = 0; count < (host->can_queue + AAC_NUM_MGT_FIB); ++count) {
++			struct scsi_cmnd * command;
++			struct fib * fib = &aac->fibs[count];
++			if ((fib->hw_fib_va->header.XferState & cpu_to_le32(Async | NoResponseExpected)) &&
++			  (fib->flags & FIB_CONTEXT_FLAG) &&
++			  ((command = fib->callback_data)) &&
++			  (command->device == cmd->device)) {
++				fib->flags |= FIB_CONTEXT_FLAG_TIMED_OUT;
++				command->SCp.phase = AAC_OWNER_ERROR_HANDLER;
++				if (command == cmd)
++					ret = SUCCESS;
++			}
++		}
+ 	}
+ 	return ret;
+ }
+@@ -569,6 +585,7 @@ static int aac_eh_reset(struct scsi_cmnd* cmd)
+ 	for (count = 0; count < (host->can_queue + AAC_NUM_MGT_FIB); ++count) {
+ 		struct fib * fib = &aac->fibs[count];
+ 		if (fib->hw_fib_va->header.XferState &&
++		  (fib->flags & FIB_CONTEXT_FLAG) &&
+ 		  (fib->callback_data == cmd)) {
+ 			fib->flags |= FIB_CONTEXT_FLAG_TIMED_OUT;
+ 			cmd->SCp.phase = AAC_OWNER_ERROR_HANDLER;

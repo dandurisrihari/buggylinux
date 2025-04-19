@@ -1,0 +1,56 @@
+diff --git a/arch/x86/kvm/mmu.c b/arch/x86/kvm/mmu.c
+index 5d3376f67794..cb8225969255 100644
+--- a/arch/x86/kvm/mmu.c
++++ b/arch/x86/kvm/mmu.c
+@@ -3698,12 +3698,15 @@ static int kvm_arch_setup_async_pf(struct kvm_vcpu *vcpu, gva_t gva, gfn_t gfn)
+ 	return kvm_setup_async_pf(vcpu, gva, kvm_vcpu_gfn_to_hva(vcpu, gfn), &arch);
+ }
+ 
+-static bool can_do_async_pf(struct kvm_vcpu *vcpu)
++bool kvm_can_do_async_pf(struct kvm_vcpu *vcpu)
+ {
+ 	if (unlikely(!lapic_in_kernel(vcpu) ||
+ 		     kvm_event_needs_reinjection(vcpu)))
+ 		return false;
+ 
++	if (is_guest_mode(vcpu))
++		return false;
++
+ 	return kvm_x86_ops->interrupt_allowed(vcpu);
+ }
+ 
+@@ -3719,7 +3722,7 @@ static bool try_async_pf(struct kvm_vcpu *vcpu, bool prefault, gfn_t gfn,
+ 	if (!async)
+ 		return false; /* *pfn has correct page already */
+ 
+-	if (!prefault && can_do_async_pf(vcpu)) {
++	if (!prefault && kvm_can_do_async_pf(vcpu)) {
+ 		trace_kvm_try_async_get_page(gva, gfn);
+ 		if (kvm_find_async_pf_gfn(vcpu, gfn)) {
+ 			trace_kvm_async_pf_doublefault(gva, gfn);
+diff --git a/arch/x86/kvm/mmu.h b/arch/x86/kvm/mmu.h
+index 27975807cc64..330bf3a811fb 100644
+--- a/arch/x86/kvm/mmu.h
++++ b/arch/x86/kvm/mmu.h
+@@ -76,6 +76,7 @@ int handle_mmio_page_fault(struct kvm_vcpu *vcpu, u64 addr, bool direct);
+ void kvm_init_shadow_mmu(struct kvm_vcpu *vcpu);
+ void kvm_init_shadow_ept_mmu(struct kvm_vcpu *vcpu, bool execonly,
+ 			     bool accessed_dirty);
++bool kvm_can_do_async_pf(struct kvm_vcpu *vcpu);
+ 
+ static inline unsigned int kvm_mmu_available_pages(struct kvm *kvm)
+ {
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index a2cd0997343c..87d3cb901935 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -8607,8 +8607,7 @@ bool kvm_arch_can_inject_async_page_present(struct kvm_vcpu *vcpu)
+ 	if (!(vcpu->arch.apf.msr_val & KVM_ASYNC_PF_ENABLED))
+ 		return true;
+ 	else
+-		return !kvm_event_needs_reinjection(vcpu) &&
+-			kvm_x86_ops->interrupt_allowed(vcpu);
++		return kvm_can_do_async_pf(vcpu);
+ }
+ 
+ void kvm_arch_start_assignment(struct kvm *kvm)

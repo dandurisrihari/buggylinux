@@ -1,0 +1,97 @@
+commit 0ef0fd351550130129bbdb77362488befd7b69d2
+Merge: 4489da718309 c011d23ba046
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Fri May 17 10:33:30 2019 -0700
+
+    Merge tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm
+    
+    Pull KVM updates from Paolo Bonzini:
+     "ARM:
+       - support for SVE and Pointer Authentication in guests
+       - PMU improvements
+    
+      POWER:
+       - support for direct access to the POWER9 XIVE interrupt controller
+       - memory and performance optimizations
+    
+      x86:
+       - support for accessing memory not backed by struct page
+       - fixes and refactoring
+    
+      Generic:
+       - dirty page tracking improvements"
+    
+    * tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm: (155 commits)
+      kvm: fix compilation on aarch64
+      Revert "KVM: nVMX: Expose RDPMC-exiting only when guest supports PMU"
+      kvm: x86: Fix L1TF mitigation for shadow MMU
+      KVM: nVMX: Disable intercept for FS/GS base MSRs in vmcs02 when possible
+      KVM: PPC: Book3S: Remove useless checks in 'release' method of KVM device
+      KVM: PPC: Book3S HV: XIVE: Fix spelling mistake "acessing" -> "accessing"
+      KVM: PPC: Book3S HV: Make sure to load LPID for radix VCPUs
+      kvm: nVMX: Set nested_run_pending in vmx_set_nested_state after checks complete
+      tests: kvm: Add tests for KVM_SET_NESTED_STATE
+      KVM: nVMX: KVM_SET_NESTED_STATE - Tear down old EVMCS state before setting new state
+      tests: kvm: Add tests for KVM_CAP_MAX_VCPUS and KVM_CAP_MAX_CPU_ID
+      tests: kvm: Add tests to .gitignore
+      KVM: Introduce KVM_CAP_MANUAL_DIRTY_LOG_PROTECT2
+      KVM: Fix kvm_clear_dirty_log_protect off-by-(minus-)one
+      KVM: Fix the bitmap range to copy during clear dirty
+      KVM: arm64: Fix ptrauth ID register masking logic
+      KVM: x86: use direct accessors for RIP and RSP
+      KVM: VMX: Use accessors for GPRs outside of dedicated caching logic
+      KVM: x86: Omit caching logic for always-available GPRs
+      kvm, x86: Properly check whether a pfn is an MMIO or not
+      ...
+
+diff --cc arch/x86/kvm/paging_tmpl.h
+index 08715034e315,c40af67d0f44..367a47df4ba0
+--- a/arch/x86/kvm/paging_tmpl.h
++++ b/arch/x86/kvm/paging_tmpl.h
+@@@ -140,16 -140,36 +140,36 @@@ static int FNAME(cmpxchg_gpte)(struct k
+  	pt_element_t *table;
+  	struct page *page;
+  
+ -	npages = get_user_pages_fast((unsigned long)ptep_user, 1, 1, &page);
+ +	npages = get_user_pages_fast((unsigned long)ptep_user, 1, FOLL_WRITE, &page);
+- 	/* Check if the user is doing something meaningless. */
+- 	if (unlikely(npages != 1))
+- 		return -EFAULT;
+- 
+- 	table = kmap_atomic(page);
+- 	ret = CMPXCHG(&table[index], orig_pte, new_pte);
+- 	kunmap_atomic(table);
+- 
+- 	kvm_release_page_dirty(page);
++ 	if (likely(npages == 1)) {
++ 		table = kmap_atomic(page);
++ 		ret = CMPXCHG(&table[index], orig_pte, new_pte);
++ 		kunmap_atomic(table);
++ 
++ 		kvm_release_page_dirty(page);
++ 	} else {
++ 		struct vm_area_struct *vma;
++ 		unsigned long vaddr = (unsigned long)ptep_user & PAGE_MASK;
++ 		unsigned long pfn;
++ 		unsigned long paddr;
++ 
++ 		down_read(&current->mm->mmap_sem);
++ 		vma = find_vma_intersection(current->mm, vaddr, vaddr + PAGE_SIZE);
++ 		if (!vma || !(vma->vm_flags & VM_PFNMAP)) {
++ 			up_read(&current->mm->mmap_sem);
++ 			return -EFAULT;
++ 		}
++ 		pfn = ((vaddr - vma->vm_start) >> PAGE_SHIFT) + vma->vm_pgoff;
++ 		paddr = pfn << PAGE_SHIFT;
++ 		table = memremap(paddr, PAGE_SIZE, MEMREMAP_WB);
++ 		if (!table) {
++ 			up_read(&current->mm->mmap_sem);
++ 			return -EFAULT;
++ 		}
++ 		ret = CMPXCHG(&table[index], orig_pte, new_pte);
++ 		memunmap(table);
++ 		up_read(&current->mm->mmap_sem);
++ 	}
+  
+  	return (ret != orig_pte);
+  }

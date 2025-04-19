@@ -1,0 +1,96 @@
+commit adf2de5e8d85aad3fa0319e1a524fa97d2aa8f90
+Author: Pawan Gupta <pawan.kumar.gupta@linux.intel.com>
+Date:   Tue Mar 11 08:02:52 2025 -0700
+
+    x86/cpu: Update x86_match_cpu() to also use cpu-type
+    
+    Non-hybrid CPU variants that share the same Family/Model could be
+    differentiated by their cpu-type. x86_match_cpu() currently does not use
+    cpu-type for CPU matching.
+    
+    Dave Hansen suggested to use below conditions to match CPU-type:
+    
+      1. If CPU_TYPE_ANY (the wildcard), then matched
+      2. If hybrid, then matched
+      3. If !hybrid, look at the boot CPU and compare the cpu-type to determine
+         if it is a match.
+    
+      This special case for hybrid systems allows more compact vulnerability
+      list.  Imagine that "Haswell" CPUs might or might not be hybrid and that
+      only Atom cores are vulnerable to Meltdown.  That means there are three
+      possibilities:
+    
+            1. P-core only
+            2. Atom only
+            3. Atom + P-core (aka. hybrid)
+    
+      One might be tempted to code up the vulnerability list like this:
+    
+            MATCH(     HASWELL, X86_FEATURE_HYBRID, MELTDOWN)
+            MATCH_TYPE(HASWELL, ATOM,               MELTDOWN)
+    
+      Logically, this matches #2 and #3. But that's a little silly. You would
+      only ask for the "ATOM" match in cases where there *WERE* hybrid cores in
+      play. You shouldn't have to _also_ ask for hybrid cores explicitly.
+    
+      In short, assume that processors that enumerate Hybrid==1 have a
+      vulnerable core type.
+    
+    Update x86_match_cpu() to also match cpu-type. Also treat hybrid systems as
+    special, and match them to any cpu-type.
+    
+    Suggested-by: Dave Hansen <dave.hansen@linux.intel.com>
+    Signed-off-by: Pawan Gupta <pawan.kumar.gupta@linux.intel.com>
+    Signed-off-by: Borislav Petkov (AMD) <bp@alien8.de>
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+    Acked-by: Dave Hansen <dave.hansen@linux.intel.com>
+    Link: https://lore.kernel.org/r/20250311-add-cpu-type-v8-4-e8514dcaaff2@linux.intel.com
+
+diff --git a/arch/x86/kernel/cpu/match.c b/arch/x86/kernel/cpu/match.c
+index 4f3c65429f82..6af1e8baeb0f 100644
+--- a/arch/x86/kernel/cpu/match.c
++++ b/arch/x86/kernel/cpu/match.c
+@@ -5,6 +5,34 @@
+ #include <linux/export.h>
+ #include <linux/slab.h>
+ 
++/**
++ * x86_match_vendor_cpu_type - helper function to match the hardware defined
++ *                             cpu-type for a single entry in the x86_cpu_id
++ *                             table. Note, this function does not match the
++ *                             generic cpu-types TOPO_CPU_TYPE_EFFICIENCY and
++ *                             TOPO_CPU_TYPE_PERFORMANCE.
++ * @c: Pointer to the cpuinfo_x86 structure of the CPU to match.
++ * @m: Pointer to the x86_cpu_id entry to match against.
++ *
++ * Return: true if the cpu-type matches, false otherwise.
++ */
++static bool x86_match_vendor_cpu_type(struct cpuinfo_x86 *c, const struct x86_cpu_id *m)
++{
++	if (m->type == X86_CPU_TYPE_ANY)
++		return true;
++
++	/* Hybrid CPUs are special, they are assumed to match all cpu-types */
++	if (cpu_feature_enabled(X86_FEATURE_HYBRID_CPU))
++		return true;
++
++	if (c->x86_vendor == X86_VENDOR_INTEL)
++		return m->type == c->topo.intel_type;
++	if (c->x86_vendor == X86_VENDOR_AMD)
++		return m->type == c->topo.amd_type;
++
++	return false;
++}
++
+ /**
+  * x86_match_cpu - match current CPU against an array of x86_cpu_ids
+  * @match: Pointer to array of x86_cpu_ids. Last entry terminated with
+@@ -50,6 +78,8 @@ const struct x86_cpu_id *x86_match_cpu(const struct x86_cpu_id *match)
+ 			continue;
+ 		if (m->feature != X86_FEATURE_ANY && !cpu_has(c, m->feature))
+ 			continue;
++		if (!x86_match_vendor_cpu_type(c, m))
++			continue;
+ 		return m;
+ 	}
+ 	return NULL;

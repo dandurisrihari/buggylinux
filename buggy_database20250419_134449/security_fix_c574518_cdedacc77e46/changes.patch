@@ -1,0 +1,75 @@
+diff --git a/drivers/net/wireless/wl12xx/io.h b/drivers/net/wireless/wl12xx/io.h
+index e6199eb51936..36e185583ec4 100644
+--- a/drivers/net/wireless/wl12xx/io.h
++++ b/drivers/net/wireless/wl12xx/io.h
+@@ -171,5 +171,6 @@ int wl1271_free_hw(struct wl1271 *wl);
+ irqreturn_t wl1271_irq(int irq, void *data);
+ bool wl1271_set_block_size(struct wl1271 *wl);
+ int wl1271_tx_dummy_packet(struct wl1271 *wl);
++void wl1271_configure_filters(struct wl1271 *wl, unsigned int filters);
+ 
+ #endif
+diff --git a/drivers/net/wireless/wl12xx/main.c b/drivers/net/wireless/wl12xx/main.c
+index 57d0af6cfa64..0efa7a055109 100644
+--- a/drivers/net/wireless/wl12xx/main.c
++++ b/drivers/net/wireless/wl12xx/main.c
+@@ -1528,7 +1528,7 @@ static void wl1271_op_remove_interface(struct ieee80211_hw *hw,
+ 	cancel_work_sync(&wl->recovery_work);
+ }
+ 
+-static void wl1271_configure_filters(struct wl1271 *wl, unsigned int filters)
++void wl1271_configure_filters(struct wl1271 *wl, unsigned int filters)
+ {
+ 	wl1271_set_default_filters(wl);
+ 
+@@ -1650,7 +1650,7 @@ static int wl1271_unjoin(struct wl1271 *wl)
+ 	clear_bit(WL1271_FLAG_JOINED, &wl->flags);
+ 	memset(wl->bssid, 0, ETH_ALEN);
+ 
+-	/* stop filterting packets based on bssid */
++	/* stop filtering packets based on bssid */
+ 	wl1271_configure_filters(wl, FIF_OTHER_BSS);
+ 
+ out:
+diff --git a/drivers/net/wireless/wl12xx/tx.c b/drivers/net/wireless/wl12xx/tx.c
+index 2019ed9ebfc4..7686bc1ff16a 100644
+--- a/drivers/net/wireless/wl12xx/tx.c
++++ b/drivers/net/wireless/wl12xx/tx.c
+@@ -70,6 +70,28 @@ static void wl1271_free_tx_id(struct wl1271 *wl, int id)
+ 	}
+ }
+ 
++static int wl1271_tx_update_filters(struct wl1271 *wl,
++						 struct sk_buff *skb)
++{
++	struct ieee80211_hdr *hdr;
++
++	hdr = (struct ieee80211_hdr *)(skb->data +
++				       sizeof(struct wl1271_tx_hw_descr));
++
++	/*
++	 * stop bssid-based filtering before transmitting authentication
++	 * requests. this way the hw will never drop authentication
++	 * responses coming from BSSIDs it isn't familiar with (e.g. on
++	 * roaming)
++	 */
++	if (!ieee80211_is_auth(hdr->frame_control))
++		return 0;
++
++	wl1271_configure_filters(wl, FIF_OTHER_BSS);
++
++	return wl1271_acx_rx_config(wl, wl->rx_config, wl->rx_filter);
++}
++
+ static void wl1271_tx_ap_update_inconnection_sta(struct wl1271 *wl,
+ 						 struct sk_buff *skb)
+ {
+@@ -350,6 +372,8 @@ static int wl1271_prepare_tx_frame(struct wl1271 *wl, struct sk_buff *skb,
+ 	if (wl->bss_type == BSS_TYPE_AP_BSS) {
+ 		wl1271_tx_ap_update_inconnection_sta(wl, skb);
+ 		wl1271_tx_regulate_link(wl, hlid);
++	} else {
++		wl1271_tx_update_filters(wl, skb);
+ 	}
+ 
+ 	wl1271_tx_fill_hdr(wl, skb, extra, info, hlid);

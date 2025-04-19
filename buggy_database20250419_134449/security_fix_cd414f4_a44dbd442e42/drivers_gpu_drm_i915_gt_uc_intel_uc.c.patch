@@ -1,0 +1,50 @@
+commit cd414f4f59f64d7d2a249caaf387edbc5a874020
+Author: John Harrison <John.C.Harrison@Intel.com>
+Date:   Fri Feb 17 14:33:08 2023 -0800
+
+    drm/i915/guc: Fix missing return code checks in submission init
+    
+    The CI results for the 'fast request' patch set (enables error return
+    codes for fire-and-forget H2G messages) hit an issue with the KMD
+    sending context submission requests on an invalid context. That was
+    caused by a fault injection probe failing the context creation of a
+    kernel context. However, there was no return code checking on any of
+    the kernel context registration paths. So the driver kept going and
+    tried to use the kernel context for the record defaults process.
+    
+    This would not cause any actual problems. The invalid requests would
+    be rejected by GuC and ultimately the start up sequence would
+    correctly wedge due to the context creation failure. But fixing the
+    issue correctly rather ignoring it means we won't get CI complaining
+    when the fast request patch lands and enables the extra error checking.
+    
+    So fix it by checking for errors and aborting as appropriate when
+    creating kernel contexts. While at it, clean up some other submission
+    init related failure cleanup paths. Also, rename guc_init_lrc_mapping
+    to guc_init_submission as the former name hasn't been valid in a long
+    time.
+    
+    v2: Add another wrapper to keep the flow balanced (Daniele)
+    
+    Signed-off-by: John Harrison <John.C.Harrison@Intel.com>
+    Reviewed-by: Daniele Ceraolo Spurio <daniele.ceraolospurio@intel.com>
+    Link: https://patchwork.freedesktop.org/patch/msgid/20230217223308.3449737-3-John.C.Harrison@Intel.com
+
+diff --git a/drivers/gpu/drm/i915/gt/uc/intel_uc.c b/drivers/gpu/drm/i915/gt/uc/intel_uc.c
+index 1b7ecd384a79..4ccb4be4c9cb 100644
+--- a/drivers/gpu/drm/i915/gt/uc/intel_uc.c
++++ b/drivers/gpu/drm/i915/gt/uc/intel_uc.c
+@@ -532,8 +532,11 @@ static int __uc_init_hw(struct intel_uc *uc)
+ 	else
+ 		intel_huc_auth(huc);
+ 
+-	if (intel_uc_uses_guc_submission(uc))
+-		intel_guc_submission_enable(guc);
++	if (intel_uc_uses_guc_submission(uc)) {
++		ret = intel_guc_submission_enable(guc);
++		if (ret)
++			goto err_log_capture;
++	}
+ 
+ 	if (intel_uc_uses_guc_slpc(uc)) {
+ 		ret = intel_guc_slpc_enable(&guc->slpc);

@@ -1,0 +1,72 @@
+commit e818fac595ab94900f0046baba1f1a0e2d5c2435
+Author: Matt Redfearn <matt.redfearn@mips.com>
+Date:   Thu Mar 31 10:05:35 2016 +0100
+
+    MIPS: Generate relocation table when CONFIG_RELOCATABLE
+    
+    When CONFIG_RELOCATABLE is enabled (added in later patch) add
+    --emit-relocs to vmlinux LDFLAGS so that fully linked vmlinux contains
+    relocation information.
+    
+    Run the previously added relocs tool to fill in the .data.relocs section
+    of vmlinux with a table of relocations. The relocs tool will also remove
+    (mark as 0 length) the relocation sections added to vmlinux.
+    
+    When vmlinux is passed to the boot makefile for conversion into a boot
+    image the now empty relocation sections will be removed and the
+    populated relocation table will be included in the binary image.
+    
+    Signed-off-by: Matt Redfearn <matt.redfearn@imgtec.com>
+    Cc: linux-mips@linux-mips.org
+    Cc: kernel-hardening@lists.openwall.com
+    Cc: linux-kernel@vger.kernel.org
+    Patchwork: https://patchwork.linux-mips.org/patch/12983/
+    Signed-off-by: Ralf Baechle <ralf@linux-mips.org>
+
+diff --git a/arch/mips/Makefile b/arch/mips/Makefile
+index a61031e7c06f..c0b002a09bef 100644
+--- a/arch/mips/Makefile
++++ b/arch/mips/Makefile
+@@ -96,6 +96,10 @@ LDFLAGS_vmlinux			+= -G 0 -static -n -nostdlib
+ KBUILD_AFLAGS_MODULE		+= -mlong-calls
+ KBUILD_CFLAGS_MODULE		+= -mlong-calls
+ 
++ifeq ($(CONFIG_RELOCATABLE),y)
++LDFLAGS_vmlinux			+= --emit-relocs
++endif
++
+ #
+ # pass -msoft-float to GAS if it supports it.  However on newer binutils
+ # (specifically newer than 2.24.51.20140728) we then also need to explicitly
+@@ -313,6 +317,10 @@ rom.bin rom.sw: vmlinux
+ 		$(bootvars-y) $@
+ endif
+ 
++CMD_RELOCS = arch/mips/boot/tools/relocs
++quiet_cmd_relocs = RELOCS  $<
++      cmd_relocs = $(CMD_RELOCS) $<
++
+ #
+ # Some machines like the Indy need 32-bit ELF binaries for booting purposes.
+ # Other need ECOFF, so we build a 32-bit ELF binary for them which we then
+@@ -321,6 +329,11 @@ endif
+ quiet_cmd_32 = OBJCOPY $@
+ 	cmd_32 = $(OBJCOPY) -O $(32bit-bfd) $(OBJCOPYFLAGS) $< $@
+ vmlinux.32: vmlinux
++ifeq ($(CONFIG_RELOCATABLE)$(CONFIG_64BIT),yy)
++# Currently, objcopy fails to handle the relocations in the elf64
++# So the relocs tool must be run here to remove them first
++	$(call cmd,relocs)
++endif
+ 	$(call cmd,32)
+ 
+ #
+@@ -336,6 +349,9 @@ all:	$(all-y)
+ 
+ # boot
+ $(boot-y): $(vmlinux-32) FORCE
++ifeq ($(CONFIG_RELOCATABLE)$(CONFIG_32BIT),yy)
++	$(call cmd,relocs)
++endif
+ 	$(Q)$(MAKE) $(build)=arch/mips/boot VMLINUX=$(vmlinux-32) \
+ 		$(bootvars-y) arch/mips/boot/$@

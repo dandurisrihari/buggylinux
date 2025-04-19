@@ -1,0 +1,132 @@
+diff --git a/include/linux/highmem.h b/include/linux/highmem.h
+index e9912da5441b..44242268f53b 100644
+--- a/include/linux/highmem.h
++++ b/include/linux/highmem.h
+@@ -319,6 +319,32 @@ static inline void copy_user_highpage(struct page *to, struct page *from,
+ 
+ #endif
+ 
++#ifdef copy_mc_to_kernel
++static inline int copy_mc_user_highpage(struct page *to, struct page *from,
++					unsigned long vaddr, struct vm_area_struct *vma)
++{
++	unsigned long ret;
++	char *vfrom, *vto;
++
++	vfrom = kmap_local_page(from);
++	vto = kmap_local_page(to);
++	ret = copy_mc_to_kernel(vto, vfrom, PAGE_SIZE);
++	if (!ret)
++		kmsan_unpoison_memory(page_address(to), PAGE_SIZE);
++	kunmap_local(vto);
++	kunmap_local(vfrom);
++
++	return ret;
++}
++#else
++static inline int copy_mc_user_highpage(struct page *to, struct page *from,
++					unsigned long vaddr, struct vm_area_struct *vma)
++{
++	copy_user_highpage(to, from, vaddr, vma);
++	return 0;
++}
++#endif
++
+ #ifndef __HAVE_ARCH_COPY_HIGHPAGE
+ 
+ static inline void copy_highpage(struct page *to, struct page *from)
+diff --git a/mm/memory.c b/mm/memory.c
+index e0555ddd71b5..13b1fe661d86 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -2798,10 +2798,16 @@ static inline int pte_unmap_same(struct vm_fault *vmf)
+ 	return same;
+ }
+ 
+-static inline bool __wp_page_copy_user(struct page *dst, struct page *src,
+-				       struct vm_fault *vmf)
++/*
++ * Return:
++ *	0:		copied succeeded
++ *	-EHWPOISON:	copy failed due to hwpoison in source page
++ *	-EAGAIN:	copied failed (some other reason)
++ */
++static inline int __wp_page_copy_user(struct page *dst, struct page *src,
++				      struct vm_fault *vmf)
+ {
+-	bool ret;
++	int ret;
+ 	void *kaddr;
+ 	void __user *uaddr;
+ 	bool locked = false;
+@@ -2810,8 +2816,9 @@ static inline bool __wp_page_copy_user(struct page *dst, struct page *src,
+ 	unsigned long addr = vmf->address;
+ 
+ 	if (likely(src)) {
+-		copy_user_highpage(dst, src, addr, vma);
+-		return true;
++		if (copy_mc_user_highpage(dst, src, addr, vma))
++			return -EHWPOISON;
++		return 0;
+ 	}
+ 
+ 	/*
+@@ -2838,7 +2845,7 @@ static inline bool __wp_page_copy_user(struct page *dst, struct page *src,
+ 			 * and update local tlb only
+ 			 */
+ 			update_mmu_tlb(vma, addr, vmf->pte);
+-			ret = false;
++			ret = -EAGAIN;
+ 			goto pte_unlock;
+ 		}
+ 
+@@ -2863,7 +2870,7 @@ static inline bool __wp_page_copy_user(struct page *dst, struct page *src,
+ 		if (!likely(pte_same(*vmf->pte, vmf->orig_pte))) {
+ 			/* The PTE changed under us, update local tlb */
+ 			update_mmu_tlb(vma, addr, vmf->pte);
+-			ret = false;
++			ret = -EAGAIN;
+ 			goto pte_unlock;
+ 		}
+ 
+@@ -2882,7 +2889,7 @@ static inline bool __wp_page_copy_user(struct page *dst, struct page *src,
+ 		}
+ 	}
+ 
+-	ret = true;
++	ret = 0;
+ 
+ pte_unlock:
+ 	if (locked)
+@@ -3054,6 +3061,7 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
+ 	pte_t entry;
+ 	int page_copied = 0;
+ 	struct mmu_notifier_range range;
++	int ret;
+ 
+ 	delayacct_wpcopy_start();
+ 
+@@ -3071,19 +3079,21 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
+ 		if (!new_page)
+ 			goto oom;
+ 
+-		if (!__wp_page_copy_user(new_page, old_page, vmf)) {
++		ret = __wp_page_copy_user(new_page, old_page, vmf);
++		if (ret) {
+ 			/*
+ 			 * COW failed, if the fault was solved by other,
+ 			 * it's fine. If not, userspace would re-fault on
+ 			 * the same address and we will handle the fault
+ 			 * from the second attempt.
++			 * The -EHWPOISON case will not be retried.
+ 			 */
+ 			put_page(new_page);
+ 			if (old_page)
+ 				put_page(old_page);
+ 
+ 			delayacct_wpcopy_end();
+-			return 0;
++			return ret == -EHWPOISON ? VM_FAULT_HWPOISON : 0;
+ 		}
+ 		kmsan_copy_page_meta(new_page, old_page);
+ 	}

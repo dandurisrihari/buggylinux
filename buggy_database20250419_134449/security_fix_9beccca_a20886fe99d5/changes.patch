@@ -1,0 +1,115 @@
+diff --git a/Makefile b/Makefile
+index ac2ec990422d..69b40b629f3c 100644
+--- a/Makefile
++++ b/Makefile
+@@ -966,8 +966,10 @@ LDFLAGS_vmlinux += --gc-sections
+ endif
+ 
+ ifdef CONFIG_SHADOW_CALL_STACK
++ifndef CONFIG_DYNAMIC_SCS
+ CC_FLAGS_SCS	:= -fsanitize=shadow-call-stack
+ KBUILD_CFLAGS	+= $(CC_FLAGS_SCS)
++endif
+ export CC_FLAGS_SCS
+ endif
+ 
+diff --git a/arch/Kconfig b/arch/Kconfig
+index 8f138e580d1a..072a1b39e3af 100644
+--- a/arch/Kconfig
++++ b/arch/Kconfig
+@@ -651,6 +651,13 @@ config SHADOW_CALL_STACK
+ 	  reading and writing arbitrary memory may be able to locate them
+ 	  and hijack control flow by modifying the stacks.
+ 
++config DYNAMIC_SCS
++	bool
++	help
++	  Set by the arch code if it relies on code patching to insert the
++	  shadow call stack push and pop instructions rather than on the
++	  compiler.
++
+ config LTO
+ 	bool
+ 	help
+diff --git a/include/linux/scs.h b/include/linux/scs.h
+index 18122d9e17ff..4ab5bdc898cf 100644
+--- a/include/linux/scs.h
++++ b/include/linux/scs.h
+@@ -53,6 +53,22 @@ static inline bool task_scs_end_corrupted(struct task_struct *tsk)
+ 	return sz >= SCS_SIZE - 1 || READ_ONCE_NOCHECK(*magic) != SCS_END_MAGIC;
+ }
+ 
++DECLARE_STATIC_KEY_FALSE(dynamic_scs_enabled);
++
++static inline bool scs_is_dynamic(void)
++{
++	if (!IS_ENABLED(CONFIG_DYNAMIC_SCS))
++		return false;
++	return static_branch_likely(&dynamic_scs_enabled);
++}
++
++static inline bool scs_is_enabled(void)
++{
++	if (!IS_ENABLED(CONFIG_DYNAMIC_SCS))
++		return true;
++	return scs_is_dynamic();
++}
++
+ #else /* CONFIG_SHADOW_CALL_STACK */
+ 
+ static inline void *scs_alloc(int node) { return NULL; }
+@@ -62,6 +78,8 @@ static inline void scs_task_reset(struct task_struct *tsk) {}
+ static inline int scs_prepare(struct task_struct *tsk, int node) { return 0; }
+ static inline void scs_release(struct task_struct *tsk) {}
+ static inline bool task_scs_end_corrupted(struct task_struct *tsk) { return false; }
++static inline bool scs_is_enabled(void) { return false; }
++static inline bool scs_is_dynamic(void) { return false; }
+ 
+ #endif /* CONFIG_SHADOW_CALL_STACK */
+ 
+diff --git a/kernel/scs.c b/kernel/scs.c
+index b7e1b096d906..d7809affe740 100644
+--- a/kernel/scs.c
++++ b/kernel/scs.c
+@@ -12,6 +12,10 @@
+ #include <linux/vmalloc.h>
+ #include <linux/vmstat.h>
+ 
++#ifdef CONFIG_DYNAMIC_SCS
++DEFINE_STATIC_KEY_FALSE(dynamic_scs_enabled);
++#endif
++
+ static void __scs_account(void *s, int account)
+ {
+ 	struct page *scs_page = vmalloc_to_page(s);
+@@ -101,14 +105,20 @@ static int scs_cleanup(unsigned int cpu)
+ 
+ void __init scs_init(void)
+ {
++	if (!scs_is_enabled())
++		return;
+ 	cpuhp_setup_state(CPUHP_BP_PREPARE_DYN, "scs:scs_cache", NULL,
+ 			  scs_cleanup);
+ }
+ 
+ int scs_prepare(struct task_struct *tsk, int node)
+ {
+-	void *s = scs_alloc(node);
++	void *s;
+ 
++	if (!scs_is_enabled())
++		return 0;
++
++	s = scs_alloc(node);
+ 	if (!s)
+ 		return -ENOMEM;
+ 
+@@ -148,7 +158,7 @@ void scs_release(struct task_struct *tsk)
+ {
+ 	void *s = task_scs(tsk);
+ 
+-	if (!s)
++	if (!scs_is_enabled() || !s)
+ 		return;
+ 
+ 	WARN(task_scs_end_corrupted(tsk),

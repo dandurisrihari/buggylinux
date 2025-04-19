@@ -1,0 +1,98 @@
+diff --git a/include/net/bluetooth/hci_core.h b/include/net/bluetooth/hci_core.h
+index 5e785b968e7e..46a43b721dd6 100644
+--- a/include/net/bluetooth/hci_core.h
++++ b/include/net/bluetooth/hci_core.h
+@@ -326,6 +326,7 @@ void hci_conn_hash_flush(struct hci_dev *hdev);
+ void hci_conn_check_pending(struct hci_dev *hdev);
+ 
+ struct hci_conn *hci_connect(struct hci_dev *hdev, int type, bdaddr_t *dst, __u8 auth_type);
++int hci_conn_check_link_mode(struct hci_conn *conn);
+ int hci_conn_auth(struct hci_conn *conn);
+ int hci_conn_encrypt(struct hci_conn *conn);
+ int hci_conn_change_link_key(struct hci_conn *conn);
+diff --git a/net/bluetooth/af_bluetooth.c b/net/bluetooth/af_bluetooth.c
+index 1edfdf4c095b..f6348e078aa4 100644
+--- a/net/bluetooth/af_bluetooth.c
++++ b/net/bluetooth/af_bluetooth.c
+@@ -49,7 +49,7 @@
+ #define BT_DBG(D...)
+ #endif
+ 
+-#define VERSION "2.12"
++#define VERSION "2.13"
+ 
+ /* Bluetooth sockets */
+ #define BT_MAX_PROTO	8
+diff --git a/net/bluetooth/hci_conn.c b/net/bluetooth/hci_conn.c
+index a2f9efaa3361..b7002429f152 100644
+--- a/net/bluetooth/hci_conn.c
++++ b/net/bluetooth/hci_conn.c
+@@ -376,6 +376,19 @@ struct hci_conn *hci_connect(struct hci_dev *hdev, int type, bdaddr_t *dst, __u8
+ }
+ EXPORT_SYMBOL(hci_connect);
+ 
++/* Check link security requirement */
++int hci_conn_check_link_mode(struct hci_conn *conn)
++{
++	BT_DBG("conn %p", conn);
++
++	if (conn->ssp_mode > 0 && conn->hdev->ssp_mode > 0 &&
++					!(conn->link_mode & HCI_LM_ENCRYPT))
++		return 0;
++
++	return 1;
++}
++EXPORT_SYMBOL(hci_conn_check_link_mode);
++
+ /* Authenticate remote device */
+ int hci_conn_auth(struct hci_conn *conn)
+ {
+diff --git a/net/bluetooth/l2cap.c b/net/bluetooth/l2cap.c
+index a96d6de80d12..9610a9c85b98 100644
+--- a/net/bluetooth/l2cap.c
++++ b/net/bluetooth/l2cap.c
+@@ -1568,10 +1568,10 @@ static inline int l2cap_connect_req(struct l2cap_conn *conn, struct l2cap_cmd_hd
+ 	struct l2cap_conn_req *req = (struct l2cap_conn_req *) data;
+ 	struct l2cap_conn_rsp rsp;
+ 	struct sock *sk, *parent;
+-	int result, status = 0;
++	int result, status = L2CAP_CS_NO_INFO;
+ 
+ 	u16 dcid = 0, scid = __le16_to_cpu(req->scid);
+-	__le16 psm  = req->psm;
++	__le16 psm = req->psm;
+ 
+ 	BT_DBG("psm 0x%2.2x scid 0x%4.4x", psm, scid);
+ 
+@@ -1582,6 +1582,13 @@ static inline int l2cap_connect_req(struct l2cap_conn *conn, struct l2cap_cmd_hd
+ 		goto sendresp;
+ 	}
+ 
++	/* Check if the ACL is secure enough (if not SDP) */
++	if (psm != cpu_to_le16(0x0001) &&
++				!hci_conn_check_link_mode(conn->hcon)) {
++		result = L2CAP_CR_SEC_BLOCK;
++		goto response;
++	}
++
+ 	result = L2CAP_CR_NO_MEM;
+ 
+ 	/* Check for backlog size */
+@@ -2239,7 +2246,7 @@ static int l2cap_auth_cfm(struct hci_conn *hcon, u8 status)
+ 			rsp.scid   = cpu_to_le16(l2cap_pi(sk)->dcid);
+ 			rsp.dcid   = cpu_to_le16(l2cap_pi(sk)->scid);
+ 			rsp.result = cpu_to_le16(result);
+-			rsp.status = cpu_to_le16(0);
++			rsp.status = cpu_to_le16(L2CAP_CS_NO_INFO);
+ 			l2cap_send_cmd(conn, l2cap_pi(sk)->ident,
+ 					L2CAP_CONN_RSP, sizeof(rsp), &rsp);
+ 		}
+@@ -2311,7 +2318,7 @@ static int l2cap_encrypt_cfm(struct hci_conn *hcon, u8 status, u8 encrypt)
+ 			rsp.scid   = cpu_to_le16(l2cap_pi(sk)->dcid);
+ 			rsp.dcid   = cpu_to_le16(l2cap_pi(sk)->scid);
+ 			rsp.result = cpu_to_le16(result);
+-			rsp.status = cpu_to_le16(0);
++			rsp.status = cpu_to_le16(L2CAP_CS_NO_INFO);
+ 			l2cap_send_cmd(conn, l2cap_pi(sk)->ident,
+ 					L2CAP_CONN_RSP, sizeof(rsp), &rsp);
+ 		}

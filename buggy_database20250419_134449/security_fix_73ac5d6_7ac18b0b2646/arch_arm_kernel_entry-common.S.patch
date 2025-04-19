@@ -1,0 +1,79 @@
+commit 73ac5d6a2b6ac3ae8d1e1818f3e9946f97489bc9
+Author: Thomas Garnier <thgarnie@google.com>
+Date:   Wed Jun 14 18:12:02 2017 -0700
+
+    arm/syscalls: Check address limit on user-mode return
+    
+    Ensure the address limit is a user-mode segment before returning to
+    user-mode. Otherwise a process can corrupt kernel-mode memory and
+    elevate privileges [1].
+    
+    The set_fs function sets the TIF_SETFS flag to force a slow path on
+    return. In the slow path, the address limit is checked to be USER_DS if
+    needed.
+    
+    The TIF_SETFS flag is added to _TIF_WORK_MASK shifting _TIF_SYSCALL_WORK
+    for arm instruction immediate support. The global work mask is too big
+    to used on a single instruction so adapt ret_fast_syscall.
+    
+    [1] https://bugs.chromium.org/p/project-zero/issues/detail?id=990
+    
+    Signed-off-by: Thomas Garnier <thgarnie@google.com>
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Mark Rutland <mark.rutland@arm.com>
+    Cc: kernel-hardening@lists.openwall.com
+    Cc: Catalin Marinas <catalin.marinas@arm.com>
+    Cc: Will Deacon <will.deacon@arm.com>
+    Cc: David Howells <dhowells@redhat.com>
+    Cc: Dave Hansen <dave.hansen@intel.com>
+    Cc: Miroslav Benes <mbenes@suse.cz>
+    Cc: Chris Metcalf <cmetcalf@mellanox.com>
+    Cc: Pratyush Anand <panand@redhat.com>
+    Cc: Russell King <linux@armlinux.org.uk>
+    Cc: Petr Mladek <pmladek@suse.com>
+    Cc: Rik van Riel <riel@redhat.com>
+    Cc: Kees Cook <keescook@chromium.org>
+    Cc: Arnd Bergmann <arnd@arndb.de>
+    Cc: Al Viro <viro@zeniv.linux.org.uk>
+    Cc: Andy Lutomirski <luto@kernel.org>
+    Cc: Josh Poimboeuf <jpoimboe@redhat.com>
+    Cc: linux-arm-kernel@lists.infradead.org
+    Cc: Will Drewry <wad@chromium.org>
+    Cc: linux-api@vger.kernel.org
+    Cc: Oleg Nesterov <oleg@redhat.com>
+    Cc: Andy Lutomirski <luto@amacapital.net>
+    Cc: Paolo Bonzini <pbonzini@redhat.com>
+    Link: http://lkml.kernel.org/r/20170615011203.144108-2-thgarnie@google.com
+
+diff --git a/arch/arm/kernel/entry-common.S b/arch/arm/kernel/entry-common.S
+index eb5cd77bf1d8..e33c32d56193 100644
+--- a/arch/arm/kernel/entry-common.S
++++ b/arch/arm/kernel/entry-common.S
+@@ -41,7 +41,9 @@ ret_fast_syscall:
+  UNWIND(.cantunwind	)
+ 	disable_irq_notrace			@ disable interrupts
+ 	ldr	r1, [tsk, #TI_FLAGS]		@ re-check for syscall tracing
+-	tst	r1, #_TIF_SYSCALL_WORK | _TIF_WORK_MASK
++	tst	r1, #_TIF_SYSCALL_WORK
++	bne	fast_work_pending
++	tst	r1, #_TIF_WORK_MASK
+ 	bne	fast_work_pending
+ 
+ 	/* perform architecture specific actions before user return */
+@@ -67,12 +69,15 @@ ret_fast_syscall:
+ 	str	r0, [sp, #S_R0 + S_OFF]!	@ save returned r0
+ 	disable_irq_notrace			@ disable interrupts
+ 	ldr	r1, [tsk, #TI_FLAGS]		@ re-check for syscall tracing
+-	tst	r1, #_TIF_SYSCALL_WORK | _TIF_WORK_MASK
++	tst	r1, #_TIF_SYSCALL_WORK
++	bne	fast_work_pending
++	tst	r1, #_TIF_WORK_MASK
+ 	beq	no_work_pending
+  UNWIND(.fnend		)
+ ENDPROC(ret_fast_syscall)
+ 
+ 	/* Slower path - fall through to work_pending */
++fast_work_pending:
+ #endif
+ 
+ 	tst	r1, #_TIF_SYSCALL_WORK

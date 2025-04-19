@@ -1,0 +1,249 @@
+diff --git a/include/linux/mm.h b/include/linux/mm.h
+index 7f594da84aca..d4fb49a5d60d 100644
+--- a/include/linux/mm.h
++++ b/include/linux/mm.h
+@@ -3174,6 +3174,7 @@ enum mf_flags {
+ 	MF_ACTION_REQUIRED = 1 << 1,
+ 	MF_MUST_KILL = 1 << 2,
+ 	MF_SOFT_OFFLINE = 1 << 3,
++	MF_UNPOISON = 1 << 4,
+ };
+ extern int memory_failure(unsigned long pfn, int flags);
+ extern void memory_failure_queue(unsigned long pfn, int flags);
+diff --git a/include/linux/page-flags.h b/include/linux/page-flags.h
+index 18423c2157e8..7e2b90dc7d3f 100644
+--- a/include/linux/page-flags.h
++++ b/include/linux/page-flags.h
+@@ -522,7 +522,11 @@ PAGEFLAG_FALSE(Uncached, uncached)
+ PAGEFLAG(HWPoison, hwpoison, PF_ANY)
+ TESTSCFLAG(HWPoison, hwpoison, PF_ANY)
+ #define __PG_HWPOISON (1UL << PG_hwpoison)
++#define MAGIC_HWPOISON	0x48575053U	/* HWPS */
++extern void SetPageHWPoisonTakenOff(struct page *page);
++extern void ClearPageHWPoisonTakenOff(struct page *page);
+ extern bool take_page_off_buddy(struct page *page);
++extern bool put_page_back_buddy(struct page *page);
+ #else
+ PAGEFLAG_FALSE(HWPoison, hwpoison)
+ #define __PG_HWPOISON 0
+diff --git a/mm/memory-failure.c b/mm/memory-failure.c
+index 810328fe8adb..6a2b4b86b679 100644
+--- a/mm/memory-failure.c
++++ b/mm/memory-failure.c
+@@ -1160,6 +1160,22 @@ static int page_action(struct page_state *ps, struct page *p,
+ 	return (result == MF_RECOVERED || result == MF_DELAYED) ? 0 : -EBUSY;
+ }
+ 
++static inline bool PageHWPoisonTakenOff(struct page *page)
++{
++	return PageHWPoison(page) && page_private(page) == MAGIC_HWPOISON;
++}
++
++void SetPageHWPoisonTakenOff(struct page *page)
++{
++	set_page_private(page, MAGIC_HWPOISON);
++}
++
++void ClearPageHWPoisonTakenOff(struct page *page)
++{
++	if (PageHWPoison(page))
++		set_page_private(page, 0);
++}
++
+ /*
+  * Return true if a page type of a given page is supported by hwpoison
+  * mechanism (while handling could fail), otherwise false.  This function
+@@ -1262,6 +1278,27 @@ static int get_any_page(struct page *p, unsigned long flags)
+ 	return ret;
+ }
+ 
++static int __get_unpoison_page(struct page *page)
++{
++	struct page *head = compound_head(page);
++	int ret = 0;
++	bool hugetlb = false;
++
++	ret = get_hwpoison_huge_page(head, &hugetlb);
++	if (hugetlb)
++		return ret;
++
++	/*
++	 * PageHWPoisonTakenOff pages are not only marked as PG_hwpoison,
++	 * but also isolated from buddy freelist, so need to identify the
++	 * state and have to cancel both operations to unpoison.
++	 */
++	if (PageHWPoisonTakenOff(page))
++		return -EHWPOISON;
++
++	return get_page_unless_zero(page) ? 1 : 0;
++}
++
+ /**
+  * get_hwpoison_page() - Get refcount for memory error handling
+  * @p:		Raw error page (hit by memory error)
+@@ -1278,18 +1315,26 @@ static int get_any_page(struct page *p, unsigned long flags)
+  * extra care for the error page's state (as done in __get_hwpoison_page()),
+  * and has some retry logic in get_any_page().
+  *
++ * When called from unpoison_memory(), the caller should already ensure that
++ * the given page has PG_hwpoison. So it's never reused for other page
++ * allocations, and __get_unpoison_page() never races with them.
++ *
+  * Return: 0 on failure,
+  *         1 on success for in-use pages in a well-defined state,
+  *         -EIO for pages on which we can not handle memory errors,
+  *         -EBUSY when get_hwpoison_page() has raced with page lifecycle
+- *         operations like allocation and free.
++ *         operations like allocation and free,
++ *         -EHWPOISON when the page is hwpoisoned and taken off from buddy.
+  */
+ static int get_hwpoison_page(struct page *p, unsigned long flags)
+ {
+ 	int ret;
+ 
+ 	zone_pcp_disable(page_zone(p));
+-	ret = get_any_page(p, flags);
++	if (flags & MF_UNPOISON)
++		ret = __get_unpoison_page(p);
++	else
++		ret = get_any_page(p, flags);
+ 	zone_pcp_enable(page_zone(p));
+ 
+ 	return ret;
+@@ -1937,6 +1982,28 @@ core_initcall(memory_failure_init);
+ 		pr_info(fmt, pfn);			\
+ })
+ 
++static inline int clear_page_hwpoison(struct ratelimit_state *rs, struct page *p)
++{
++	if (TestClearPageHWPoison(p)) {
++		unpoison_pr_info("Unpoison: Software-unpoisoned page %#lx\n",
++				 page_to_pfn(p), rs);
++		num_poisoned_pages_dec();
++		return 1;
++	}
++	return 0;
++}
++
++static inline int unpoison_taken_off_page(struct ratelimit_state *rs,
++					  struct page *p)
++{
++	if (put_page_back_buddy(p)) {
++		unpoison_pr_info("Unpoison: Software-unpoisoned page %#lx\n",
++				 page_to_pfn(p), rs);
++		return 0;
++	}
++	return -EBUSY;
++}
++
+ /**
+  * unpoison_memory - Unpoison a previously poisoned page
+  * @pfn: Page number of the to be unpoisoned page
+@@ -1953,9 +2020,7 @@ int unpoison_memory(unsigned long pfn)
+ {
+ 	struct page *page;
+ 	struct page *p;
+-	int freeit = 0;
+-	int ret = 0;
+-	unsigned long flags = 0;
++	int ret = -EBUSY;
+ 	static DEFINE_RATELIMIT_STATE(unpoison_rs, DEFAULT_RATELIMIT_INTERVAL,
+ 					DEFAULT_RATELIMIT_BURST);
+ 
+@@ -1991,24 +2056,30 @@ int unpoison_memory(unsigned long pfn)
+ 		goto unlock_mutex;
+ 	}
+ 
+-	if (!get_hwpoison_page(p, flags)) {
+-		if (TestClearPageHWPoison(p))
+-			num_poisoned_pages_dec();
+-		unpoison_pr_info("Unpoison: Software-unpoisoned free page %#lx\n",
+-				 pfn, &unpoison_rs);
++	if (PageSlab(page) || PageTable(page))
+ 		goto unlock_mutex;
+-	}
+ 
+-	if (TestClearPageHWPoison(page)) {
+-		unpoison_pr_info("Unpoison: Software-unpoisoned page %#lx\n",
+-				 pfn, &unpoison_rs);
+-		num_poisoned_pages_dec();
+-		freeit = 1;
+-	}
++	ret = get_hwpoison_page(p, MF_UNPOISON);
++	if (!ret) {
++		if (clear_page_hwpoison(&unpoison_rs, page))
++			ret = 0;
++		else
++			ret = -EBUSY;
++	} else if (ret < 0) {
++		if (ret == -EHWPOISON) {
++			ret = unpoison_taken_off_page(&unpoison_rs, p);
++		} else
++			unpoison_pr_info("Unpoison: failed to grab page %#lx\n",
++					 pfn, &unpoison_rs);
++	} else {
++		int freeit = clear_page_hwpoison(&unpoison_rs, p);
+ 
+-	put_page(page);
+-	if (freeit && !(pfn == my_zero_pfn(0) && page_count(p) == 1))
+ 		put_page(page);
++		if (freeit && !(pfn == my_zero_pfn(0) && page_count(p) == 1)) {
++			put_page(page);
++			ret = 0;
++		}
++	}
+ 
+ unlock_mutex:
+ 	mutex_unlock(&mf_mutex);
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index 99fc65c532f0..d4205e5e41d1 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -19,6 +19,7 @@
+ #include <linux/mm.h>
+ #include <linux/highmem.h>
+ #include <linux/swap.h>
++#include <linux/swapops.h>
+ #include <linux/interrupt.h>
+ #include <linux/pagemap.h>
+ #include <linux/jiffies.h>
+@@ -9508,6 +9509,7 @@ bool take_page_off_buddy(struct page *page)
+ 			del_page_from_free_list(page_head, zone, page_order);
+ 			break_down_buddy_pages(zone, page_head, page, 0,
+ 						page_order, migratetype);
++			SetPageHWPoisonTakenOff(page);
+ 			if (!is_migrate_isolate(migratetype))
+ 				__mod_zone_freepage_state(zone, -1, migratetype);
+ 			ret = true;
+@@ -9519,6 +9521,31 @@ bool take_page_off_buddy(struct page *page)
+ 	spin_unlock_irqrestore(&zone->lock, flags);
+ 	return ret;
+ }
++
++/*
++ * Cancel takeoff done by take_page_off_buddy().
++ */
++bool put_page_back_buddy(struct page *page)
++{
++	struct zone *zone = page_zone(page);
++	unsigned long pfn = page_to_pfn(page);
++	unsigned long flags;
++	int migratetype = get_pfnblock_migratetype(page, pfn);
++	bool ret = false;
++
++	spin_lock_irqsave(&zone->lock, flags);
++	if (put_page_testzero(page)) {
++		ClearPageHWPoisonTakenOff(page);
++		__free_one_page(page, pfn, zone, 0, migratetype, FPI_NONE);
++		if (TestClearPageHWPoison(page)) {
++			num_poisoned_pages_dec();
++			ret = true;
++		}
++	}
++	spin_unlock_irqrestore(&zone->lock, flags);
++
++	return ret;
++}
+ #endif
+ 
+ #ifdef CONFIG_ZONE_DMA

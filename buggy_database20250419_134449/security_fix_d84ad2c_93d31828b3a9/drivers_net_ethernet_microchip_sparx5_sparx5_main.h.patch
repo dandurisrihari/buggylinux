@@ -1,0 +1,99 @@
+commit d84ad2c0d80c3ee1b7d758e2c07d043fcf32d568
+Author: Daniel Machon <daniel.machon@microchip.com>
+Date:   Mon Jan 13 20:36:09 2025 +0100
+
+    net: lan969x: add FDMA implementation
+    
+    The lan969x switch device supports manual frame injection and extraction
+    to and from the switch core, using a number of injection and extraction
+    queues.  This technique is currently supported, but delivers poor
+    performance compared to Frame DMA (FDMA).
+    
+    This lan969x implementation of FDMA, hooks into the existing FDMA for
+    Sparx5, but requires its own RX and TX handling, as lan969x does not
+    support the same native cache coherency that Sparx5 does. Effectively,
+    this means that we are going to use the DMA mapping API for mapping and
+    unmapping TX buffers. The RX loop will utilize the page pool API for
+    efficient RX handling. Other than that, the implementation is largely
+    the same, and utilizes the FDMA library for DCB and DB handling.
+    
+    Some numbers:
+    
+    Manual injection/extraction (before this series):
+    
+    // iperf3 -c 1.0.1.1
+    
+    [ ID] Interval           Transfer     Bitrate
+    [  5]   0.00-10.02  sec   345 MBytes   289 Mbits/sec  sender
+    [  5]   0.00-10.06  sec   345 MBytes   288 Mbits/sec  receiver
+    
+    FDMA (after this series):
+    
+    // iperf3 -c 1.0.1.1
+    
+    [ ID] Interval           Transfer     Bitrate
+    [  5]   0.00-10.03  sec  1.10 GBytes   940 Mbits/sec  sender
+    [  5]   0.00-10.07  sec  1.10 GBytes   936 Mbits/sec  receiver
+    
+    Reviewed-by: Steen Hegelund <Steen.Hegelund@microchip.com>
+    Signed-off-by: Daniel Machon <daniel.machon@microchip.com>
+    Link: https://patch.msgid.link/20250113-sparx5-lan969x-switch-driver-5-v2-5-c468f02fd623@microchip.com
+    Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+diff --git a/drivers/net/ethernet/microchip/sparx5/sparx5_main.h b/drivers/net/ethernet/microchip/sparx5/sparx5_main.h
+index 62f5e5420f83..fe7d8bcc0cd9 100644
+--- a/drivers/net/ethernet/microchip/sparx5/sparx5_main.h
++++ b/drivers/net/ethernet/microchip/sparx5/sparx5_main.h
+@@ -112,6 +112,8 @@ enum sparx5_feature {
+ #define XTR_QUEUE     0
+ #define INJ_QUEUE     0
+ 
++#define FDMA_XTR_CHANNEL		6
++#define FDMA_INJ_CHANNEL		0
+ #define FDMA_DCB_MAX			64
+ #define FDMA_RX_DCB_MAX_DBS		15
+ #define FDMA_TX_DCB_MAX_DBS		1
+@@ -157,11 +159,25 @@ struct sparx5_calendar_data {
+  */
+ struct sparx5_rx {
+ 	struct fdma fdma;
+-	struct sk_buff *skb[FDMA_DCB_MAX][FDMA_RX_DCB_MAX_DBS];
++	struct page_pool *page_pool;
++	union {
++		struct sk_buff *skb[FDMA_DCB_MAX][FDMA_RX_DCB_MAX_DBS];
++		struct page *page[FDMA_DCB_MAX][FDMA_RX_DCB_MAX_DBS];
++	};
+ 	dma_addr_t dma;
+ 	struct napi_struct napi;
+ 	struct net_device *ndev;
+ 	u64 packets;
++	u8 page_order;
++};
++
++/* Used to store information about TX buffers. */
++struct sparx5_tx_buf {
++	struct net_device *dev;
++	struct sk_buff *skb;
++	dma_addr_t dma_addr;
++	bool used;
++	bool ptp;
+ };
+ 
+ /* Frame DMA transmit state:
+@@ -169,6 +185,7 @@ struct sparx5_rx {
+  */
+ struct sparx5_tx {
+ 	struct fdma fdma;
++	struct sparx5_tx_buf *dbs;
+ 	u64 packets;
+ 	u64 dropped;
+ };
+@@ -449,6 +466,8 @@ int sparx5_fdma_napi_callback(struct napi_struct *napi, int weight);
+ int sparx5_fdma_xmit(struct sparx5 *sparx5, u32 *ifh, struct sk_buff *skb,
+ 		     struct net_device *dev);
+ irqreturn_t sparx5_fdma_handler(int irq, void *args);
++void sparx5_fdma_reload(struct sparx5 *sparx5, struct fdma *fdma);
++void sparx5_fdma_injection_mode(struct sparx5 *sparx5);
+ 
+ /* sparx5_mactable.c */
+ void sparx5_mact_pull_work(struct work_struct *work);

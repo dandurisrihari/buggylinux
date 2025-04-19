@@ -1,0 +1,154 @@
+commit d1e879ec600f9b3bdd253167533959facfefb17b
+Author: Miri Korenblit <miriam.rachel.korenblit@intel.com>
+Date:   Sun Feb 16 11:42:40 2025 +0200
+
+    wifi: iwlwifi: add iwlmld sub-driver
+    
+    iwlwifi is the driver of all Intel wifi devices since 2008.
+    Since then, the hardware has changed a lot, but the firmware
+    API has changed even more. The need to keep one driver that
+    supports all those different APIs led us to introduce a new
+    architecture circa 2012 which allowed us to keep the same
+    interface to the hardware (DMAs, Tx queues, etc...) with a
+    new layer to implement the mid-layer between mac80211 and
+    the firmware. The first component is called the 'transport'
+    and the latter is called 'operation_mode' a.k.a  op_mode.
+    
+    In 2013 we took advantage of the new architecture to
+    introduce iwlmvm which allowed us to implement the, then,
+    new firmware API. This op_mode supports 7260 and up, those
+    devices supports support at least VHT.
+    
+    Since then, wifi evolved and so did the firmware. It became
+    much bigger and took a lot of functionality from the driver.
+    It became increasingly hard to keep the same op_mode for the
+    newest devices and we experienced frequent regressions on
+    older devices. In order to avoid those regressions and keep
+    the code maintainable, we decided it was about time to start
+    a new op_mode.
+    
+    iwlmld is a new op_mode that supports BE200 or newer if the
+    firmware being used is 97.ucode or newer. If the user has
+    an older devices or BE200 with .96.ucode, iwlmvm will be
+    loaded. Of course, this op_mode selection is seamless.
+    
+    All the features supported in iwlmvm are supported in
+    iwlmld besides a few seldom used use cases: injection and
+    Hotspot 2.0. Those are under work.
+    
+    A few points about the implementation:
+     * iwlmld doesn't have any mutexes, it relies on the
+       wiphy_lock
+     * iwlmld is more "resource oriented": stations, links and
+       interfaces are allocated and freed only after all the
+       relevant flows are completed.
+     * Firmware notifications' sizes are validated in a more
+       structured way.
+    
+    We would love to see this new op_mode merged in 6.15. The
+    firmware for this new driver (.97.ucode) is not yet publicly
+    available but it'll be sent very soon.
+    People eager to get an early version of this firmware can
+    contact Emmanuel at:
+    emmanuel.grumbach@intel.com
+    
+    I've listed the people who directly contributed
+    code, but many others from various teams have
+    contributed in other ways.
+    
+    Co-developed-by: Johannes Berg <johannes.berg@intel.com>
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+    Co-developed-by: Avraham Stern <avraham.stern@intel.com>
+    Signed-off-by: Avraham Stern <avraham.stern@intel.com>
+    Co-developed-by: Daniel Gabay <daniel.gabay@intel.com>
+    Signed-off-by: Daniel Gabay <daniel.gabay@intel.com>
+    Co-developed-by: Emmanuel Grumbach <emmanuel.grumbach@intel.com>
+    Signed-off-by: Emmanuel Grumbach <emmanuel.grumbach@intel.com>
+    Co-developed-by: Anjaneyulu <pagadala.yesu.anjaneyulu@intel.com>
+    Signed-off-by: Anjaneyulu <pagadala.yesu.anjaneyulu@intel.com>
+    Co-developed-by: Yedidya Benshimol <yedidya.ben.shimol@intel.com>
+    Signed-off-by: Yedidya Benshimol <yedidya.ben.shimol@intel.com>
+    Co-developed-by: Benjamin Berg <benjamin.berg@intel.com>
+    Signed-off-by: Benjamin Berg <benjamin.berg@intel.com>
+    Co-developed-by: Shaul Triebitz <shaul.triebitz@intel.com>
+    Signed-off-by: Shaul Triebitz <shaul.triebitz@intel.com>
+    Signed-off-by: Miri Korenblit <miriam.rachel.korenblit@intel.com>
+    Link: https://lore.kernel.org/linux-wireless/20250216094321.537988-1-miriam.rachel.korenblit@intel.com/
+    [fix Kconfig, fix api/phy.h includes, SPDX tag and coding
+     style issues, duplicated includes per 0-day robot]
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+diff --git a/drivers/net/wireless/intel/iwlwifi/mld/low_latency.h b/drivers/net/wireless/intel/iwlwifi/mld/low_latency.h
+new file mode 100644
+index 000000000000..f59684d235af
+--- /dev/null
++++ b/drivers/net/wireless/intel/iwlwifi/mld/low_latency.h
+@@ -0,0 +1,68 @@
++/* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
++/*
++ * Copyright (C) 2024 Intel Corporation
++ */
++#ifndef __iwl_mld_low_latency_h__
++#define __iwl_mld_low_latency_h__
++
++/**
++ * struct iwl_mld_low_latency_packets_counters - Packets counters
++ * @lock: synchronize the counting in data path against the worker
++ * @vo_vi: per-mac, counts the number of TX and RX voice and video packets
++ */
++struct iwl_mld_low_latency_packets_counters {
++	spinlock_t lock;
++	u32 vo_vi[NUM_MAC_INDEX_DRIVER];
++} ____cacheline_aligned_in_smp;
++
++/**
++ * enum iwl_mld_low_latency_cause - low-latency set causes
++ *
++ * @LOW_LATENCY_TRAFFIC: indicates low-latency traffic was detected
++ * @LOW_LATENCY_DEBUGFS: low-latency mode set from debugfs
++ * @LOW_LATENCY_VIF_TYPE: low-latency mode set because of vif type (AP)
++ */
++enum iwl_mld_low_latency_cause {
++	LOW_LATENCY_TRAFFIC	= BIT(0),
++	LOW_LATENCY_DEBUGFS	= BIT(1),
++	LOW_LATENCY_VIF_TYPE	= BIT(2),
++};
++
++/**
++ * struct iwl_mld_low_latency - Manage low-latency detection and activation.
++ * @work: this work is used to detect low-latency by monitoring the number of
++ *	voice and video packets transmitted in a period of time. If the
++ *	threshold is reached, low-latency is activated. When active,
++ *	it is deactivated if the threshold is not reached within a
++ *	10-second period.
++ * @timestamp: timestamp of the last update.
++ * @window_start: per-mac, timestamp of the start of the current window. when
++ *	the window is over, the counters are reset.
++ * @pkts_counters: per-queue array voice/video packet counters
++ * @result: per-mac latest low-latency result
++ * @stopped: if true, ignore the requests to update the counters
++ */
++struct iwl_mld_low_latency {
++	struct wiphy_delayed_work work;
++	unsigned long timestamp;
++	unsigned long window_start[NUM_MAC_INDEX_DRIVER];
++	struct iwl_mld_low_latency_packets_counters *pkts_counters;
++	bool result[NUM_MAC_INDEX_DRIVER];
++	bool stopped;
++};
++
++int iwl_mld_low_latency_init(struct iwl_mld *mld);
++void iwl_mld_low_latency_free(struct iwl_mld *mld);
++void iwl_mld_low_latency_restart_cleanup(struct iwl_mld *mld);
++void iwl_mld_vif_update_low_latency(struct iwl_mld *mld,
++				    struct ieee80211_vif *vif,
++				    bool low_latency,
++				    enum iwl_mld_low_latency_cause cause);
++void iwl_mld_low_latency_update_counters(struct iwl_mld *mld,
++					 struct ieee80211_hdr *hdr,
++					 struct ieee80211_sta *sta,
++					 u8 queue);
++void iwl_mld_low_latency_stop(struct iwl_mld *mld);
++void iwl_mld_low_latency_restart(struct iwl_mld *mld);
++
++#endif /* __iwl_mld_low_latency_h__ */

@@ -1,0 +1,89 @@
+diff --git a/arch/alpha/include/uapi/asm/mman.h b/arch/alpha/include/uapi/asm/mman.h
+index 2dbdf59258d9..f9d4e6b6d4bd 100644
+--- a/arch/alpha/include/uapi/asm/mman.h
++++ b/arch/alpha/include/uapi/asm/mman.h
+@@ -32,6 +32,7 @@
+ #define MAP_NONBLOCK	0x40000		/* do not block on IO */
+ #define MAP_STACK	0x80000		/* give out an address that is best suited for process/thread stacks */
+ #define MAP_HUGETLB	0x100000	/* create a huge page mapping */
++#define MAP_FIXED_NOREPLACE	0x200000/* MAP_FIXED which doesn't unmap underlying mapping */
+ 
+ #define MS_ASYNC	1		/* sync memory asynchronously */
+ #define MS_SYNC		2		/* synchronous memory sync */
+diff --git a/arch/mips/include/uapi/asm/mman.h b/arch/mips/include/uapi/asm/mman.h
+index 606e02ca4b6c..3035ca499cd8 100644
+--- a/arch/mips/include/uapi/asm/mman.h
++++ b/arch/mips/include/uapi/asm/mman.h
+@@ -50,6 +50,7 @@
+ #define MAP_NONBLOCK	0x20000		/* do not block on IO */
+ #define MAP_STACK	0x40000		/* give out an address that is best suited for process/thread stacks */
+ #define MAP_HUGETLB	0x80000		/* create a huge page mapping */
++#define MAP_FIXED_NOREPLACE 0x100000	/* MAP_FIXED which doesn't unmap underlying mapping */
+ 
+ /*
+  * Flags for msync
+diff --git a/arch/parisc/include/uapi/asm/mman.h b/arch/parisc/include/uapi/asm/mman.h
+index a056a642bb31..870fbf8c7088 100644
+--- a/arch/parisc/include/uapi/asm/mman.h
++++ b/arch/parisc/include/uapi/asm/mman.h
+@@ -26,6 +26,7 @@
+ #define MAP_NONBLOCK	0x20000		/* do not block on IO */
+ #define MAP_STACK	0x40000		/* give out an address that is best suited for process/thread stacks */
+ #define MAP_HUGETLB	0x80000		/* create a huge page mapping */
++#define MAP_FIXED_NOREPLACE 0x100000	/* MAP_FIXED which doesn't unmap underlying mapping */
+ 
+ #define MS_SYNC		1		/* synchronous memory sync */
+ #define MS_ASYNC	2		/* sync memory asynchronously */
+diff --git a/arch/xtensa/include/uapi/asm/mman.h b/arch/xtensa/include/uapi/asm/mman.h
+index 3e9d01ada81f..58f29a9d895d 100644
+--- a/arch/xtensa/include/uapi/asm/mman.h
++++ b/arch/xtensa/include/uapi/asm/mman.h
+@@ -57,6 +57,7 @@
+ #define MAP_NONBLOCK	0x20000		/* do not block on IO */
+ #define MAP_STACK	0x40000		/* give out an address that is best suited for process/thread stacks */
+ #define MAP_HUGETLB	0x80000		/* create a huge page mapping */
++#define MAP_FIXED_NOREPLACE 0x100000	/* MAP_FIXED which doesn't unmap underlying mapping */
+ #ifdef CONFIG_MMAP_ALLOW_UNINITIALIZED
+ # define MAP_UNINITIALIZED 0x4000000	/* For anonymous mmap, memory could be
+ 					 * uninitialized */
+diff --git a/include/uapi/asm-generic/mman-common.h b/include/uapi/asm-generic/mman-common.h
+index f8b134f5608f..4aa65a8d7e92 100644
+--- a/include/uapi/asm-generic/mman-common.h
++++ b/include/uapi/asm-generic/mman-common.h
+@@ -26,6 +26,7 @@
+ #else
+ # define MAP_UNINITIALIZED 0x0		/* Don't support this flag */
+ #endif
++#define MAP_FIXED_NOREPLACE	0x80000	/* MAP_FIXED which doesn't unmap underlying mapping */
+ 
+ /*
+  * Flags for mlock
+diff --git a/mm/mmap.c b/mm/mmap.c
+index f2154fc2548b..188f195883b9 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -1342,6 +1342,10 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
+ 		if (!(file && path_noexec(&file->f_path)))
+ 			prot |= PROT_EXEC;
+ 
++	/* force arch specific MAP_FIXED handling in get_unmapped_area */
++	if (flags & MAP_FIXED_NOREPLACE)
++		flags |= MAP_FIXED;
++
+ 	if (!(flags & MAP_FIXED))
+ 		addr = round_hint_to_min(addr);
+ 
+@@ -1365,6 +1369,13 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
+ 	if (offset_in_page(addr))
+ 		return addr;
+ 
++	if (flags & MAP_FIXED_NOREPLACE) {
++		struct vm_area_struct *vma = find_vma(mm, addr);
++
++		if (vma && vma->vm_start <= addr)
++			return -EEXIST;
++	}
++
+ 	if (prot == PROT_EXEC) {
+ 		pkey = execute_only_pkey(mm);
+ 		if (pkey < 0)

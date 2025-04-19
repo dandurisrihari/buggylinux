@@ -1,0 +1,44 @@
+commit a95386f0390ab602904d11fe6bd7ea5ef9b136f8
+Author: Gustavo A. R. Silva <gustavo@embeddedor.com>
+Date:   Fri Dec 21 15:47:53 2018 -0600
+
+    nfc: af_nfc: Fix Spectre v1 vulnerability
+    
+    proto is indirectly controlled by user-space, hence leading to
+    a potential exploitation of the Spectre variant 1 vulnerability.
+    
+    This issue was detected with the help of Smatch:
+    
+    net/nfc/af_nfc.c:42 nfc_sock_create() warn: potential spectre issue 'proto_tab' [w] (local cap)
+    
+    Fix this by sanitizing proto before using it to index proto_tab.
+    
+    Notice that given that speculation windows are large, the policy is
+    to kill the speculation on the first load and not worry if it can be
+    completed with a dependent load/store [1].
+    
+    [1] https://marc.info/?l=linux-kernel&m=152449131114778&w=2
+    
+    Signed-off-by: Gustavo A. R. Silva <gustavo@embeddedor.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/nfc/af_nfc.c b/net/nfc/af_nfc.c
+index d3e594eb36d0..256f3c57059e 100644
+--- a/net/nfc/af_nfc.c
++++ b/net/nfc/af_nfc.c
+@@ -21,6 +21,7 @@
+ 
+ #include <linux/nfc.h>
+ #include <linux/module.h>
++#include <linux/nospec.h>
+ 
+ #include "nfc.h"
+ 
+@@ -37,6 +38,7 @@ static int nfc_sock_create(struct net *net, struct socket *sock, int proto,
+ 
+ 	if (proto < 0 || proto >= NFC_SOCKPROTO_MAX)
+ 		return -EINVAL;
++	proto = array_index_nospec(proto, NFC_SOCKPROTO_MAX);
+ 
+ 	read_lock(&proto_tab_lock);
+ 	if (proto_tab[proto] &&	try_module_get(proto_tab[proto]->owner)) {

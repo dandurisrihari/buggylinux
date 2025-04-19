@@ -1,0 +1,211 @@
+diff --git a/include/linux/slab.h b/include/linux/slab.h
+index 922bf15794f7..a9200d453087 100644
+--- a/include/linux/slab.h
++++ b/include/linux/slab.h
+@@ -570,6 +570,21 @@ void *kmem_cache_alloc_node_noprof(struct kmem_cache *s, gfp_t flags,
+ 				   int node) __assume_slab_alignment __malloc;
+ #define kmem_cache_alloc_node(...)	alloc_hooks(kmem_cache_alloc_node_noprof(__VA_ARGS__))
+ 
++/*
++ * These macros allow declaring a kmem_buckets * parameter alongside size, which
++ * can be compiled out with CONFIG_SLAB_BUCKETS=n so that a large number of call
++ * sites don't have to pass NULL.
++ */
++#ifdef CONFIG_SLAB_BUCKETS
++#define DECL_BUCKET_PARAMS(_size, _b)	size_t (_size), kmem_buckets *(_b)
++#define PASS_BUCKET_PARAMS(_size, _b)	(_size), (_b)
++#define PASS_BUCKET_PARAM(_b)		(_b)
++#else
++#define DECL_BUCKET_PARAMS(_size, _b)	size_t (_size)
++#define PASS_BUCKET_PARAMS(_size, _b)	(_size)
++#define PASS_BUCKET_PARAM(_b)		NULL
++#endif
++
+ /*
+  * The following functions are not to be used directly and are intended only
+  * for internal use from kmalloc() and kmalloc_node()
+@@ -579,7 +594,7 @@ void *kmem_cache_alloc_node_noprof(struct kmem_cache *s, gfp_t flags,
+ void *__kmalloc_noprof(size_t size, gfp_t flags)
+ 				__assume_kmalloc_alignment __alloc_size(1);
+ 
+-void *__kmalloc_node_noprof(size_t size, gfp_t flags, int node)
++void *__kmalloc_node_noprof(DECL_BUCKET_PARAMS(size, b), gfp_t flags, int node)
+ 				__assume_kmalloc_alignment __alloc_size(1);
+ 
+ void *__kmalloc_cache_noprof(struct kmem_cache *s, gfp_t flags, size_t size)
+@@ -680,7 +695,7 @@ static __always_inline __alloc_size(1) void *kmalloc_node_noprof(size_t size, gf
+ 				kmalloc_caches[kmalloc_type(flags, _RET_IP_)][index],
+ 				flags, node, size);
+ 	}
+-	return __kmalloc_node_noprof(size, flags, node);
++	return __kmalloc_node_noprof(PASS_BUCKET_PARAMS(size, NULL), flags, node);
+ }
+ #define kmalloc_node(...)			alloc_hooks(kmalloc_node_noprof(__VA_ARGS__))
+ 
+@@ -731,8 +746,10 @@ static inline __realloc_size(2, 3) void * __must_check krealloc_array_noprof(voi
+  */
+ #define kcalloc(n, size, flags)		kmalloc_array(n, size, (flags) | __GFP_ZERO)
+ 
+-void *kmalloc_node_track_caller_noprof(size_t size, gfp_t flags, int node,
+-				  unsigned long caller) __alloc_size(1);
++void *__kmalloc_node_track_caller_noprof(DECL_BUCKET_PARAMS(size, b), gfp_t flags, int node,
++					 unsigned long caller) __alloc_size(1);
++#define kmalloc_node_track_caller_noprof(size, flags, node, caller) \
++	__kmalloc_node_track_caller_noprof(PASS_BUCKET_PARAMS(size, NULL), flags, node, caller)
+ #define kmalloc_node_track_caller(...)		\
+ 	alloc_hooks(kmalloc_node_track_caller_noprof(__VA_ARGS__, _RET_IP_))
+ 
+@@ -758,7 +775,7 @@ static inline __alloc_size(1, 2) void *kmalloc_array_node_noprof(size_t n, size_
+ 		return NULL;
+ 	if (__builtin_constant_p(n) && __builtin_constant_p(size))
+ 		return kmalloc_node_noprof(bytes, flags, node);
+-	return __kmalloc_node_noprof(bytes, flags, node);
++	return __kmalloc_node_noprof(PASS_BUCKET_PARAMS(bytes, NULL), flags, node);
+ }
+ #define kmalloc_array_node(...)			alloc_hooks(kmalloc_array_node_noprof(__VA_ARGS__))
+ 
+diff --git a/kernel/configs/hardening.config b/kernel/configs/hardening.config
+index 8a7ce7a6b3ab..3fabb8f55ef6 100644
+--- a/kernel/configs/hardening.config
++++ b/kernel/configs/hardening.config
+@@ -20,6 +20,7 @@ CONFIG_RANDOMIZE_MEMORY=y
+ # Randomize allocator freelists, harden metadata.
+ CONFIG_SLAB_FREELIST_RANDOM=y
+ CONFIG_SLAB_FREELIST_HARDENED=y
++CONFIG_SLAB_BUCKETS=y
+ CONFIG_SHUFFLE_PAGE_ALLOCATOR=y
+ CONFIG_RANDOM_KMALLOC_CACHES=y
+ 
+diff --git a/mm/Kconfig b/mm/Kconfig
+index b4cb45255a54..e0dfb268717c 100644
+--- a/mm/Kconfig
++++ b/mm/Kconfig
+@@ -273,6 +273,23 @@ config SLAB_FREELIST_HARDENED
+ 	  sacrifices to harden the kernel slab allocator against common
+ 	  freelist exploit methods.
+ 
++config SLAB_BUCKETS
++	bool "Support allocation from separate kmalloc buckets"
++	depends on !SLUB_TINY
++	default SLAB_FREELIST_HARDENED
++	help
++	  Kernel heap attacks frequently depend on being able to create
++	  specifically-sized allocations with user-controlled contents
++	  that will be allocated into the same kmalloc bucket as a
++	  target object. To avoid sharing these allocation buckets,
++	  provide an explicitly separated set of buckets to be used for
++	  user-controlled allocations. This may very slightly increase
++	  memory fragmentation, though in practice it's only a handful
++	  of extra pages since the bulk of user-controlled allocations
++	  are relatively long-lived.
++
++	  If unsure, say Y.
++
+ config SLUB_STATS
+ 	default n
+ 	bool "Enable performance statistics"
+diff --git a/mm/slab.h b/mm/slab.h
+index b16e63191578..d5e8034af9d5 100644
+--- a/mm/slab.h
++++ b/mm/slab.h
+@@ -403,16 +403,18 @@ static inline unsigned int size_index_elem(unsigned int bytes)
+  * KMALLOC_MAX_CACHE_SIZE and the caller must check that.
+  */
+ static inline struct kmem_cache *
+-kmalloc_slab(size_t size, gfp_t flags, unsigned long caller)
++kmalloc_slab(size_t size, kmem_buckets *b, gfp_t flags, unsigned long caller)
+ {
+ 	unsigned int index;
+ 
++	if (!b)
++		b = &kmalloc_caches[kmalloc_type(flags, caller)];
+ 	if (size <= 192)
+ 		index = kmalloc_size_index[size_index_elem(size)];
+ 	else
+ 		index = fls(size - 1);
+ 
+-	return kmalloc_caches[kmalloc_type(flags, caller)][index];
++	return (*b)[index];
+ }
+ 
+ gfp_t kmalloc_fix_flags(gfp_t flags);
+diff --git a/mm/slab_common.c b/mm/slab_common.c
+index ff60f91e4edc..bcc1e13d7f86 100644
+--- a/mm/slab_common.c
++++ b/mm/slab_common.c
+@@ -703,7 +703,7 @@ size_t kmalloc_size_roundup(size_t size)
+ 		 * The flags don't matter since size_index is common to all.
+ 		 * Neither does the caller for just getting ->object_size.
+ 		 */
+-		return kmalloc_slab(size, GFP_KERNEL, 0)->object_size;
++		return kmalloc_slab(size, NULL, GFP_KERNEL, 0)->object_size;
+ 	}
+ 
+ 	/* Above the smaller buckets, size is a multiple of page size. */
+diff --git a/mm/slub.c b/mm/slub.c
+index 3d19a0ee411f..80f0a51242d1 100644
+--- a/mm/slub.c
++++ b/mm/slub.c
+@@ -4117,7 +4117,7 @@ void *__kmalloc_large_node_noprof(size_t size, gfp_t flags, int node)
+ EXPORT_SYMBOL(__kmalloc_large_node_noprof);
+ 
+ static __always_inline
+-void *__do_kmalloc_node(size_t size, gfp_t flags, int node,
++void *__do_kmalloc_node(size_t size, kmem_buckets *b, gfp_t flags, int node,
+ 			unsigned long caller)
+ {
+ 	struct kmem_cache *s;
+@@ -4133,32 +4133,32 @@ void *__do_kmalloc_node(size_t size, gfp_t flags, int node,
+ 	if (unlikely(!size))
+ 		return ZERO_SIZE_PTR;
+ 
+-	s = kmalloc_slab(size, flags, caller);
++	s = kmalloc_slab(size, b, flags, caller);
+ 
+ 	ret = slab_alloc_node(s, NULL, flags, node, caller, size);
+ 	ret = kasan_kmalloc(s, ret, size, flags);
+ 	trace_kmalloc(caller, ret, size, s->size, flags, node);
+ 	return ret;
+ }
+-
+-void *__kmalloc_node_noprof(size_t size, gfp_t flags, int node)
++void *__kmalloc_node_noprof(DECL_BUCKET_PARAMS(size, b), gfp_t flags, int node)
+ {
+-	return __do_kmalloc_node(size, flags, node, _RET_IP_);
++	return __do_kmalloc_node(size, PASS_BUCKET_PARAM(b), flags, node, _RET_IP_);
+ }
+ EXPORT_SYMBOL(__kmalloc_node_noprof);
+ 
+ void *__kmalloc_noprof(size_t size, gfp_t flags)
+ {
+-	return __do_kmalloc_node(size, flags, NUMA_NO_NODE, _RET_IP_);
++	return __do_kmalloc_node(size, NULL, flags, NUMA_NO_NODE, _RET_IP_);
+ }
+ EXPORT_SYMBOL(__kmalloc_noprof);
+ 
+-void *kmalloc_node_track_caller_noprof(size_t size, gfp_t flags,
+-				       int node, unsigned long caller)
++void *__kmalloc_node_track_caller_noprof(DECL_BUCKET_PARAMS(size, b), gfp_t flags,
++					 int node, unsigned long caller)
+ {
+-	return __do_kmalloc_node(size, flags, node, caller);
++	return __do_kmalloc_node(size, PASS_BUCKET_PARAM(b), flags, node, caller);
++
+ }
+-EXPORT_SYMBOL(kmalloc_node_track_caller_noprof);
++EXPORT_SYMBOL(__kmalloc_node_track_caller_noprof);
+ 
+ void *__kmalloc_cache_noprof(struct kmem_cache *s, gfp_t gfpflags, size_t size)
+ {
+diff --git a/scripts/kernel-doc b/scripts/kernel-doc
+index 95a59ac78f82..2791f8195203 100755
+--- a/scripts/kernel-doc
++++ b/scripts/kernel-doc
+@@ -1729,6 +1729,7 @@ sub dump_function($$) {
+     $prototype =~ s/__printf\s*\(\s*\d*\s*,\s*\d*\s*\) +//;
+     $prototype =~ s/__(?:re)?alloc_size\s*\(\s*\d+\s*(?:,\s*\d+\s*)?\) +//;
+     $prototype =~ s/__diagnose_as\s*\(\s*\S+\s*(?:,\s*\d+\s*)*\) +//;
++    $prototype =~ s/DECL_BUCKET_PARAMS\s*\(\s*(\S+)\s*,\s*(\S+)\s*\)/$1, $2/;
+     my $define = $prototype =~ s/^#\s*define\s+//; #ak added
+     $prototype =~ s/__attribute_const__ +//;
+     $prototype =~ s/__attribute__\s*\(\(

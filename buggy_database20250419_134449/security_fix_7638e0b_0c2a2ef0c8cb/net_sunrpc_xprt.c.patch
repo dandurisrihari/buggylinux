@@ -1,0 +1,44 @@
+commit 7638e0bfaed1b653d3ca663e560e9ffb44bb1030
+Author: Chuck Lever <chuck.lever@oracle.com>
+Date:   Wed Mar 31 13:22:14 2021 -0400
+
+    SUNRPC: Move fault injection call sites
+    
+    I've hit some crashes that occur in the xprt_rdma_inject_disconnect
+    path. It appears that, for some provides, rdma_disconnect() can
+    take so long that the transport can disconnect and release its
+    hardware resources while rdma_disconnect() is still running,
+    resulting in a UAF in the provider.
+    
+    The transport's fault injection method may depend on the stability
+    of transport data structures. That means it needs to be invoked
+    only from contexts that hold the transport write lock.
+    
+    Fixes: 4a0682583988 ("SUNRPC: Transport fault injection")
+    Signed-off-by: Chuck Lever <chuck.lever@oracle.com>
+    Signed-off-by: Trond Myklebust <trond.myklebust@hammerspace.com>
+
+diff --git a/net/sunrpc/xprt.c b/net/sunrpc/xprt.c
+index a853f75d4968..80c94ead4aa0 100644
+--- a/net/sunrpc/xprt.c
++++ b/net/sunrpc/xprt.c
+@@ -1485,7 +1485,10 @@ bool xprt_prepare_transmit(struct rpc_task *task)
+ 
+ void xprt_end_transmit(struct rpc_task *task)
+ {
+-	xprt_release_write(task->tk_rqstp->rq_xprt, task);
++	struct rpc_xprt	*xprt = task->tk_rqstp->rq_xprt;
++
++	xprt_inject_disconnect(xprt);
++	xprt_release_write(xprt, task);
+ }
+ 
+ /**
+@@ -1887,7 +1890,6 @@ void xprt_release(struct rpc_task *task)
+ 	spin_unlock(&xprt->transport_lock);
+ 	if (req->rq_buffer)
+ 		xprt->ops->buf_free(task);
+-	xprt_inject_disconnect(xprt);
+ 	xdr_free_bvec(&req->rq_rcv_buf);
+ 	xdr_free_bvec(&req->rq_snd_buf);
+ 	if (req->rq_cred != NULL)

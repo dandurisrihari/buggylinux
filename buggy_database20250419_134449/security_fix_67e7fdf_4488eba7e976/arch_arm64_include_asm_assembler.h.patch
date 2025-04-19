@@ -1,0 +1,53 @@
+commit 67e7fdfcc6824a4f768d76d89377b33baad58fad
+Author: Steve Capper <steve.capper@arm.com>
+Date:   Thu Dec 6 22:50:41 2018 +0000
+
+    arm64: mm: introduce 52-bit userspace support
+    
+    On arm64 there is optional support for a 52-bit virtual address space.
+    To exploit this one has to be running with a 64KB page size and be
+    running on hardware that supports this.
+    
+    For an arm64 kernel supporting a 48 bit VA with a 64KB page size,
+    some changes are needed to support a 52-bit userspace:
+     * TCR_EL1.T0SZ needs to be 12 instead of 16,
+     * TASK_SIZE needs to reflect the new size.
+    
+    This patch implements the above when the support for 52-bit VAs is
+    detected at early boot time.
+    
+    On arm64 userspace addresses translation is controlled by TTBR0_EL1. As
+    well as userspace, TTBR0_EL1 controls:
+     * The identity mapping,
+     * EFI runtime code.
+    
+    It is possible to run a kernel with an identity mapping that has a
+    larger VA size than userspace (and for this case __cpu_set_tcr_t0sz()
+    would set TCR_EL1.T0SZ as appropriate). However, when the conditions for
+    52-bit userspace are met; it is possible to keep TCR_EL1.T0SZ fixed at
+    12. Thus in this patch, the TCR_EL1.T0SZ size changing logic is
+    disabled.
+    
+    Reviewed-by: Catalin Marinas <catalin.marinas@arm.com>
+    Signed-off-by: Steve Capper <steve.capper@arm.com>
+    Signed-off-by: Will Deacon <will.deacon@arm.com>
+
+diff --git a/arch/arm64/include/asm/assembler.h b/arch/arm64/include/asm/assembler.h
+index ba609e0439e8..122d91d4097a 100644
+--- a/arch/arm64/include/asm/assembler.h
++++ b/arch/arm64/include/asm/assembler.h
+@@ -357,11 +357,10 @@ alternative_endif
+ 	.endm
+ 
+ /*
+- * tcr_set_idmap_t0sz - update TCR.T0SZ so that we can load the ID map
++ * tcr_set_t0sz - update TCR.T0SZ so that we can load the ID map
+  */
+-	.macro	tcr_set_idmap_t0sz, valreg, tmpreg
+-	ldr_l	\tmpreg, idmap_t0sz
+-	bfi	\valreg, \tmpreg, #TCR_T0SZ_OFFSET, #TCR_TxSZ_WIDTH
++	.macro	tcr_set_t0sz, valreg, t0sz
++	bfi	\valreg, \t0sz, #TCR_T0SZ_OFFSET, #TCR_TxSZ_WIDTH
+ 	.endm
+ 
+ /*

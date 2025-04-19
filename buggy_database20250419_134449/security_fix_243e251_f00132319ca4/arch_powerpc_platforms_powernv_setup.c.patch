@@ -1,0 +1,83 @@
+commit 243e25112d06b348f087a6f7aba4bbc288285bdd
+Author: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+Date:   Wed Apr 5 17:54:50 2017 +1000
+
+    powerpc/xive: Native exploitation of the XIVE interrupt controller
+    
+    The XIVE interrupt controller is the new interrupt controller
+    found in POWER9. It supports advanced virtualization capabilities
+    among other things.
+    
+    Currently we use a set of firmware calls that simulate the old
+    "XICS" interrupt controller but this is fairly inefficient.
+    
+    This adds the framework for using XIVE along with a native
+    backend which OPAL for configuration. Later, a backend allowing
+    the use in a KVM or PowerVM guest will also be provided.
+    
+    This disables some fast path for interrupts in KVM when XIVE is
+    enabled as these rely on the firmware emulation code which is no
+    longer available when the XIVE is used natively by Linux.
+    
+    A latter patch will make KVM also directly exploit the XIVE, thus
+    recovering the lost performance (and more).
+    
+    Signed-off-by: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+    [mpe: Fixup pr_xxx("XIVE:"...), don't split pr_xxx() strings,
+     tweak Kconfig so XIVE_NATIVE selects XIVE and depends on POWERNV,
+     fix build errors when SMP=n, fold in fixes from Ben:
+       Don't call cpu_online() on an invalid CPU number
+       Fix irq target selection returning out of bounds cpu#
+       Extra sanity checks on cpu numbers
+     ]
+    Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+
+diff --git a/arch/powerpc/platforms/powernv/setup.c b/arch/powerpc/platforms/powernv/setup.c
+index d50c7d99baaf..adceac978d18 100644
+--- a/arch/powerpc/platforms/powernv/setup.c
++++ b/arch/powerpc/platforms/powernv/setup.c
+@@ -32,6 +32,7 @@
+ #include <asm/machdep.h>
+ #include <asm/firmware.h>
+ #include <asm/xics.h>
++#include <asm/xive.h>
+ #include <asm/opal.h>
+ #include <asm/kexec.h>
+ #include <asm/smp.h>
+@@ -76,7 +77,9 @@ static void __init pnv_init(void)
+ 
+ static void __init pnv_init_IRQ(void)
+ {
+-	xics_init();
++	/* Try using a XIVE if available, otherwise use a XICS */
++	if (!xive_native_init())
++		xics_init();
+ 
+ 	WARN_ON(!ppc_md.get_irq);
+ }
+@@ -218,10 +221,12 @@ static void pnv_kexec_wait_secondaries_down(void)
+ 
+ static void pnv_kexec_cpu_down(int crash_shutdown, int secondary)
+ {
+-	xics_kexec_teardown_cpu(secondary);
++	if (xive_enabled())
++		xive_kexec_teardown_cpu(secondary);
++	else
++		xics_kexec_teardown_cpu(secondary);
+ 
+ 	/* On OPAL, we return all CPUs to firmware */
+-
+ 	if (!firmware_has_feature(FW_FEATURE_OPAL))
+ 		return;
+ 
+@@ -237,6 +242,10 @@ static void pnv_kexec_cpu_down(int crash_shutdown, int secondary)
+ 		/* Primary waits for the secondaries to have reached OPAL */
+ 		pnv_kexec_wait_secondaries_down();
+ 
++		/* Switch XIVE back to emulation mode */
++		if (xive_enabled())
++			xive_shutdown();
++
+ 		/*
+ 		 * We might be running as little-endian - now that interrupts
+ 		 * are disabled, reset the HILE bit to big-endian so we don't

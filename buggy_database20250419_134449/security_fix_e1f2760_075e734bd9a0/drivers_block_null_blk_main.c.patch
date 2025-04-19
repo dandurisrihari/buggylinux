@@ -1,0 +1,70 @@
+commit e1f2760ba3478fa3f8c48db8e91fbe3df8bea2f8
+Author: Justin Stitt <justinstitt@google.com>
+Date:   Tue Sep 19 05:30:35 2023 +0000
+
+    null_blk: replace strncpy with strscpy
+    
+    `strncpy` is deprecated for use on NUL-terminated destination strings [1].
+    
+    We should favor a more robust and less ambiguous interface.
+    
+    We expect that both `nullb->disk_name` and `disk->disk_name` be
+    NUL-terminated:
+    |     snprintf(nullb->disk_name, sizeof(nullb->disk_name),
+    |              "%s", config_item_name(&dev->group.cg_item));
+    ...
+    |       pr_info("disk %s created\n", nullb->disk_name);
+    
+    It seems like NUL-padding may be required due to __assign_disk_name()
+    utilizing a memcpy as opposed to a `str*cpy` api.
+    | static inline void __assign_disk_name(char *name, struct gendisk *disk)
+    | {
+    |       if (disk)
+    |               memcpy(name, disk->disk_name, DISK_NAME_LEN);
+    |       else
+    |               memset(name, 0, DISK_NAME_LEN);
+    | }
+    
+    Then we go and print it with `__print_disk_name` which wraps `nullb_trace_disk_name()`.
+    | #define __print_disk_name(name) nullb_trace_disk_name(p, name)
+    
+    This function obviously expects a NUL-terminated string.
+    | const char *nullb_trace_disk_name(struct trace_seq *p, char *name)
+    | {
+    |       const char *ret = trace_seq_buffer_ptr(p);
+    |
+    |       if (name && *name)
+    |               trace_seq_printf(p, "disk=%s, ", name);
+    |       trace_seq_putc(p, 0);
+    |
+    |       return ret;
+    | }
+    
+    >From the above, we need both 1) a NUL-terminated string and 2) a
+    NUL-padded string. So, let's use strscpy_pad() as per Kees' suggestion
+    from v1.
+    
+    Link: https://www.kernel.org/doc/html/latest/process/deprecated.html#strncpy-on-nul-terminated-strings [1]
+    Link: https://github.com/KSPP/linux/issues/90
+    Cc: linux-hardening@vger.kernel.org
+    Cc: Kees Cook <keescook@chromium.org>
+    Cc: Nick Desaulniers <ndesaulniers@google.com>
+    Cc: Nathan Chancellor <nathan@kernel.org>
+    Signed-off-by: Justin Stitt <justinstitt@google.com>
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Link: https://lore.kernel.org/r/20230919-strncpy-drivers-block-null_blk-main-c-v3-1-10cf0a87a2c3@google.com
+    Signed-off-by: Jens Axboe <axboe@kernel.dk>
+
+diff --git a/drivers/block/null_blk/main.c b/drivers/block/null_blk/main.c
+index 79d6cd3c3d41..22a3cf7f32e2 100644
+--- a/drivers/block/null_blk/main.c
++++ b/drivers/block/null_blk/main.c
+@@ -1966,7 +1966,7 @@ static int null_gendisk_register(struct nullb *nullb)
+ 	else
+ 		disk->fops		= &null_bio_ops;
+ 	disk->private_data	= nullb;
+-	strncpy(disk->disk_name, nullb->disk_name, DISK_NAME_LEN);
++	strscpy_pad(disk->disk_name, nullb->disk_name, DISK_NAME_LEN);
+ 
+ 	if (nullb->dev->zoned) {
+ 		int ret = null_register_zoned_dev(nullb);

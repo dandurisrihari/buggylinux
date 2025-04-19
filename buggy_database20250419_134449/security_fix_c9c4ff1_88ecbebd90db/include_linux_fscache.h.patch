@@ -1,0 +1,78 @@
+commit c9c4ff12df110feb1b91951010f673f4b16e49e8
+Author: David Howells <dhowells@redhat.com>
+Date:   Mon Nov 27 13:58:07 2023 +0000
+
+    netfs: Move pinning-for-writeback from fscache to netfs
+    
+    Move the resource pinning-for-writeback from fscache code to netfslib code.
+    This is used to keep a cache backing object pinned whilst we have dirty
+    pages on the netfs inode in the pagecache such that VM writeback will be
+    able to reach it.
+    
+    Whilst we're at it, switch the parameters of netfs_unpin_writeback() to
+    match ->write_inode() so that it can be used for that directly.
+    
+    Note that this mechanism could be more generically useful than that for
+    network filesystems.  Quite often they have to keep around other resources
+    (e.g. authentication tokens or network connections) until the writeback is
+    complete.
+    
+    Signed-off-by: David Howells <dhowells@redhat.com>
+    Reviewed-by: Jeff Layton <jlayton@kernel.org>
+    cc: linux-cachefs@redhat.com
+    cc: linux-fsdevel@vger.kernel.org
+    cc: linux-mm@kvack.org
+
+diff --git a/include/linux/fscache.h b/include/linux/fscache.h
+index 9ed6696aee7a..6e8562cbcc43 100644
+--- a/include/linux/fscache.h
++++ b/include/linux/fscache.h
+@@ -626,48 +626,6 @@ static inline void fscache_write_to_cache(struct fscache_cookie *cookie,
+ 
+ }
+ 
+-#if __fscache_available
+-bool fscache_dirty_folio(struct address_space *mapping, struct folio *folio,
+-		struct fscache_cookie *cookie);
+-#else
+-#define fscache_dirty_folio(MAPPING, FOLIO, COOKIE) \
+-		filemap_dirty_folio(MAPPING, FOLIO)
+-#endif
+-
+-/**
+- * fscache_unpin_writeback - Unpin writeback resources
+- * @wbc: The writeback control
+- * @cookie: The cookie referring to the cache object
+- *
+- * Unpin the writeback resources pinned by fscache_dirty_folio().  This is
+- * intended to be called by the netfs's ->write_inode() method.
+- */
+-static inline void fscache_unpin_writeback(struct writeback_control *wbc,
+-					   struct fscache_cookie *cookie)
+-{
+-	if (wbc->unpinned_fscache_wb)
+-		fscache_unuse_cookie(cookie, NULL, NULL);
+-}
+-
+-/**
+- * fscache_clear_inode_writeback - Clear writeback resources pinned by an inode
+- * @cookie: The cookie referring to the cache object
+- * @inode: The inode to clean up
+- * @aux: Auxiliary data to apply to the inode
+- *
+- * Clear any writeback resources held by an inode when the inode is evicted.
+- * This must be called before clear_inode() is called.
+- */
+-static inline void fscache_clear_inode_writeback(struct fscache_cookie *cookie,
+-						 struct inode *inode,
+-						 const void *aux)
+-{
+-	if (inode->i_state & I_PINNING_FSCACHE_WB) {
+-		loff_t i_size = i_size_read(inode);
+-		fscache_unuse_cookie(cookie, aux, &i_size);
+-	}
+-}
+-
+ /**
+  * fscache_note_page_release - Note that a netfs page got released
+  * @cookie: The cookie corresponding to the file

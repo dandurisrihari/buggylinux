@@ -1,0 +1,81 @@
+commit dd30706e73b70d67e88fdaca688db7a3374fd5de
+Author: Quinn Tran <qutran@marvell.com>
+Date:   Wed Jun 23 22:26:00 2021 -0700
+
+    scsi: qla2xxx: edif: Add key update
+    
+    Some FC adapters from Marvell offer the ability to encrypt data in flight
+    (EDIF). This feature requires an application to act as an authenticator.
+    
+    As part of the authentication process, the authentication application will
+    generate a SADB entry (Security Association/SA, key, SPI value, etc). This
+    SADB is then passed to driver to be programmed into hardware. There will be
+    a pair of SADB's (Tx and Rx) for each connection.
+    
+    After some period, the application can choose to change the key. At that
+    time, a new set of SADB pair is given to driver. The old set of SADB will
+    be deleted.
+    
+    Add a new bsg call (QL_VND_SC_SA_UPDATE) to allow application to allow
+    adding or deleting SADB entries.  Driver will not keep the key in
+    memory. It will pass it to HW.
+    
+    It is assumed that application will assign a unique SPI value to this SADB
+    (SA + key). Driver + hardware will assign a handle to track this unique
+    SPI/SADB.
+    
+    Link: https://lore.kernel.org/r/20210624052606.21613-6-njavali@marvell.com
+    Reviewed-by: Hannes Reinecke <hare@suse.de>
+    Reviewed-by: Himanshu Madhani <himanshu.madhani@oracle.com>
+    Co-developed-by: Larry Wisneski <Larry.Wisneski@marvell.com>
+    Signed-off-by: Larry Wisneski <Larry.Wisneski@marvell.com>
+    Co-developed-by: Duane Grigsby <duane.grigsby@marvell.com>
+    Signed-off-by: Duane Grigsby <duane.grigsby@marvell.com>
+    Co-developed-by: Rick Hicksted Jr <rhicksted@marvell.com>
+    Signed-off-by: Rick Hicksted Jr <rhicksted@marvell.com>
+    Signed-off-by: Quinn Tran <qutran@marvell.com>
+    Signed-off-by: Nilesh Javali <njavali@marvell.com>
+    Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+
+diff --git a/drivers/scsi/qla2xxx/qla_os.c b/drivers/scsi/qla2xxx/qla_os.c
+index b7e1d7437d81..0ae4d0fd622f 100644
+--- a/drivers/scsi/qla2xxx/qla_os.c
++++ b/drivers/scsi/qla2xxx/qla_os.c
+@@ -2835,6 +2835,17 @@ qla2x00_probe_one(struct pci_dev *pdev, const struct pci_device_id *id)
+ 	spin_lock_init(&ha->tgt.sess_lock);
+ 	spin_lock_init(&ha->tgt.atio_lock);
+ 
++	spin_lock_init(&ha->sadb_lock);
++	INIT_LIST_HEAD(&ha->sadb_tx_index_list);
++	INIT_LIST_HEAD(&ha->sadb_rx_index_list);
++
++	spin_lock_init(&ha->sadb_fp_lock);
++
++	if (qla_edif_sadb_build_free_pool(ha)) {
++		kfree(ha);
++		goto  disable_device;
++	}
++
+ 	atomic_set(&ha->nvme_active_aen_cnt, 0);
+ 
+ 	/* Clear our data area */
+@@ -3868,6 +3879,9 @@ qla2x00_free_device(scsi_qla_host_t *vha)
+ 
+ 	qla82xx_md_free(vha);
+ 
++	qla_edif_sadb_release_free_pool(ha);
++	qla_edif_sadb_release(ha);
++
+ 	qla2x00_free_queues(ha);
+ }
+ 
+@@ -5375,6 +5389,9 @@ qla2x00_do_work(struct scsi_qla_host *vha)
+ 			qla24xx_els_dcmd2_iocb(vha, ELS_DCMD_PLOGI,
+ 			    e->u.fcport.fcport, false);
+ 			break;
++		case QLA_EVT_SA_REPLACE:
++			qla24xx_issue_sa_replace_iocb(vha, e);
++			break;
+ 		}
+ 
+ 		if (rc == EAGAIN) {

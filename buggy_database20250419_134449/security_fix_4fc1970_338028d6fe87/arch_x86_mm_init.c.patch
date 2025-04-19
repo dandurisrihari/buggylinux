@@ -1,0 +1,103 @@
+commit 4fc19708b165c1c152fa1f12f6600e66184b7786
+Author: Nadav Amit <nadav.amit@gmail.com>
+Date:   Fri Apr 26 16:22:46 2019 -0700
+
+    x86/alternatives: Initialize temporary mm for patching
+    
+    To prevent improper use of the PTEs that are used for text patching, the
+    next patches will use a temporary mm struct. Initailize it by copying
+    the init mm.
+    
+    The address that will be used for patching is taken from the lower area
+    that is usually used for the task memory. Doing so prevents the need to
+    frequently synchronize the temporary-mm (e.g., when BPF programs are
+    installed), since different PGDs are used for the task memory.
+    
+    Finally, randomize the address of the PTEs to harden against exploits
+    that use these PTEs.
+    
+    Suggested-by: Andy Lutomirski <luto@kernel.org>
+    Tested-by: Masami Hiramatsu <mhiramat@kernel.org>
+    Signed-off-by: Nadav Amit <namit@vmware.com>
+    Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+    Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+    Reviewed-by: Masami Hiramatsu <mhiramat@kernel.org>
+    Cc: Borislav Petkov <bp@alien8.de>
+    Cc: Dave Hansen <dave.hansen@intel.com>
+    Cc: H. Peter Anvin <hpa@zytor.com>
+    Cc: Kees Cook <keescook@chromium.org>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Cc: Rik van Riel <riel@surriel.com>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Cc: akpm@linux-foundation.org
+    Cc: ard.biesheuvel@linaro.org
+    Cc: deneen.t.dock@intel.com
+    Cc: kernel-hardening@lists.openwall.com
+    Cc: kristen@linux.intel.com
+    Cc: linux_dti@icloud.com
+    Cc: will.deacon@arm.com
+    Link: https://lkml.kernel.org/r/20190426232303.28381-8-nadav.amit@gmail.com
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+diff --git a/arch/x86/mm/init.c b/arch/x86/mm/init.c
+index 8dacdb96899e..fd10d91a6115 100644
+--- a/arch/x86/mm/init.c
++++ b/arch/x86/mm/init.c
+@@ -6,6 +6,7 @@
+ #include <linux/swapfile.h>
+ #include <linux/swapops.h>
+ #include <linux/kmemleak.h>
++#include <linux/sched/task.h>
+ 
+ #include <asm/set_memory.h>
+ #include <asm/e820/api.h>
+@@ -23,6 +24,7 @@
+ #include <asm/hypervisor.h>
+ #include <asm/cpufeature.h>
+ #include <asm/pti.h>
++#include <asm/text-patching.h>
+ 
+ /*
+  * We need to define the tracepoints somewhere, and tlb.c
+@@ -701,6 +703,41 @@ void __init init_mem_mapping(void)
+ 	early_memtest(0, max_pfn_mapped << PAGE_SHIFT);
+ }
+ 
++/*
++ * Initialize an mm_struct to be used during poking and a pointer to be used
++ * during patching.
++ */
++void __init poking_init(void)
++{
++	spinlock_t *ptl;
++	pte_t *ptep;
++
++	poking_mm = copy_init_mm();
++	BUG_ON(!poking_mm);
++
++	/*
++	 * Randomize the poking address, but make sure that the following page
++	 * will be mapped at the same PMD. We need 2 pages, so find space for 3,
++	 * and adjust the address if the PMD ends after the first one.
++	 */
++	poking_addr = TASK_UNMAPPED_BASE;
++	if (IS_ENABLED(CONFIG_RANDOMIZE_BASE))
++		poking_addr += (kaslr_get_random_long("Poking") & PAGE_MASK) %
++			(TASK_SIZE - TASK_UNMAPPED_BASE - 3 * PAGE_SIZE);
++
++	if (((poking_addr + PAGE_SIZE) & ~PMD_MASK) == 0)
++		poking_addr += PAGE_SIZE;
++
++	/*
++	 * We need to trigger the allocation of the page-tables that will be
++	 * needed for poking now. Later, poking may be performed in an atomic
++	 * section, which might cause allocation to fail.
++	 */
++	ptep = get_locked_pte(poking_mm, poking_addr, &ptl);
++	BUG_ON(!ptep);
++	pte_unmap_unlock(ptep, ptl);
++}
++
+ /*
+  * devmem_is_allowed() checks to see if /dev/mem access to a certain address
+  * is valid. The argument is a physical page number.

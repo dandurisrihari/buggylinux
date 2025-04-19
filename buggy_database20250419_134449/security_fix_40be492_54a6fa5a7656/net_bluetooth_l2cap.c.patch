@@ -1,0 +1,51 @@
+commit 40be492fe4fab829951681860c2bb26fa1d5fe4a
+Author: Marcel Holtmann <marcel@holtmann.org>
+Date:   Mon Jul 14 20:13:50 2008 +0200
+
+    [Bluetooth] Export details about authentication requirements
+    
+    With the Simple Pairing support, the authentication requirements are
+    an explicit setting during the bonding process. Track and enforce the
+    requirements and allow higher layers like L2CAP and RFCOMM to increase
+    them if needed.
+    
+    This patch introduces a new IOCTL that allows to query the current
+    authentication requirements. It is also possible to detect Simple
+    Pairing support in the kernel this way.
+    
+    Signed-off-by: Marcel Holtmann <marcel@holtmann.org>
+
+diff --git a/net/bluetooth/l2cap.c b/net/bluetooth/l2cap.c
+index 252264062f59..30ad59b717d5 100644
+--- a/net/bluetooth/l2cap.c
++++ b/net/bluetooth/l2cap.c
+@@ -2150,7 +2150,7 @@ static int l2cap_disconn_ind(struct hci_conn *hcon, u8 reason)
+ static int l2cap_auth_cfm(struct hci_conn *hcon, u8 status)
+ {
+ 	struct l2cap_chan_list *l;
+-	struct l2cap_conn *conn = conn = hcon->l2cap_data;
++	struct l2cap_conn *conn = hcon->l2cap_data;
+ 	struct l2cap_conn_rsp rsp;
+ 	struct sock *sk;
+ 	int result;
+@@ -2165,11 +2165,17 @@ static int l2cap_auth_cfm(struct hci_conn *hcon, u8 status)
+ 	read_lock(&l->lock);
+ 
+ 	for (sk = l->head; sk; sk = l2cap_pi(sk)->next_c) {
++		struct l2cap_pinfo *pi = l2cap_pi(sk);
++
+ 		bh_lock_sock(sk);
+ 
+-		if (sk->sk_state != BT_CONNECT2 ||
+-				(l2cap_pi(sk)->link_mode & L2CAP_LM_ENCRYPT) ||
+-				(l2cap_pi(sk)->link_mode & L2CAP_LM_SECURE)) {
++		if (sk->sk_state != BT_CONNECT2) {
++			bh_unlock_sock(sk);
++			continue;
++		}
++
++		if ((pi->link_mode & (L2CAP_LM_ENCRYPT | L2CAP_LM_SECURE)) &&
++					!(hcon->link_mode & HCI_LM_ENCRYPT)) {
+ 			bh_unlock_sock(sk);
+ 			continue;
+ 		}

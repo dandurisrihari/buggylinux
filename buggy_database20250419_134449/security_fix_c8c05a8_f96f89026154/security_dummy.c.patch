@@ -1,0 +1,86 @@
+commit c8c05a8eec6f1258f6d5cb71a44ee5dc1e989b63
+Author: Catherine Zhang <cxzhang@watson.ibm.com>
+Date:   Thu Jun 8 23:39:49 2006 -0700
+
+    [LSM-IPsec]: SELinux Authorize
+    
+    This patch contains a fix for the previous patch that adds security
+    contexts to IPsec policies and security associations.  In the previous
+    patch, no authorization (besides the check for write permissions to
+    SAD and SPD) is required to delete IPsec policies and security
+    assocations with security contexts.  Thus a user authorized to change
+    SAD and SPD can bypass the IPsec policy authorization by simply
+    deleteing policies with security contexts.  To fix this security hole,
+    an additional authorization check is added for removing security
+    policies and security associations with security contexts.
+    
+    Note that if no security context is supplied on add or present on
+    policy to be deleted, the SELinux module allows the change
+    unconditionally.  The hook is called on deletion when no context is
+    present, which we may want to change.  At present, I left it up to the
+    module.
+    
+    LSM changes:
+    
+    The patch adds two new LSM hooks: xfrm_policy_delete and
+    xfrm_state_delete.  The new hooks are necessary to authorize deletion
+    of IPsec policies that have security contexts.  The existing hooks
+    xfrm_policy_free and xfrm_state_free lack the context to do the
+    authorization, so I decided to split authorization of deletion and
+    memory management of security data, as is typical in the LSM
+    interface.
+    
+    Use:
+    
+    The new delete hooks are checked when xfrm_policy or xfrm_state are
+    deleted by either the xfrm_user interface (xfrm_get_policy,
+    xfrm_del_sa) or the pfkey interface (pfkey_spddelete, pfkey_delete).
+    
+    SELinux changes:
+    
+    The new policy_delete and state_delete functions are added.
+    
+    Signed-off-by: Catherine Zhang <cxzhang@watson.ibm.com>
+    Signed-off-by: Trent Jaeger <tjaeger@cse.psu.edu>
+    Acked-by: James Morris <jmorris@namei.org>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/security/dummy.c b/security/dummy.c
+index 8ccccccc12ac..64f6da0f422e 100644
+--- a/security/dummy.c
++++ b/security/dummy.c
+@@ -810,6 +810,11 @@ static void dummy_xfrm_policy_free_security(struct xfrm_policy *xp)
+ {
+ }
+ 
++static int dummy_xfrm_policy_delete_security(struct xfrm_policy *xp)
++{
++	return 0;
++}
++
+ static int dummy_xfrm_state_alloc_security(struct xfrm_state *x, struct xfrm_user_sec_ctx *sec_ctx)
+ {
+ 	return 0;
+@@ -819,6 +824,11 @@ static void dummy_xfrm_state_free_security(struct xfrm_state *x)
+ {
+ }
+ 
++static int dummy_xfrm_state_delete_security(struct xfrm_state *x)
++{
++	return 0;
++}
++
+ static int dummy_xfrm_policy_lookup(struct xfrm_policy *xp, u32 sk_sid, u8 dir)
+ {
+ 	return 0;
+@@ -1024,8 +1034,10 @@ void security_fixup_ops (struct security_operations *ops)
+ 	set_to_dummy_if_null(ops, xfrm_policy_alloc_security);
+ 	set_to_dummy_if_null(ops, xfrm_policy_clone_security);
+ 	set_to_dummy_if_null(ops, xfrm_policy_free_security);
++	set_to_dummy_if_null(ops, xfrm_policy_delete_security);
+ 	set_to_dummy_if_null(ops, xfrm_state_alloc_security);
+ 	set_to_dummy_if_null(ops, xfrm_state_free_security);
++	set_to_dummy_if_null(ops, xfrm_state_delete_security);
+ 	set_to_dummy_if_null(ops, xfrm_policy_lookup);
+ #endif	/* CONFIG_SECURITY_NETWORK_XFRM */
+ #ifdef CONFIG_KEYS

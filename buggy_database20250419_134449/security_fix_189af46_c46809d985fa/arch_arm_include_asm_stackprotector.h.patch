@@ -1,0 +1,68 @@
+commit 189af4657186da08a2e79fb8e906cfd82b2ccddc
+Author: Ard Biesheuvel <ardb@kernel.org>
+Date:   Thu Dec 6 09:32:57 2018 +0100
+
+    ARM: smp: add support for per-task stack canaries
+    
+    On ARM, we currently only change the value of the stack canary when
+    switching tasks if the kernel was built for UP. On SMP kernels, this
+    is impossible since the stack canary value is obtained via a global
+    symbol reference, which means
+    a) all running tasks on all CPUs must use the same value
+    b) we can only modify the value when no kernel stack frames are live
+       on any CPU, which is effectively never.
+    
+    So instead, use a GCC plugin to add a RTL pass that replaces each
+    reference to the address of the __stack_chk_guard symbol with an
+    expression that produces the address of the 'stack_canary' field
+    that is added to struct thread_info. This way, each task will use
+    its own randomized value.
+    
+    Cc: Russell King <linux@armlinux.org.uk>
+    Cc: Kees Cook <keescook@chromium.org>
+    Cc: Emese Revfy <re.emese@gmail.com>
+    Cc: Arnd Bergmann <arnd@arndb.de>
+    Cc: Laura Abbott <labbott@redhat.com>
+    Cc: kernel-hardening@lists.openwall.com
+    Acked-by: Nicolas Pitre <nico@linaro.org>
+    Signed-off-by: Ard Biesheuvel <ard.biesheuvel@linaro.org>
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+
+diff --git a/arch/arm/include/asm/stackprotector.h b/arch/arm/include/asm/stackprotector.h
+index ef5f7b69443e..72a20c3a0a90 100644
+--- a/arch/arm/include/asm/stackprotector.h
++++ b/arch/arm/include/asm/stackprotector.h
+@@ -6,8 +6,10 @@
+  * the stack frame and verifying that it hasn't been overwritten when
+  * returning from the function.  The pattern is called stack canary
+  * and gcc expects it to be defined by a global variable called
+- * "__stack_chk_guard" on ARM.  This unfortunately means that on SMP
+- * we cannot have a different canary value per task.
++ * "__stack_chk_guard" on ARM.  This prevents SMP systems from using a
++ * different value for each task unless we enable a GCC plugin that
++ * replaces these symbol references with references to each task's own
++ * value.
+  */
+ 
+ #ifndef _ASM_STACKPROTECTOR_H
+@@ -16,6 +18,8 @@
+ #include <linux/random.h>
+ #include <linux/version.h>
+ 
++#include <asm/thread_info.h>
++
+ extern unsigned long __stack_chk_guard;
+ 
+ /*
+@@ -33,7 +37,11 @@ static __always_inline void boot_init_stack_canary(void)
+ 	canary ^= LINUX_VERSION_CODE;
+ 
+ 	current->stack_canary = canary;
++#ifndef CONFIG_STACKPROTECTOR_PER_TASK
+ 	__stack_chk_guard = current->stack_canary;
++#else
++	current_thread_info()->stack_canary = current->stack_canary;
++#endif
+ }
+ 
+ #endif	/* _ASM_STACKPROTECTOR_H */

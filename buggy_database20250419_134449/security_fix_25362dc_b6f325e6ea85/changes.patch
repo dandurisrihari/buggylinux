@@ -1,0 +1,189 @@
+diff --git a/arch/arm/kernel/vmlinux.lds.S b/arch/arm/kernel/vmlinux.lds.S
+index 8b60fde5ce48..a6e395c53a48 100644
+--- a/arch/arm/kernel/vmlinux.lds.S
++++ b/arch/arm/kernel/vmlinux.lds.S
+@@ -8,7 +8,7 @@
+ #include <asm/thread_info.h>
+ #include <asm/memory.h>
+ #include <asm/page.h>
+-#ifdef CONFIG_ARM_KERNMEM_PERMS
++#ifdef CONFIG_DEBUG_RODATA
+ #include <asm/pgtable.h>
+ #endif
+ 
+@@ -94,7 +94,7 @@ SECTIONS
+ 		HEAD_TEXT
+ 	}
+ 
+-#ifdef CONFIG_ARM_KERNMEM_PERMS
++#ifdef CONFIG_DEBUG_RODATA
+ 	. = ALIGN(1<<SECTION_SHIFT);
+ #endif
+ 
+@@ -117,7 +117,7 @@ SECTIONS
+ 			ARM_CPU_KEEP(PROC_INFO)
+ 	}
+ 
+-#ifdef CONFIG_DEBUG_RODATA
++#ifdef CONFIG_DEBUG_ALIGN_RODATA
+ 	. = ALIGN(1<<SECTION_SHIFT);
+ #endif
+ 	RO_DATA(PAGE_SIZE)
+@@ -153,7 +153,7 @@ SECTIONS
+ 	_etext = .;			/* End of text and rodata section */
+ 
+ #ifndef CONFIG_XIP_KERNEL
+-# ifdef CONFIG_ARM_KERNMEM_PERMS
++# ifdef CONFIG_DEBUG_RODATA
+ 	. = ALIGN(1<<SECTION_SHIFT);
+ # else
+ 	. = ALIGN(PAGE_SIZE);
+@@ -231,7 +231,7 @@ SECTIONS
+ 	__data_loc = ALIGN(4);		/* location in binary */
+ 	. = PAGE_OFFSET + TEXT_OFFSET;
+ #else
+-#ifdef CONFIG_ARM_KERNMEM_PERMS
++#ifdef CONFIG_DEBUG_RODATA
+ 	. = ALIGN(1<<SECTION_SHIFT);
+ #else
+ 	. = ALIGN(THREAD_SIZE);
+diff --git a/arch/arm/mm/Kconfig b/arch/arm/mm/Kconfig
+index 549f6d3aec5b..4daeda0a5b7f 100644
+--- a/arch/arm/mm/Kconfig
++++ b/arch/arm/mm/Kconfig
+@@ -1037,24 +1037,26 @@ config ARCH_SUPPORTS_BIG_ENDIAN
+ 	  This option specifies the architecture can support big endian
+ 	  operation.
+ 
+-config ARM_KERNMEM_PERMS
+-	bool "Restrict kernel memory permissions"
++config DEBUG_RODATA
++	bool "Make kernel text and rodata read-only"
+ 	depends on MMU
++	default y if CPU_V7
+ 	help
+-	  If this is set, kernel memory other than kernel text (and rodata)
+-	  will be made non-executable. The tradeoff is that each region is
+-	  padded to section-size (1MiB) boundaries (because their permissions
+-	  are different and splitting the 1M pages into 4K ones causes TLB
+-	  performance problems), wasting memory.
++	  If this is set, kernel text and rodata memory will be made
++	  read-only, and non-text kernel memory will be made non-executable.
++	  The tradeoff is that each region is padded to section-size (1MiB)
++	  boundaries (because their permissions are different and splitting
++	  the 1M pages into 4K ones causes TLB performance problems), which
++	  can waste memory.
+ 
+-config DEBUG_RODATA
+-	bool "Make kernel text and rodata read-only"
+-	depends on ARM_KERNMEM_PERMS
++config DEBUG_ALIGN_RODATA
++	bool "Make rodata strictly non-executable"
++	depends on DEBUG_RODATA
+ 	default y
+ 	help
+-	  If this is set, kernel text and rodata will be made read-only. This
+-	  is to help catch accidental or malicious attempts to change the
+-	  kernel's executable code. Additionally splits rodata from kernel
+-	  text so it can be made explicitly non-executable. This creates
+-	  another section-size padded region, so it can waste more memory
+-	  space while gaining the read-only protections.
++	  If this is set, rodata will be made explicitly non-executable. This
++	  provides protection on the rare chance that attackers might find and
++	  use ROP gadgets that exist in the rodata section. This adds an
++	  additional section-aligned split of rodata from kernel text so it
++	  can be made explicitly non-executable. This padding may waste memory
++	  space to gain the additional protection.
+diff --git a/arch/arm/mm/init.c b/arch/arm/mm/init.c
+index 49bd08178008..53f42508025b 100644
+--- a/arch/arm/mm/init.c
++++ b/arch/arm/mm/init.c
+@@ -572,8 +572,9 @@ void __init mem_init(void)
+ 	}
+ }
+ 
+-#ifdef CONFIG_ARM_KERNMEM_PERMS
++#ifdef CONFIG_DEBUG_RODATA
+ struct section_perm {
++	const char *name;
+ 	unsigned long start;
+ 	unsigned long end;
+ 	pmdval_t mask;
+@@ -584,6 +585,7 @@ struct section_perm {
+ static struct section_perm nx_perms[] = {
+ 	/* Make pages tables, etc before _stext RW (set NX). */
+ 	{
++		.name	= "pre-text NX",
+ 		.start	= PAGE_OFFSET,
+ 		.end	= (unsigned long)_stext,
+ 		.mask	= ~PMD_SECT_XN,
+@@ -591,14 +593,16 @@ static struct section_perm nx_perms[] = {
+ 	},
+ 	/* Make init RW (set NX). */
+ 	{
++		.name	= "init NX",
+ 		.start	= (unsigned long)__init_begin,
+ 		.end	= (unsigned long)_sdata,
+ 		.mask	= ~PMD_SECT_XN,
+ 		.prot	= PMD_SECT_XN,
+ 	},
+-#ifdef CONFIG_DEBUG_RODATA
++#ifdef CONFIG_DEBUG_ALIGN_RODATA
+ 	/* Make rodata NX (set RO in ro_perms below). */
+ 	{
++		.name	= "rodata NX",
+ 		.start  = (unsigned long)__start_rodata,
+ 		.end    = (unsigned long)__init_begin,
+ 		.mask   = ~PMD_SECT_XN,
+@@ -607,10 +611,10 @@ static struct section_perm nx_perms[] = {
+ #endif
+ };
+ 
+-#ifdef CONFIG_DEBUG_RODATA
+ static struct section_perm ro_perms[] = {
+ 	/* Make kernel code and rodata RX (set RO). */
+ 	{
++		.name	= "text/rodata RO",
+ 		.start  = (unsigned long)_stext,
+ 		.end    = (unsigned long)__init_begin,
+ #ifdef CONFIG_ARM_LPAE
+@@ -623,7 +627,6 @@ static struct section_perm ro_perms[] = {
+ #endif
+ 	},
+ };
+-#endif
+ 
+ /*
+  * Updates section permissions only for the current mm (sections are
+@@ -670,8 +673,8 @@ void set_section_perms(struct section_perm *perms, int n, bool set,
+ 	for (i = 0; i < n; i++) {
+ 		if (!IS_ALIGNED(perms[i].start, SECTION_SIZE) ||
+ 		    !IS_ALIGNED(perms[i].end, SECTION_SIZE)) {
+-			pr_err("BUG: section %lx-%lx not aligned to %lx\n",
+-				perms[i].start, perms[i].end,
++			pr_err("BUG: %s section %lx-%lx not aligned to %lx\n",
++				perms[i].name, perms[i].start, perms[i].end,
+ 				SECTION_SIZE);
+ 			continue;
+ 		}
+@@ -712,7 +715,6 @@ void fix_kernmem_perms(void)
+ 	stop_machine(__fix_kernmem_perms, NULL, NULL);
+ }
+ 
+-#ifdef CONFIG_DEBUG_RODATA
+ int __mark_rodata_ro(void *unused)
+ {
+ 	update_sections_early(ro_perms, ARRAY_SIZE(ro_perms));
+@@ -735,11 +737,10 @@ void set_kernel_text_ro(void)
+ 	set_section_perms(ro_perms, ARRAY_SIZE(ro_perms), true,
+ 				current->active_mm);
+ }
+-#endif /* CONFIG_DEBUG_RODATA */
+ 
+ #else
+ static inline void fix_kernmem_perms(void) { }
+-#endif /* CONFIG_ARM_KERNMEM_PERMS */
++#endif /* CONFIG_DEBUG_RODATA */
+ 
+ void free_tcmmem(void)
+ {

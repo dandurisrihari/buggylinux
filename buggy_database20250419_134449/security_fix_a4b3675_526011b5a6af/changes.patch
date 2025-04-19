@@ -1,0 +1,85 @@
+diff --git a/drivers/media/platform/vivid/vivid-core.c b/drivers/media/platform/vivid/vivid-core.c
+index a6fa9edd4c7e..c931f007e5b0 100644
+--- a/drivers/media/platform/vivid/vivid-core.c
++++ b/drivers/media/platform/vivid/vivid-core.c
+@@ -630,8 +630,19 @@ static void vivid_dev_release(struct v4l2_device *v4l2_dev)
+ }
+ 
+ #ifdef CONFIG_MEDIA_CONTROLLER
++static int vivid_req_validate(struct media_request *req)
++{
++	struct vivid_dev *dev = container_of(req->mdev, struct vivid_dev, mdev);
++
++	if (dev->req_validate_error) {
++		dev->req_validate_error = false;
++		return -EINVAL;
++	}
++	return vb2_request_validate(req);
++}
++
+ static const struct media_device_ops vivid_media_ops = {
+-	.req_validate = vb2_request_validate,
++	.req_validate = vivid_req_validate,
+ 	.req_queue = vb2_request_queue,
+ };
+ #endif
+diff --git a/drivers/media/platform/vivid/vivid-core.h b/drivers/media/platform/vivid/vivid-core.h
+index 0bec2c3401d2..a4ff8547f79d 100644
+--- a/drivers/media/platform/vivid/vivid-core.h
++++ b/drivers/media/platform/vivid/vivid-core.h
+@@ -294,6 +294,7 @@ struct vivid_dev {
+ 	bool				buf_prepare_error;
+ 	bool				start_streaming_error;
+ 	bool				dqbuf_error;
++	bool				req_validate_error;
+ 	bool				seq_wrap;
+ 	bool				time_wrap;
+ 	u64				time_wrap_offset;
+diff --git a/drivers/media/platform/vivid/vivid-ctrls.c b/drivers/media/platform/vivid/vivid-ctrls.c
+index bfffeda12f14..4cd526ff248b 100644
+--- a/drivers/media/platform/vivid/vivid-ctrls.c
++++ b/drivers/media/platform/vivid/vivid-ctrls.c
+@@ -81,6 +81,7 @@
+ #define VIVID_CID_START_STR_ERROR	(VIVID_CID_VIVID_BASE + 69)
+ #define VIVID_CID_QUEUE_ERROR		(VIVID_CID_VIVID_BASE + 70)
+ #define VIVID_CID_CLEAR_FB		(VIVID_CID_VIVID_BASE + 71)
++#define VIVID_CID_REQ_VALIDATE_ERROR	(VIVID_CID_VIVID_BASE + 72)
+ 
+ #define VIVID_CID_RADIO_SEEK_MODE	(VIVID_CID_VIVID_BASE + 90)
+ #define VIVID_CID_RADIO_SEEK_PROG_LIM	(VIVID_CID_VIVID_BASE + 91)
+@@ -1002,6 +1003,9 @@ static int vivid_streaming_s_ctrl(struct v4l2_ctrl *ctrl)
+ 	case VIVID_CID_START_STR_ERROR:
+ 		dev->start_streaming_error = true;
+ 		break;
++	case VIVID_CID_REQ_VALIDATE_ERROR:
++		dev->req_validate_error = true;
++		break;
+ 	case VIVID_CID_QUEUE_ERROR:
+ 		if (vb2_start_streaming_called(&dev->vb_vid_cap_q))
+ 			vb2_queue_error(&dev->vb_vid_cap_q);
+@@ -1087,6 +1091,15 @@ static const struct v4l2_ctrl_config vivid_ctrl_queue_error = {
+ 	.type = V4L2_CTRL_TYPE_BUTTON,
+ };
+ 
++#ifdef CONFIG_MEDIA_CONTROLLER
++static const struct v4l2_ctrl_config vivid_ctrl_req_validate_error = {
++	.ops = &vivid_streaming_ctrl_ops,
++	.id = VIVID_CID_REQ_VALIDATE_ERROR,
++	.name = "Inject req_validate() Error",
++	.type = V4L2_CTRL_TYPE_BUTTON,
++};
++#endif
++
+ static const struct v4l2_ctrl_config vivid_ctrl_seq_wrap = {
+ 	.ops = &vivid_streaming_ctrl_ops,
+ 	.id = VIVID_CID_SEQ_WRAP,
+@@ -1516,6 +1529,9 @@ int vivid_create_controls(struct vivid_dev *dev, bool show_ccs_cap,
+ 		v4l2_ctrl_new_custom(hdl_streaming, &vivid_ctrl_buf_prepare_error, NULL);
+ 		v4l2_ctrl_new_custom(hdl_streaming, &vivid_ctrl_start_streaming_error, NULL);
+ 		v4l2_ctrl_new_custom(hdl_streaming, &vivid_ctrl_queue_error, NULL);
++#ifdef CONFIG_MEDIA_CONTROLLER
++		v4l2_ctrl_new_custom(hdl_streaming, &vivid_ctrl_req_validate_error, NULL);
++#endif
+ 		v4l2_ctrl_new_custom(hdl_streaming, &vivid_ctrl_seq_wrap, NULL);
+ 		v4l2_ctrl_new_custom(hdl_streaming, &vivid_ctrl_time_wrap, NULL);
+ 	}

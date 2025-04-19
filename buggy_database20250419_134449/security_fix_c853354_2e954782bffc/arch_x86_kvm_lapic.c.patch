@@ -1,0 +1,40 @@
+commit c853354429f7ec88f9cdde4e46e69a2c0e3c8310
+Author: Wanpeng Li <wanpeng.li@hotmail.com>
+Date:   Thu Jun 29 06:28:09 2017 -0700
+
+    KVM: LAPIC: Fix lapic timer injection delay
+    
+    If the TSC deadline timer is programmed really close to the deadline or
+    even in the past, the computation in vmx_set_hv_timer will program the
+    absolute target tsc value to vmcs preemption timer field w/ delta == 0,
+    then plays a vmentry and an upcoming vmx preemption timer fire vmexit
+    dance, the lapic timer injection is delayed due to this duration. Actually
+    the lapic timer which is emulated by hrtimer can handle this correctly.
+    
+    This patch fixes it by firing the lapic timer and injecting a timer interrupt
+    immediately during the next vmentry if the TSC deadline timer is programmed
+    really close to the deadline or even in the past. This saves ~300 cycles on
+    the tsc_deadline_timer test of apic.flat.
+    
+    Cc: Paolo Bonzini <pbonzini@redhat.com>
+    Cc: Radim Krčmář <rkrcmar@redhat.com>
+    Signed-off-by: Wanpeng Li <wanpeng.li@hotmail.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/lapic.c b/arch/x86/kvm/lapic.c
+index a80e5a5d6f2f..2819d4c123eb 100644
+--- a/arch/x86/kvm/lapic.c
++++ b/arch/x86/kvm/lapic.c
+@@ -1525,8 +1525,11 @@ static bool start_hv_timer(struct kvm_lapic *apic)
+ 	 * the window.  For periodic timer, leave the hv timer running for
+ 	 * simplicity, and the deadline will be recomputed on the next vmexit.
+ 	 */
+-	if (!apic_lvtt_period(apic) && atomic_read(&ktimer->pending))
++	if (!apic_lvtt_period(apic) && (r || atomic_read(&ktimer->pending))) {
++		if (r)
++			apic_timer_expired(apic);
+ 		return false;
++	}
+ 
+ 	trace_kvm_hv_timer_state(apic->vcpu->vcpu_id, true);
+ 	return true;

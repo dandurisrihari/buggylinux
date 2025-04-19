@@ -1,0 +1,41 @@
+diff --git a/drivers/dma/idxd/cdev.c b/drivers/dma/idxd/cdev.c
+index c2808fd081d6..a9b96b18772f 100644
+--- a/drivers/dma/idxd/cdev.c
++++ b/drivers/dma/idxd/cdev.c
+@@ -312,6 +312,24 @@ static int idxd_user_drv_probe(struct idxd_dev *idxd_dev)
+ 	if (idxd->state != IDXD_DEV_ENABLED)
+ 		return -ENXIO;
+ 
++	/*
++	 * User type WQ is enabled only when SVA is enabled for two reasons:
++	 *   - If no IOMMU or IOMMU Passthrough without SVA, userspace
++	 *     can directly access physical address through the WQ.
++	 *   - The IDXD cdev driver does not provide any ways to pin
++	 *     user pages and translate the address from user VA to IOVA or
++	 *     PA without IOMMU SVA. Therefore the application has no way
++	 *     to instruct the device to perform DMA function. This makes
++	 *     the cdev not usable for normal application usage.
++	 */
++	if (!device_user_pasid_enabled(idxd)) {
++		idxd->cmd_status = IDXD_SCMD_WQ_USER_NO_IOMMU;
++		dev_dbg(&idxd->pdev->dev,
++			"User type WQ cannot be enabled without SVA.\n");
++
++		return -EOPNOTSUPP;
++	}
++
+ 	mutex_lock(&wq->wq_lock);
+ 	wq->type = IDXD_WQT_USER;
+ 	rc = drv_enable_wq(wq);
+diff --git a/include/uapi/linux/idxd.h b/include/uapi/linux/idxd.h
+index 095299c75828..2b9e7feba3f3 100644
+--- a/include/uapi/linux/idxd.h
++++ b/include/uapi/linux/idxd.h
+@@ -29,6 +29,7 @@ enum idxd_scmd_stat {
+ 	IDXD_SCMD_WQ_NO_SIZE = 0x800e0000,
+ 	IDXD_SCMD_WQ_NO_PRIV = 0x800f0000,
+ 	IDXD_SCMD_WQ_IRQ_ERR = 0x80100000,
++	IDXD_SCMD_WQ_USER_NO_IOMMU = 0x80110000,
+ };
+ 
+ #define IDXD_SCMD_SOFTERR_MASK	0x80000000

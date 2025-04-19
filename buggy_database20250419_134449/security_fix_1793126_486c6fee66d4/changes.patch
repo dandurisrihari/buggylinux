@@ -1,0 +1,350 @@
+diff --git a/Documentation/DocBook/drm.tmpl b/Documentation/DocBook/drm.tmpl
+index 9fc8ed4ac0f4..ed1d6d289022 100644
+--- a/Documentation/DocBook/drm.tmpl
++++ b/Documentation/DocBook/drm.tmpl
+@@ -205,6 +205,12 @@
+               Driver implements DRM PRIME buffer sharing.
+             </para></listitem>
+           </varlistentry>
++          <varlistentry>
++            <term>DRIVER_RENDER</term>
++            <listitem><para>
++              Driver supports dedicated render nodes.
++            </para></listitem>
++          </varlistentry>
+         </variablelist>
+       </sect3>
+       <sect3>
+@@ -2644,6 +2650,69 @@ int (*resume) (struct drm_device *);</synopsis>
+       info, since man pages should cover the rest.
+     </para>
+ 
++  <!-- External: render nodes -->
++
++    <sect1>
++      <title>Render nodes</title>
++      <para>
++        DRM core provides multiple character-devices for user-space to use.
++        Depending on which device is opened, user-space can perform a different
++        set of operations (mainly ioctls). The primary node is always created
++        and called <term>card&lt;num&gt;</term>. Additionally, a currently
++        unused control node, called <term>controlD&lt;num&gt;</term> is also
++        created. The primary node provides all legacy operations and
++        historically was the only interface used by userspace. With KMS, the
++        control node was introduced. However, the planned KMS control interface
++        has never been written and so the control node stays unused to date.
++      </para>
++      <para>
++        With the increased use of offscreen renderers and GPGPU applications,
++        clients no longer require running compositors or graphics servers to
++        make use of a GPU. But the DRM API required unprivileged clients to
++        authenticate to a DRM-Master prior to getting GPU access. To avoid this
++        step and to grant clients GPU access without authenticating, render
++        nodes were introduced. Render nodes solely serve render clients, that
++        is, no modesetting or privileged ioctls can be issued on render nodes.
++        Only non-global rendering commands are allowed. If a driver supports
++        render nodes, it must advertise it via the <term>DRIVER_RENDER</term>
++        DRM driver capability. If not supported, the primary node must be used
++        for render clients together with the legacy drmAuth authentication
++        procedure.
++      </para>
++      <para>
++        If a driver advertises render node support, DRM core will create a
++        separate render node called <term>renderD&lt;num&gt;</term>. There will
++        be one render node per device. No ioctls except  PRIME-related ioctls
++        will be allowed on this node. Especially <term>GEM_OPEN</term> will be
++        explicitly prohibited. Render nodes are designed to avoid the
++        buffer-leaks, which occur if clients guess the flink names or mmap
++        offsets on the legacy interface. Additionally to this basic interface,
++        drivers must mark their driver-dependent render-only ioctls as
++        <term>DRM_RENDER_ALLOW</term> so render clients can use them. Driver
++        authors must be careful not to allow any privileged ioctls on render
++        nodes.
++      </para>
++      <para>
++        With render nodes, user-space can now control access to the render node
++        via basic file-system access-modes. A running graphics server which
++        authenticates clients on the privileged primary/legacy node is no longer
++        required. Instead, a client can open the render node and is immediately
++        granted GPU access. Communication between clients (or servers) is done
++        via PRIME. FLINK from render node to legacy node is not supported. New
++        clients must not use the insecure FLINK interface.
++      </para>
++      <para>
++        Besides dropping all modeset/global ioctls, render nodes also drop the
++        DRM-Master concept. There is no reason to associate render clients with
++        a DRM-Master as they are independent of any graphics server. Besides,
++        they must work without any running master, anyway.
++        Drivers must be able to run without a master object if they support
++        render nodes. If, on the other hand, a driver requires shared state
++        between clients which is visible to user-space and accessible beyond
++        open-file boundaries, they cannot support render nodes.
++      </para>
++    </sect1>
++
+   <!-- External: vblank handling -->
+ 
+     <sect1>
+diff --git a/drivers/gpu/drm/drm_drv.c b/drivers/gpu/drm/drm_drv.c
+index 288da3dc2a09..e572dd20bdee 100644
+--- a/drivers/gpu/drm/drm_drv.c
++++ b/drivers/gpu/drm/drm_drv.c
+@@ -68,7 +68,7 @@ static const struct drm_ioctl_desc drm_ioctls[] = {
+ 	DRM_IOCTL_DEF(DRM_IOCTL_GET_MAP, drm_getmap, DRM_UNLOCKED),
+ 	DRM_IOCTL_DEF(DRM_IOCTL_GET_CLIENT, drm_getclient, DRM_UNLOCKED),
+ 	DRM_IOCTL_DEF(DRM_IOCTL_GET_STATS, drm_getstats, DRM_UNLOCKED),
+-	DRM_IOCTL_DEF(DRM_IOCTL_GET_CAP, drm_getcap, DRM_UNLOCKED),
++	DRM_IOCTL_DEF(DRM_IOCTL_GET_CAP, drm_getcap, DRM_UNLOCKED|DRM_RENDER_ALLOW),
+ 	DRM_IOCTL_DEF(DRM_IOCTL_SET_VERSION, drm_setversion, DRM_MASTER),
+ 
+ 	DRM_IOCTL_DEF(DRM_IOCTL_SET_UNIQUE, drm_setunique, DRM_AUTH|DRM_MASTER|DRM_ROOT_ONLY),
+@@ -130,14 +130,14 @@ static const struct drm_ioctl_desc drm_ioctls[] = {
+ 
+ 	DRM_IOCTL_DEF(DRM_IOCTL_UPDATE_DRAW, drm_noop, DRM_AUTH|DRM_MASTER|DRM_ROOT_ONLY),
+ 
+-	DRM_IOCTL_DEF(DRM_IOCTL_GEM_CLOSE, drm_gem_close_ioctl, DRM_UNLOCKED),
++	DRM_IOCTL_DEF(DRM_IOCTL_GEM_CLOSE, drm_gem_close_ioctl, DRM_UNLOCKED|DRM_RENDER_ALLOW),
+ 	DRM_IOCTL_DEF(DRM_IOCTL_GEM_FLINK, drm_gem_flink_ioctl, DRM_AUTH|DRM_UNLOCKED),
+ 	DRM_IOCTL_DEF(DRM_IOCTL_GEM_OPEN, drm_gem_open_ioctl, DRM_AUTH|DRM_UNLOCKED),
+ 
+ 	DRM_IOCTL_DEF(DRM_IOCTL_MODE_GETRESOURCES, drm_mode_getresources, DRM_CONTROL_ALLOW|DRM_UNLOCKED),
+ 
+-	DRM_IOCTL_DEF(DRM_IOCTL_PRIME_HANDLE_TO_FD, drm_prime_handle_to_fd_ioctl, DRM_AUTH|DRM_UNLOCKED),
+-	DRM_IOCTL_DEF(DRM_IOCTL_PRIME_FD_TO_HANDLE, drm_prime_fd_to_handle_ioctl, DRM_AUTH|DRM_UNLOCKED),
++	DRM_IOCTL_DEF(DRM_IOCTL_PRIME_HANDLE_TO_FD, drm_prime_handle_to_fd_ioctl, DRM_AUTH|DRM_UNLOCKED|DRM_RENDER_ALLOW),
++	DRM_IOCTL_DEF(DRM_IOCTL_PRIME_FD_TO_HANDLE, drm_prime_fd_to_handle_ioctl, DRM_AUTH|DRM_UNLOCKED|DRM_RENDER_ALLOW),
+ 
+ 	DRM_IOCTL_DEF(DRM_IOCTL_MODE_GETPLANERESOURCES, drm_mode_getplane_res, DRM_CONTROL_ALLOW|DRM_UNLOCKED),
+ 	DRM_IOCTL_DEF(DRM_IOCTL_MODE_GETCRTC, drm_mode_getcrtc, DRM_CONTROL_ALLOW|DRM_UNLOCKED),
+@@ -420,9 +420,10 @@ long drm_ioctl(struct file *filp,
+ 		DRM_DEBUG("no function\n");
+ 		retcode = -EINVAL;
+ 	} else if (((ioctl->flags & DRM_ROOT_ONLY) && !capable(CAP_SYS_ADMIN)) ||
+-		   ((ioctl->flags & DRM_AUTH) && !file_priv->authenticated) ||
++		   ((ioctl->flags & DRM_AUTH) && !drm_is_render_client(file_priv) && !file_priv->authenticated) ||
+ 		   ((ioctl->flags & DRM_MASTER) && !file_priv->is_master) ||
+-		   (!(ioctl->flags & DRM_CONTROL_ALLOW) && (file_priv->minor->type == DRM_MINOR_CONTROL))) {
++		   (!(ioctl->flags & DRM_CONTROL_ALLOW) && (file_priv->minor->type == DRM_MINOR_CONTROL)) ||
++		   (!(ioctl->flags & DRM_RENDER_ALLOW) && drm_is_render_client(file_priv))) {
+ 		retcode = -EACCES;
+ 	} else {
+ 		if (cmd & (IOC_IN | IOC_OUT)) {
+diff --git a/drivers/gpu/drm/drm_fops.c b/drivers/gpu/drm/drm_fops.c
+index 136c949307ba..4be8e09a32ef 100644
+--- a/drivers/gpu/drm/drm_fops.c
++++ b/drivers/gpu/drm/drm_fops.c
+@@ -262,10 +262,10 @@ static int drm_open_helper(struct inode *inode, struct file *filp,
+ 			goto out_prime_destroy;
+ 	}
+ 
+-
+-	/* if there is no current master make this fd it */
++	/* if there is no current master make this fd it, but do not create
++	 * any master object for render clients */
+ 	mutex_lock(&dev->struct_mutex);
+-	if (!priv->minor->master) {
++	if (!priv->minor->master && !drm_is_render_client(priv)) {
+ 		/* create a new master */
+ 		priv->minor->master = drm_master_create(priv->minor);
+ 		if (!priv->minor->master) {
+@@ -303,12 +303,11 @@ static int drm_open_helper(struct inode *inode, struct file *filp,
+ 				goto out_close;
+ 			}
+ 		}
+-		mutex_unlock(&dev->struct_mutex);
+-	} else {
++	} else if (!drm_is_render_client(priv)) {
+ 		/* get a reference to the master */
+ 		priv->master = drm_master_get(priv->minor->master);
+-		mutex_unlock(&dev->struct_mutex);
+ 	}
++	mutex_unlock(&dev->struct_mutex);
+ 
+ 	mutex_lock(&dev->struct_mutex);
+ 	list_add(&priv->lhead, &dev->filelist);
+@@ -478,7 +477,8 @@ int drm_release(struct inode *inode, struct file *filp)
+ 	iput(container_of(dev->dev_mapping, struct inode, i_data));
+ 
+ 	/* drop the reference held my the file priv */
+-	drm_master_put(&file_priv->master);
++	if (file_priv->master)
++		drm_master_put(&file_priv->master);
+ 	file_priv->is_master = 0;
+ 	list_del(&file_priv->lhead);
+ 	mutex_unlock(&dev->struct_mutex);
+diff --git a/drivers/gpu/drm/drm_pci.c b/drivers/gpu/drm/drm_pci.c
+index 3fca2db1c40c..1f96cee6eee8 100644
+--- a/drivers/gpu/drm/drm_pci.c
++++ b/drivers/gpu/drm/drm_pci.c
+@@ -354,6 +354,12 @@ int drm_get_pci_dev(struct pci_dev *pdev, const struct pci_device_id *ent,
+ 			goto err_g2;
+ 	}
+ 
++	if (drm_core_check_feature(dev, DRIVER_RENDER) && drm_rnodes) {
++		ret = drm_get_minor(dev, &dev->render, DRM_MINOR_RENDER);
++		if (ret)
++			goto err_g21;
++	}
++
+ 	if ((ret = drm_get_minor(dev, &dev->primary, DRM_MINOR_LEGACY)))
+ 		goto err_g3;
+ 
+@@ -383,6 +389,9 @@ int drm_get_pci_dev(struct pci_dev *pdev, const struct pci_device_id *ent,
+ err_g4:
+ 	drm_put_minor(&dev->primary);
+ err_g3:
++	if (dev->render)
++		drm_put_minor(&dev->render);
++err_g21:
+ 	if (drm_core_check_feature(dev, DRIVER_MODESET))
+ 		drm_put_minor(&dev->control);
+ err_g2:
+diff --git a/drivers/gpu/drm/drm_platform.c b/drivers/gpu/drm/drm_platform.c
+index 400024b6d512..f7a18c6ba4c4 100644
+--- a/drivers/gpu/drm/drm_platform.c
++++ b/drivers/gpu/drm/drm_platform.c
+@@ -69,6 +69,12 @@ static int drm_get_platform_dev(struct platform_device *platdev,
+ 			goto err_g1;
+ 	}
+ 
++	if (drm_core_check_feature(dev, DRIVER_RENDER) && drm_rnodes) {
++		ret = drm_get_minor(dev, &dev->render, DRM_MINOR_RENDER);
++		if (ret)
++			goto err_g11;
++	}
++
+ 	ret = drm_get_minor(dev, &dev->primary, DRM_MINOR_LEGACY);
+ 	if (ret)
+ 		goto err_g2;
+@@ -100,6 +106,9 @@ static int drm_get_platform_dev(struct platform_device *platdev,
+ err_g3:
+ 	drm_put_minor(&dev->primary);
+ err_g2:
++	if (dev->render)
++		drm_put_minor(&dev->render);
++err_g11:
+ 	if (drm_core_check_feature(dev, DRIVER_MODESET))
+ 		drm_put_minor(&dev->control);
+ err_g1:
+diff --git a/drivers/gpu/drm/drm_stub.c b/drivers/gpu/drm/drm_stub.c
+index e30bb0d7c67a..e7eb0276f7f1 100644
+--- a/drivers/gpu/drm/drm_stub.c
++++ b/drivers/gpu/drm/drm_stub.c
+@@ -40,6 +40,9 @@
+ unsigned int drm_debug = 0;	/* 1 to enable debug output */
+ EXPORT_SYMBOL(drm_debug);
+ 
++unsigned int drm_rnodes = 0;	/* 1 to enable experimental render nodes API */
++EXPORT_SYMBOL(drm_rnodes);
++
+ unsigned int drm_vblank_offdelay = 5000;    /* Default to 5000 msecs. */
+ EXPORT_SYMBOL(drm_vblank_offdelay);
+ 
+@@ -56,11 +59,13 @@ MODULE_AUTHOR(CORE_AUTHOR);
+ MODULE_DESCRIPTION(CORE_DESC);
+ MODULE_LICENSE("GPL and additional rights");
+ MODULE_PARM_DESC(debug, "Enable debug output");
++MODULE_PARM_DESC(rnodes, "Enable experimental render nodes API");
+ MODULE_PARM_DESC(vblankoffdelay, "Delay until vblank irq auto-disable [msecs]");
+ MODULE_PARM_DESC(timestamp_precision_usec, "Max. error on timestamps [usecs]");
+ MODULE_PARM_DESC(timestamp_monotonic, "Use monotonic timestamps");
+ 
+ module_param_named(debug, drm_debug, int, 0600);
++module_param_named(rnodes, drm_rnodes, int, 0600);
+ module_param_named(vblankoffdelay, drm_vblank_offdelay, int, 0600);
+ module_param_named(timestamp_precision_usec, drm_timestamp_precision, int, 0600);
+ module_param_named(timestamp_monotonic, drm_timestamp_monotonic, int, 0600);
+@@ -446,6 +451,9 @@ void drm_put_dev(struct drm_device *dev)
+ 	if (drm_core_check_feature(dev, DRIVER_MODESET))
+ 		drm_put_minor(&dev->control);
+ 
++	if (dev->render)
++		drm_put_minor(&dev->render);
++
+ 	if (driver->driver_features & DRIVER_GEM)
+ 		drm_gem_destroy(dev);
+ 
+@@ -462,6 +470,8 @@ void drm_unplug_dev(struct drm_device *dev)
+ 	/* for a USB device */
+ 	if (drm_core_check_feature(dev, DRIVER_MODESET))
+ 		drm_unplug_minor(dev->control);
++	if (dev->render)
++		drm_unplug_minor(dev->render);
+ 	drm_unplug_minor(dev->primary);
+ 
+ 	mutex_lock(&drm_global_mutex);
+diff --git a/drivers/gpu/drm/drm_usb.c b/drivers/gpu/drm/drm_usb.c
+index 34a156f0c336..87664723b9ce 100644
+--- a/drivers/gpu/drm/drm_usb.c
++++ b/drivers/gpu/drm/drm_usb.c
+@@ -33,6 +33,12 @@ int drm_get_usb_dev(struct usb_interface *interface,
+ 	if (ret)
+ 		goto err_g1;
+ 
++	if (drm_core_check_feature(dev, DRIVER_RENDER) && drm_rnodes) {
++		ret = drm_get_minor(dev, &dev->render, DRM_MINOR_RENDER);
++		if (ret)
++			goto err_g11;
++	}
++
+ 	ret = drm_get_minor(dev, &dev->primary, DRM_MINOR_LEGACY);
+ 	if (ret)
+ 		goto err_g2;
+@@ -62,6 +68,9 @@ int drm_get_usb_dev(struct usb_interface *interface,
+ err_g3:
+ 	drm_put_minor(&dev->primary);
+ err_g2:
++	if (dev->render)
++		drm_put_minor(&dev->render);
++err_g11:
+ 	drm_put_minor(&dev->control);
+ err_g1:
+ 	kfree(dev);
+diff --git a/include/drm/drmP.h b/include/drm/drmP.h
+index 0e3d51793b65..290734191f72 100644
+--- a/include/drm/drmP.h
++++ b/include/drm/drmP.h
+@@ -145,6 +145,7 @@ int drm_err(const char *func, const char *format, ...);
+ #define DRIVER_GEM         0x1000
+ #define DRIVER_MODESET     0x2000
+ #define DRIVER_PRIME       0x4000
++#define DRIVER_RENDER      0x8000
+ 
+ #define DRIVER_BUS_PCI 0x1
+ #define DRIVER_BUS_PLATFORM 0x2
+@@ -290,6 +291,7 @@ typedef int drm_ioctl_compat_t(struct file *filp, unsigned int cmd,
+ #define DRM_ROOT_ONLY	0x4
+ #define DRM_CONTROL_ALLOW 0x8
+ #define DRM_UNLOCKED	0x10
++#define DRM_RENDER_ALLOW 0x20
+ 
+ struct drm_ioctl_desc {
+ 	unsigned int cmd;
+@@ -1204,6 +1206,7 @@ struct drm_device {
+ 	unsigned int agp_buffer_token;
+ 	struct drm_minor *control;		/**< Control node for card */
+ 	struct drm_minor *primary;		/**< render type primary screen head */
++	struct drm_minor *render;		/**< render node for card */
+ 
+         struct drm_mode_config mode_config;	/**< Current mode config */
+ 
+@@ -1251,6 +1254,11 @@ static inline bool drm_modeset_is_locked(struct drm_device *dev)
+ 	return mutex_is_locked(&dev->mode_config.mutex);
+ }
+ 
++static inline bool drm_is_render_client(struct drm_file *file_priv)
++{
++	return file_priv->minor->type == DRM_MINOR_RENDER;
++}
++
+ /******************************************************************/
+ /** \name Internal function definitions */
+ /*@{*/
+@@ -1450,6 +1458,7 @@ extern void drm_put_dev(struct drm_device *dev);
+ extern int drm_put_minor(struct drm_minor **minor);
+ extern void drm_unplug_dev(struct drm_device *dev);
+ extern unsigned int drm_debug;
++extern unsigned int drm_rnodes;
+ 
+ extern unsigned int drm_vblank_offdelay;
+ extern unsigned int drm_timestamp_precision;

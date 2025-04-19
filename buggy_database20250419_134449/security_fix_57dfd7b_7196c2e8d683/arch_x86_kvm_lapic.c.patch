@@ -1,0 +1,46 @@
+commit 57dfd7b53dec740afe402135fdd1c5708ec337f0
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Fri Jan 28 00:51:48 2022 +0000
+
+    KVM: x86: Move delivery of non-APICv interrupt into vendor code
+    
+    Handle non-APICv interrupt delivery in vendor code, even though it means
+    VMX and SVM will temporarily have duplicate code.  SVM's AVIC has a race
+    condition that requires KVM to fall back to legacy interrupt injection
+    _after_ the interrupt has been logged in the vIRR, i.e. to fix the race,
+    SVM will need to open code the full flow anyways[*].  Refactor the code
+    so that the SVM bug without introducing other issues, e.g. SVM would
+    return "success" and thus invoke trace_kvm_apicv_accept_irq() even when
+    delivery through the AVIC failed, and to opportunistically prepare for
+    using KVM_X86_OP to fill each vendor's kvm_x86_ops struct, which will
+    rely on the vendor function matching the kvm_x86_op pointer name.
+    
+    No functional change intended.
+    
+    [*] https://lore.kernel.org/all/20211213104634.199141-4-mlevitsk@redhat.com
+    
+    Signed-off-by: Sean Christopherson <seanjc@google.com>
+    Message-Id: <20220128005208.4008533-3-seanjc@google.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/lapic.c b/arch/x86/kvm/lapic.c
+index 4662469240bc..d7e6fde82d25 100644
+--- a/arch/x86/kvm/lapic.c
++++ b/arch/x86/kvm/lapic.c
+@@ -1096,14 +1096,8 @@ static int __apic_accept_irq(struct kvm_lapic *apic, int delivery_mode,
+ 						       apic->regs + APIC_TMR);
+ 		}
+ 
+-		if (static_call(kvm_x86_deliver_posted_interrupt)(vcpu, vector)) {
+-			kvm_lapic_set_irr(vector, apic);
+-			kvm_make_request(KVM_REQ_EVENT, vcpu);
+-			kvm_vcpu_kick(vcpu);
+-		} else {
+-			trace_kvm_apicv_accept_irq(vcpu->vcpu_id, delivery_mode,
+-						   trig_mode, vector);
+-		}
++		static_call(kvm_x86_deliver_interrupt)(apic, delivery_mode,
++						       trig_mode, vector);
+ 		break;
+ 
+ 	case APIC_DM_REMRD:

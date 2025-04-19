@@ -1,0 +1,66 @@
+commit 7e0880b9fbbe7d21e29347020bef0b7329cb0e9d
+Author: Horia Geantă <horia.geanta@nxp.com>
+Date:   Tue Dec 19 12:16:07 2017 +0200
+
+    crypto: caam - add Derived Key Protocol (DKP) support
+    
+    Offload split key generation in CAAM engine, using DKP.
+    DKP is supported starting with Era 6.
+    
+    Note that the way assoclen is transmitted from the job descriptor
+    to the shared descriptor changes - DPOVRD register is used instead
+    of MATH3 (where available), since DKP protocol thrashes the MATH
+    registers.
+    
+    The replacement of MDHA split key generation with DKP has the side
+    effect of the crypto engine writing the authentication key, and thus
+    the DMA mapping direction for the buffer holding the key has to change
+    from DMA_TO_DEVICE to DMA_BIDIRECTIONAL.
+    There are two cases:
+    -key is inlined in descriptor - descriptor buffer mapping changes
+    -key is referenced - key buffer mapping changes
+    
+    Signed-off-by: Horia Geantă <horia.geanta@nxp.com>
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+diff --git a/drivers/crypto/caam/key_gen.c b/drivers/crypto/caam/key_gen.c
+index 8c79c3a153dc..312b5f042f31 100644
+--- a/drivers/crypto/caam/key_gen.c
++++ b/drivers/crypto/caam/key_gen.c
+@@ -11,36 +11,6 @@
+ #include "desc_constr.h"
+ #include "key_gen.h"
+ 
+-/**
+- * split_key_len - Compute MDHA split key length for a given algorithm
+- * @hash: Hashing algorithm selection, one of OP_ALG_ALGSEL_* - MD5, SHA1,
+- *        SHA224, SHA384, SHA512.
+- *
+- * Return: MDHA split key length
+- */
+-static inline u32 split_key_len(u32 hash)
+-{
+-	/* Sizes for MDHA pads (*not* keys): MD5, SHA1, 224, 256, 384, 512 */
+-	static const u8 mdpadlen[] = { 16, 20, 32, 32, 64, 64 };
+-	u32 idx;
+-
+-	idx = (hash & OP_ALG_ALGSEL_SUBMASK) >> OP_ALG_ALGSEL_SHIFT;
+-
+-	return (u32)(mdpadlen[idx] * 2);
+-}
+-
+-/**
+- * split_key_pad_len - Compute MDHA split key pad length for a given algorithm
+- * @hash: Hashing algorithm selection, one of OP_ALG_ALGSEL_* - MD5, SHA1,
+- *        SHA224, SHA384, SHA512.
+- *
+- * Return: MDHA split key pad length
+- */
+-static inline u32 split_key_pad_len(u32 hash)
+-{
+-	return ALIGN(split_key_len(hash), 16);
+-}
+-
+ void split_key_done(struct device *dev, u32 *desc, u32 err,
+ 			   void *context)
+ {

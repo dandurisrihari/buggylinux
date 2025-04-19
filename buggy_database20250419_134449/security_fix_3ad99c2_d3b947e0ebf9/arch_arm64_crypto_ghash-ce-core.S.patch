@@ -1,0 +1,43 @@
+commit 3ad99c22cebee84034bc53e42f5115dbc97490e8
+Author: Ard Biesheuvel <ardb@kernel.org>
+Date:   Tue Nov 10 10:10:42 2020 +0100
+
+    crypto: arm64/gcm - move authentication tag check to SIMD domain
+    
+    Instead of copying the calculated authentication tag to memory and
+    calling crypto_memneq() to verify it, use vector bytewise compare and
+    min across vector instructions to decide whether the tag is valid. This
+    is more efficient, and given that the tag is only transiently held in a
+    NEON register, it is also safer, given that calculated tags for failed
+    decryptions should be withheld.
+    
+    Signed-off-by: Ard Biesheuvel <ardb@kernel.org>
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+diff --git a/arch/arm64/crypto/ghash-ce-core.S b/arch/arm64/crypto/ghash-ce-core.S
+index 6b958dcdf136..7868330dd54e 100644
+--- a/arch/arm64/crypto/ghash-ce-core.S
++++ b/arch/arm64/crypto/ghash-ce-core.S
+@@ -544,7 +544,22 @@ CPU_LE(	rev		w8, w8		)
+ 	ext		XL.16b, XL.16b, XL.16b, #8
+ 	rev64		XL.16b, XL.16b
+ 	eor		XL.16b, XL.16b, KS0.16b
++
++	.if		\enc == 1
+ 	st1		{XL.16b}, [x10]			// store tag
++	.else
++	ldp		x11, x12, [sp, #40]		// load tag pointer and authsize
++	adr_l		x17, .Lpermute_table
++	ld1		{KS0.16b}, [x11]		// load supplied tag
++	add		x17, x17, x12
++	ld1		{KS1.16b}, [x17]		// load permute vector
++
++	cmeq		XL.16b, XL.16b, KS0.16b		// compare tags
++	mvn		XL.16b, XL.16b			// -1 for fail, 0 for pass
++	tbl		XL.16b, {XL.16b}, KS1.16b	// keep authsize bytes only
++	sminv		b0, XL.16b			// signed minimum across XL
++	smov		w0, v0.b[0]			// return b0
++	.endif
+ 
+ 4:	ldp		x29, x30, [sp], #32
+ 	ret

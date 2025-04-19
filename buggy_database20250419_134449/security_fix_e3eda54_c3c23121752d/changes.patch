@@ -1,0 +1,772 @@
+diff --git a/drivers/staging/greybus/Makefile b/drivers/staging/greybus/Makefile
+index bd9967ca46c6..fa5aaf363c7b 100644
+--- a/drivers/staging/greybus/Makefile
++++ b/drivers/staging/greybus/Makefile
+@@ -33,7 +33,7 @@ gb-audio-manager-y += audio_manager.o
+ gb-audio-manager-y += audio_manager_module.o
+ gb-bootrom-y := bootrom.o
+ gb-camera-y := camera.o
+-gb-firmware-y := fw-core.o fw-download.o fw-management.o
++gb-firmware-y := fw-core.o fw-download.o fw-management.o authentication.o
+ gb-spilib-y := spilib.o
+ gb-sdio-y := sdio.o
+ gb-uart-y := uart.o
+diff --git a/drivers/staging/greybus/authentication.c b/drivers/staging/greybus/authentication.c
+new file mode 100644
+index 000000000000..e4697805530a
+--- /dev/null
++++ b/drivers/staging/greybus/authentication.c
+@@ -0,0 +1,437 @@
++/*
++ * Greybus Component Authentication Protocol (CAP) Driver.
++ *
++ * Copyright 2016 Google Inc.
++ * Copyright 2016 Linaro Ltd.
++ *
++ * Released under the GPLv2 only.
++ */
++
++#include "greybus.h"
++
++#include <linux/cdev.h>
++#include <linux/fs.h>
++#include <linux/ioctl.h>
++#include <linux/uaccess.h>
++
++#include "greybus_authentication.h"
++#include "firmware.h"
++#include "greybus.h"
++
++#define CAP_TIMEOUT_MS		1000
++
++/*
++ * Number of minor devices this driver supports.
++ * There will be exactly one required per Interface.
++ */
++#define NUM_MINORS		U8_MAX
++
++struct gb_cap {
++	struct device		*parent;
++	struct gb_connection	*connection;
++	struct kref		kref;
++	struct list_head	node;
++	bool			disabled; /* connection getting disabled */
++
++	struct mutex		mutex;
++	struct cdev		cdev;
++	struct device		*class_device;
++	dev_t			dev_num;
++};
++
++static struct class *cap_class;
++static dev_t cap_dev_num;
++static DEFINE_IDA(cap_minors_map);
++static LIST_HEAD(cap_list);
++static DEFINE_MUTEX(list_mutex);
++
++static void cap_kref_release(struct kref *kref)
++{
++	struct gb_cap *cap = container_of(kref, struct gb_cap, kref);
++
++	kfree(cap);
++}
++
++/*
++ * All users of cap take a reference (from within list_mutex lock), before
++ * they get a pointer to play with. And the structure will be freed only after
++ * the last user has put the reference to it.
++ */
++static void put_cap(struct gb_cap *cap)
++{
++	kref_put(&cap->kref, cap_kref_release);
++}
++
++/* Caller must call put_cap() after using struct gb_cap */
++static struct gb_cap *get_cap(struct cdev *cdev)
++{
++	struct gb_cap *cap;
++
++	mutex_lock(&list_mutex);
++
++	list_for_each_entry(cap, &cap_list, node) {
++		if (&cap->cdev == cdev) {
++			kref_get(&cap->kref);
++			goto unlock;
++		}
++	}
++
++	cap = NULL;
++
++unlock:
++	mutex_unlock(&list_mutex);
++
++	return cap;
++}
++
++static int cap_get_endpoint_uid(struct gb_cap *cap, u8 *euid)
++{
++	struct gb_connection *connection = cap->connection;
++	struct gb_cap_get_endpoint_uid_response response;
++	int ret;
++
++	ret = gb_operation_sync(connection, GB_CAP_TYPE_GET_ENDPOINT_UID, NULL,
++				0, &response, sizeof(response));
++	if (ret) {
++		dev_err(cap->parent, "failed to get endpoint uid (%d)\n", ret);
++		return ret;
++	}
++
++	memcpy(euid, response.uid, sizeof(response.uid));
++
++	return 0;
++}
++
++static int cap_get_ims_certificate(struct gb_cap *cap, u32 class, u32 id,
++				   u8 *certificate, u32 *size, u8 *result)
++{
++	struct gb_connection *connection = cap->connection;
++	struct gb_cap_get_ims_certificate_request *request;
++	struct gb_cap_get_ims_certificate_response *response;
++	size_t max_size = gb_operation_get_payload_size_max(connection);
++	struct gb_operation *op;
++	int ret;
++
++	op = gb_operation_create_flags(connection,
++				       GB_CAP_TYPE_GET_IMS_CERTIFICATE,
++				       sizeof(*request), max_size,
++				       GB_OPERATION_FLAG_SHORT_RESPONSE,
++				       GFP_KERNEL);
++	if (!op)
++		return -ENOMEM;
++
++	request = op->request->payload;
++	request->certificate_class = cpu_to_le32(class);
++	request->certificate_id = cpu_to_le32(id);
++
++	ret = gb_operation_request_send_sync(op);
++	if (ret) {
++		dev_err(cap->parent, "failed to get certificate (%d)\n", ret);
++		goto done;
++	}
++
++	response = op->response->payload;
++	*result = response->result_code;
++	*size = op->response->payload_size - sizeof(*response);
++	memcpy(certificate, response->certificate, *size);
++
++done:
++	gb_operation_put(op);
++	return ret;
++}
++
++static int cap_authenticate(struct gb_cap *cap, u32 auth_type, u8 *uid,
++			    u8 *challenge, u8 *result, u8 *auth_response,
++			    u32 *signature_size, u8 *signature)
++{
++	struct gb_connection *connection = cap->connection;
++	struct gb_cap_authenticate_request *request;
++	struct gb_cap_authenticate_response *response;
++	size_t max_size = gb_operation_get_payload_size_max(connection);
++	struct gb_operation *op;
++	int ret;
++
++	op = gb_operation_create_flags(connection, GB_CAP_TYPE_AUTHENTICATE,
++				       sizeof(*request), max_size,
++				       GB_OPERATION_FLAG_SHORT_RESPONSE,
++				       GFP_KERNEL);
++	if (!op)
++		return -ENOMEM;
++
++	request = op->request->payload;
++	request->auth_type = cpu_to_le32(auth_type);
++	memcpy(request->uid, uid, sizeof(request->uid));
++	memcpy(request->challenge, challenge, sizeof(request->challenge));
++
++	ret = gb_operation_request_send_sync(op);
++	if (ret) {
++		dev_err(cap->parent, "failed to authenticate (%d)\n", ret);
++		goto done;
++	}
++
++	response = op->response->payload;
++	*result = response->result_code;
++	*signature_size = op->response->payload_size - sizeof(*response);
++	memcpy(auth_response, response->response, sizeof(response->response));
++	memcpy(signature, response->signature, *signature_size);
++
++done:
++	gb_operation_put(op);
++	return ret;
++}
++
++/* Char device fops */
++
++static int cap_open(struct inode *inode, struct file *file)
++{
++	struct gb_cap *cap = get_cap(inode->i_cdev);
++
++	/* cap structure can't get freed until file descriptor is closed */
++	if (cap) {
++		file->private_data = cap;
++		return 0;
++	}
++
++	return -ENODEV;
++}
++
++static int cap_release(struct inode *inode, struct file *file)
++{
++	struct gb_cap *cap = file->private_data;
++
++	put_cap(cap);
++	return 0;
++}
++
++static int cap_ioctl(struct gb_cap *cap, unsigned int cmd,
++			 void __user *buf)
++{
++	struct cap_ioc_get_endpoint_uid endpoint_uid;
++	struct cap_ioc_get_ims_certificate *ims_cert;
++	struct cap_ioc_authenticate *authenticate;
++	int ret;
++
++	switch (cmd) {
++	case CAP_IOC_GET_ENDPOINT_UID:
++		ret = cap_get_endpoint_uid(cap, endpoint_uid.uid);
++		if (ret)
++			return ret;
++
++		if (copy_to_user(buf, &endpoint_uid, sizeof(endpoint_uid)))
++			return -EFAULT;
++
++		return 0;
++	case CAP_IOC_GET_IMS_CERTIFICATE:
++		ims_cert = kzalloc(sizeof(*ims_cert), GFP_KERNEL);
++		if (!ims_cert)
++			return -ENOMEM;
++
++		if (copy_from_user(ims_cert, buf, sizeof(*ims_cert))) {
++			ret = -EFAULT;
++			goto free_ims_cert;
++		}
++
++		ret = cap_get_ims_certificate(cap, ims_cert->certificate_class,
++					      ims_cert->certificate_id,
++					      ims_cert->certificate,
++					      &ims_cert->cert_size,
++					      &ims_cert->result_code);
++		if (ret)
++			goto free_ims_cert;
++
++		if (copy_to_user(buf, ims_cert, sizeof(*ims_cert)))
++			ret = -EFAULT;
++
++free_ims_cert:
++		kfree(ims_cert);
++		return ret;
++	case CAP_IOC_AUTHENTICATE:
++		authenticate = kzalloc(sizeof(*authenticate), GFP_KERNEL);
++		if (!authenticate)
++			return -ENOMEM;
++
++		if (copy_from_user(authenticate, buf, sizeof(*authenticate))) {
++			ret = -EFAULT;
++			goto free_authenticate;
++		}
++
++		ret = cap_authenticate(cap, authenticate->auth_type,
++				       authenticate->uid,
++				       authenticate->challenge,
++				       &authenticate->result_code,
++				       authenticate->response,
++				       &authenticate->signature_size,
++				       authenticate->signature);
++		if (ret)
++			goto free_authenticate;
++
++		if (copy_to_user(buf, authenticate, sizeof(*authenticate)))
++			ret = -EFAULT;
++free_authenticate:
++		kfree(authenticate);
++		return ret;
++	default:
++		return -ENOTTY;
++	}
++}
++
++static long cap_ioctl_unlocked(struct file *file, unsigned int cmd,
++			       unsigned long arg)
++{
++	struct gb_cap *cap = file->private_data;
++	int ret = -ENODEV;
++
++	/*
++	 * Serialize ioctls.
++	 *
++	 * We don't want the user to do multiple authentication operations in
++	 * parallel.
++	 *
++	 * This is also used to protect ->disabled, which is used to check if
++	 * the connection is getting disconnected, so that we don't start any
++	 * new operations.
++	 */
++	mutex_lock(&cap->mutex);
++	if (!cap->disabled)
++		ret = cap_ioctl(cap, cmd, (void __user *)arg);
++	mutex_unlock(&cap->mutex);
++
++	return ret;
++}
++
++static const struct file_operations cap_fops = {
++	.owner		= THIS_MODULE,
++	.open		= cap_open,
++	.release	= cap_release,
++	.unlocked_ioctl	= cap_ioctl_unlocked,
++};
++
++int gb_cap_connection_init(struct gb_connection *connection)
++{
++	struct gb_cap *cap;
++	int ret, minor;
++
++	if (!connection)
++		return 0;
++
++	cap = kzalloc(sizeof(*cap), GFP_KERNEL);
++	if (!cap)
++		return -ENOMEM;
++
++	cap->parent = &connection->bundle->dev;
++	cap->connection = connection;
++	mutex_init(&cap->mutex);
++	gb_connection_set_data(connection, cap);
++	kref_init(&cap->kref);
++
++	mutex_lock(&list_mutex);
++	list_add(&cap->node, &cap_list);
++	mutex_unlock(&list_mutex);
++
++	ret = gb_connection_enable(connection);
++	if (ret)
++		goto err_list_del;
++
++	minor = ida_simple_get(&cap_minors_map, 0, NUM_MINORS, GFP_KERNEL);
++	if (minor < 0) {
++		ret = minor;
++		goto err_connection_disable;
++	}
++
++	/* Add a char device to allow userspace to interact with cap */
++	cap->dev_num = MKDEV(MAJOR(cap_dev_num), minor);
++	cdev_init(&cap->cdev, &cap_fops);
++
++	ret = cdev_add(&cap->cdev, cap->dev_num, 1);
++	if (ret)
++		goto err_remove_ida;
++
++	/* Add a soft link to the previously added char-dev within the bundle */
++	cap->class_device = device_create(cap_class, cap->parent, cap->dev_num,
++					  NULL, "gb-authenticate-%d", minor);
++	if (IS_ERR(cap->class_device)) {
++		ret = PTR_ERR(cap->class_device);
++		goto err_del_cdev;
++	}
++
++	return 0;
++
++err_del_cdev:
++	cdev_del(&cap->cdev);
++err_remove_ida:
++	ida_simple_remove(&cap_minors_map, minor);
++err_connection_disable:
++	gb_connection_disable(connection);
++err_list_del:
++	mutex_lock(&list_mutex);
++	list_del(&cap->node);
++	mutex_unlock(&list_mutex);
++
++	put_cap(cap);
++
++	return ret;
++}
++
++void gb_cap_connection_exit(struct gb_connection *connection)
++{
++	struct gb_cap *cap;
++
++	if (!connection)
++		return;
++
++	cap = gb_connection_get_data(connection);
++
++	device_destroy(cap_class, cap->dev_num);
++	cdev_del(&cap->cdev);
++	ida_simple_remove(&cap_minors_map, MINOR(cap->dev_num));
++
++	/*
++	 * Disallow any new ioctl operations on the char device and wait for
++	 * existing ones to finish.
++	 */
++	mutex_lock(&cap->mutex);
++	cap->disabled = true;
++	mutex_unlock(&cap->mutex);
++
++	/* All pending greybus operations should have finished by now */
++	gb_connection_disable(cap->connection);
++
++	/* Disallow new users to get access to the cap structure */
++	mutex_lock(&list_mutex);
++	list_del(&cap->node);
++	mutex_unlock(&list_mutex);
++
++	/*
++	 * All current users of cap would have taken a reference to it by
++	 * now, we can drop our reference and wait the last user will get
++	 * cap freed.
++	 */
++	put_cap(cap);
++}
++
++int cap_init(void)
++{
++	int ret;
++
++	cap_class = class_create(THIS_MODULE, "gb_authenticate");
++	if (IS_ERR(cap_class))
++		return PTR_ERR(cap_class);
++
++	ret = alloc_chrdev_region(&cap_dev_num, 0, NUM_MINORS,
++				  "gb_authenticate");
++	if (ret)
++		goto err_remove_class;
++
++	return 0;
++
++err_remove_class:
++	class_destroy(cap_class);
++	return ret;
++}
++
++void cap_exit(void)
++{
++	unregister_chrdev_region(cap_dev_num, NUM_MINORS);
++	class_destroy(cap_class);
++	ida_destroy(&cap_minors_map);
++}
+diff --git a/drivers/staging/greybus/firmware.h b/drivers/staging/greybus/firmware.h
+index a82d0203971b..fb955379cfe4 100644
+--- a/drivers/staging/greybus/firmware.h
++++ b/drivers/staging/greybus/firmware.h
+@@ -25,4 +25,10 @@ int gb_fw_download_request_handler(struct gb_operation *op);
+ int gb_fw_download_connection_init(struct gb_connection *connection);
+ void gb_fw_download_connection_exit(struct gb_connection *connection);
+ 
++/* CAP Protocol specific functions */
++int cap_init(void);
++void cap_exit(void);
++int gb_cap_connection_init(struct gb_connection *connection);
++void gb_cap_connection_exit(struct gb_connection *connection);
++
+ #endif /* __FIRMWARE_H */
+diff --git a/drivers/staging/greybus/fw-core.c b/drivers/staging/greybus/fw-core.c
+index 33941efe13ea..963973242be0 100644
+--- a/drivers/staging/greybus/fw-core.c
++++ b/drivers/staging/greybus/fw-core.c
+@@ -17,6 +17,7 @@ struct gb_fw_core {
+ 	struct gb_connection	*download_connection;
+ 	struct gb_connection	*mgmt_connection;
+ 	struct gb_connection	*spi_connection;
++	struct gb_connection	*cap_connection;
+ };
+ 
+ struct gb_connection *to_fw_mgmt_connection(struct device *dev)
+@@ -134,6 +135,24 @@ static int gb_fw_core_probe(struct gb_bundle *bundle,
+ 				fw_core->spi_connection = connection;
+ 			}
+ 
++			break;
++		case GREYBUS_PROTOCOL_AUTHENTICATION:
++			/* Disallow multiple CAP CPorts */
++			if (fw_core->cap_connection) {
++				dev_err(&bundle->dev, "multiple Authentication CPorts found\n");
++				ret = -EINVAL;
++				goto err_destroy_connections;
++			}
++
++			connection = gb_connection_create(bundle, cport_id,
++							  NULL);
++			if (IS_ERR(connection)) {
++				dev_err(&bundle->dev, "failed to create Authentication connection (%ld)\n",
++					PTR_ERR(connection));
++			} else {
++				fw_core->cap_connection = connection;
++			}
++
+ 			break;
+ 		default:
+ 			dev_err(&bundle->dev, "invalid protocol id (0x%02x)\n",
+@@ -168,6 +187,15 @@ static int gb_fw_core_probe(struct gb_bundle *bundle,
+ 		fw_core->spi_connection = NULL;
+ 	}
+ 
++	ret = gb_cap_connection_init(fw_core->cap_connection);
++	if (ret) {
++		/* We may still be able to work with the Interface */
++		dev_err(&bundle->dev, "failed to initialize CAP connection, disable it (%d)\n",
++			ret);
++		gb_connection_destroy(fw_core->cap_connection);
++		fw_core->cap_connection = NULL;
++	}
++
+ 	ret = gb_fw_mgmt_connection_init(fw_core->mgmt_connection);
+ 	if (ret) {
+ 		/* We may still be able to work with the Interface */
+@@ -181,10 +209,12 @@ static int gb_fw_core_probe(struct gb_bundle *bundle,
+ 	return 0;
+ 
+ err_exit_connections:
++	gb_cap_connection_exit(fw_core->cap_connection);
+ 	gb_fw_spi_connection_exit(fw_core->spi_connection);
+ 	gb_fw_download_connection_exit(fw_core->download_connection);
+ err_destroy_connections:
+ 	gb_connection_destroy(fw_core->mgmt_connection);
++	gb_connection_destroy(fw_core->cap_connection);
+ 	gb_connection_destroy(fw_core->spi_connection);
+ 	gb_connection_destroy(fw_core->download_connection);
+ 	kfree(fw_core);
+@@ -197,10 +227,12 @@ static void gb_fw_core_disconnect(struct gb_bundle *bundle)
+ 	struct gb_fw_core *fw_core = greybus_get_drvdata(bundle);
+ 
+ 	gb_fw_mgmt_connection_exit(fw_core->mgmt_connection);
++	gb_cap_connection_exit(fw_core->cap_connection);
+ 	gb_fw_spi_connection_exit(fw_core->spi_connection);
+ 	gb_fw_download_connection_exit(fw_core->download_connection);
+ 
+ 	gb_connection_destroy(fw_core->mgmt_connection);
++	gb_connection_destroy(fw_core->cap_connection);
+ 	gb_connection_destroy(fw_core->spi_connection);
+ 	gb_connection_destroy(fw_core->download_connection);
+ 
+@@ -229,19 +261,32 @@ static int fw_core_init(void)
+ 		return ret;
+ 	}
+ 
+-	ret = greybus_register(&gb_fw_core_driver);
++	ret = cap_init();
+ 	if (ret) {
+-		fw_mgmt_exit();
+-		return ret;
++		pr_err("Failed to initialize component authentication core (%d)\n",
++		       ret);
++		goto fw_mgmt_exit;
+ 	}
+ 
++	ret = greybus_register(&gb_fw_core_driver);
++	if (ret)
++		goto cap_exit;
++
+ 	return 0;
++
++cap_exit:
++	cap_exit();
++fw_mgmt_exit:
++	fw_mgmt_exit();
++
++	return ret;
+ }
+ module_init(fw_core_init);
+ 
+ static void __exit fw_core_exit(void)
+ {
+ 	greybus_deregister(&gb_fw_core_driver);
++	cap_exit();
+ 	fw_mgmt_exit();
+ }
+ module_exit(fw_core_exit);
+diff --git a/drivers/staging/greybus/greybus_authentication.h b/drivers/staging/greybus/greybus_authentication.h
+new file mode 100644
+index 000000000000..4784ed98e8a3
+--- /dev/null
++++ b/drivers/staging/greybus/greybus_authentication.h
+@@ -0,0 +1,120 @@
++/*
++ * Greybus Component Authentication User Header
++ *
++ * This file is provided under a dual BSD/GPLv2 license.  When using or
++ * redistributing this file, you may do so under either license.
++ *
++ * GPL LICENSE SUMMARY
++ *
++ * Copyright(c) 2016 Google Inc. All rights reserved.
++ * Copyright(c) 2016 Linaro Ltd. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of version 2 of the GNU General Public License as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License version 2 for more details.
++ *
++ * BSD LICENSE
++ *
++ * Copyright(c) 2016 Google Inc. All rights reserved.
++ * Copyright(c) 2016 Linaro Ltd. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *
++ *  * Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ *  * Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in
++ *    the documentation and/or other materials provided with the
++ *    distribution.
++ *  * Neither the name of Google Inc. or Linaro Ltd. nor the names of
++ *    its contributors may be used to endorse or promote products
++ *    derived from this software without specific prior written
++ *    permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL GOOGLE INC. OR
++ * LINARO LTD. BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
++ * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
++ * OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef __GREYBUS_AUTHENTICATION_USER_H
++#define __GREYBUS_AUTHENTICATION_USER_H
++
++#include <linux/ioctl.h>
++#include <linux/types.h>
++
++#define CAP_CERTIFICATE_MAX_SIZE	1600
++#define CAP_SIGNATURE_MAX_SIZE		320
++
++/* Certificate class types */
++#define CAP_CERT_IMS_EAPC		0x00000001
++#define CAP_CERT_IMS_EASC		0x00000002
++#define CAP_CERT_IMS_EARC		0x00000003
++#define CAP_CERT_IMS_IAPC		0x00000004
++#define CAP_CERT_IMS_IASC		0x00000005
++#define CAP_CERT_IMS_IARC		0x00000006
++
++/* IMS Certificate response result codes */
++#define CAP_IMS_RESULT_CERT_FOUND	0x00
++#define CAP_IMS_RESULT_CERT_CLASS_INVAL	0x01
++#define CAP_IMS_RESULT_CERT_CORRUPT	0x02
++#define CAP_IMS_RESULT_CERT_NOT_FOUND	0x03
++
++/* Authentication types */
++#define CAP_AUTH_IMS_PRI		0x00000001
++#define CAP_AUTH_IMS_SEC		0x00000002
++#define CAP_AUTH_IMS_RSA		0x00000003
++
++/* Authenticate response result codes */
++#define CAP_AUTH_RESULT_CR_SUCCESS	0x00
++#define CAP_AUTH_RESULT_CR_BAD_TYPE	0x01
++#define CAP_AUTH_RESULT_CR_WRONG_EP	0x02
++#define CAP_AUTH_RESULT_CR_NO_KEY	0x03
++#define CAP_AUTH_RESULT_CR_SIG_FAIL	0x04
++
++
++/* IOCTL support */
++struct cap_ioc_get_endpoint_uid {
++	__u8			uid[8];
++} __attribute__ ((__packed__));
++
++struct cap_ioc_get_ims_certificate {
++	__u32			certificate_class;
++	__u32			certificate_id;
++
++	__u8			result_code;
++	__u32			cert_size;
++	__u8			certificate[CAP_CERTIFICATE_MAX_SIZE];
++} __attribute__ ((__packed__));
++
++struct cap_ioc_authenticate {
++	__u32			auth_type;
++	__u8			uid[8];
++	__u8			challenge[32];
++
++	__u8			result_code;
++	__u8			response[64];
++	__u32			signature_size;
++	__u8			signature[CAP_SIGNATURE_MAX_SIZE];
++} __attribute__ ((__packed__));
++
++#define CAP_IOCTL_BASE			'C'
++#define CAP_IOC_GET_ENDPOINT_UID	_IOR(CAP_IOCTL_BASE, 0, struct cap_ioc_get_endpoint_uid)
++#define CAP_IOC_GET_IMS_CERTIFICATE	_IOWR(CAP_IOCTL_BASE, 1, struct cap_ioc_get_ims_certificate)
++#define CAP_IOC_AUTHENTICATE		_IOWR(CAP_IOCTL_BASE, 2, struct cap_ioc_authenticate)
++
++#endif /* __GREYBUS_AUTHENTICATION_USER_H */
+diff --git a/drivers/staging/greybus/greybus_manifest.h b/drivers/staging/greybus/greybus_manifest.h
+index 2ae39ad92368..d135945cefe1 100644
+--- a/drivers/staging/greybus/greybus_manifest.h
++++ b/drivers/staging/greybus/greybus_manifest.h
+@@ -47,6 +47,7 @@ enum greybus_protocol {
+ 	GREYBUS_PROTOCOL_CAMERA_DATA	= 0x16,
+ 	GREYBUS_PROTOCOL_FW_DOWNLOAD	= 0x17,
+ 	GREYBUS_PROTOCOL_FW_MANAGEMENT	= 0x18,
++	GREYBUS_PROTOCOL_AUTHENTICATION	= 0x19,
+ 	GREYBUS_PROTOCOL_LOG		= 0x1a,
+ 		/* ... */
+ 	GREYBUS_PROTOCOL_RAW		= 0xfe,
+diff --git a/drivers/staging/greybus/greybus_protocols.h b/drivers/staging/greybus/greybus_protocols.h
+index 327d01f3679a..0043b912f720 100644
+--- a/drivers/staging/greybus/greybus_protocols.h
++++ b/drivers/staging/greybus/greybus_protocols.h
+@@ -345,6 +345,43 @@ struct gb_fw_mgmt_backend_fw_updated_request {
+ /* firmware management backend firmware updated response has no payload */
+ 
+ 
++/* Component Authentication Protocol (CAP) */
++
++/* Request Types */
++#define GB_CAP_TYPE_GET_ENDPOINT_UID	0x01
++#define GB_CAP_TYPE_GET_IMS_CERTIFICATE	0x02
++#define GB_CAP_TYPE_AUTHENTICATE	0x03
++
++/* CAP get endpoint uid request has no payload */
++struct gb_cap_get_endpoint_uid_response {
++	__u8			uid[8];
++} __packed;
++
++/* CAP get endpoint ims certificate request/response */
++struct gb_cap_get_ims_certificate_request {
++	__le32			certificate_class;
++	__le32			certificate_id;
++} __packed;
++
++struct gb_cap_get_ims_certificate_response {
++	__u8			result_code;
++	__u8			certificate[0];
++} __packed;
++
++/* CAP authenticate request/response */
++struct gb_cap_authenticate_request {
++	__le32			auth_type;
++	__u8			uid[8];
++	__u8			challenge[32];
++} __packed;
++
++struct gb_cap_authenticate_response {
++	__u8			result_code;
++	__u8			response[64];
++	__u8			signature[0];
++} __packed;
++
++
+ /* Bootrom Protocol */
+ 
+ /* Version of the Greybus bootrom protocol we support */

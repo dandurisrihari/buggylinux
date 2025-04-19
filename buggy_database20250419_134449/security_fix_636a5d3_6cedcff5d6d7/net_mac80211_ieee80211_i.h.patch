@@ -1,0 +1,82 @@
+commit 636a5d3625993c5ca59abc81794b9ded93cdb740
+Author: Jouni Malinen <jouni.malinen@atheros.com>
+Date:   Thu Mar 19 13:39:22 2009 +0200
+
+    nl80211: Add MLME primitives to support external SME
+    
+    This patch adds new nl80211 commands to allow user space to request
+    authentication and association (and also deauthentication and
+    disassociation). The commands are structured to allow separate
+    authentication and association steps, i.e., the interface between
+    kernel and user space is similar to the MLME SAP interface in IEEE
+    802.11 standard and an user space application takes the role of the
+    SME.
+    
+    The patch introduces MLME-AUTHENTICATE.request,
+    MLME-{,RE}ASSOCIATE.request, MLME-DEAUTHENTICATE.request, and
+    MLME-DISASSOCIATE.request primitives. The authentication and
+    association commands request the actual operations in two steps
+    (assuming the driver supports this; if not, separate authentication
+    step is skipped; this could end up being a separate "connect"
+    command).
+    
+    The initial implementation for mac80211 uses the current
+    net/mac80211/mlme.c for actual sending and processing of management
+    frames and the new nl80211 commands will just stop the current state
+    machine from moving automatically from authentication to association.
+    Future cleanup may move more of the MLME operations into cfg80211.
+    
+    The goal of this design is to provide more control of authentication and
+    association process to user space without having to move the full MLME
+    implementation. This should be enough to allow IEEE 802.11r FT protocol
+    and 802.11s SAE authentication to be implemented. Obviously, this will
+    also bring the extra benefit of not having to use WEXT for association
+    requests with mac80211. An example implementation of a user space SME
+    using the new nl80211 commands is available for wpa_supplicant.
+    
+    This patch is enough to get IEEE 802.11r FT protocol working with
+    over-the-air mechanism (over-the-DS will need additional MLME
+    primitives for handling the FT Action frames).
+    
+    Signed-off-by: Jouni Malinen <j@w1.fi>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/mac80211/ieee80211_i.h b/net/mac80211/ieee80211_i.h
+index ad12c2a03a95..7b96d95f48b1 100644
+--- a/net/mac80211/ieee80211_i.h
++++ b/net/mac80211/ieee80211_i.h
+@@ -256,6 +256,7 @@ struct mesh_preq_queue {
+ #define IEEE80211_STA_TKIP_WEP_USED	BIT(14)
+ #define IEEE80211_STA_CSA_RECEIVED	BIT(15)
+ #define IEEE80211_STA_MFP_ENABLED	BIT(16)
++#define IEEE80211_STA_EXT_SME		BIT(17)
+ /* flags for MLME request */
+ #define IEEE80211_STA_REQ_SCAN 0
+ #define IEEE80211_STA_REQ_DIRECT_PROBE 1
+@@ -266,6 +267,7 @@ struct mesh_preq_queue {
+ #define IEEE80211_AUTH_ALG_OPEN BIT(0)
+ #define IEEE80211_AUTH_ALG_SHARED_KEY BIT(1)
+ #define IEEE80211_AUTH_ALG_LEAP BIT(2)
++#define IEEE80211_AUTH_ALG_FT BIT(3)
+ 
+ struct ieee80211_if_managed {
+ 	struct timer_list timer;
+@@ -335,6 +337,9 @@ struct ieee80211_if_managed {
+ 	size_t ie_deauth_len;
+ 	u8 *ie_disassoc;
+ 	size_t ie_disassoc_len;
++
++	u8 *sme_auth_ie;
++	size_t sme_auth_ie_len;
+ };
+ 
+ enum ieee80211_ibss_flags {
+@@ -970,7 +975,7 @@ ieee80211_scan_rx(struct ieee80211_sub_if_data *sdata,
+ 		  struct sk_buff *skb,
+ 		  struct ieee80211_rx_status *rx_status);
+ int ieee80211_sta_set_extra_ie(struct ieee80211_sub_if_data *sdata,
+-			       char *ie, size_t len);
++			       const char *ie, size_t len);
+ 
+ void ieee80211_mlme_notify_scan_completed(struct ieee80211_local *local);
+ void ieee80211_scan_failed(struct ieee80211_local *local);

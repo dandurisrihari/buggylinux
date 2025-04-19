@@ -1,0 +1,80 @@
+commit 1b683b551209ca46ae59b29572018001db5af078
+Author: Patrick McHardy <kaber@trash.net>
+Date:   Wed Nov 29 02:35:30 2006 +0100
+
+    [NETFILTER]: sip conntrack: better NAT handling
+    
+    The NAT handling of the SIP helper has a few problems:
+    
+    - Request headers are only mangled in the reply direction, From/To headers
+      not at all, which can lead to authentication failures with DNAT in case
+      the authentication domain is the IP address
+    
+    - Contact headers in responses are only mangled for REGISTER responses
+    
+    - Headers may be mangled even though they contain addresses not
+      participating in the connection, like alternative addresses
+    
+    - Packets are droppen when domain names are used where the helper expects
+      IP addresses
+    
+    This patch takes a different approach, instead of fixed rules what field
+    to mangle to what content, it adds symetric mapping of From/To/Via/Contact
+    headers, which allows to deal properly with echoed addresses in responses
+    and foreign addresses not belonging to the connection.
+    
+    Signed-off-by: Patrick McHardy <kaber@trash.net>
+
+diff --git a/net/ipv4/netfilter/ip_conntrack_sip.c b/net/ipv4/netfilter/ip_conntrack_sip.c
+index 0a6a13c45b07..3a26d63eed88 100644
+--- a/net/ipv4/netfilter/ip_conntrack_sip.c
++++ b/net/ipv4/netfilter/ip_conntrack_sip.c
+@@ -69,13 +69,38 @@ struct sip_header_nfo {
+ };
+ 
+ static struct sip_header_nfo ct_sip_hdrs[] = {
+-	[POS_REQ_HEADER] = { 	/* SIP Requests headers */
++	[POS_REG_REQ_URI] = { 	/* SIP REGISTER request URI */
++		.lname		= "sip:",
++		.lnlen		= sizeof("sip:") - 1,
++		.ln_str		= ":",
++		.ln_strlen	= sizeof(":") - 1,
++		.match_len	= epaddr_len
++	},
++	[POS_REQ_URI] = { 	/* SIP request URI */
+ 		.lname		= "sip:",
+ 		.lnlen		= sizeof("sip:") - 1,
+ 		.ln_str		= "@",
+ 		.ln_strlen	= sizeof("@") - 1,
+ 		.match_len	= epaddr_len
+ 	},
++	[POS_FROM] = {		/* SIP From header */
++		.lname		= "From:",
++		.lnlen		= sizeof("From:") - 1,
++		.sname		= "\r\nf:",
++		.snlen		= sizeof("\r\nf:") - 1,
++		.ln_str		= "sip:",
++		.ln_strlen	= sizeof("sip:") - 1,
++		.match_len	= skp_epaddr_len,
++	},
++	[POS_TO] = {		/* SIP To header */
++		.lname		= "To:",
++		.lnlen		= sizeof("To:") - 1,
++		.sname		= "\r\nt:",
++		.snlen		= sizeof("\r\nt:") - 1,
++		.ln_str		= "sip:",
++		.ln_strlen	= sizeof("sip:") - 1,
++		.match_len	= skp_epaddr_len,
++	},
+ 	[POS_VIA] = { 		/* SIP Via header */
+ 		.lname		= "Via:",
+ 		.lnlen		= sizeof("Via:") - 1,
+@@ -284,7 +309,7 @@ int ct_sip_get_info(const char *dptr, size_t dlen,
+ 
+ 	while (dptr <= limit) {
+ 		if ((strncmp(dptr, hnfo->lname, hnfo->lnlen) != 0) &&
+-		    (hinfo->sname == NULL ||
++		    (hnfo->sname == NULL ||
+ 		     strncmp(dptr, hnfo->sname, hnfo->snlen) != 0)) {
+ 			dptr++;
+ 			continue;

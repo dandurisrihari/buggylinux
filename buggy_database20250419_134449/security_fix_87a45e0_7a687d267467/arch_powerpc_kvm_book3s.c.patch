@@ -1,0 +1,58 @@
+commit 87a45e07a5abfec4d6b0e8356718f8919d0a3c20
+Author: Nicholas Piggin <npiggin@gmail.com>
+Date:   Wed Oct 2 16:00:22 2019 +1000
+
+    KVM: PPC: Book3S: Replace reset_msr mmu op with inject_interrupt arch op
+    
+    reset_msr sets the MSR for interrupt injection, but it's cleaner and
+    more flexible to provide a single op to set both MSR and PC for the
+    interrupt.
+    
+    Signed-off-by: Nicholas Piggin <npiggin@gmail.com>
+    Signed-off-by: Paul Mackerras <paulus@ozlabs.org>
+
+diff --git a/arch/powerpc/kvm/book3s.c b/arch/powerpc/kvm/book3s.c
+index a2336c452905..58a59ee998e2 100644
+--- a/arch/powerpc/kvm/book3s.c
++++ b/arch/powerpc/kvm/book3s.c
+@@ -74,27 +74,6 @@ struct kvm_stats_debugfs_item debugfs_entries[] = {
+ 	{ NULL }
+ };
+ 
+-void kvmppc_unfixup_split_real(struct kvm_vcpu *vcpu)
+-{
+-	if (vcpu->arch.hflags & BOOK3S_HFLAG_SPLIT_HACK) {
+-		ulong pc = kvmppc_get_pc(vcpu);
+-		ulong lr = kvmppc_get_lr(vcpu);
+-		if ((pc & SPLIT_HACK_MASK) == SPLIT_HACK_OFFS)
+-			kvmppc_set_pc(vcpu, pc & ~SPLIT_HACK_MASK);
+-		if ((lr & SPLIT_HACK_MASK) == SPLIT_HACK_OFFS)
+-			kvmppc_set_lr(vcpu, lr & ~SPLIT_HACK_MASK);
+-		vcpu->arch.hflags &= ~BOOK3S_HFLAG_SPLIT_HACK;
+-	}
+-}
+-EXPORT_SYMBOL_GPL(kvmppc_unfixup_split_real);
+-
+-static inline unsigned long kvmppc_interrupt_offset(struct kvm_vcpu *vcpu)
+-{
+-	if (!is_kvmppc_hv_enabled(vcpu->kvm))
+-		return to_book3s(vcpu)->hior;
+-	return 0;
+-}
+-
+ static inline void kvmppc_update_int_pending(struct kvm_vcpu *vcpu,
+ 			unsigned long pending_now, unsigned long old_pending)
+ {
+@@ -134,11 +113,7 @@ static inline bool kvmppc_critical_section(struct kvm_vcpu *vcpu)
+ 
+ void kvmppc_inject_interrupt(struct kvm_vcpu *vcpu, int vec, u64 flags)
+ {
+-	kvmppc_unfixup_split_real(vcpu);
+-	kvmppc_set_srr0(vcpu, kvmppc_get_pc(vcpu));
+-	kvmppc_set_srr1(vcpu, (kvmppc_get_msr(vcpu) & SRR1_MSR_BITS) | flags);
+-	kvmppc_set_pc(vcpu, kvmppc_interrupt_offset(vcpu) + vec);
+-	vcpu->arch.mmu.reset_msr(vcpu);
++	vcpu->kvm->arch.kvm_ops->inject_interrupt(vcpu, vec, flags);
+ }
+ 
+ static int kvmppc_book3s_vec2irqprio(unsigned int vec)

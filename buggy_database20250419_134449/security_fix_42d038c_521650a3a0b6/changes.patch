@@ -1,0 +1,62 @@
+diff --git a/arch/arm64/Kconfig b/arch/arm64/Kconfig
+index 3adcec05b1f6..b15803afb2a0 100644
+--- a/arch/arm64/Kconfig
++++ b/arch/arm64/Kconfig
+@@ -148,6 +148,7 @@ config ARM64
+ 	select HAVE_FAST_GUP
+ 	select HAVE_FTRACE_MCOUNT_RECORD
+ 	select HAVE_FUNCTION_TRACER
++	select HAVE_FUNCTION_ERROR_INJECTION
+ 	select HAVE_FUNCTION_GRAPH_TRACER
+ 	select HAVE_GCC_PLUGINS
+ 	select HAVE_HW_BREAKPOINT if PERF_EVENTS
+diff --git a/arch/arm64/include/asm/ptrace.h b/arch/arm64/include/asm/ptrace.h
+index 1dcf63a9ac1f..fbebb411ae20 100644
+--- a/arch/arm64/include/asm/ptrace.h
++++ b/arch/arm64/include/asm/ptrace.h
+@@ -301,6 +301,11 @@ static inline unsigned long regs_return_value(struct pt_regs *regs)
+ 	return regs->regs[0];
+ }
+ 
++static inline void regs_set_return_value(struct pt_regs *regs, unsigned long rc)
++{
++	regs->regs[0] = rc;
++}
++
+ /**
+  * regs_get_kernel_argument() - get Nth function argument in kernel
+  * @regs:	pt_regs of that context
+diff --git a/arch/arm64/lib/Makefile b/arch/arm64/lib/Makefile
+index 33c2a4abda04..f182ccb0438e 100644
+--- a/arch/arm64/lib/Makefile
++++ b/arch/arm64/lib/Makefile
+@@ -33,3 +33,5 @@ UBSAN_SANITIZE_atomic_ll_sc.o	:= n
+ lib-$(CONFIG_ARCH_HAS_UACCESS_FLUSHCACHE) += uaccess_flushcache.o
+ 
+ obj-$(CONFIG_CRC32) += crc32.o
++
++obj-$(CONFIG_FUNCTION_ERROR_INJECTION) += error-inject.o
+diff --git a/arch/arm64/lib/error-inject.c b/arch/arm64/lib/error-inject.c
+new file mode 100644
+index 000000000000..ed15021da3ed
+--- /dev/null
++++ b/arch/arm64/lib/error-inject.c
+@@ -0,0 +1,18 @@
++// SPDX-License-Identifier: GPL-2.0
++
++#include <linux/error-injection.h>
++#include <linux/kprobes.h>
++
++void override_function_with_return(struct pt_regs *regs)
++{
++	/*
++	 * 'regs' represents the state on entry of a predefined function in
++	 * the kernel/module and which is captured on a kprobe.
++	 *
++	 * When kprobe returns back from exception it will override the end
++	 * of probed function and directly return to the predefined
++	 * function's caller.
++	 */
++	instruction_pointer_set(regs, procedure_link_pointer(regs));
++}
++NOKPROBE_SYMBOL(override_function_with_return);

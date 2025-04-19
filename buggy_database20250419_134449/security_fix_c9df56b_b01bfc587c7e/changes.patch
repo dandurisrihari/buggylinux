@@ -1,0 +1,181 @@
+diff --git a/include/linux/nl80211.h b/include/linux/nl80211.h
+index f17307590e61..460b12a8ef66 100644
+--- a/include/linux/nl80211.h
++++ b/include/linux/nl80211.h
+@@ -499,6 +499,9 @@
+  *	this command may also be sent by the driver as an MLME event to
+  *	inform userspace of the new replay counter.
+  *
++ * @NL80211_CMD_PMKSA_CANDIDATE: This is used as an event to inform userspace
++ *	of PMKSA caching dandidates.
++ *
+  * @NL80211_CMD_MAX: highest used command number
+  * @__NL80211_CMD_AFTER_LAST: internal use
+  */
+@@ -623,6 +626,8 @@ enum nl80211_commands {
+ 
+ 	NL80211_CMD_SET_REKEY_OFFLOAD,
+ 
++	NL80211_CMD_PMKSA_CANDIDATE,
++
+ 	/* add new commands above here */
+ 
+ 	/* used to define NL80211_CMD_MAX below */
+@@ -1070,6 +1075,9 @@ enum nl80211_commands {
+  * @NL80211_ATTR_ROAM_SUPPORT: Indicates whether the firmware is capable of
+  *	roaming to another AP in the same ESS if the signal lever is low.
+  *
++ * @NL80211_ATTR_PMKSA_CANDIDATE: Nested attribute containing the PMKSA caching
++ *	candidate information, see &enum nl80211_pmksa_candidate_attr.
++ *
+  * @NL80211_ATTR_MAX: highest attribute number currently defined
+  * @__NL80211_ATTR_AFTER_LAST: internal use
+  */
+@@ -1288,6 +1296,8 @@ enum nl80211_attrs {
+ 	NL80211_ATTR_SCHED_SCAN_MATCH,
+ 	NL80211_ATTR_MAX_MATCH_SETS,
+ 
++	NL80211_ATTR_PMKSA_CANDIDATE,
++
+ 	/* add attributes here, update the policy in nl80211.c */
+ 
+ 	__NL80211_ATTR_AFTER_LAST,
+@@ -2558,4 +2568,27 @@ enum nl80211_sta_wme_attr {
+ 	NL80211_STA_WME_MAX = __NL80211_STA_WME_AFTER_LAST - 1
+ };
+ 
++/**
++ * enum nl80211_pmksa_candidate_attr - attributes for PMKSA caching candidates
++ * @__NL80211_PMKSA_CANDIDATE_INVALID: invalid number for nested attributes
++ * @NL80211_PMKSA_CANDIDATE_INDEX: candidate index (u32; the smaller, the higher
++ *	priority)
++ * @NL80211_PMKSA_CANDIDATE_BSSID: candidate BSSID (6 octets)
++ * @NL80211_PMKSA_CANDIDATE_PREAUTH: RSN pre-authentication supported (flag)
++ * @NUM_NL80211_PMKSA_CANDIDATE: number of PMKSA caching candidate attributes
++ *	(internal)
++ * @MAX_NL80211_PMKSA_CANDIDATE: highest PMKSA caching candidate attribute
++ *	(internal)
++ */
++enum nl80211_pmksa_candidate_attr {
++	__NL80211_PMKSA_CANDIDATE_INVALID,
++	NL80211_PMKSA_CANDIDATE_INDEX,
++	NL80211_PMKSA_CANDIDATE_BSSID,
++	NL80211_PMKSA_CANDIDATE_PREAUTH,
++
++	/* keep last */
++	NUM_NL80211_PMKSA_CANDIDATE,
++	MAX_NL80211_PMKSA_CANDIDATE = NUM_NL80211_PMKSA_CANDIDATE - 1
++};
++
+ #endif /* __LINUX_NL80211_H */
+diff --git a/include/net/cfg80211.h b/include/net/cfg80211.h
+index 9518b5cfb822..6ac4bddeeeca 100644
+--- a/include/net/cfg80211.h
++++ b/include/net/cfg80211.h
+@@ -3136,6 +3136,17 @@ void cfg80211_cqm_pktloss_notify(struct net_device *dev,
+ void cfg80211_gtk_rekey_notify(struct net_device *dev, const u8 *bssid,
+ 			       const u8 *replay_ctr, gfp_t gfp);
+ 
++/**
++ * cfg80211_pmksa_candidate_notify - notify about PMKSA caching candidate
++ * @dev: network device
++ * @index: candidate index (the smaller the index, the higher the priority)
++ * @bssid: BSSID of AP
++ * @preauth: Whether AP advertises support for RSN pre-authentication
++ * @gfp: allocation flags
++ */
++void cfg80211_pmksa_candidate_notify(struct net_device *dev, int index,
++				     const u8 *bssid, bool preauth, gfp_t gfp);
++
+ /* Logging, debugging and troubleshooting/diagnostic helpers. */
+ 
+ /* wiphy_printk helpers, similar to dev_printk */
+diff --git a/net/wireless/mlme.c b/net/wireless/mlme.c
+index 832f6574e4ed..61adea540e02 100644
+--- a/net/wireless/mlme.c
++++ b/net/wireless/mlme.c
+@@ -1095,3 +1095,14 @@ void cfg80211_gtk_rekey_notify(struct net_device *dev, const u8 *bssid,
+ 	nl80211_gtk_rekey_notify(rdev, dev, bssid, replay_ctr, gfp);
+ }
+ EXPORT_SYMBOL(cfg80211_gtk_rekey_notify);
++
++void cfg80211_pmksa_candidate_notify(struct net_device *dev, int index,
++				     const u8 *bssid, bool preauth, gfp_t gfp)
++{
++	struct wireless_dev *wdev = dev->ieee80211_ptr;
++	struct wiphy *wiphy = wdev->wiphy;
++	struct cfg80211_registered_device *rdev = wiphy_to_dev(wiphy);
++
++	nl80211_pmksa_candidate_notify(rdev, dev, index, bssid, preauth, gfp);
++}
++EXPORT_SYMBOL(cfg80211_pmksa_candidate_notify);
+diff --git a/net/wireless/nl80211.c b/net/wireless/nl80211.c
+index 430b432bc3f0..3c6427abdf34 100644
+--- a/net/wireless/nl80211.c
++++ b/net/wireless/nl80211.c
+@@ -7270,6 +7270,52 @@ void nl80211_gtk_rekey_notify(struct cfg80211_registered_device *rdev,
+ 	nlmsg_free(msg);
+ }
+ 
++void nl80211_pmksa_candidate_notify(struct cfg80211_registered_device *rdev,
++				    struct net_device *netdev, int index,
++				    const u8 *bssid, bool preauth, gfp_t gfp)
++{
++	struct sk_buff *msg;
++	struct nlattr *attr;
++	void *hdr;
++
++	msg = nlmsg_new(NLMSG_GOODSIZE, gfp);
++	if (!msg)
++		return;
++
++	hdr = nl80211hdr_put(msg, 0, 0, 0, NL80211_CMD_PMKSA_CANDIDATE);
++	if (!hdr) {
++		nlmsg_free(msg);
++		return;
++	}
++
++	NLA_PUT_U32(msg, NL80211_ATTR_WIPHY, rdev->wiphy_idx);
++	NLA_PUT_U32(msg, NL80211_ATTR_IFINDEX, netdev->ifindex);
++
++	attr = nla_nest_start(msg, NL80211_ATTR_PMKSA_CANDIDATE);
++	if (!attr)
++		goto nla_put_failure;
++
++	NLA_PUT_U32(msg, NL80211_PMKSA_CANDIDATE_INDEX, index);
++	NLA_PUT(msg, NL80211_PMKSA_CANDIDATE_BSSID, ETH_ALEN, bssid);
++	if (preauth)
++		NLA_PUT_FLAG(msg, NL80211_PMKSA_CANDIDATE_PREAUTH);
++
++	nla_nest_end(msg, attr);
++
++	if (genlmsg_end(msg, hdr) < 0) {
++		nlmsg_free(msg);
++		return;
++	}
++
++	genlmsg_multicast_netns(wiphy_net(&rdev->wiphy), msg, 0,
++				nl80211_mlme_mcgrp.id, gfp);
++	return;
++
++ nla_put_failure:
++	genlmsg_cancel(msg, hdr);
++	nlmsg_free(msg);
++}
++
+ void
+ nl80211_send_cqm_pktloss_notify(struct cfg80211_registered_device *rdev,
+ 				struct net_device *netdev, const u8 *peer,
+diff --git a/net/wireless/nl80211.h b/net/wireless/nl80211.h
+index 5d69c56400ae..f24a1fbeaf19 100644
+--- a/net/wireless/nl80211.h
++++ b/net/wireless/nl80211.h
+@@ -113,4 +113,8 @@ void nl80211_gtk_rekey_notify(struct cfg80211_registered_device *rdev,
+ 			      struct net_device *netdev, const u8 *bssid,
+ 			      const u8 *replay_ctr, gfp_t gfp);
+ 
++void nl80211_pmksa_candidate_notify(struct cfg80211_registered_device *rdev,
++				    struct net_device *netdev, int index,
++				    const u8 *bssid, bool preauth, gfp_t gfp);
++
+ #endif /* __NET_WIRELESS_NL80211_H */

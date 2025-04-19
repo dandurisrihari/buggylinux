@@ -1,0 +1,85 @@
+commit c7115e094ca820bb72e0c89f158d16bc48c6fa04
+Author: Chao Yu <chao@kernel.org>
+Date:   Sat Jan 13 03:41:32 2024 +0800
+
+    f2fs: introduce FAULT_BLKADDR_CONSISTENCE
+    
+    We will encounter below inconsistent status when FAULT_BLKADDR type
+    fault injection is on.
+    
+    Info: checkpoint state = d6 :  nat_bits crc fsck compacted_summary orphan_inodes sudden-power-off
+    [ASSERT] (fsck_chk_inode_blk:1254)  --> ino: 0x1c100 has i_blocks: 000000c0, but has 191 blocks
+    [FIX] (fsck_chk_inode_blk:1260)  --> [0x1c100] i_blocks=0x000000c0 -> 0xbf
+    [FIX] (fsck_chk_inode_blk:1269)  --> [0x1c100] i_compr_blocks=0x00000026 -> 0x27
+    [ASSERT] (fsck_chk_inode_blk:1254)  --> ino: 0x1cadb has i_blocks: 0000002f, but has 46 blocks
+    [FIX] (fsck_chk_inode_blk:1260)  --> [0x1cadb] i_blocks=0x0000002f -> 0x2e
+    [FIX] (fsck_chk_inode_blk:1269)  --> [0x1cadb] i_compr_blocks=0x00000011 -> 0x12
+    [ASSERT] (fsck_chk_inode_blk:1254)  --> ino: 0x1c62c has i_blocks: 00000002, but has 1 blocks
+    [FIX] (fsck_chk_inode_blk:1260)  --> [0x1c62c] i_blocks=0x00000002 -> 0x1
+    
+    After we inject fault into f2fs_is_valid_blkaddr() during truncation,
+    a) it missed to increase @nr_free or @valid_blocks
+    b) it can cause in blkaddr leak in truncated dnode
+    Which may cause inconsistent status.
+    
+    This patch separates FAULT_BLKADDR_CONSISTENCE from FAULT_BLKADDR,
+    and rename FAULT_BLKADDR to FAULT_BLKADDR_VALIDITY
+    so that we can:
+    a) use FAULT_BLKADDR_CONSISTENCE in f2fs_truncate_data_blocks_range()
+    to simulate inconsistent issue independently, then it can verify fsck
+    repair flow.
+    b) FAULT_BLKADDR_VALIDITY fault will not cause any inconsistent status,
+    we can just use it to check error path handling in kernel side.
+    
+    Reviewed-by: Daeho Jeong <daehojeong@google.com>
+    Signed-off-by: Chao Yu <chao@kernel.org>
+    Signed-off-by: Jaegeuk Kim <jaegeuk@kernel.org>
+
+diff --git a/fs/f2fs/super.c b/fs/f2fs/super.c
+index d45ab0992ae5..e2c066fbc0fa 100644
+--- a/fs/f2fs/super.c
++++ b/fs/f2fs/super.c
+@@ -44,24 +44,25 @@ static struct kmem_cache *f2fs_inode_cachep;
+ #ifdef CONFIG_F2FS_FAULT_INJECTION
+ 
+ const char *f2fs_fault_name[FAULT_MAX] = {
+-	[FAULT_KMALLOC]		= "kmalloc",
+-	[FAULT_KVMALLOC]	= "kvmalloc",
+-	[FAULT_PAGE_ALLOC]	= "page alloc",
+-	[FAULT_PAGE_GET]	= "page get",
+-	[FAULT_ALLOC_NID]	= "alloc nid",
+-	[FAULT_ORPHAN]		= "orphan",
+-	[FAULT_BLOCK]		= "no more block",
+-	[FAULT_DIR_DEPTH]	= "too big dir depth",
+-	[FAULT_EVICT_INODE]	= "evict_inode fail",
+-	[FAULT_TRUNCATE]	= "truncate fail",
+-	[FAULT_READ_IO]		= "read IO error",
+-	[FAULT_CHECKPOINT]	= "checkpoint error",
+-	[FAULT_DISCARD]		= "discard error",
+-	[FAULT_WRITE_IO]	= "write IO error",
+-	[FAULT_SLAB_ALLOC]	= "slab alloc",
+-	[FAULT_DQUOT_INIT]	= "dquot initialize",
+-	[FAULT_LOCK_OP]		= "lock_op",
+-	[FAULT_BLKADDR]		= "invalid blkaddr",
++	[FAULT_KMALLOC]			= "kmalloc",
++	[FAULT_KVMALLOC]		= "kvmalloc",
++	[FAULT_PAGE_ALLOC]		= "page alloc",
++	[FAULT_PAGE_GET]		= "page get",
++	[FAULT_ALLOC_NID]		= "alloc nid",
++	[FAULT_ORPHAN]			= "orphan",
++	[FAULT_BLOCK]			= "no more block",
++	[FAULT_DIR_DEPTH]		= "too big dir depth",
++	[FAULT_EVICT_INODE]		= "evict_inode fail",
++	[FAULT_TRUNCATE]		= "truncate fail",
++	[FAULT_READ_IO]			= "read IO error",
++	[FAULT_CHECKPOINT]		= "checkpoint error",
++	[FAULT_DISCARD]			= "discard error",
++	[FAULT_WRITE_IO]		= "write IO error",
++	[FAULT_SLAB_ALLOC]		= "slab alloc",
++	[FAULT_DQUOT_INIT]		= "dquot initialize",
++	[FAULT_LOCK_OP]			= "lock_op",
++	[FAULT_BLKADDR_VALIDITY]	= "invalid blkaddr",
++	[FAULT_BLKADDR_CONSISTENCE]	= "inconsistent blkaddr",
+ };
+ 
+ void f2fs_build_fault_attr(struct f2fs_sb_info *sbi, unsigned int rate,

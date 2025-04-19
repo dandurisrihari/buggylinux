@@ -1,0 +1,64 @@
+commit c9a211951c7c79cfb5de888d7d9550872868b086
+Author: Howard McLauchlan <hmclauchlan@fb.com>
+Date:   Wed Mar 21 18:59:08 2018 -0700
+
+    bpf: whitelist all syscalls for error injection
+    
+    Error injection is a useful mechanism to fail arbitrary kernel
+    functions. However, it is often hard to guarantee an error propagates
+    appropriately to user space programs. By injecting into syscalls, we can
+    return arbitrary values to user space directly; this increases
+    flexibility and robustness in testing, allowing us to test user space
+    error paths effectively.
+    
+    The following script, for example, fails calls to sys_open() from a
+    given pid:
+    
+    from bcc import BPF
+    from sys import argv
+    
+    pid = argv[1]
+    
+    prog = r"""
+    
+    int kprobe__SyS_open(struct pt_regs *ctx, const char *pathname, int flags)
+    {
+        u32 pid = bpf_get_current_pid_tgid();
+        if (pid == %s)
+            bpf_override_return(ctx, -ENOMEM);
+        return 0;
+    }
+    """ % pid
+    
+    b = BPF(text=prog)
+    while 1:
+        b.perf_buffer_poll()
+    
+    This patch whitelists all syscalls defined with SYSCALL_DEFINE and
+    COMPAT_SYSCALL_DEFINE for error injection. These changes are not
+    intended to be considered stable, and would normally be configured off.
+    
+    Signed-off-by: Howard McLauchlan <hmclauchlan@fb.com>
+    Signed-off-by: Dominik Brodowski <linux@dominikbrodowski.net>
+
+diff --git a/include/linux/syscalls.h b/include/linux/syscalls.h
+index 1f223b7cf16d..b961184f597a 100644
+--- a/include/linux/syscalls.h
++++ b/include/linux/syscalls.h
+@@ -191,6 +191,8 @@ static inline int is_syscall_trace_event(struct trace_event_call *tp_event)
+ 
+ #define SYSCALL_DEFINE0(sname)					\
+ 	SYSCALL_METADATA(_##sname, 0);				\
++	asmlinkage long sys_##sname(void);			\
++	ALLOW_ERROR_INJECTION(sys_##sname, ERRNO);		\
+ 	asmlinkage long sys_##sname(void)
+ 
+ #define SYSCALL_DEFINE1(name, ...) SYSCALL_DEFINEx(1, _##name, __VA_ARGS__)
+@@ -210,6 +212,7 @@ static inline int is_syscall_trace_event(struct trace_event_call *tp_event)
+ #define __SYSCALL_DEFINEx(x, name, ...)					\
+ 	asmlinkage long sys##name(__MAP(x,__SC_DECL,__VA_ARGS__))	\
+ 		__attribute__((alias(__stringify(SyS##name))));		\
++	ALLOW_ERROR_INJECTION(sys##name, ERRNO);			\
+ 	static inline long SYSC##name(__MAP(x,__SC_DECL,__VA_ARGS__));	\
+ 	asmlinkage long SyS##name(__MAP(x,__SC_LONG,__VA_ARGS__));	\
+ 	asmlinkage long SyS##name(__MAP(x,__SC_LONG,__VA_ARGS__))	\

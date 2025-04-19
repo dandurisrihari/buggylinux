@@ -1,0 +1,77 @@
+commit 885f82bfbc6fefb6664ea27965c3ab9ac4194b8c
+Author: Thomas Gleixner <tglx@linutronix.de>
+Date:   Sun Apr 29 15:21:42 2018 +0200
+
+    x86/process: Allow runtime control of Speculative Store Bypass
+    
+    The Speculative Store Bypass vulnerability can be mitigated with the
+    Reduced Data Speculation (RDS) feature. To allow finer grained control of
+    this eventually expensive mitigation a per task mitigation control is
+    required.
+    
+    Add a new TIF_RDS flag and put it into the group of TIF flags which are
+    evaluated for mismatch in switch_to(). If these bits differ in the previous
+    and the next task, then the slow path function __switch_to_xtra() is
+    invoked. Implement the TIF_RDS dependent mitigation control in the slow
+    path.
+    
+    If the prctl for controlling Speculative Store Bypass is disabled or no
+    task uses the prctl then there is no overhead in the switch_to() fast
+    path.
+    
+    Update the KVM related speculation control functions to take TID_RDS into
+    account as well.
+    
+    Based on a patch from Tim Chen. Completely rewritten.
+    
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Reviewed-by: Ingo Molnar <mingo@kernel.org>
+    Reviewed-by: Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+
+diff --git a/arch/x86/kernel/process.c b/arch/x86/kernel/process.c
+index 03408b942adb..397342725046 100644
+--- a/arch/x86/kernel/process.c
++++ b/arch/x86/kernel/process.c
+@@ -38,6 +38,7 @@
+ #include <asm/switch_to.h>
+ #include <asm/desc.h>
+ #include <asm/prctl.h>
++#include <asm/spec-ctrl.h>
+ 
+ /*
+  * per-CPU TSS segments. Threads are completely 'soft' on Linux,
+@@ -278,6 +279,24 @@ static inline void switch_to_bitmap(struct tss_struct *tss,
+ 	}
+ }
+ 
++static __always_inline void __speculative_store_bypass_update(unsigned long tifn)
++{
++	u64 msr;
++
++	if (static_cpu_has(X86_FEATURE_AMD_RDS)) {
++		msr = x86_amd_ls_cfg_base | rds_tif_to_amd_ls_cfg(tifn);
++		wrmsrl(MSR_AMD64_LS_CFG, msr);
++	} else {
++		msr = x86_spec_ctrl_base | rds_tif_to_spec_ctrl(tifn);
++		wrmsrl(MSR_IA32_SPEC_CTRL, msr);
++	}
++}
++
++void speculative_store_bypass_update(void)
++{
++	__speculative_store_bypass_update(current_thread_info()->flags);
++}
++
+ void __switch_to_xtra(struct task_struct *prev_p, struct task_struct *next_p,
+ 		      struct tss_struct *tss)
+ {
+@@ -309,6 +328,9 @@ void __switch_to_xtra(struct task_struct *prev_p, struct task_struct *next_p,
+ 
+ 	if ((tifp ^ tifn) & _TIF_NOCPUID)
+ 		set_cpuid_faulting(!!(tifn & _TIF_NOCPUID));
++
++	if ((tifp ^ tifn) & _TIF_RDS)
++		__speculative_store_bypass_update(tifn);
+ }
+ 
+ /*

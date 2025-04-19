@@ -1,0 +1,106 @@
+commit b2ac7541e3777f325c49d900550c9e3dd10c0eda
+Author: Raed Salem <raeds@mellanox.com>
+Date:   Thu Oct 24 16:11:28 2019 +0300
+
+    net/mlx5e: IPsec: Add Connect-X IPsec Rx data path offload
+    
+    On receive flow inspect received packets for IPsec offload indication
+    using the cqe, for IPsec offloaded packets propagate offload status
+    and stack handle to stack for further processing.
+    
+    Supported statuses:
+    - Offload ok.
+    - Authentication failure.
+    - Bad trailer indication.
+    
+    Connect-X IPsec does not use mlx5e_ipsec_handle_rx_cqe.
+    
+    For RX only offload, we see the BW gain. Below is the iperf3
+    performance report on two server of 24 cores Intel(R) Xeon(R)
+    CPU E5-2620 v3 @ 2.40GHz with ConnectX6-DX.
+    We use one thread per IPsec tunnel.
+    
+    ---------------------------------------------------------------------
+    Mode          |  Num tunnel | BW     | Send CPU util | Recv CPU util
+                  |             | (Gbps) | (Average %)   | (Average %)
+    ---------------------------------------------------------------------
+    Cryto offload | 1           | 4.6    | 4.2           | 14.5
+    ---------------------------------------------------------------------
+    Cryto offload | 24          | 38     | 73            | 63
+    ---------------------------------------------------------------------
+    Non-offload   | 1           | 4      | 4             | 13
+    ---------------------------------------------------------------------
+    Non-offload   | 24          | 23     | 52            | 67
+    
+    Signed-off-by: Raed Salem <raeds@mellanox.com>
+    Reviewed-by: Boris Pismenny <borisp@mellanox.com>
+    Reviewed-by: Tariq Toukan <tariqt@mellanox.com>
+    Signed-off-by: Saeed Mahameed <saeedm@mellanox.com>
+
+diff --git a/drivers/net/ethernet/mellanox/mlx5/core/en_accel/ipsec_rxtx.c b/drivers/net/ethernet/mellanox/mlx5/core/en_accel/ipsec_rxtx.c
+index 824b87ac8f9e..93a8d68815ad 100644
+--- a/drivers/net/ethernet/mellanox/mlx5/core/en_accel/ipsec_rxtx.c
++++ b/drivers/net/ethernet/mellanox/mlx5/core/en_accel/ipsec_rxtx.c
+@@ -360,6 +360,62 @@ struct sk_buff *mlx5e_ipsec_handle_rx_skb(struct net_device *netdev,
+ 	return skb;
+ }
+ 
++enum {
++	MLX5E_IPSEC_OFFLOAD_RX_SYNDROME_DECRYPTED,
++	MLX5E_IPSEC_OFFLOAD_RX_SYNDROME_AUTH_FAILED,
++	MLX5E_IPSEC_OFFLOAD_RX_SYNDROME_BAD_TRAILER,
++};
++
++void mlx5e_ipsec_offload_handle_rx_skb(struct net_device *netdev,
++				       struct sk_buff *skb,
++				       struct mlx5_cqe64 *cqe)
++{
++	u32 ipsec_meta_data = be32_to_cpu(cqe->ft_metadata);
++	u8 ipsec_syndrome = ipsec_meta_data & 0xFF;
++	struct mlx5e_priv *priv;
++	struct xfrm_offload *xo;
++	struct xfrm_state *xs;
++	struct sec_path *sp;
++	u32  sa_handle;
++
++	sa_handle = MLX5_IPSEC_METADATA_HANDLE(ipsec_meta_data);
++	priv = netdev_priv(netdev);
++	sp = secpath_set(skb);
++	if (unlikely(!sp)) {
++		atomic64_inc(&priv->ipsec->sw_stats.ipsec_rx_drop_sp_alloc);
++		return;
++	}
++
++	xs = mlx5e_ipsec_sadb_rx_lookup(priv->ipsec, sa_handle);
++	if (unlikely(!xs)) {
++		atomic64_inc(&priv->ipsec->sw_stats.ipsec_rx_drop_sadb_miss);
++		return;
++	}
++
++	sp = skb_sec_path(skb);
++	sp->xvec[sp->len++] = xs;
++	sp->olen++;
++
++	xo = xfrm_offload(skb);
++	xo->flags = CRYPTO_DONE;
++
++	switch (ipsec_syndrome & MLX5_IPSEC_METADATA_SYNDROM_MASK) {
++	case MLX5E_IPSEC_OFFLOAD_RX_SYNDROME_DECRYPTED:
++		xo->status = CRYPTO_SUCCESS;
++		if (WARN_ON_ONCE(priv->ipsec->no_trailer))
++			xo->flags |= XFRM_ESP_NO_TRAILER;
++		break;
++	case MLX5E_IPSEC_OFFLOAD_RX_SYNDROME_AUTH_FAILED:
++		xo->status = CRYPTO_TUNNEL_ESP_AUTH_FAILED;
++		break;
++	case MLX5E_IPSEC_OFFLOAD_RX_SYNDROME_BAD_TRAILER:
++		xo->status = CRYPTO_INVALID_PACKET_SYNTAX;
++		break;
++	default:
++		atomic64_inc(&priv->ipsec->sw_stats.ipsec_rx_drop_syndrome);
++	}
++}
++
+ bool mlx5e_ipsec_feature_check(struct sk_buff *skb, struct net_device *netdev,
+ 			       netdev_features_t features)
+ {

@@ -1,0 +1,150 @@
+commit 0451d14d05618e5fcbdc5017a30e3d609ddc8229
+Author: Aravind Gopalakrishnan <Aravind.Gopalakrishnan@amd.com>
+Date:   Tue Jun 2 15:35:56 2015 -0500
+
+    EDAC, mce_amd_inj: Modify flags attribute to use string arguments
+    
+    Use strings such as "hw" or "sw" to indicate the type of error injection
+    to be performed.
+    
+    Current flags attribute derives the meanings of values that can be
+    programmed into it from asm/mce.h. Moving to defined strings for the
+    attribute allows this module to be self-sufficient and removes the
+    dependency. Also, we can introduce new flags as and when needed without
+    having to worry about conflicting with the flags already defined in
+    asm/mce.h.
+    
+    Also, modify do_inject() to use the newly defined injection_type enum to
+    figure out the injection mechanism we need to use
+    
+    Suggested-by: Borislav Petkov <bp@suse.de>
+    Signed-off-by: Aravind Gopalakrishnan <Aravind.Gopalakrishnan@amd.com>
+    Cc: linux-edac <linux-edac@vger.kernel.org>
+    Cc: mchehab@osg.samsung.com
+    Cc: x86-ml <x86@kernel.org>
+    Link: http://lkml.kernel.org/r/1433277362-10911-4-git-send-email-Aravind.Gopalakrishnan@amd.com
+    [ Use strstrip() return value. ]
+    Signed-off-by: Borislav Petkov <bp@suse.de>
+
+diff --git a/drivers/edac/mce_amd_inj.c b/drivers/edac/mce_amd_inj.c
+index 15f6aa18b2f8..2a0c829fef3d 100644
+--- a/drivers/edac/mce_amd_inj.c
++++ b/drivers/edac/mce_amd_inj.c
+@@ -15,6 +15,8 @@
+ #include <linux/device.h>
+ #include <linux/module.h>
+ #include <linux/cpu.h>
++#include <linux/string.h>
++#include <linux/uaccess.h>
+ #include <asm/mce.h>
+ 
+ #include "mce_amd.h"
+@@ -27,6 +29,23 @@ static struct dentry *dfs_inj;
+ 
+ static u8 n_banks;
+ 
++#define MAX_FLAG_OPT_SIZE	3
++
++enum injection_type {
++	SW_INJ = 0,	/* SW injection, simply decode the error */
++	HW_INJ,		/* Trigger a #MC */
++	N_INJ_TYPES,
++};
++
++static const char * const flags_options[] = {
++	[SW_INJ] = "sw",
++	[HW_INJ] = "hw",
++	NULL
++};
++
++/* Set default injection to SW_INJ */
++enum injection_type inj_type = SW_INJ;
++
+ #define MCE_INJECT_SET(reg)						\
+ static int inj_##reg##_set(void *data, u64 val)				\
+ {									\
+@@ -81,24 +100,66 @@ static int toggle_hw_mce_inject(unsigned int cpu, bool enable)
+ 	return err;
+ }
+ 
+-static int flags_get(void *data, u64 *val)
++static int __set_inj(const char *buf)
+ {
+-	struct mce *m = (struct mce *)data;
++	int i;
+ 
+-	*val = m->inject_flags;
++	for (i = 0; i < N_INJ_TYPES; i++) {
++		if (!strncmp(flags_options[i], buf, strlen(flags_options[i]))) {
++			inj_type = i;
++			return 0;
++		}
++	}
++	return -EINVAL;
++}
+ 
+-	return 0;
++static ssize_t flags_read(struct file *filp, char __user *ubuf,
++			  size_t cnt, loff_t *ppos)
++{
++	char buf[MAX_FLAG_OPT_SIZE];
++	int n;
++
++	n = sprintf(buf, "%s\n", flags_options[inj_type]);
++
++	return simple_read_from_buffer(ubuf, cnt, ppos, buf, n);
+ }
+ 
+-static int flags_set(void *data, u64 val)
++static ssize_t flags_write(struct file *filp, const char __user *ubuf,
++			   size_t cnt, loff_t *ppos)
+ {
+-	struct mce *m = (struct mce *)data;
++	char buf[MAX_FLAG_OPT_SIZE], *__buf;
++	int err;
++	size_t ret;
+ 
+-	m->inject_flags = (u8)val;
+-	return 0;
++	if (cnt > MAX_FLAG_OPT_SIZE)
++		cnt = MAX_FLAG_OPT_SIZE;
++
++	ret = cnt;
++
++	if (copy_from_user(&buf, ubuf, cnt))
++		return -EFAULT;
++
++	buf[cnt - 1] = 0;
++
++	/* strip whitespace */
++	__buf = strstrip(buf);
++
++	err = __set_inj(__buf);
++	if (err) {
++		pr_err("%s: Invalid flags value: %s\n", __func__, __buf);
++		return err;
++	}
++
++	*ppos += ret;
++
++	return ret;
+ }
+ 
+-DEFINE_SIMPLE_ATTRIBUTE(flags_fops, flags_get, flags_set, "%llu\n");
++static const struct file_operations flags_fops = {
++	.read           = flags_read,
++	.write          = flags_write,
++	.llseek         = generic_file_llseek,
++};
+ 
+ /*
+  * On which CPU to inject?
+@@ -130,7 +191,7 @@ static void do_inject(void)
+ 	unsigned int cpu = i_mce.extcpu;
+ 	u8 b = i_mce.bank;
+ 
+-	if (!(i_mce.inject_flags & MCJ_EXCEPTION)) {
++	if (inj_type == SW_INJ) {
+ 		amd_decode_mce(NULL, 0, &i_mce);
+ 		return;
+ 	}

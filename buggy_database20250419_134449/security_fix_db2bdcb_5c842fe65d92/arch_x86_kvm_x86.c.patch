@@ -1,0 +1,58 @@
+commit db2bdcbbbd32e5500b822d5e74ef8b5bd777e687
+Author: Radim Krčmář <rkrcmar@redhat.com>
+Date:   Thu Oct 8 20:23:34 2015 +0200
+
+    KVM: x86: fix edge EOI and IOAPIC reconfig race
+    
+    KVM uses eoi_exit_bitmap to track vectors that need an action on EOI.
+    The problem is that IOAPIC can be reconfigured while an interrupt with
+    old configuration is pending and eoi_exit_bitmap only remembers the
+    newest configuration;  thus EOI from the pending interrupt is not
+    recognized.
+    
+    (Reconfiguration is not a problem for level interrupts, because IOAPIC
+     sends interrupt with the new configuration.)
+    
+    For an edge interrupt with ACK notifiers, like i8254 timer; things can
+    happen in this order
+     1) IOAPIC inject a vector from i8254
+     2) guest reconfigures that vector's VCPU and therefore eoi_exit_bitmap
+        on original VCPU gets cleared
+     3) guest's handler for the vector does EOI
+     4) KVM's EOI handler doesn't pass that vector to IOAPIC because it is
+        not in that VCPU's eoi_exit_bitmap
+     5) i8254 stops working
+    
+    A simple solution is to set the IOAPIC vector in eoi_exit_bitmap if the
+    vector is in PIR/IRR/ISR.
+    
+    This creates an unwanted situation if the vector is reused by a
+    non-IOAPIC source, but I think it is so rare that we don't want to make
+    the solution more sophisticated.  The simple solution also doesn't work
+    if we are reconfiguring the vector.  (Shouldn't happen in the wild and
+    I'd rather fix users of ACK notifiers instead of working around that.)
+    
+    The are no races because ioapic injection and reconfig are locked.
+    
+    Fixes: b053b2aef25d ("KVM: x86: Add EOI exit bitmap inference")
+    [Before b053b2aef25d, this bug happened only with APICv.]
+    Fixes: c7c9c56ca26f ("x86, apicv: add virtual interrupt delivery support")
+    Cc: <stable@vger.kernel.org>
+    Signed-off-by: Radim Krčmář <rkrcmar@redhat.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index e28954d2698a..e33aebbf189e 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -6201,8 +6201,10 @@ static void vcpu_scan_ioapic(struct kvm_vcpu *vcpu)
+ 
+ 	if (irqchip_split(vcpu->kvm))
+ 		kvm_scan_ioapic_routes(vcpu, vcpu->arch.eoi_exit_bitmap);
+-	else
++	else {
++		kvm_x86_ops->sync_pir_to_irr(vcpu);
+ 		kvm_ioapic_scan_entry(vcpu, vcpu->arch.eoi_exit_bitmap);
++	}
+ 	kvm_x86_ops->load_eoi_exitmap(vcpu);
+ }

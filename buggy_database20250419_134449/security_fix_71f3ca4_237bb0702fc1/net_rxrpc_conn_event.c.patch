@@ -1,0 +1,57 @@
+commit 71f3ca408fd43b586c02480768a503af075b247e
+Author: David Howells <dhowells@redhat.com>
+Date:   Sat Sep 17 10:49:14 2016 +0100
+
+    rxrpc: Improve skb tracing
+    
+    Improve sk_buff tracing within AF_RXRPC by the following means:
+    
+     (1) Use an enum to note the event type rather than plain integers and use
+         an array of event names rather than a big multi ?: list.
+    
+     (2) Distinguish Rx from Tx packets and account them separately.  This
+         requires the call phase to be tracked so that we know what we might
+         find in rxtx_buffer[].
+    
+     (3) Add a parameter to rxrpc_{new,see,get,free}_skb() to indicate the
+         event type.
+    
+     (4) A pair of 'rotate' events are added to indicate packets that are about
+         to be rotated out of the Rx and Tx windows.
+    
+     (5) A pair of 'lost' events are added, along with rxrpc_lose_skb() for
+         packet loss injection recording.
+    
+    Signed-off-by: David Howells <dhowells@redhat.com>
+
+diff --git a/net/rxrpc/conn_event.c b/net/rxrpc/conn_event.c
+index 9b19c51831aa..75a15a4c74c3 100644
+--- a/net/rxrpc/conn_event.c
++++ b/net/rxrpc/conn_event.c
+@@ -388,7 +388,7 @@ void rxrpc_process_connection(struct work_struct *work)
+ 	/* go through the conn-level event packets, releasing the ref on this
+ 	 * connection that each one has when we've finished with it */
+ 	while ((skb = skb_dequeue(&conn->rx_queue))) {
+-		rxrpc_see_skb(skb);
++		rxrpc_see_skb(skb, rxrpc_skb_rx_seen);
+ 		ret = rxrpc_process_event(conn, skb, &abort_code);
+ 		switch (ret) {
+ 		case -EPROTO:
+@@ -399,7 +399,7 @@ void rxrpc_process_connection(struct work_struct *work)
+ 			goto requeue_and_leave;
+ 		case -ECONNABORTED:
+ 		default:
+-			rxrpc_free_skb(skb);
++			rxrpc_free_skb(skb, rxrpc_skb_rx_freed);
+ 			break;
+ 		}
+ 	}
+@@ -416,7 +416,7 @@ void rxrpc_process_connection(struct work_struct *work)
+ protocol_error:
+ 	if (rxrpc_abort_connection(conn, -ret, abort_code) < 0)
+ 		goto requeue_and_leave;
+-	rxrpc_free_skb(skb);
++	rxrpc_free_skb(skb, rxrpc_skb_rx_freed);
+ 	_leave(" [EPROTO]");
+ 	goto out;
+ }

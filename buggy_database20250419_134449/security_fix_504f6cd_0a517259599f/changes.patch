@@ -1,0 +1,112 @@
+diff --git a/drivers/net/wireless/ath/ath10k/mac.c b/drivers/net/wireless/ath/ath10k/mac.c
+index 8d07f77e34de..c6c09c1d421e 100644
+--- a/drivers/net/wireless/ath/ath10k/mac.c
++++ b/drivers/net/wireless/ath/ath10k/mac.c
+@@ -179,6 +179,31 @@ static int ath10k_clear_peer_keys(struct ath10k_vif *arvif,
+ 	return first_errno;
+ }
+ 
++bool ath10k_mac_is_peer_wep_key_set(struct ath10k *ar, const u8 *addr,
++				    u8 keyidx)
++{
++	struct ath10k_peer *peer;
++	int i;
++
++	lockdep_assert_held(&ar->data_lock);
++
++	/* We don't know which vdev this peer belongs to,
++	 * since WMI doesn't give us that information.
++	 *
++	 * FIXME: multi-bss needs to be handled.
++	 */
++	peer = ath10k_peer_find(ar, 0, addr);
++	if (!peer)
++		return false;
++
++	for (i = 0; i < ARRAY_SIZE(peer->keys); i++) {
++		if (peer->keys[i] && peer->keys[i]->keyidx == keyidx)
++			return true;
++	}
++
++	return false;
++}
++
+ static int ath10k_clear_vdev_key(struct ath10k_vif *arvif,
+ 				 struct ieee80211_key_conf *key)
+ {
+diff --git a/drivers/net/wireless/ath/ath10k/mac.h b/drivers/net/wireless/ath/ath10k/mac.h
+index 4e3c989aa841..68296117d203 100644
+--- a/drivers/net/wireless/ath/ath10k/mac.h
++++ b/drivers/net/wireless/ath/ath10k/mac.h
+@@ -21,6 +21,8 @@
+ #include <net/mac80211.h>
+ #include "core.h"
+ 
++#define WEP_KEYID_SHIFT 6
++
+ struct ath10k_generic_iter {
+ 	struct ath10k *ar;
+ 	int ret;
+@@ -41,6 +43,8 @@ void ath10k_mgmt_over_wmi_tx_work(struct work_struct *work);
+ void ath10k_halt(struct ath10k *ar);
+ void ath10k_mac_vif_beacon_free(struct ath10k_vif *arvif);
+ void ath10k_drain_tx(struct ath10k *ar);
++bool ath10k_mac_is_peer_wep_key_set(struct ath10k *ar, const u8 *addr,
++				    u8 keyidx);
+ 
+ static inline struct ath10k_vif *ath10k_vif_to_arvif(struct ieee80211_vif *vif)
+ {
+diff --git a/drivers/net/wireless/ath/ath10k/wmi.c b/drivers/net/wireless/ath/ath10k/wmi.c
+index cd1e5e546a24..7dd7c78ec195 100644
+--- a/drivers/net/wireless/ath/ath10k/wmi.c
++++ b/drivers/net/wireless/ath/ath10k/wmi.c
+@@ -1113,6 +1113,40 @@ static inline u8 get_rate_idx(u32 rate, enum ieee80211_band band)
+ 	return rate_idx;
+ }
+ 
++/* If keys are configured, HW decrypts all frames
++ * with protected bit set. Mark such frames as decrypted.
++ */
++static void ath10k_wmi_handle_wep_reauth(struct ath10k *ar,
++					 struct sk_buff *skb,
++					 struct ieee80211_rx_status *status)
++{
++	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *)skb->data;
++	unsigned int hdrlen;
++	bool peer_key;
++	u8 *addr, keyidx;
++
++	if (!ieee80211_is_auth(hdr->frame_control) ||
++	    !ieee80211_has_protected(hdr->frame_control))
++		return;
++
++	hdrlen = ieee80211_hdrlen(hdr->frame_control);
++	if (skb->len < (hdrlen + IEEE80211_WEP_IV_LEN))
++		return;
++
++	keyidx = skb->data[hdrlen + (IEEE80211_WEP_IV_LEN - 1)] >> WEP_KEYID_SHIFT;
++	addr = ieee80211_get_SA(hdr);
++
++	spin_lock_bh(&ar->data_lock);
++	peer_key = ath10k_mac_is_peer_wep_key_set(ar, addr, keyidx);
++	spin_unlock_bh(&ar->data_lock);
++
++	if (peer_key) {
++		ath10k_dbg(ar, ATH10K_DBG_MAC,
++			   "mac wep key present for peer %pM\n", addr);
++		status->flag |= RX_FLAG_DECRYPTED;
++	}
++}
++
+ static int ath10k_wmi_event_mgmt_rx(struct ath10k *ar, struct sk_buff *skb)
+ {
+ 	struct wmi_mgmt_rx_event_v1 *ev_v1;
+@@ -1203,6 +1237,8 @@ static int ath10k_wmi_event_mgmt_rx(struct ath10k *ar, struct sk_buff *skb)
+ 	hdr = (struct ieee80211_hdr *)skb->data;
+ 	fc = le16_to_cpu(hdr->frame_control);
+ 
++	ath10k_wmi_handle_wep_reauth(ar, skb, status);
++
+ 	/* FW delivers WEP Shared Auth frame with Protected Bit set and
+ 	 * encrypted payload. However in case of PMF it delivers decrypted
+ 	 * frames with Protected Bit set. */

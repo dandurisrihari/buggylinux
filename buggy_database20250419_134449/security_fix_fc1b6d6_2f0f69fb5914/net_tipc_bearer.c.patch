@@ -1,0 +1,173 @@
+commit fc1b6d6de2208774efd2a20bf0daddb02d18b1e0
+Author: Tuong Lien <tuong.t.lien@dektech.com.au>
+Date:   Fri Nov 8 12:05:11 2019 +0700
+
+    tipc: introduce TIPC encryption & authentication
+    
+    This commit offers an option to encrypt and authenticate all messaging,
+    including the neighbor discovery messages. The currently most advanced
+    algorithm supported is the AEAD AES-GCM (like IPSec or TLS). All
+    encryption/decryption is done at the bearer layer, just before leaving
+    or after entering TIPC.
+    
+    Supported features:
+    - Encryption & authentication of all TIPC messages (header + data);
+    - Two symmetric-key modes: Cluster and Per-node;
+    - Automatic key switching;
+    - Key-expired revoking (sequence number wrapped);
+    - Lock-free encryption/decryption (RCU);
+    - Asynchronous crypto, Intel AES-NI supported;
+    - Multiple cipher transforms;
+    - Logs & statistics;
+    
+    Two key modes:
+    - Cluster key mode: One single key is used for both TX & RX in all
+    nodes in the cluster.
+    - Per-node key mode: Each nodes in the cluster has one specific TX key.
+    For RX, a node requires its peers' TX key to be able to decrypt the
+    messages from those peers.
+    
+    Key setting from user-space is performed via netlink by a user program
+    (e.g. the iproute2 'tipc' tool).
+    
+    Internal key state machine:
+    
+                                     Attach    Align(RX)
+                                         +-+   +-+
+                                         | V   | V
+            +---------+      Attach     +---------+
+            |  IDLE   |---------------->| PENDING |(user = 0)
+            +---------+                 +---------+
+               A   A                   Switch|  A
+               |   |                         |  |
+               |   | Free(switch/revoked)    |  |
+         (Free)|   +----------------------+  |  |Timeout
+               |              (TX)        |  |  |(RX)
+               |                          |  |  |
+               |                          |  v  |
+            +---------+      Switch     +---------+
+            | PASSIVE |<----------------| ACTIVE  |
+            +---------+       (RX)      +---------+
+            (user = 1)                  (user >= 1)
+    
+    The number of TFMs is 10 by default and can be changed via the procfs
+    'net/tipc/max_tfms'. At this moment, as for simplicity, this file is
+    also used to print the crypto statistics at runtime:
+    
+    echo 0xfff1 > /proc/sys/net/tipc/max_tfms
+    
+    The patch defines a new TIPC version (v7) for the encryption message (-
+    backward compatibility as well). The message is basically encapsulated
+    as follows:
+    
+       +----------------------------------------------------------+
+       | TIPCv7 encryption  | Original TIPCv2    | Authentication |
+       | header             | packet (encrypted) | Tag            |
+       +----------------------------------------------------------+
+    
+    The throughput is about ~40% for small messages (compared with non-
+    encryption) and ~9% for large messages. With the support from hardware
+    crypto i.e. the Intel AES-NI CPU instructions, the throughput increases
+    upto ~85% for small messages and ~55% for large messages.
+    
+    By default, the new feature is inactive (i.e. no encryption) until user
+    sets a key for TIPC. There is however also a new option - "TIPC_CRYPTO"
+    in the kernel configuration to enable/disable the new code when needed.
+    
+    MAINTAINERS | add two new files 'crypto.h' & 'crypto.c' in tipc
+    
+    Acked-by: Ying Xue <ying.xue@windreiver.com>
+    Acked-by: Jon Maloy <jon.maloy@ericsson.com>
+    Signed-off-by: Tuong Lien <tuong.t.lien@dektech.com.au>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/tipc/bearer.c b/net/tipc/bearer.c
+index 6e15b9b1f1ef..d7ec26bd739d 100644
+--- a/net/tipc/bearer.c
++++ b/net/tipc/bearer.c
+@@ -44,6 +44,7 @@
+ #include "netlink.h"
+ #include "udp_media.h"
+ #include "trace.h"
++#include "crypto.h"
+ 
+ #define MAX_ADDR_STR 60
+ 
+@@ -516,10 +517,15 @@ void tipc_bearer_xmit_skb(struct net *net, u32 bearer_id,
+ 
+ 	rcu_read_lock();
+ 	b = bearer_get(net, bearer_id);
+-	if (likely(b && (test_bit(0, &b->up) || msg_is_reset(hdr))))
+-		b->media->send_msg(net, skb, b, dest);
+-	else
++	if (likely(b && (test_bit(0, &b->up) || msg_is_reset(hdr)))) {
++#ifdef CONFIG_TIPC_CRYPTO
++		tipc_crypto_xmit(net, &skb, b, dest, NULL);
++		if (skb)
++#endif
++			b->media->send_msg(net, skb, b, dest);
++	} else {
+ 		kfree_skb(skb);
++	}
+ 	rcu_read_unlock();
+ }
+ 
+@@ -527,7 +533,8 @@ void tipc_bearer_xmit_skb(struct net *net, u32 bearer_id,
+  */
+ void tipc_bearer_xmit(struct net *net, u32 bearer_id,
+ 		      struct sk_buff_head *xmitq,
+-		      struct tipc_media_addr *dst)
++		      struct tipc_media_addr *dst,
++		      struct tipc_node *__dnode)
+ {
+ 	struct tipc_bearer *b;
+ 	struct sk_buff *skb, *tmp;
+@@ -541,10 +548,15 @@ void tipc_bearer_xmit(struct net *net, u32 bearer_id,
+ 		__skb_queue_purge(xmitq);
+ 	skb_queue_walk_safe(xmitq, skb, tmp) {
+ 		__skb_dequeue(xmitq);
+-		if (likely(test_bit(0, &b->up) || msg_is_reset(buf_msg(skb))))
+-			b->media->send_msg(net, skb, b, dst);
+-		else
++		if (likely(test_bit(0, &b->up) || msg_is_reset(buf_msg(skb)))) {
++#ifdef CONFIG_TIPC_CRYPTO
++			tipc_crypto_xmit(net, &skb, b, dst, __dnode);
++			if (skb)
++#endif
++				b->media->send_msg(net, skb, b, dst);
++		} else {
+ 			kfree_skb(skb);
++		}
+ 	}
+ 	rcu_read_unlock();
+ }
+@@ -555,6 +567,7 @@ void tipc_bearer_bc_xmit(struct net *net, u32 bearer_id,
+ 			 struct sk_buff_head *xmitq)
+ {
+ 	struct tipc_net *tn = tipc_net(net);
++	struct tipc_media_addr *dst;
+ 	int net_id = tn->net_id;
+ 	struct tipc_bearer *b;
+ 	struct sk_buff *skb, *tmp;
+@@ -569,7 +582,12 @@ void tipc_bearer_bc_xmit(struct net *net, u32 bearer_id,
+ 		msg_set_non_seq(hdr, 1);
+ 		msg_set_mc_netid(hdr, net_id);
+ 		__skb_dequeue(xmitq);
+-		b->media->send_msg(net, skb, b, &b->bcast_addr);
++		dst = &b->bcast_addr;
++#ifdef CONFIG_TIPC_CRYPTO
++		tipc_crypto_xmit(net, &skb, b, dst, NULL);
++		if (skb)
++#endif
++			b->media->send_msg(net, skb, b, dst);
+ 	}
+ 	rcu_read_unlock();
+ }
+@@ -596,6 +614,7 @@ static int tipc_l2_rcv_msg(struct sk_buff *skb, struct net_device *dev,
+ 	if (likely(b && test_bit(0, &b->up) &&
+ 		   (skb->pkt_type <= PACKET_MULTICAST))) {
+ 		skb_mark_not_on_list(skb);
++		TIPC_SKB_CB(skb)->flags = 0;
+ 		tipc_rcv(dev_net(b->pt.dev), skb, b);
+ 		rcu_read_unlock();
+ 		return NET_RX_SUCCESS;

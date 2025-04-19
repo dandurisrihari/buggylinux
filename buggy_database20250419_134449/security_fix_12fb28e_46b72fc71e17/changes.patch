@@ -1,0 +1,404 @@
+diff --git a/MAINTAINERS b/MAINTAINERS
+index 2ecaaec6a6bf..90cf8403dd17 100644
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -5289,6 +5289,7 @@ M:	Dan Williams <dan.j.williams@intel.com>
+ L:	linux-cxl@vger.kernel.org
+ S:	Maintained
+ F:	drivers/cxl/
++F:	include/linux/cxl-einj.h
+ F:	include/linux/cxl-event.h
+ F:	include/uapi/linux/cxl_mem.h
+ F:	tools/testing/cxl/
+diff --git a/drivers/acpi/apei/Kconfig b/drivers/acpi/apei/Kconfig
+index 6b18f8bc7be3..3cfe7e7475f2 100644
+--- a/drivers/acpi/apei/Kconfig
++++ b/drivers/acpi/apei/Kconfig
+@@ -60,6 +60,19 @@ config ACPI_APEI_EINJ
+ 	  mainly used for debugging and testing the other parts of
+ 	  APEI and some other RAS features.
+ 
++config ACPI_APEI_EINJ_CXL
++	bool "CXL Error INJection Support"
++	default ACPI_APEI_EINJ
++	depends on ACPI_APEI_EINJ
++	depends on CXL_BUS && CXL_BUS <= ACPI_APEI_EINJ
++	help
++	  Support for CXL protocol Error INJection through debugfs/cxl.
++	  Availability and which errors are supported is dependent on
++	  the host platform. Look to ACPI v6.5 section 18.6.4 and kernel
++	  EINJ documentation for more information.
++
++	  If unsure say 'n'
++
+ config ACPI_APEI_ERST_DEBUG
+ 	tristate "APEI Error Record Serialization Table (ERST) Debug Support"
+ 	depends on ACPI_APEI
+diff --git a/drivers/acpi/apei/Makefile b/drivers/acpi/apei/Makefile
+index 4dfac2128737..2c474e6477e1 100644
+--- a/drivers/acpi/apei/Makefile
++++ b/drivers/acpi/apei/Makefile
+@@ -2,6 +2,8 @@
+ obj-$(CONFIG_ACPI_APEI)		+= apei.o
+ obj-$(CONFIG_ACPI_APEI_GHES)	+= ghes.o
+ obj-$(CONFIG_ACPI_APEI_EINJ)	+= einj.o
++einj-y				:= einj-core.o
++einj-$(CONFIG_ACPI_APEI_EINJ_CXL) += einj-cxl.o
+ obj-$(CONFIG_ACPI_APEI_ERST_DEBUG) += erst-dbg.o
+ 
+ apei-y := apei-base.o hest.o erst.o bert.o
+diff --git a/drivers/acpi/apei/apei-internal.h b/drivers/acpi/apei/apei-internal.h
+index 67c2c3b959e1..cd2766c69d78 100644
+--- a/drivers/acpi/apei/apei-internal.h
++++ b/drivers/acpi/apei/apei-internal.h
+@@ -130,4 +130,22 @@ static inline u32 cper_estatus_len(struct acpi_hest_generic_status *estatus)
+ }
+ 
+ int apei_osc_setup(void);
++
++int einj_get_available_error_type(u32 *type);
++int einj_error_inject(u32 type, u32 flags, u64 param1, u64 param2, u64 param3,
++		      u64 param4);
++int einj_cxl_rch_error_inject(u32 type, u32 flags, u64 param1, u64 param2,
++			      u64 param3, u64 param4);
++bool einj_is_cxl_error_type(u64 type);
++int einj_validate_error_type(u64 type);
++
++#ifndef ACPI_EINJ_CXL_CACHE_CORRECTABLE
++#define ACPI_EINJ_CXL_CACHE_CORRECTABLE     BIT(12)
++#define ACPI_EINJ_CXL_CACHE_UNCORRECTABLE   BIT(13)
++#define ACPI_EINJ_CXL_CACHE_FATAL           BIT(14)
++#define ACPI_EINJ_CXL_MEM_CORRECTABLE       BIT(15)
++#define ACPI_EINJ_CXL_MEM_UNCORRECTABLE     BIT(16)
++#define ACPI_EINJ_CXL_MEM_FATAL             BIT(17)
++#endif
++
+ #endif
+diff --git a/drivers/acpi/apei/einj.c b/drivers/acpi/apei/einj-core.c
+similarity index 93%
+rename from drivers/acpi/apei/einj.c
+rename to drivers/acpi/apei/einj-core.c
+index 937c69844dac..66e7f529e92f 100644
+--- a/drivers/acpi/apei/einj.c
++++ b/drivers/acpi/apei/einj-core.c
+@@ -37,6 +37,12 @@
+ #define MEM_ERROR_MASK		(ACPI_EINJ_MEMORY_CORRECTABLE | \
+ 				ACPI_EINJ_MEMORY_UNCORRECTABLE | \
+ 				ACPI_EINJ_MEMORY_FATAL)
++#define CXL_ERROR_MASK		(ACPI_EINJ_CXL_CACHE_CORRECTABLE | \
++				ACPI_EINJ_CXL_CACHE_UNCORRECTABLE | \
++				ACPI_EINJ_CXL_CACHE_FATAL | \
++				ACPI_EINJ_CXL_MEM_CORRECTABLE | \
++				ACPI_EINJ_CXL_MEM_UNCORRECTABLE | \
++				ACPI_EINJ_CXL_MEM_FATAL)
+ 
+ /*
+  * ACPI version 5 provides a SET_ERROR_TYPE_WITH_ADDRESS action.
+@@ -141,7 +147,7 @@ static DEFINE_MUTEX(einj_mutex);
+ /*
+  * Exported APIs use this flag to exit early if einj_probe() failed.
+  */
+-static bool einj_initialized __ro_after_init;
++bool einj_initialized __ro_after_init;
+ 
+ static void *einj_param;
+ 
+@@ -166,7 +172,7 @@ static int __einj_get_available_error_type(u32 *type)
+ }
+ 
+ /* Get error injection capabilities of the platform */
+-static int einj_get_available_error_type(u32 *type)
++int einj_get_available_error_type(u32 *type)
+ {
+ 	int rc;
+ 
+@@ -536,8 +542,8 @@ static int __einj_error_inject(u32 type, u32 flags, u64 param1, u64 param2,
+ }
+ 
+ /* Inject the specified hardware error */
+-static int einj_error_inject(u32 type, u32 flags, u64 param1, u64 param2,
+-			     u64 param3, u64 param4)
++int einj_error_inject(u32 type, u32 flags, u64 param1, u64 param2, u64 param3,
++		      u64 param4)
+ {
+ 	int rc;
+ 	u64 base_addr, size;
+@@ -560,8 +566,17 @@ static int einj_error_inject(u32 type, u32 flags, u64 param1, u64 param2,
+ 	if (type & ACPI5_VENDOR_BIT) {
+ 		if (vendor_flags != SETWA_FLAGS_MEM)
+ 			goto inject;
+-	} else if (!(type & MEM_ERROR_MASK) && !(flags & SETWA_FLAGS_MEM))
++	} else if (!(type & MEM_ERROR_MASK) && !(flags & SETWA_FLAGS_MEM)) {
+ 		goto inject;
++	}
++
++	/*
++	 * Injections targeting a CXL 1.0/1.1 port have to be injected
++	 * via the einj_cxl_rch_error_inject() path as that does the proper
++	 * validation of the given RCRB base (MMIO) address.
++	 */
++	if (einj_is_cxl_error_type(type) && (flags & SETWA_FLAGS_MEM))
++		return -EINVAL;
+ 
+ 	/*
+ 	 * Disallow crazy address masks that give BIOS leeway to pick
+@@ -593,6 +608,21 @@ static int einj_error_inject(u32 type, u32 flags, u64 param1, u64 param2,
+ 	return rc;
+ }
+ 
++int einj_cxl_rch_error_inject(u32 type, u32 flags, u64 param1, u64 param2,
++			      u64 param3, u64 param4)
++{
++	int rc;
++
++	if (!(einj_is_cxl_error_type(type) && (flags & SETWA_FLAGS_MEM)))
++		return -EINVAL;
++
++	mutex_lock(&einj_mutex);
++	rc = __einj_error_inject(type, flags, param1, param2, param3, param4);
++	mutex_unlock(&einj_mutex);
++
++	return rc;
++}
++
+ static u32 error_type;
+ static u32 error_flags;
+ static u64 error_param1;
+@@ -613,12 +643,6 @@ static struct { u32 mask; const char *str; } const einj_error_type_string[] = {
+ 	{ BIT(9), "Platform Correctable" },
+ 	{ BIT(10), "Platform Uncorrectable non-fatal" },
+ 	{ BIT(11), "Platform Uncorrectable fatal"},
+-	{ BIT(12), "CXL.cache Protocol Correctable" },
+-	{ BIT(13), "CXL.cache Protocol Uncorrectable non-fatal" },
+-	{ BIT(14), "CXL.cache Protocol Uncorrectable fatal" },
+-	{ BIT(15), "CXL.mem Protocol Correctable" },
+-	{ BIT(16), "CXL.mem Protocol Uncorrectable non-fatal" },
+-	{ BIT(17), "CXL.mem Protocol Uncorrectable fatal" },
+ 	{ BIT(31), "Vendor Defined Error Types" },
+ };
+ 
+@@ -647,22 +671,26 @@ static int error_type_get(void *data, u64 *val)
+ 	return 0;
+ }
+ 
+-static int error_type_set(void *data, u64 val)
++bool einj_is_cxl_error_type(u64 type)
++{
++	return (type & CXL_ERROR_MASK) && (!(type & ACPI5_VENDOR_BIT));
++}
++
++int einj_validate_error_type(u64 type)
+ {
++	u32 tval, vendor, available_error_type = 0;
+ 	int rc;
+-	u32 available_error_type = 0;
+-	u32 tval, vendor;
+ 
+ 	/* Only low 32 bits for error type are valid */
+-	if (val & GENMASK_ULL(63, 32))
++	if (type & GENMASK_ULL(63, 32))
+ 		return -EINVAL;
+ 
+ 	/*
+ 	 * Vendor defined types have 0x80000000 bit set, and
+ 	 * are not enumerated by ACPI_EINJ_GET_ERROR_TYPE
+ 	 */
+-	vendor = val & ACPI5_VENDOR_BIT;
+-	tval = val & 0x7fffffff;
++	vendor = type & ACPI5_VENDOR_BIT;
++	tval = type & GENMASK(30, 0);
+ 
+ 	/* Only one error type can be specified */
+ 	if (tval & (tval - 1))
+@@ -671,9 +699,21 @@ static int error_type_set(void *data, u64 val)
+ 		rc = einj_get_available_error_type(&available_error_type);
+ 		if (rc)
+ 			return rc;
+-		if (!(val & available_error_type))
++		if (!(type & available_error_type))
+ 			return -EINVAL;
+ 	}
++
++	return 0;
++}
++
++static int error_type_set(void *data, u64 val)
++{
++	int rc;
++
++	rc = einj_validate_error_type(val);
++	if (rc)
++		return rc;
++
+ 	error_type = val;
+ 
+ 	return 0;
+diff --git a/drivers/acpi/apei/einj-cxl.c b/drivers/acpi/apei/einj-cxl.c
+new file mode 100644
+index 000000000000..8b8be0c90709
+--- /dev/null
++++ b/drivers/acpi/apei/einj-cxl.c
+@@ -0,0 +1,113 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * CXL Error INJection support. Used by CXL core to inject
++ * protocol errors into CXL ports.
++ *
++ * Copyright (C) 2023 Advanced Micro Devices, Inc.
++ *
++ * Author: Ben Cheatham <benjamin.cheatham@amd.com>
++ */
++#include <linux/einj-cxl.h>
++#include <linux/seq_file.h>
++#include <linux/pci.h>
++
++#include "apei-internal.h"
++
++/* Defined in einj-core.c */
++extern bool einj_initialized;
++
++static struct { u32 mask; const char *str; } const einj_cxl_error_type_string[] = {
++	{ ACPI_EINJ_CXL_CACHE_CORRECTABLE, "CXL.cache Protocol Correctable" },
++	{ ACPI_EINJ_CXL_CACHE_UNCORRECTABLE, "CXL.cache Protocol Uncorrectable non-fatal" },
++	{ ACPI_EINJ_CXL_CACHE_FATAL, "CXL.cache Protocol Uncorrectable fatal" },
++	{ ACPI_EINJ_CXL_MEM_CORRECTABLE, "CXL.mem Protocol Correctable" },
++	{ ACPI_EINJ_CXL_MEM_UNCORRECTABLE, "CXL.mem Protocol Uncorrectable non-fatal" },
++	{ ACPI_EINJ_CXL_MEM_FATAL, "CXL.mem Protocol Uncorrectable fatal" },
++};
++
++int einj_cxl_available_error_type_show(struct seq_file *m, void *v)
++{
++	int cxl_err, rc;
++	u32 available_error_type = 0;
++
++	rc = einj_get_available_error_type(&available_error_type);
++	if (rc)
++		return rc;
++
++	for (int pos = 0; pos < ARRAY_SIZE(einj_cxl_error_type_string); pos++) {
++		cxl_err = ACPI_EINJ_CXL_CACHE_CORRECTABLE << pos;
++
++		if (available_error_type & cxl_err)
++			seq_printf(m, "0x%08x\t%s\n",
++				   einj_cxl_error_type_string[pos].mask,
++				   einj_cxl_error_type_string[pos].str);
++	}
++
++	return 0;
++}
++EXPORT_SYMBOL_NS_GPL(einj_cxl_available_error_type_show, CXL);
++
++static int cxl_dport_get_sbdf(struct pci_dev *dport_dev, u64 *sbdf)
++{
++	struct pci_bus *pbus;
++	struct pci_host_bridge *bridge;
++	u64 seg = 0, bus;
++
++	pbus = dport_dev->bus;
++	bridge = pci_find_host_bridge(pbus);
++
++	if (!bridge)
++		return -ENODEV;
++
++	if (bridge->domain_nr != PCI_DOMAIN_NR_NOT_SET)
++		seg = bridge->domain_nr;
++
++	bus = pbus->number;
++	*sbdf = (seg << 24) | (bus << 16) | dport_dev->devfn;
++
++	return 0;
++}
++
++int einj_cxl_inject_rch_error(u64 rcrb, u64 type)
++{
++	int rc;
++
++	/* Only CXL error types can be specified */
++	if (!einj_is_cxl_error_type(type))
++		return -EINVAL;
++
++	rc = einj_validate_error_type(type);
++	if (rc)
++		return rc;
++
++	return einj_cxl_rch_error_inject(type, 0x2, rcrb, GENMASK_ULL(63, 0),
++					 0, 0);
++}
++EXPORT_SYMBOL_NS_GPL(einj_cxl_inject_rch_error, CXL);
++
++int einj_cxl_inject_error(struct pci_dev *dport, u64 type)
++{
++	u64 param4 = 0;
++	int rc;
++
++	/* Only CXL error types can be specified */
++	if (!einj_is_cxl_error_type(type))
++		return -EINVAL;
++
++	rc = einj_validate_error_type(type);
++	if (rc)
++		return rc;
++
++	rc = cxl_dport_get_sbdf(dport, &param4);
++	if (rc)
++		return rc;
++
++	return einj_error_inject(type, 0x4, 0, 0, 0, param4);
++}
++EXPORT_SYMBOL_NS_GPL(einj_cxl_inject_error, CXL);
++
++bool einj_cxl_is_initialized(void)
++{
++	return einj_initialized;
++}
++EXPORT_SYMBOL_NS_GPL(einj_cxl_is_initialized, CXL);
+diff --git a/include/linux/einj-cxl.h b/include/linux/einj-cxl.h
+new file mode 100644
+index 000000000000..624ff6ff41f9
+--- /dev/null
++++ b/include/linux/einj-cxl.h
+@@ -0,0 +1,44 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++/*
++ * CXL protocol Error INJection support.
++ *
++ * Copyright (c) 2023 Advanced Micro Devices, Inc.
++ * All Rights Reserved.
++ *
++ * Author: Ben Cheatham <benjamin.cheatham@amd.com>
++ */
++#ifndef EINJ_CXL_H
++#define EINJ_CXL_H
++
++#include <linux/errno.h>
++#include <linux/types.h>
++
++struct pci_dev;
++struct seq_file;
++
++#if IS_ENABLED(CONFIG_ACPI_APEI_EINJ_CXL)
++int einj_cxl_available_error_type_show(struct seq_file *m, void *v);
++int einj_cxl_inject_error(struct pci_dev *dport_dev, u64 type);
++int einj_cxl_inject_rch_error(u64 rcrb, u64 type);
++bool einj_cxl_is_initialized(void);
++#else /* !IS_ENABLED(CONFIG_ACPI_APEI_EINJ_CXL) */
++static inline int einj_cxl_available_error_type_show(struct seq_file *m,
++						     void *v)
++{
++	return -ENXIO;
++}
++
++static inline int einj_cxl_inject_error(struct pci_dev *dport_dev, u64 type)
++{
++	return -ENXIO;
++}
++
++static inline int einj_cxl_inject_rch_error(u64 rcrb, u64 type)
++{
++	return -ENXIO;
++}
++
++static inline bool einj_cxl_is_initialized(void) { return false; }
++#endif /* CONFIG_ACPI_APEI_EINJ_CXL */
++
++#endif /* EINJ_CXL_H */

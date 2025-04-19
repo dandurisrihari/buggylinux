@@ -1,0 +1,51 @@
+diff --git a/arch/x86/kvm/lapic.c b/arch/x86/kvm/lapic.c
+index 6acd76b7e71d..890f218ddd7a 100644
+--- a/arch/x86/kvm/lapic.c
++++ b/arch/x86/kvm/lapic.c
+@@ -342,9 +342,11 @@ void __kvm_apic_update_irr(u32 *pir, void *regs)
+ 	u32 i, pir_val;
+ 
+ 	for (i = 0; i <= 7; i++) {
+-		pir_val = xchg(&pir[i], 0);
+-		if (pir_val)
++		pir_val = READ_ONCE(pir[i]);
++		if (pir_val) {
++			pir_val = xchg(&pir[i], 0);
+ 			*((u32 *)(regs + APIC_IRR + i * 0x10)) |= pir_val;
++		}
+ 	}
+ }
+ EXPORT_SYMBOL_GPL(__kvm_apic_update_irr);
+diff --git a/arch/x86/kvm/vmx.c b/arch/x86/kvm/vmx.c
+index dcb840e8bfe3..a91a5b01f38e 100644
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -520,6 +520,12 @@ static inline void pi_set_sn(struct pi_desc *pi_desc)
+ 			(unsigned long *)&pi_desc->control);
+ }
+ 
++static inline void pi_clear_on(struct pi_desc *pi_desc)
++{
++	clear_bit(POSTED_INTR_ON,
++  		  (unsigned long *)&pi_desc->control);
++}
++
+ static inline int pi_test_on(struct pi_desc *pi_desc)
+ {
+ 	return test_bit(POSTED_INTR_ON,
+@@ -4780,9 +4786,15 @@ static void vmx_sync_pir_to_irr(struct kvm_vcpu *vcpu)
+ {
+ 	struct vcpu_vmx *vmx = to_vmx(vcpu);
+ 
+-	if (!pi_test_and_clear_on(&vmx->pi_desc))
++	if (!pi_test_on(&vmx->pi_desc))
+ 		return;
+ 
++	pi_clear_on(&vmx->pi_desc);
++	/*
++	 * IOMMU can write to PIR.ON, so the barrier matters even on UP.
++	 * But on x86 this is just a compiler barrier anyway.
++	 */
++	smp_mb__after_atomic();
+ 	kvm_apic_update_irr(vcpu, vmx->pi_desc.pir);
+ }

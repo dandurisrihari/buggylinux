@@ -1,0 +1,60 @@
+commit 26c680b7319dba5da2ff743a6b18c9e4bba0ba04
+Author: Avraham Stern <avraham.stern@intel.com>
+Date:   Thu Apr 13 21:40:26 2023 +0300
+
+    wifi: iwlwifi: mvm: make HLTK configuration for PASN station optional
+    
+    When secure LTF is not used, the HLTK is not derived during the PASN
+    authentication. Make the HLTK optional when adding a PASN station.
+    
+    Signed-off-by: Avraham Stern <avraham.stern@intel.com>
+    Signed-off-by: Gregory Greenman <gregory.greenman@intel.com>
+    Link: https://lore.kernel.org/r/20230413213309.a57f7f3b59bd.Ifa88afb51a2516156153ac321d81556e295036c2@changeid
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+diff --git a/drivers/net/wireless/intel/iwlwifi/mvm/ftm-responder.c b/drivers/net/wireless/intel/iwlwifi/mvm/ftm-responder.c
+index c37d793d6a4a..1b6fb73ddfc7 100644
+--- a/drivers/net/wireless/intel/iwlwifi/mvm/ftm-responder.c
++++ b/drivers/net/wireless/intel/iwlwifi/mvm/ftm-responder.c
+@@ -317,6 +317,8 @@ int iwl_mvm_ftm_respoder_add_pasn_sta(struct iwl_mvm *mvm,
+ 		.addr = addr,
+ 		.hltk = hltk,
+ 	};
++	struct iwl_mvm_pasn_hltk_data *hltk_data_ptr = NULL;
++
+ 	u8 cmd_ver = iwl_fw_lookup_cmd_ver(mvm->fw,
+ 					   WIDE_ID(LOCATION_GROUP, TOF_RESPONDER_DYN_CONFIG_CMD),
+ 					   2);
+@@ -328,12 +330,21 @@ int iwl_mvm_ftm_respoder_add_pasn_sta(struct iwl_mvm *mvm,
+ 		return -ENOTSUPP;
+ 	}
+ 
+-	hltk_data.cipher = iwl_mvm_cipher_to_location_cipher(cipher);
+-	if (hltk_data.cipher == IWL_LOCATION_CIPHER_INVALID) {
+-		IWL_ERR(mvm, "invalid cipher: %u\n", cipher);
++	if ((!hltk || !hltk_len) && (!tk || !tk_len)) {
++		IWL_ERR(mvm, "TK and HLTK not set\n");
+ 		return -EINVAL;
+ 	}
+ 
++	if (hltk && hltk_len) {
++		hltk_data.cipher = iwl_mvm_cipher_to_location_cipher(cipher);
++		if (hltk_data.cipher == IWL_LOCATION_CIPHER_INVALID) {
++			IWL_ERR(mvm, "invalid cipher: %u\n", cipher);
++			return -EINVAL;
++		}
++
++		hltk_data_ptr = &hltk_data;
++	}
++
+ 	if (tk && tk_len) {
+ 		sta = kzalloc(sizeof(*sta), GFP_KERNEL);
+ 		if (!sta)
+@@ -350,7 +361,7 @@ int iwl_mvm_ftm_respoder_add_pasn_sta(struct iwl_mvm *mvm,
+ 		list_add_tail(&sta->list, &mvm->resp_pasn_list);
+ 	}
+ 
+-	ret = iwl_mvm_ftm_responder_dyn_cfg_v3(mvm, vif, NULL, &hltk_data);
++	ret = iwl_mvm_ftm_responder_dyn_cfg_v3(mvm, vif, NULL, hltk_data_ptr);
+ 	if (ret && sta)
+ 		iwl_mvm_resp_del_pasn_sta(mvm, vif, sta);

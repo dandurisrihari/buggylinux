@@ -1,0 +1,96 @@
+commit 165470fb260020861bea61a18f3e3a543a20c804
+Author: Justin Stitt <justinstitt@google.com>
+Date:   Tue Dec 12 01:20:20 2023 +0000
+
+    scsi: ibmvscsi_tgt: Replace deprecated strncpy() with strscpy()
+    
+    strncpy() is deprecated for use on NUL-terminated destination strings [1]
+    and as such we should prefer more robust and less ambiguous string
+    interfaces.
+    
+    We don't need the NUL-padding behavior that strncpy() provides as vscsi is
+    NUL-allocated in ibmvscsis_probe() which proceeds to call
+    ibmvscsis_adapter_info():
+    
+    |       vscsi = kzalloc(sizeof(*vscsi), GFP_KERNEL);
+    
+    ibmvscsis_probe() -> ibmvscsis_handle_crq() -> ibmvscsis_parse_command()
+    -> ibmvscsis_mad() -> ibmvscsis_process_mad() -> ibmvscsis_adapter_info()
+    
+    Following the same idea, `partition_name` is defiend as:
+    
+    |       static char partition_name[PARTITION_NAMELEN] = "UNKNOWN";
+    ... which is NUL-padded already, meaning strscpy() is the best option.
+    
+    Considering the above, a suitable replacement is strscpy() [2] due to the
+    fact that it guarantees NUL-termination on the destination buffer without
+    unnecessarily NUL-padding.
+    
+    However, for cap->name and info let's use strscpy_pad() as they are
+    allocated via dma_alloc_coherent():
+    
+    |       cap = dma_alloc_coherent(&vscsi->dma_dev->dev, olen, &token,
+    |                                GFP_ATOMIC);
+    &
+    |       info = dma_alloc_coherent(&vscsi->dma_dev->dev, sizeof(*info), &token,
+    |                                 GFP_ATOMIC);
+    
+    Link: https://www.kernel.org/doc/html/latest/process/deprecated.html#strncpy-on-nul-terminated-strings [1]
+    Link: https://manpages.debian.org/testing/linux-manual-4.8/strscpy.9.en.html [2]
+    Link: https://github.com/KSPP/linux/issues/90
+    Cc: linux-hardening@vger.kernel.org
+    Signed-off-by: Justin Stitt <justinstitt@google.com>
+    Link: https://lore.kernel.org/r/20231212-strncpy-drivers-scsi-ibmvscsi_tgt-ibmvscsi_tgt-c-v2-1-bdb9a7cd96c8@google.com
+    Acked-by: Tyrel Datwyler <tyreld@linux.ibm.com>
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+
+diff --git a/drivers/scsi/ibmvscsi_tgt/ibmvscsi_tgt.c b/drivers/scsi/ibmvscsi_tgt/ibmvscsi_tgt.c
+index 4dc411a58107..6b16020b1f59 100644
+--- a/drivers/scsi/ibmvscsi_tgt/ibmvscsi_tgt.c
++++ b/drivers/scsi/ibmvscsi_tgt/ibmvscsi_tgt.c
+@@ -1551,18 +1551,18 @@ static long ibmvscsis_adapter_info(struct scsi_info *vscsi,
+ 	if (vscsi->client_data.partition_number == 0)
+ 		vscsi->client_data.partition_number =
+ 			be32_to_cpu(info->partition_number);
+-	strncpy(vscsi->client_data.srp_version, info->srp_version,
++	strscpy(vscsi->client_data.srp_version, info->srp_version,
+ 		sizeof(vscsi->client_data.srp_version));
+-	strncpy(vscsi->client_data.partition_name, info->partition_name,
++	strscpy(vscsi->client_data.partition_name, info->partition_name,
+ 		sizeof(vscsi->client_data.partition_name));
+ 	vscsi->client_data.mad_version = be32_to_cpu(info->mad_version);
+ 	vscsi->client_data.os_type = be32_to_cpu(info->os_type);
+ 
+ 	/* Copy our info */
+-	strncpy(info->srp_version, SRP_VERSION,
+-		sizeof(info->srp_version));
+-	strncpy(info->partition_name, vscsi->dds.partition_name,
+-		sizeof(info->partition_name));
++	strscpy_pad(info->srp_version, SRP_VERSION,
++		    sizeof(info->srp_version));
++	strscpy_pad(info->partition_name, vscsi->dds.partition_name,
++		    sizeof(info->partition_name));
+ 	info->partition_number = cpu_to_be32(vscsi->dds.partition_num);
+ 	info->mad_version = cpu_to_be32(MAD_VERSION_1);
+ 	info->os_type = cpu_to_be32(LINUX);
+@@ -1645,8 +1645,8 @@ static int ibmvscsis_cap_mad(struct scsi_info *vscsi, struct iu_entry *iue)
+ 			 be64_to_cpu(mad->buffer),
+ 			 vscsi->dds.window[LOCAL].liobn, token);
+ 	if (rc == H_SUCCESS) {
+-		strncpy(cap->name, dev_name(&vscsi->dma_dev->dev),
+-			SRP_MAX_LOC_LEN);
++		strscpy_pad(cap->name, dev_name(&vscsi->dma_dev->dev),
++			sizeof(cap->name));
+ 
+ 		len = olen - min_len;
+ 		status = VIOSRP_MAD_SUCCESS;
+@@ -3650,7 +3650,7 @@ static int ibmvscsis_get_system_info(void)
+ 
+ 	name = of_get_property(rootdn, "ibm,partition-name", NULL);
+ 	if (name)
+-		strncpy(partition_name, name, sizeof(partition_name));
++		strscpy(partition_name, name, sizeof(partition_name));
+ 
+ 	num = of_get_property(rootdn, "ibm,partition-no", NULL);
+ 	if (num)

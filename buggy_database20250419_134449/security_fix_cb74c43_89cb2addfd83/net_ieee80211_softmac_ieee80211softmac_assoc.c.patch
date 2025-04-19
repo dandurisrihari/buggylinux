@@ -1,0 +1,78 @@
+commit cb74c432e321ed645b6cd88b77edc15f9478efbd
+Author: Joseph Jezak <josejx@gentoo.org>
+Date:   Sun Jun 11 12:00:37 2006 -0400
+
+    [PATCH] SoftMAC: Prevent multiple authentication attempts on the same network
+    
+    This patch addresses the "No queue exists" messages commonly seen during
+    authentication and associating.  These appear due to scheduling multiple
+    authentication attempts on the same network.  To prevent this, I added a
+    flag to stop multiple authentication attempts by the association layer.
+    I also added a check to the wx handler to see if we're connecting to a
+    different network than the one already in progress.  This scenario was
+    causing multiple requests on the same network because the network BSSID
+    was not being updated despite the fact that the ESSID changed.
+    
+    Signed-off-by: Joseph Jezak <josejx@gentoo.org>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/ieee80211/softmac/ieee80211softmac_assoc.c b/net/ieee80211/softmac/ieee80211softmac_assoc.c
+index 5e9a90651d04..0af360d9e9a5 100644
+--- a/net/ieee80211/softmac/ieee80211softmac_assoc.c
++++ b/net/ieee80211/softmac/ieee80211softmac_assoc.c
+@@ -47,9 +47,7 @@ ieee80211softmac_assoc(struct ieee80211softmac_device *mac, struct ieee80211soft
+ 	
+ 	dprintk(KERN_INFO PFX "sent association request!\n");
+ 
+-	/* Change the state to associating */
+ 	spin_lock_irqsave(&mac->lock, flags);
+-	mac->associnfo.associating = 1;
+ 	mac->associated = 0; /* just to make sure */
+ 
+ 	/* Set a timer for timeout */
+@@ -203,6 +201,10 @@ ieee80211softmac_assoc_work(void *d)
+ 	if (mac->associated)
+ 		ieee80211softmac_send_disassoc_req(mac, WLAN_REASON_DISASSOC_STA_HAS_LEFT);
+ 
++	spin_lock_irqsave(&mac->lock, flags);
++	mac->associnfo.associating = 1;
++	spin_unlock_irqrestore(&mac->lock, flags);
++
+ 	/* try to find the requested network in our list, if we found one already */
+ 	if (bssvalid || mac->associnfo.bssfixed)
+ 		found = ieee80211softmac_get_network_by_bssid(mac, mac->associnfo.bssid);	
+@@ -295,19 +297,32 @@ ieee80211softmac_assoc_work(void *d)
+ 	memcpy(mac->associnfo.associate_essid.data, found->essid.data, IW_ESSID_MAX_SIZE + 1);
+ 	
+ 	/* we found a network! authenticate (if necessary) and associate to it. */
+-	if (!found->authenticated) {
++	if (found->authenticating) {
++		dprintk(KERN_INFO PFX "Already requested authentication, waiting...\n");
++		if(!mac->associnfo.assoc_wait) {
++			mac->associnfo.assoc_wait = 1;
++			ieee80211softmac_notify_internal(mac, IEEE80211SOFTMAC_EVENT_ANY, found, ieee80211softmac_assoc_notify, NULL, GFP_KERNEL);
++		}
++		return;
++	}
++	if (!found->authenticated && !found->authenticating) {
+ 		/* This relies on the fact that _auth_req only queues the work,
+ 		 * otherwise adding the notification would be racy. */
+ 		if (!ieee80211softmac_auth_req(mac, found)) {
+-			dprintk(KERN_INFO PFX "cannot associate without being authenticated, requested authentication\n");
+-			ieee80211softmac_notify_internal(mac, IEEE80211SOFTMAC_EVENT_ANY, found, ieee80211softmac_assoc_notify_auth, NULL, GFP_KERNEL);
++			if(!mac->associnfo.assoc_wait) {
++				dprintk(KERN_INFO PFX "Cannot associate without being authenticated, requested authentication\n");
++				mac->associnfo.assoc_wait = 1;
++				ieee80211softmac_notify_internal(mac, IEEE80211SOFTMAC_EVENT_ANY, found, ieee80211softmac_assoc_notify, NULL, GFP_KERNEL);
++			}
+ 		} else {
+ 			printkl(KERN_WARNING PFX "Not authenticated, but requesting authentication failed. Giving up to associate\n");
++			mac->associnfo.assoc_wait = 0;
+ 			ieee80211softmac_call_events(mac, IEEE80211SOFTMAC_EVENT_ASSOCIATE_FAILED, found);
+ 		}
+ 		return;
+ 	}
+ 	/* finally! now we can start associating */
++	mac->associnfo.assoc_wait = 0;
+ 	ieee80211softmac_assoc(mac, found);
+ }

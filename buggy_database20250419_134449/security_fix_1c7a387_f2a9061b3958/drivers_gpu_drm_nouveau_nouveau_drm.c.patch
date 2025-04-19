@@ -1,0 +1,90 @@
+commit 1c7a387ffef894b1ab3942f0482dac7a6e0a909c
+Author: Tvrtko Ursulin <tursulin@ursulin.net>
+Date:   Wed Jun 21 10:48:24 2023 +0100
+
+    drm: Update file owner during use
+    
+    With the typical model where the display server opens the file descriptor
+    and then hands it over to the client(*), we were showing stale data in
+    debugfs.
+    
+    Fix it by updating the drm_file->pid on ioctl access from a different
+    process.
+    
+    The field is also made RCU protected to allow for lockless readers. Update
+    side is protected with dev->filelist_mutex.
+    
+    Before:
+    
+    $ cat /sys/kernel/debug/dri/0/clients
+                 command   pid dev master a   uid      magic
+                    Xorg  2344   0   y    y     0          0
+                    Xorg  2344   0   n    y     0          2
+                    Xorg  2344   0   n    y     0          3
+                    Xorg  2344   0   n    y     0          4
+    
+    After:
+    
+    $ cat /sys/kernel/debug/dri/0/clients
+                 command  tgid dev master a   uid      magic
+                    Xorg   830   0   y    y     0          0
+           xfce4-session   880   0   n    y     0          1
+                   xfwm4   943   0   n    y     0          2
+               neverball  1095   0   n    y     0          3
+    
+    *)
+    More detailed and historically accurate description of various handover
+    implementation kindly provided by Emil Velikov:
+    
+    """
+    The traditional model, the server was the orchestrator managing the
+    primary device node. From the fd, to the master status and
+    authentication. But looking at the fd alone, this has varied across
+    the years.
+    
+    IIRC in the DRI1 days, Xorg (libdrm really) would have a list of open
+    fd(s) and reuse those whenever needed, DRI2 the client was responsible
+    for open() themselves and with DRI3 the fd was passed to the client.
+    
+    Around the inception of DRI3 and systemd-logind, the latter became
+    another possible orchestrator. Whereby Xorg and Wayland compositors
+    could ask it for the fd. For various reasons (hysterical and genuine
+    ones) Xorg has a fallback path going the open(), whereas Wayland
+    compositors are moving to solely relying on logind... some never had
+    fallback even.
+    
+    Over the past few years, more projects have emerged which provide
+    functionality similar (be that on API level, Dbus, or otherwise) to
+    systemd-logind.
+    """
+    
+    v2:
+     * Fixed typo in commit text and added a fine historical explanation
+       from Emil.
+    
+    Signed-off-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+    Cc: "Christian König" <christian.koenig@amd.com>
+    Cc: Daniel Vetter <daniel@ffwll.ch>
+    Acked-by: Christian König <christian.koenig@amd.com>
+    Reviewed-by: Emil Velikov <emil.l.velikov@gmail.com>
+    Reviewed-by: Rob Clark <robdclark@gmail.com>
+    Tested-by: Rob Clark <robdclark@gmail.com>
+    Link: https://patchwork.freedesktop.org/patch/msgid/20230621094824.2348732-1-tvrtko.ursulin@linux.intel.com
+    Signed-off-by: Christian König <christian.koenig@amd.com>
+
+diff --git a/drivers/gpu/drm/nouveau/nouveau_drm.c b/drivers/gpu/drm/nouveau/nouveau_drm.c
+index 4396f501b16a..50589f982d1a 100644
+--- a/drivers/gpu/drm/nouveau/nouveau_drm.c
++++ b/drivers/gpu/drm/nouveau/nouveau_drm.c
+@@ -1133,7 +1133,10 @@ nouveau_drm_open(struct drm_device *dev, struct drm_file *fpriv)
+ 	}
+ 
+ 	get_task_comm(tmpname, current);
+-	snprintf(name, sizeof(name), "%s[%d]", tmpname, pid_nr(fpriv->pid));
++	rcu_read_lock();
++	snprintf(name, sizeof(name), "%s[%d]",
++		 tmpname, pid_nr(rcu_dereference(fpriv->pid)));
++	rcu_read_unlock();
+ 
+ 	if (!(cli = kzalloc(sizeof(*cli), GFP_KERNEL))) {
+ 		ret = -ENOMEM;

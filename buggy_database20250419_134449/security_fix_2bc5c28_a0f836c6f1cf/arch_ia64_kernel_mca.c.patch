@@ -1,0 +1,84 @@
+commit 2bc5c282999af41042c2b703bf3a58ca1d7e3ee2
+Author: Russ Anderson <rja@sgi.com>
+Date:   Thu Sep 20 13:59:12 2007 -0500
+
+    [IA64] Remove needless delay in MCA rendezvous
+    
+    While testing the MCA recovery code, noticed that some machines would have a
+    five second delay rendezvousing cpus.  What was happening is that
+    ia64_wait_for_slaves() would check to see if all the slave CPUs had
+    rendezvoused.  If any had not, it would wait 1 millisecond then check again.
+    If any CPUs had still not rendezvoused, it would wait 5 seconds before
+    checking again.
+    
+    On some configs the rendezvous takes more than 1 millisecond, causing the code
+    to wait the full 5 seconds, even though the last CPU rendezvoused after only
+    a few milliseconds.
+    
+    The fix is to check every 1 millisecond to see if all the cpus have
+    rendezvoused.  After 5 seconds the code concludes the CPUs will never
+    rendezvous (same as before).
+    
+    The MCA code is, by definition, not performance critical, but a needless
+    delay of 5 seconds is senseless.  The 5 seconds also adds up quickly
+    when running the error injection code in a loop.
+    
+    This patch both simplifies the code and removes the needless delay.
+    
+    Signed-off-by: Russ Anderson <rja@sgi.com>
+    Signed-off-by: Tony Luck <tony.luck@intel.com>
+
+diff --git a/arch/ia64/kernel/mca.c b/arch/ia64/kernel/mca.c
+index 63b73f3d4c9f..92367faecbbf 100644
+--- a/arch/ia64/kernel/mca.c
++++ b/arch/ia64/kernel/mca.c
+@@ -1135,30 +1135,27 @@ ia64_mca_modify_original_stack(struct pt_regs *regs,
+ static void
+ ia64_wait_for_slaves(int monarch, const char *type)
+ {
+-	int c, wait = 0, missing = 0;
+-	for_each_online_cpu(c) {
+-		if (c == monarch)
+-			continue;
+-		if (ia64_mc_info.imi_rendez_checkin[c] == IA64_MCA_RENDEZ_CHECKIN_NOTDONE) {
+-			udelay(1000);		/* short wait first */
+-			wait = 1;
+-			break;
+-		}
+-	}
+-	if (!wait)
+-		goto all_in;
+-	for_each_online_cpu(c) {
+-		if (c == monarch)
+-			continue;
+-		if (ia64_mc_info.imi_rendez_checkin[c] == IA64_MCA_RENDEZ_CHECKIN_NOTDONE) {
+-			udelay(5*1000000);	/* wait 5 seconds for slaves (arbitrary) */
+-			if (ia64_mc_info.imi_rendez_checkin[c] == IA64_MCA_RENDEZ_CHECKIN_NOTDONE)
+-				missing = 1;
+-			break;
++	int c, i , wait;
++
++	/*
++	 * wait 5 seconds total for slaves (arbitrary)
++	 */
++	for (i = 0; i < 5000; i++) {
++		wait = 0;
++		for_each_online_cpu(c) {
++			if (c == monarch)
++				continue;
++			if (ia64_mc_info.imi_rendez_checkin[c]
++					== IA64_MCA_RENDEZ_CHECKIN_NOTDONE) {
++				udelay(1000);		/* short wait */
++				wait = 1;
++				break;
++			}
+ 		}
++		if (!wait)
++			goto all_in;
+ 	}
+-	if (!missing)
+-		goto all_in;
++
+ 	/*
+ 	 * Maybe slave(s) dead. Print buffered messages immediately.
+ 	 */

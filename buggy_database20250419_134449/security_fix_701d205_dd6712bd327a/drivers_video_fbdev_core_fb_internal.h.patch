@@ -1,0 +1,105 @@
+commit 701d2054fa317188cd4039c84e72c73254013b23
+Author: Thomas Zimmermann <tzimmermann@suse.de>
+Date:   Tue Jun 13 13:07:13 2023 +0200
+
+    fbdev: Make support for userspace interfaces configurable
+    
+    Add Kconfig option CONFIG_FB_DEVICE and make the virtual fbdev
+    device optional. If the new option has not been selected, fbdev
+    does not create files in devfs, sysfs or procfs.
+    
+    Most modern Linux systems run a DRM-based graphics stack that uses
+    the kernel's framebuffer console, but has otherwise deprecated fbdev
+    support. Yet fbdev userspace interfaces are still present.
+    
+    The option makes it possible to use the fbdev subsystem as console
+    implementation without support for userspace. This closes potential
+    entry points to manipulate kernel or I/O memory via framebuffers. It
+    also prevents the execution of driver code via ioctl or sysfs, both
+    of which might allow malicious software to exploit bugs in the fbdev
+    code.
+    
+    A small number of fbdev drivers require struct fbinfo.dev to be
+    initialized, usually for the support of sysfs interface. Make these
+    drivers depend on FB_DEVICE. They can later be fixed if necessary.
+    
+    v3:
+            * effect -> affect in Kconfig help (Daniel)
+    v2:
+            * set FB_DEVICE default to y (Geert)
+            * comment on {get,put}_device() (Sam)
+            * Kconfig fixes (Sam)
+            * add TODO item about FB_DEVICE dependencies (Sam)
+    
+    Signed-off-by: Thomas Zimmermann <tzimmermann@suse.de>
+    Acked-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+    Reviewed-by: Sam Ravnborg <sam@ravnborg.org>
+    Link: https://patchwork.freedesktop.org/patch/msgid/20230613110953.24176-39-tzimmermann@suse.de
+
+diff --git a/drivers/video/fbdev/core/fb_internal.h b/drivers/video/fbdev/core/fb_internal.h
+index 0b43c0cd5096..4c8d509a0026 100644
+--- a/drivers/video/fbdev/core/fb_internal.h
++++ b/drivers/video/fbdev/core/fb_internal.h
+@@ -3,12 +3,22 @@
+ #ifndef _FB_INTERNAL_H
+ #define _FB_INTERNAL_H
+ 
++#include <linux/device.h>
+ #include <linux/fb.h>
+ #include <linux/mutex.h>
+ 
+ /* fb_devfs.c */
++#if defined(CONFIG_FB_DEVICE)
+ int fb_register_chrdev(void);
+ void fb_unregister_chrdev(void);
++#else
++static inline int fb_register_chrdev(void)
++{
++	return 0;
++}
++static inline void fb_unregister_chrdev(void)
++{ }
++#endif
+ 
+ /* fbmem.c */
+ extern struct class *fb_class;
+@@ -19,11 +29,39 @@ struct fb_info *get_fb_info(unsigned int idx);
+ void put_fb_info(struct fb_info *fb_info);
+ 
+ /* fb_procfs.c */
++#if defined(CONFIG_FB_DEVICE)
+ int fb_init_procfs(void);
+ void fb_cleanup_procfs(void);
++#else
++static inline int fb_init_procfs(void)
++{
++	return 0;
++}
++static inline void fb_cleanup_procfs(void)
++{ }
++#endif
+ 
+ /* fbsysfs.c */
++#if defined(CONFIG_FB_DEVICE)
+ int fb_device_create(struct fb_info *fb_info);
+ void fb_device_destroy(struct fb_info *fb_info);
++#else
++static inline int fb_device_create(struct fb_info *fb_info)
++{
++	/*
++	 * Acquire a reference on the parent device to avoid
++	 * unplug operations behind our back. With the fbdev
++	 * device enabled, this is performed within register_device().
++	 */
++	get_device(fb_info->device);
++
++	return 0;
++}
++static inline void fb_device_destroy(struct fb_info *fb_info)
++{
++	/* Undo the get_device() from fb_device_create() */
++	put_device(fb_info->device);
++}
++#endif
+ 
+ #endif

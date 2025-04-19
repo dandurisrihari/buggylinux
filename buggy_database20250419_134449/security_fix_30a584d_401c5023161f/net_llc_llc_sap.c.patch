@@ -1,0 +1,45 @@
+commit 30a584d944fbd599d4a8f470f75bf7af1a15b466
+Author: Stephen Hemminger <stephen@networkplumber.org>
+Date:   Thu Aug 3 16:38:49 2006 -0700
+
+    [LLX]: SOCK_DGRAM interface fixes
+    
+    The datagram interface of LLC is broken in a couple of ways.
+    These were discovered when trying to use it to build an out-of-kernel
+    version of STP.
+    
+    First it didn't pass the source address of the received packet
+    in recvfrom(). It needs to copy the source address of received LLC packets
+    into the socket control block. At the same time fix a security issue
+    because there was uninitialized data leakage. Every recvfrom call
+    was just copying out old data.
+    
+    Second, LLC should not merge multiple packets in one receive call
+    on datagram sockets. LLC should preserve packet boundaries on
+    SOCK_DGRAM.
+    
+    This fix goes against the old historical comments about UNIX98 semantics
+    but without this fix SOCK_DGRAM is broken and useless. So either ANK's
+    interpretation was incorect or UNIX98 standard was wrong.
+    
+    Signed-off-by: Stephen Hemminger <shemminger@osdl.org>
+    Acked-by: Arnaldo Carvalho de Melo <acme@mandriva.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/llc/llc_sap.c b/net/llc/llc_sap.c
+index 20c4eb5c1ac6..42eb0c3a9780 100644
+--- a/net/llc/llc_sap.c
++++ b/net/llc/llc_sap.c
+@@ -51,10 +51,10 @@ void llc_save_primitive(struct sock *sk, struct sk_buff* skb, u8 prim)
+ {
+ 	struct sockaddr_llc *addr;
+ 
+-	if (skb->sk->sk_type == SOCK_STREAM) /* See UNIX98 */
+-		return;
+        /* save primitive for use by the user. */
+ 	addr		  = llc_ui_skb_cb(skb);
++
++	memset(addr, 0, sizeof(*addr));
+ 	addr->sllc_family = sk->sk_family;
+ 	addr->sllc_arphrd = skb->dev->type;
+ 	addr->sllc_test   = prim == LLC_TEST_PRIM;

@@ -1,0 +1,123 @@
+commit 3b23e4991fb66f6d152f9055ede271a726ef9f21
+Author: Torsten Duwe <duwe@lst.de>
+Date:   Fri Feb 8 16:10:19 2019 +0100
+
+    arm64: implement ftrace with regs
+    
+    This patch implements FTRACE_WITH_REGS for arm64, which allows a traced
+    function's arguments (and some other registers) to be captured into a
+    struct pt_regs, allowing these to be inspected and/or modified. This is
+    a building block for live-patching, where a function's arguments may be
+    forwarded to another function. This is also necessary to enable ftrace
+    and in-kernel pointer authentication at the same time, as it allows the
+    LR value to be captured and adjusted prior to signing.
+    
+    Using GCC's -fpatchable-function-entry=N option, we can have the
+    compiler insert a configurable number of NOPs between the function entry
+    point and the usual prologue. This also ensures functions are AAPCS
+    compliant (e.g. disabling inter-procedural register allocation).
+    
+    For example, with -fpatchable-function-entry=2, GCC 8.1.0 compiles the
+    following:
+    
+    | unsigned long bar(void);
+    |
+    | unsigned long foo(void)
+    | {
+    |         return bar() + 1;
+    | }
+    
+    ... to:
+    
+    | <foo>:
+    |         nop
+    |         nop
+    |         stp     x29, x30, [sp, #-16]!
+    |         mov     x29, sp
+    |         bl      0 <bar>
+    |         add     x0, x0, #0x1
+    |         ldp     x29, x30, [sp], #16
+    |         ret
+    
+    This patch builds the kernel with -fpatchable-function-entry=2,
+    prefixing each function with two NOPs. To trace a function, we replace
+    these NOPs with a sequence that saves the LR into a GPR, then calls an
+    ftrace entry assembly function which saves this and other relevant
+    registers:
+    
+    | mov   x9, x30
+    | bl    <ftrace-entry>
+    
+    Since patchable functions are AAPCS compliant (and the kernel does not
+    use x18 as a platform register), x9-x18 can be safely clobbered in the
+    patched sequence and the ftrace entry code.
+    
+    There are now two ftrace entry functions, ftrace_regs_entry (which saves
+    all GPRs), and ftrace_entry (which saves the bare minimum). A PLT is
+    allocated for each within modules.
+    
+    Signed-off-by: Torsten Duwe <duwe@suse.de>
+    [Mark: rework asm, comments, PLTs, initialization, commit message]
+    Signed-off-by: Mark Rutland <mark.rutland@arm.com>
+    Reviewed-by: Amit Daniel Kachhap <amit.kachhap@arm.com>
+    Reviewed-by: Ard Biesheuvel <ard.biesheuvel@linaro.org>
+    Reviewed-by: Torsten Duwe <duwe@suse.de>
+    Tested-by: Amit Daniel Kachhap <amit.kachhap@arm.com>
+    Tested-by: Torsten Duwe <duwe@suse.de>
+    Cc: AKASHI Takahiro <takahiro.akashi@linaro.org>
+    Cc: Catalin Marinas <catalin.marinas@arm.com>
+    Cc: Josh Poimboeuf <jpoimboe@redhat.com>
+    Cc: Julien Thierry <jthierry@redhat.com>
+    Cc: Will Deacon <will@kernel.org>
+
+diff --git a/arch/arm64/include/asm/ftrace.h b/arch/arm64/include/asm/ftrace.h
+index d48667b04c41..91fa4baa1a93 100644
+--- a/arch/arm64/include/asm/ftrace.h
++++ b/arch/arm64/include/asm/ftrace.h
+@@ -11,9 +11,20 @@
+ #include <asm/insn.h>
+ 
+ #define HAVE_FUNCTION_GRAPH_FP_TEST
++
++#ifdef CONFIG_DYNAMIC_FTRACE_WITH_REGS
++#define ARCH_SUPPORTS_FTRACE_OPS 1
++#else
+ #define MCOUNT_ADDR		((unsigned long)_mcount)
++#endif
++
++/* The BL at the callsite's adjusted rec->ip */
+ #define MCOUNT_INSN_SIZE	AARCH64_INSN_SIZE
+ 
++#define FTRACE_PLT_IDX		0
++#define FTRACE_REGS_PLT_IDX	1
++#define NR_FTRACE_PLTS		2
++
+ /*
+  * Currently, gcc tends to save the link register after the local variables
+  * on the stack. This causes the max stack tracer to report the function
+@@ -43,6 +54,12 @@ extern void return_to_handler(void);
+ 
+ static inline unsigned long ftrace_call_adjust(unsigned long addr)
+ {
++	/*
++	 * Adjust addr to point at the BL in the callsite.
++	 * See ftrace_init_nop() for the callsite sequence.
++	 */
++	if (IS_ENABLED(CONFIG_DYNAMIC_FTRACE_WITH_REGS))
++		return addr + AARCH64_INSN_SIZE;
+ 	/*
+ 	 * addr is the address of the mcount call instruction.
+ 	 * recordmcount does the necessary offset calculation.
+@@ -50,6 +67,12 @@ static inline unsigned long ftrace_call_adjust(unsigned long addr)
+ 	return addr;
+ }
+ 
++#ifdef CONFIG_DYNAMIC_FTRACE_WITH_REGS
++struct dyn_ftrace;
++int ftrace_init_nop(struct module *mod, struct dyn_ftrace *rec);
++#define ftrace_init_nop ftrace_init_nop
++#endif
++
+ #define ftrace_return_address(n) return_address(n)
+ 
+ /*

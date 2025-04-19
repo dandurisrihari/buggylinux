@@ -1,0 +1,52 @@
+commit 0977cfac6e76fa976618129a4585bcf53784cc87
+Author: Santosh Shukla <santosh.shukla@amd.com>
+Date:   Mon Feb 27 14:10:16 2023 +0530
+
+    KVM: nSVM: Implement support for nested VNMI
+    
+    Allow L1 to use vNMI to accelerate its injection of NMI to L2 by
+    propagating vNMI int_ctl bits from/to vmcb12 to/from vmcb02.
+    
+    To handle both the case where vNMI is enabled for L1 and L2, and where
+    vNMI is enabled for L1 but _not_ L2, move pending L1 vNMIs to nmi_pending
+    on nested VM-Entry and raise KVM_REQ_EVENT, i.e. rely on existing code to
+    route the NMI to the correct domain.
+    
+    On nested VM-Exit, reverse the process and set/clear V_NMI_PENDING for L1
+    based one whether nmi_pending is zero or non-zero.  There is no need to
+    consider vmcb02 in this case, as V_NMI_PENDING can be set in vmcb02 if
+    vNMI is disabled for L2, and if vNMI is enabled for L2, then L1 and L2
+    have different NMI contexts.
+    
+    Co-developed-by: Maxim Levitsky <mlevitsk@redhat.com>
+    Signed-off-by: Maxim Levitsky <mlevitsk@redhat.com>
+    Signed-off-by: Santosh Shukla <santosh.shukla@amd.com>
+    Link: https://lore.kernel.org/r/20230227084016.3368-12-santosh.shukla@amd.com
+    [sean: massage changelog to match the code]
+    Signed-off-by: Sean Christopherson <seanjc@google.com>
+
+diff --git a/arch/x86/kvm/svm/svm.h b/arch/x86/kvm/svm/svm.h
+index fb48c347bbe0..f44751dd8d5d 100644
+--- a/arch/x86/kvm/svm/svm.h
++++ b/arch/x86/kvm/svm/svm.h
+@@ -266,6 +266,7 @@ struct vcpu_svm {
+ 	bool pause_filter_enabled         : 1;
+ 	bool pause_threshold_enabled      : 1;
+ 	bool vgif_enabled                 : 1;
++	bool vnmi_enabled                 : 1;
+ 
+ 	u32 ldr_reg;
+ 	u32 dfr_reg;
+@@ -540,6 +541,12 @@ static inline bool nested_npt_enabled(struct vcpu_svm *svm)
+ 	return svm->nested.ctl.nested_ctl & SVM_NESTED_CTL_NP_ENABLE;
+ }
+ 
++static inline bool nested_vnmi_enabled(struct vcpu_svm *svm)
++{
++	return svm->vnmi_enabled &&
++	       (svm->nested.ctl.int_ctl & V_NMI_ENABLE_MASK);
++}
++
+ static inline bool is_x2apic_msrpm_offset(u32 offset)
+ {
+ 	/* 4 msrs per u8, and 4 u8 in u32 */

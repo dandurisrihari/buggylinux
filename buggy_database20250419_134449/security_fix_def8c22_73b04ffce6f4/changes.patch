@@ -1,0 +1,329 @@
+diff --git a/arch/arm64/include/asm/asm_pointer_auth.h b/arch/arm64/include/asm/asm_pointer_auth.h
+index f1bba5fc61c4..ead62f7dd269 100644
+--- a/arch/arm64/include/asm/asm_pointer_auth.h
++++ b/arch/arm64/include/asm/asm_pointer_auth.h
+@@ -60,6 +60,9 @@ alternative_else_nop_endif
+ 	.macro __ptrauth_keys_init_cpu tsk, tmp1, tmp2, tmp3
+ 	mrs	\tmp1, id_aa64isar1_el1
+ 	ubfx	\tmp1, \tmp1, #ID_AA64ISAR1_APA_SHIFT, #8
++	mrs_s	\tmp2, SYS_ID_AA64ISAR2_EL1
++	ubfx	\tmp2, \tmp2, #ID_AA64ISAR2_APA3_SHIFT, #4
++	orr	\tmp1, \tmp1, \tmp2
+ 	cbz	\tmp1, .Lno_addr_auth\@
+ 	mov_q	\tmp1, (SCTLR_ELx_ENIA | SCTLR_ELx_ENIB | \
+ 			SCTLR_ELx_ENDA | SCTLR_ELx_ENDB)
+diff --git a/arch/arm64/include/asm/cpufeature.h b/arch/arm64/include/asm/cpufeature.h
+index ef6be92b1921..fe7137ff6190 100644
+--- a/arch/arm64/include/asm/cpufeature.h
++++ b/arch/arm64/include/asm/cpufeature.h
+@@ -854,6 +854,7 @@ static inline unsigned int get_vmid_bits(u64 mmfr1)
+ extern struct arm64_ftr_override id_aa64mmfr1_override;
+ extern struct arm64_ftr_override id_aa64pfr1_override;
+ extern struct arm64_ftr_override id_aa64isar1_override;
++extern struct arm64_ftr_override id_aa64isar2_override;
+ 
+ u32 get_kvm_ipa_limit(void);
+ void dump_cpu_features(void);
+diff --git a/arch/arm64/include/asm/kvm_hyp.h b/arch/arm64/include/asm/kvm_hyp.h
+index 462882f356c7..aa7fa2a08f06 100644
+--- a/arch/arm64/include/asm/kvm_hyp.h
++++ b/arch/arm64/include/asm/kvm_hyp.h
+@@ -118,6 +118,7 @@ extern u64 kvm_nvhe_sym(id_aa64pfr0_el1_sys_val);
+ extern u64 kvm_nvhe_sym(id_aa64pfr1_el1_sys_val);
+ extern u64 kvm_nvhe_sym(id_aa64isar0_el1_sys_val);
+ extern u64 kvm_nvhe_sym(id_aa64isar1_el1_sys_val);
++extern u64 kvm_nvhe_sym(id_aa64isar2_el1_sys_val);
+ extern u64 kvm_nvhe_sym(id_aa64mmfr0_el1_sys_val);
+ extern u64 kvm_nvhe_sym(id_aa64mmfr1_el1_sys_val);
+ extern u64 kvm_nvhe_sym(id_aa64mmfr2_el1_sys_val);
+diff --git a/arch/arm64/include/asm/sysreg.h b/arch/arm64/include/asm/sysreg.h
+index 898bee0004ae..cbe416462b88 100644
+--- a/arch/arm64/include/asm/sysreg.h
++++ b/arch/arm64/include/asm/sysreg.h
+@@ -773,6 +773,8 @@
+ #define ID_AA64ISAR1_GPI_IMP_DEF		0x1
+ 
+ /* id_aa64isar2 */
++#define ID_AA64ISAR2_APA3_SHIFT		12
++#define ID_AA64ISAR2_GPA3_SHIFT		8
+ #define ID_AA64ISAR2_RPRES_SHIFT	4
+ #define ID_AA64ISAR2_WFXT_SHIFT		0
+ 
+@@ -786,6 +788,16 @@
+ #define ID_AA64ISAR2_WFXT_NI		0x0
+ #define ID_AA64ISAR2_WFXT_SUPPORTED	0x2
+ 
++#define ID_AA64ISAR2_APA3_NI			0x0
++#define ID_AA64ISAR2_APA3_ARCHITECTED		0x1
++#define ID_AA64ISAR2_APA3_ARCH_EPAC		0x2
++#define ID_AA64ISAR2_APA3_ARCH_EPAC2		0x3
++#define ID_AA64ISAR2_APA3_ARCH_EPAC2_FPAC	0x4
++#define ID_AA64ISAR2_APA3_ARCH_EPAC2_FPAC_CMB	0x5
++
++#define ID_AA64ISAR2_GPA3_NI			0x0
++#define ID_AA64ISAR2_GPA3_ARCHITECTED		0x1
++
+ /* id_aa64pfr0 */
+ #define ID_AA64PFR0_CSV3_SHIFT		60
+ #define ID_AA64PFR0_CSV2_SHIFT		56
+diff --git a/arch/arm64/kernel/cpufeature.c b/arch/arm64/kernel/cpufeature.c
+index 1b955bea2856..f6ecad8fc1c1 100644
+--- a/arch/arm64/kernel/cpufeature.c
++++ b/arch/arm64/kernel/cpufeature.c
+@@ -226,6 +226,10 @@ static const struct arm64_ftr_bits ftr_id_aa64isar1[] = {
+ };
+ 
+ static const struct arm64_ftr_bits ftr_id_aa64isar2[] = {
++	ARM64_FTR_BITS(FTR_VISIBLE_IF_IS_ENABLED(CONFIG_ARM64_PTR_AUTH),
++		       FTR_STRICT, FTR_EXACT, ID_AA64ISAR2_APA3_SHIFT, 4, 0),
++	ARM64_FTR_BITS(FTR_VISIBLE_IF_IS_ENABLED(CONFIG_ARM64_PTR_AUTH),
++		       FTR_STRICT, FTR_LOWER_SAFE, ID_AA64ISAR2_GPA3_SHIFT, 4, 0),
+ 	ARM64_FTR_BITS(FTR_VISIBLE, FTR_NONSTRICT, FTR_LOWER_SAFE, ID_AA64ISAR2_RPRES_SHIFT, 4, 0),
+ 	ARM64_FTR_END,
+ };
+@@ -596,6 +600,7 @@ static const struct arm64_ftr_bits ftr_raz[] = {
+ struct arm64_ftr_override __ro_after_init id_aa64mmfr1_override;
+ struct arm64_ftr_override __ro_after_init id_aa64pfr1_override;
+ struct arm64_ftr_override __ro_after_init id_aa64isar1_override;
++struct arm64_ftr_override __ro_after_init id_aa64isar2_override;
+ 
+ static const struct __ftr_reg_entry {
+ 	u32			sys_id;
+@@ -644,6 +649,8 @@ static const struct __ftr_reg_entry {
+ 	ARM64_FTR_REG_OVERRIDE(SYS_ID_AA64ISAR1_EL1, ftr_id_aa64isar1,
+ 			       &id_aa64isar1_override),
+ 	ARM64_FTR_REG(SYS_ID_AA64ISAR2_EL1, ftr_id_aa64isar2),
++	ARM64_FTR_REG_OVERRIDE(SYS_ID_AA64ISAR2_EL1, ftr_id_aa64isar2,
++			       &id_aa64isar2_override),
+ 
+ 	/* Op1 = 0, CRn = 0, CRm = 7 */
+ 	ARM64_FTR_REG(SYS_ID_AA64MMFR0_EL1, ftr_id_aa64mmfr0),
+@@ -1837,8 +1844,9 @@ static bool has_address_auth_metacap(const struct arm64_cpu_capabilities *entry,
+ {
+ 	bool api = has_address_auth_cpucap(cpu_hwcaps_ptrs[ARM64_HAS_ADDRESS_AUTH_IMP_DEF], scope);
+ 	bool apa = has_address_auth_cpucap(cpu_hwcaps_ptrs[ARM64_HAS_ADDRESS_AUTH_ARCH_QARMA5], scope);
++	bool apa3 = has_address_auth_cpucap(cpu_hwcaps_ptrs[ARM64_HAS_ADDRESS_AUTH_ARCH_QARMA3], scope);
+ 
+-	return apa || api;
++	return apa || apa3 || api;
+ }
+ 
+ static bool has_generic_auth(const struct arm64_cpu_capabilities *entry,
+@@ -1846,8 +1854,9 @@ static bool has_generic_auth(const struct arm64_cpu_capabilities *entry,
+ {
+ 	bool gpi = __system_matches_cap(ARM64_HAS_GENERIC_AUTH_IMP_DEF);
+ 	bool gpa = __system_matches_cap(ARM64_HAS_GENERIC_AUTH_ARCH_QARMA5);
++	bool gpa3 = __system_matches_cap(ARM64_HAS_GENERIC_AUTH_ARCH_QARMA3);
+ 
+-	return gpa || gpi;
++	return gpa || gpa3 || gpi;
+ }
+ #endif /* CONFIG_ARM64_PTR_AUTH */
+ 
+@@ -2243,6 +2252,16 @@ static const struct arm64_cpu_capabilities arm64_features[] = {
+ 		.min_field_value = ID_AA64ISAR1_APA_ARCHITECTED,
+ 		.matches = has_address_auth_cpucap,
+ 	},
++	{
++		.desc = "Address authentication (architected QARMA3 algorithm)",
++		.capability = ARM64_HAS_ADDRESS_AUTH_ARCH_QARMA3,
++		.type = ARM64_CPUCAP_BOOT_CPU_FEATURE,
++		.sys_reg = SYS_ID_AA64ISAR2_EL1,
++		.sign = FTR_UNSIGNED,
++		.field_pos = ID_AA64ISAR2_APA3_SHIFT,
++		.min_field_value = ID_AA64ISAR2_APA3_ARCHITECTED,
++		.matches = has_address_auth_cpucap,
++	},
+ 	{
+ 		.desc = "Address authentication (IMP DEF algorithm)",
+ 		.capability = ARM64_HAS_ADDRESS_AUTH_IMP_DEF,
+@@ -2268,6 +2287,16 @@ static const struct arm64_cpu_capabilities arm64_features[] = {
+ 		.min_field_value = ID_AA64ISAR1_GPA_ARCHITECTED,
+ 		.matches = has_cpuid_feature,
+ 	},
++	{
++		.desc = "Generic authentication (architected QARMA3 algorithm)",
++		.capability = ARM64_HAS_GENERIC_AUTH_ARCH_QARMA3,
++		.type = ARM64_CPUCAP_SYSTEM_FEATURE,
++		.sys_reg = SYS_ID_AA64ISAR2_EL1,
++		.sign = FTR_UNSIGNED,
++		.field_pos = ID_AA64ISAR2_GPA3_SHIFT,
++		.min_field_value = ID_AA64ISAR2_GPA3_ARCHITECTED,
++		.matches = has_cpuid_feature,
++	},
+ 	{
+ 		.desc = "Generic authentication (IMP DEF algorithm)",
+ 		.capability = ARM64_HAS_GENERIC_AUTH_IMP_DEF,
+@@ -2415,6 +2444,10 @@ static const struct arm64_cpu_capabilities ptr_auth_hwcap_addr_matches[] = {
+ 		HWCAP_CPUID_MATCH(SYS_ID_AA64ISAR1_EL1, ID_AA64ISAR1_APA_SHIFT,
+ 				  FTR_UNSIGNED, ID_AA64ISAR1_APA_ARCHITECTED)
+ 	},
++	{
++		HWCAP_CPUID_MATCH(SYS_ID_AA64ISAR2_EL1, ID_AA64ISAR2_APA3_SHIFT,
++				  FTR_UNSIGNED, ID_AA64ISAR2_APA3_ARCHITECTED)
++	},
+ 	{
+ 		HWCAP_CPUID_MATCH(SYS_ID_AA64ISAR1_EL1, ID_AA64ISAR1_API_SHIFT,
+ 				  FTR_UNSIGNED, ID_AA64ISAR1_API_IMP_DEF)
+@@ -2427,6 +2460,10 @@ static const struct arm64_cpu_capabilities ptr_auth_hwcap_gen_matches[] = {
+ 		HWCAP_CPUID_MATCH(SYS_ID_AA64ISAR1_EL1, ID_AA64ISAR1_GPA_SHIFT,
+ 				  FTR_UNSIGNED, ID_AA64ISAR1_GPA_ARCHITECTED)
+ 	},
++	{
++		HWCAP_CPUID_MATCH(SYS_ID_AA64ISAR2_EL1, ID_AA64ISAR2_GPA3_SHIFT,
++				  FTR_UNSIGNED, ID_AA64ISAR2_GPA3_ARCHITECTED)
++	},
+ 	{
+ 		HWCAP_CPUID_MATCH(SYS_ID_AA64ISAR1_EL1, ID_AA64ISAR1_GPI_SHIFT,
+ 				  FTR_UNSIGNED, ID_AA64ISAR1_GPI_IMP_DEF)
+diff --git a/arch/arm64/kernel/idreg-override.c b/arch/arm64/kernel/idreg-override.c
+index d8e606fe3c21..8a2ceb591686 100644
+--- a/arch/arm64/kernel/idreg-override.c
++++ b/arch/arm64/kernel/idreg-override.c
+@@ -17,7 +17,7 @@
+ #define FTR_DESC_NAME_LEN	20
+ #define FTR_DESC_FIELD_LEN	10
+ #define FTR_ALIAS_NAME_LEN	30
+-#define FTR_ALIAS_OPTION_LEN	80
++#define FTR_ALIAS_OPTION_LEN	116
+ 
+ struct ftr_set_desc {
+ 	char 				name[FTR_DESC_NAME_LEN];
+@@ -71,6 +71,16 @@ static const struct ftr_set_desc isar1 __initconst = {
+ 	},
+ };
+ 
++static const struct ftr_set_desc isar2 __initconst = {
++	.name		= "id_aa64isar2",
++	.override	= &id_aa64isar2_override,
++	.fields		= {
++	        { "gpa3", ID_AA64ISAR2_GPA3_SHIFT },
++	        { "apa3", ID_AA64ISAR2_APA3_SHIFT },
++		{}
++	},
++};
++
+ extern struct arm64_ftr_override kaslr_feature_override;
+ 
+ static const struct ftr_set_desc kaslr __initconst = {
+@@ -88,6 +98,7 @@ static const struct ftr_set_desc * const regs[] __initconst = {
+ 	&mmfr1,
+ 	&pfr1,
+ 	&isar1,
++	&isar2,
+ 	&kaslr,
+ };
+ 
+@@ -100,7 +111,8 @@ static const struct {
+ 	{ "arm64.nobti",		"id_aa64pfr1.bt=0" },
+ 	{ "arm64.nopauth",
+ 	  "id_aa64isar1.gpi=0 id_aa64isar1.gpa=0 "
+-	  "id_aa64isar1.api=0 id_aa64isar1.apa=0"	   },
++	  "id_aa64isar1.api=0 id_aa64isar1.apa=0 "
++	  "id_aa64isar2.gpa3=0 id_aa64isar2.apa3=0"	   },
+ 	{ "arm64.nomte",		"id_aa64pfr1.mte=0" },
+ 	{ "nokaslr",			"kaslr.disabled=1" },
+ };
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index ecc5958e27fe..f3bfc0ddeb0b 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -1870,6 +1870,7 @@ static int kvm_hyp_init_protection(u32 hyp_va_bits)
+ 	kvm_nvhe_sym(id_aa64pfr1_el1_sys_val) = read_sanitised_ftr_reg(SYS_ID_AA64PFR1_EL1);
+ 	kvm_nvhe_sym(id_aa64isar0_el1_sys_val) = read_sanitised_ftr_reg(SYS_ID_AA64ISAR0_EL1);
+ 	kvm_nvhe_sym(id_aa64isar1_el1_sys_val) = read_sanitised_ftr_reg(SYS_ID_AA64ISAR1_EL1);
++	kvm_nvhe_sym(id_aa64isar2_el1_sys_val) = read_sanitised_ftr_reg(SYS_ID_AA64ISAR2_EL1);
+ 	kvm_nvhe_sym(id_aa64mmfr0_el1_sys_val) = read_sanitised_ftr_reg(SYS_ID_AA64MMFR0_EL1);
+ 	kvm_nvhe_sym(id_aa64mmfr1_el1_sys_val) = read_sanitised_ftr_reg(SYS_ID_AA64MMFR1_EL1);
+ 	kvm_nvhe_sym(id_aa64mmfr2_el1_sys_val) = read_sanitised_ftr_reg(SYS_ID_AA64MMFR2_EL1);
+diff --git a/arch/arm64/kvm/hyp/include/nvhe/fixed_config.h b/arch/arm64/kvm/hyp/include/nvhe/fixed_config.h
+index eea1f6a53723..5ad626527d41 100644
+--- a/arch/arm64/kvm/hyp/include/nvhe/fixed_config.h
++++ b/arch/arm64/kvm/hyp/include/nvhe/fixed_config.h
+@@ -192,6 +192,11 @@
+ 	ARM64_FEATURE_MASK(ID_AA64ISAR1_I8MM) \
+ 	)
+ 
++#define PVM_ID_AA64ISAR2_ALLOW (\
++	ARM64_FEATURE_MASK(ID_AA64ISAR2_GPA3) | \
++	ARM64_FEATURE_MASK(ID_AA64ISAR2_APA3) \
++	)
++
+ u64 pvm_read_id_reg(const struct kvm_vcpu *vcpu, u32 id);
+ bool kvm_handle_pvm_sysreg(struct kvm_vcpu *vcpu, u64 *exit_code);
+ bool kvm_handle_pvm_restricted(struct kvm_vcpu *vcpu, u64 *exit_code);
+diff --git a/arch/arm64/kvm/hyp/nvhe/sys_regs.c b/arch/arm64/kvm/hyp/nvhe/sys_regs.c
+index 792cf6e6ac92..33f5181af330 100644
+--- a/arch/arm64/kvm/hyp/nvhe/sys_regs.c
++++ b/arch/arm64/kvm/hyp/nvhe/sys_regs.c
+@@ -22,6 +22,7 @@ u64 id_aa64pfr0_el1_sys_val;
+ u64 id_aa64pfr1_el1_sys_val;
+ u64 id_aa64isar0_el1_sys_val;
+ u64 id_aa64isar1_el1_sys_val;
++u64 id_aa64isar2_el1_sys_val;
+ u64 id_aa64mmfr0_el1_sys_val;
+ u64 id_aa64mmfr1_el1_sys_val;
+ u64 id_aa64mmfr2_el1_sys_val;
+@@ -183,6 +184,17 @@ static u64 get_pvm_id_aa64isar1(const struct kvm_vcpu *vcpu)
+ 	return id_aa64isar1_el1_sys_val & allow_mask;
+ }
+ 
++static u64 get_pvm_id_aa64isar2(const struct kvm_vcpu *vcpu)
++{
++	u64 allow_mask = PVM_ID_AA64ISAR2_ALLOW;
++
++	if (!vcpu_has_ptrauth(vcpu))
++		allow_mask &= ~(ARM64_FEATURE_MASK(ID_AA64ISAR2_APA3) |
++				ARM64_FEATURE_MASK(ID_AA64ISAR2_GPA3));
++
++	return id_aa64isar2_el1_sys_val & allow_mask;
++}
++
+ static u64 get_pvm_id_aa64mmfr0(const struct kvm_vcpu *vcpu)
+ {
+ 	u64 set_mask;
+@@ -225,6 +237,8 @@ u64 pvm_read_id_reg(const struct kvm_vcpu *vcpu, u32 id)
+ 		return get_pvm_id_aa64isar0(vcpu);
+ 	case SYS_ID_AA64ISAR1_EL1:
+ 		return get_pvm_id_aa64isar1(vcpu);
++	case SYS_ID_AA64ISAR2_EL1:
++		return get_pvm_id_aa64isar2(vcpu);
+ 	case SYS_ID_AA64MMFR0_EL1:
+ 		return get_pvm_id_aa64mmfr0(vcpu);
+ 	case SYS_ID_AA64MMFR1_EL1:
+diff --git a/arch/arm64/kvm/sys_regs.c b/arch/arm64/kvm/sys_regs.c
+index 4dc2fba316ff..baa65292bbc2 100644
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@ -1097,6 +1097,11 @@ static u64 read_id_reg(const struct kvm_vcpu *vcpu,
+ 				 ARM64_FEATURE_MASK(ID_AA64ISAR1_GPA) |
+ 				 ARM64_FEATURE_MASK(ID_AA64ISAR1_GPI));
+ 		break;
++	case SYS_ID_AA64ISAR2_EL1:
++		if (!vcpu_has_ptrauth(vcpu))
++			val &= ~(ARM64_FEATURE_MASK(ID_AA64ISAR2_APA3) |
++				 ARM64_FEATURE_MASK(ID_AA64ISAR2_GPA3));
++		break;
+ 	case SYS_ID_AA64DFR0_EL1:
+ 		/* Limit debug to ARMv8.0 */
+ 		val &= ~ARM64_FEATURE_MASK(ID_AA64DFR0_DEBUGVER);
+diff --git a/arch/arm64/tools/cpucaps b/arch/arm64/tools/cpucaps
+index 4c39247581f6..162bc2443217 100644
+--- a/arch/arm64/tools/cpucaps
++++ b/arch/arm64/tools/cpucaps
+@@ -7,6 +7,7 @@ BTI
+ HAS_32BIT_EL0_DO_NOT_USE
+ HAS_32BIT_EL1
+ HAS_ADDRESS_AUTH
++HAS_ADDRESS_AUTH_ARCH_QARMA3
+ HAS_ADDRESS_AUTH_ARCH_QARMA5
+ HAS_ADDRESS_AUTH_IMP_DEF
+ HAS_AMU_EXTN
+@@ -21,6 +22,7 @@ HAS_E0PD
+ HAS_ECV
+ HAS_EPAN
+ HAS_GENERIC_AUTH
++HAS_GENERIC_AUTH_ARCH_QARMA3
+ HAS_GENERIC_AUTH_ARCH_QARMA5
+ HAS_GENERIC_AUTH_IMP_DEF
+ HAS_IRQ_PRIO_MASKING

@@ -1,0 +1,44 @@
+commit 07b4a930fc44a537efecf73c1fd2b4937f64caaa
+Author: Lai Jiangshan <laijs@linux.alibaba.com>
+Date:   Sat Feb 15 14:37:26 2020 -0800
+
+    rcu: Don't set nesting depth negative in rcu_preempt_deferred_qs()
+    
+    Now that RCU flavors have been consolidated, an RCU-preempt
+    rcu_read_unlock() in an interrupt or softirq handler cannot possibly
+    end the RCU read-side critical section.  Consider the old vulnerability
+    involving rcu_preempt_deferred_qs() being invoked within such a handler
+    that interrupted an extended RCU read-side critical section, in which
+    a wakeup might be invoked with a scheduler lock held.  Because
+    rcu_read_unlock_special() no longer does wakeups in such situations,
+    it is no longer necessary for rcu_preempt_deferred_qs() to set the
+    nesting level negative.
+    
+    This commit therefore removes this recursion-protection code from
+    rcu_preempt_deferred_qs().
+    
+    [ paulmck: Fix typo in commit log per Steve Rostedt. ]
+    Signed-off-by: Lai Jiangshan <laijs@linux.alibaba.com>
+    Signed-off-by: Paul E. McKenney <paulmck@kernel.org>
+
+diff --git a/kernel/rcu/tree_plugin.h b/kernel/rcu/tree_plugin.h
+index ccad77639d80..263c766b9dc1 100644
+--- a/kernel/rcu/tree_plugin.h
++++ b/kernel/rcu/tree_plugin.h
+@@ -569,16 +569,11 @@ static bool rcu_preempt_need_deferred_qs(struct task_struct *t)
+ static void rcu_preempt_deferred_qs(struct task_struct *t)
+ {
+ 	unsigned long flags;
+-	bool couldrecurse = rcu_preempt_depth() >= 0;
+ 
+ 	if (!rcu_preempt_need_deferred_qs(t))
+ 		return;
+-	if (couldrecurse)
+-		rcu_preempt_depth_set(rcu_preempt_depth() - RCU_NEST_BIAS);
+ 	local_irq_save(flags);
+ 	rcu_preempt_deferred_qs_irqrestore(t, flags);
+-	if (couldrecurse)
+-		rcu_preempt_depth_set(rcu_preempt_depth() + RCU_NEST_BIAS);
+ }
+ 
+ /*

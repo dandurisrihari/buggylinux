@@ -1,0 +1,80 @@
+diff --git a/Documentation/vfio.txt b/Documentation/vfio.txt
+index 96978eced341..4c746a7e717a 100644
+--- a/Documentation/vfio.txt
++++ b/Documentation/vfio.txt
+@@ -385,6 +385,18 @@ The code flow from the example above should be slightly changed:
+ 
+ 	....
+ 
++	/* Inject EEH error, which is expected to be caused by 32-bits
++	 * config load.
++	 */
++	pe_op.op = VFIO_EEH_PE_INJECT_ERR;
++	pe_op.err.type = EEH_ERR_TYPE_32;
++	pe_op.err.func = EEH_ERR_FUNC_LD_CFG_ADDR;
++	pe_op.err.addr = 0ul;
++	pe_op.err.mask = 0ul;
++	ioctl(container, VFIO_EEH_PE_OP, &pe_op);
++
++	....
++
+ 	/* When 0xFF's returned from reading PCI config space or IO BARs
+ 	 * of the PCI device. Check the PE's state to see if that has been
+ 	 * frozen.
+diff --git a/drivers/vfio/vfio_spapr_eeh.c b/drivers/vfio/vfio_spapr_eeh.c
+index 5fa42db769ee..38edeb4729a9 100644
+--- a/drivers/vfio/vfio_spapr_eeh.c
++++ b/drivers/vfio/vfio_spapr_eeh.c
+@@ -85,6 +85,16 @@ long vfio_spapr_iommu_eeh_ioctl(struct iommu_group *group,
+ 		case VFIO_EEH_PE_CONFIGURE:
+ 			ret = eeh_pe_configure(pe);
+ 			break;
++		case VFIO_EEH_PE_INJECT_ERR:
++			minsz = offsetofend(struct vfio_eeh_pe_op, err.mask);
++			if (op.argsz < minsz)
++				return -EINVAL;
++			if (copy_from_user(&op, (void __user *)arg, minsz))
++				return -EFAULT;
++
++			ret = eeh_pe_inject_err(pe, op.err.type, op.err.func,
++						op.err.addr, op.err.mask);
++			break;
+ 		default:
+ 			ret = -EINVAL;
+ 		}
+diff --git a/include/uapi/linux/vfio.h b/include/uapi/linux/vfio.h
+index b57b750c222f..e4fa1995f613 100644
+--- a/include/uapi/linux/vfio.h
++++ b/include/uapi/linux/vfio.h
+@@ -470,12 +470,23 @@ struct vfio_iommu_spapr_tce_info {
+  * - unfreeze IO/DMA for frozen PE;
+  * - read PE state;
+  * - reset PE;
+- * - configure PE.
++ * - configure PE;
++ * - inject EEH error.
+  */
++struct vfio_eeh_pe_err {
++	__u32 type;
++	__u32 func;
++	__u64 addr;
++	__u64 mask;
++};
++
+ struct vfio_eeh_pe_op {
+ 	__u32 argsz;
+ 	__u32 flags;
+ 	__u32 op;
++	union {
++		struct vfio_eeh_pe_err err;
++	};
+ };
+ 
+ #define VFIO_EEH_PE_DISABLE		0	/* Disable EEH functionality */
+@@ -492,6 +503,7 @@ struct vfio_eeh_pe_op {
+ #define VFIO_EEH_PE_RESET_HOT		6	/* Assert hot reset          */
+ #define VFIO_EEH_PE_RESET_FUNDAMENTAL	7	/* Assert fundamental reset  */
+ #define VFIO_EEH_PE_CONFIGURE		8	/* PE configuration          */
++#define VFIO_EEH_PE_INJECT_ERR		9	/* Inject EEH error          */
+ 
+ #define VFIO_EEH_PE_OP			_IO(VFIO_TYPE, VFIO_BASE + 21)

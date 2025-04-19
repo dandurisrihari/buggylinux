@@ -1,0 +1,103 @@
+commit 25362dc496edaf17f714c0fecd8b3eb79670207b
+Author: Kees Cook <kees@kernel.org>
+Date:   Tue Jan 26 01:19:36 2016 +0100
+
+    ARM: 8501/1: mm: flip priority of CONFIG_DEBUG_RODATA
+    
+    The use of CONFIG_DEBUG_RODATA is generally seen as an essential part of
+    kernel self-protection:
+    http://www.openwall.com/lists/kernel-hardening/2015/11/30/13
+    Additionally, its name has grown to mean things beyond just rodata. To
+    get ARM closer to this, we ought to rearrange the names of the configs
+    that control how the kernel protects its memory. What was called
+    CONFIG_ARM_KERNMEM_PERMS is realy doing the work that other architectures
+    call CONFIG_DEBUG_RODATA.
+    
+    This redefines CONFIG_DEBUG_RODATA to actually do the bulk of the
+    ROing (and NXing). In the place of the old CONFIG_DEBUG_RODATA, use
+    CONFIG_DEBUG_ALIGN_RODATA, since that's what the option does: adds
+    section alignment for making rodata explicitly NX, as arm does not split
+    the page tables like arm64 does without _ALIGN_RODATA.
+    
+    Also adds human readable names to the sections so I could more easily
+    debug my typos, and makes CONFIG_DEBUG_RODATA default "y" for CPU_V7.
+    
+    Results in /sys/kernel/debug/kernel_page_tables for each config state:
+    
+     # CONFIG_DEBUG_RODATA is not set
+     # CONFIG_DEBUG_ALIGN_RODATA is not set
+    
+    ---[ Kernel Mapping ]---
+    0x80000000-0x80900000           9M     RW x  SHD
+    0x80900000-0xa0000000         503M     RW NX SHD
+    
+     CONFIG_DEBUG_RODATA=y
+     CONFIG_DEBUG_ALIGN_RODATA=y
+    
+    ---[ Kernel Mapping ]---
+    0x80000000-0x80100000           1M     RW NX SHD
+    0x80100000-0x80700000           6M     ro x  SHD
+    0x80700000-0x80a00000           3M     ro NX SHD
+    0x80a00000-0xa0000000         502M     RW NX SHD
+    
+     CONFIG_DEBUG_RODATA=y
+     # CONFIG_DEBUG_ALIGN_RODATA is not set
+    
+    ---[ Kernel Mapping ]---
+    0x80000000-0x80100000           1M     RW NX SHD
+    0x80100000-0x80a00000           9M     ro x  SHD
+    0x80a00000-0xa0000000         502M     RW NX SHD
+    
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+    Reviewed-by: Laura Abbott <labbott@fedoraproject.org>
+    Signed-off-by: Russell King <rmk+kernel@arm.linux.org.uk>
+
+diff --git a/arch/arm/kernel/vmlinux.lds.S b/arch/arm/kernel/vmlinux.lds.S
+index 8b60fde5ce48..a6e395c53a48 100644
+--- a/arch/arm/kernel/vmlinux.lds.S
++++ b/arch/arm/kernel/vmlinux.lds.S
+@@ -8,7 +8,7 @@
+ #include <asm/thread_info.h>
+ #include <asm/memory.h>
+ #include <asm/page.h>
+-#ifdef CONFIG_ARM_KERNMEM_PERMS
++#ifdef CONFIG_DEBUG_RODATA
+ #include <asm/pgtable.h>
+ #endif
+ 
+@@ -94,7 +94,7 @@ SECTIONS
+ 		HEAD_TEXT
+ 	}
+ 
+-#ifdef CONFIG_ARM_KERNMEM_PERMS
++#ifdef CONFIG_DEBUG_RODATA
+ 	. = ALIGN(1<<SECTION_SHIFT);
+ #endif
+ 
+@@ -117,7 +117,7 @@ SECTIONS
+ 			ARM_CPU_KEEP(PROC_INFO)
+ 	}
+ 
+-#ifdef CONFIG_DEBUG_RODATA
++#ifdef CONFIG_DEBUG_ALIGN_RODATA
+ 	. = ALIGN(1<<SECTION_SHIFT);
+ #endif
+ 	RO_DATA(PAGE_SIZE)
+@@ -153,7 +153,7 @@ SECTIONS
+ 	_etext = .;			/* End of text and rodata section */
+ 
+ #ifndef CONFIG_XIP_KERNEL
+-# ifdef CONFIG_ARM_KERNMEM_PERMS
++# ifdef CONFIG_DEBUG_RODATA
+ 	. = ALIGN(1<<SECTION_SHIFT);
+ # else
+ 	. = ALIGN(PAGE_SIZE);
+@@ -231,7 +231,7 @@ SECTIONS
+ 	__data_loc = ALIGN(4);		/* location in binary */
+ 	. = PAGE_OFFSET + TEXT_OFFSET;
+ #else
+-#ifdef CONFIG_ARM_KERNMEM_PERMS
++#ifdef CONFIG_DEBUG_RODATA
+ 	. = ALIGN(1<<SECTION_SHIFT);
+ #else
+ 	. = ALIGN(THREAD_SIZE);

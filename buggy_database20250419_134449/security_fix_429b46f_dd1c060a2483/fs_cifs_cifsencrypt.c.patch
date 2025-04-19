@@ -1,0 +1,93 @@
+commit 429b46f4fdaf9c9007b7c0fc371b94e40c3764b2
+Author: Steve French <smfrench@gmail.com>
+Date:   Wed Jun 26 23:45:05 2013 -0500
+
+    [CIFS] SMB3 Signing enablement
+    
+    SMB3 uses a much faster method of signing (which is also better in other ways),
+    AES-CMAC.  With the kernel now supporting AES-CMAC since last release, we
+    are overdue to allow SMB3 signing (today only CIFS and SMB2 and SMB2.1,
+    but not SMB3 and SMB3.1 can sign) - and we need this also for checking
+    secure negotation and also per-share encryption (two other new SMB3 features
+    which we need to implement).
+    
+    This patch needs some work in a few areas - for example we need to
+    move signing for SMB2/SMB3 from per-socket to per-user (we may be able to
+    use the "nosharesock" mount option in the interim for the multiuser case),
+    and Shirish found a bug in the earlier authentication overhaul
+    (setting signing flags properly) - but those can be done in followon
+    patches.
+    
+    Signed-off-by: Shirish Pargaonkar <shirishpargaonkar@gmail.com>
+    Signed-off-by: Steve French <smfrench@gmail.com>
+
+diff --git a/fs/cifs/cifsencrypt.c b/fs/cifs/cifsencrypt.c
+index 330875948f18..3d8bf941d126 100644
+--- a/fs/cifs/cifsencrypt.c
++++ b/fs/cifs/cifsencrypt.c
+@@ -705,6 +705,9 @@ calc_seckey(struct cifs_ses *ses)
+ void
+ cifs_crypto_shash_release(struct TCP_Server_Info *server)
+ {
++	if (server->secmech.cmacaes)
++		crypto_free_shash(server->secmech.cmacaes);
++
+ 	if (server->secmech.hmacsha256)
+ 		crypto_free_shash(server->secmech.hmacsha256);
+ 
+@@ -714,6 +717,8 @@ cifs_crypto_shash_release(struct TCP_Server_Info *server)
+ 	if (server->secmech.hmacmd5)
+ 		crypto_free_shash(server->secmech.hmacmd5);
+ 
++	kfree(server->secmech.sdesccmacaes);
++
+ 	kfree(server->secmech.sdeschmacsha256);
+ 
+ 	kfree(server->secmech.sdeschmacmd5);
+@@ -747,6 +752,13 @@ cifs_crypto_shash_allocate(struct TCP_Server_Info *server)
+ 		goto crypto_allocate_hmacsha256_fail;
+ 	}
+ 
++	server->secmech.cmacaes = crypto_alloc_shash("cmac(aes)", 0, 0);
++	if (IS_ERR(server->secmech.cmacaes)) {
++		cifs_dbg(VFS, "could not allocate crypto cmac-aes");
++		rc = PTR_ERR(server->secmech.cmacaes);
++		goto crypto_allocate_cmacaes_fail;
++	}
++
+ 	size = sizeof(struct shash_desc) +
+ 			crypto_shash_descsize(server->secmech.hmacmd5);
+ 	server->secmech.sdeschmacmd5 = kmalloc(size, GFP_KERNEL);
+@@ -777,8 +789,22 @@ cifs_crypto_shash_allocate(struct TCP_Server_Info *server)
+ 	server->secmech.sdeschmacsha256->shash.tfm = server->secmech.hmacsha256;
+ 	server->secmech.sdeschmacsha256->shash.flags = 0x0;
+ 
++	size = sizeof(struct shash_desc) +
++			crypto_shash_descsize(server->secmech.cmacaes);
++	server->secmech.sdesccmacaes = kmalloc(size, GFP_KERNEL);
++	if (!server->secmech.sdesccmacaes) {
++		cifs_dbg(VFS, "%s: Can't alloc cmacaes\n", __func__);
++		rc = -ENOMEM;
++		goto crypto_allocate_cmacaes_sdesc_fail;
++	}
++	server->secmech.sdesccmacaes->shash.tfm = server->secmech.cmacaes;
++	server->secmech.sdesccmacaes->shash.flags = 0x0;
++
+ 	return 0;
+ 
++crypto_allocate_cmacaes_sdesc_fail:
++	kfree(server->secmech.sdeschmacsha256);
++
+ crypto_allocate_hmacsha256_sdesc_fail:
+ 	kfree(server->secmech.sdescmd5);
+ 
+@@ -786,6 +812,9 @@ cifs_crypto_shash_allocate(struct TCP_Server_Info *server)
+ 	kfree(server->secmech.sdeschmacmd5);
+ 
+ crypto_allocate_hmacmd5_sdesc_fail:
++	crypto_free_shash(server->secmech.cmacaes);
++
++crypto_allocate_cmacaes_fail:
+ 	crypto_free_shash(server->secmech.hmacsha256);
+ 
+ crypto_allocate_hmacsha256_fail:

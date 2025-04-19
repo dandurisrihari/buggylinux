@@ -1,0 +1,114 @@
+commit 7672dbba85d30db07c3588f8cf6c6708bbdc0baa
+Author: Ramalingam C <ramalingam.c@intel.com>
+Date:   Thu Aug 1 17:11:14 2019 +0530
+
+    drm: Add Content protection type property
+    
+    This patch adds a DRM ENUM property to the selected connectors.
+    This property is used for mentioning the protected content's type
+    from userspace to kernel HDCP authentication.
+    
+    Type of the stream is decided by the protected content providers.
+    Type 0 content can be rendered on any HDCP protected display wires.
+    But Type 1 content can be rendered only on HDCP2.2 protected paths.
+    
+    So when a userspace sets this property to Type 1 and starts the HDCP
+    enable, kernel will honour it only if HDCP2.2 authentication is through
+    for type 1. Else HDCP enable will be failed.
+    
+    Pekka have completed the Weston DRM-backend review in
+    https://gitlab.freedesktop.org/wayland/weston/merge_requests/48
+    and the UAPI for HDCP 2.2 looks good.
+    
+    The userspace is accepted in Weston.
+    
+    v2:
+      cp_content_type is replaced with content_protection_type [daniel]
+      check at atomic_set_property is removed [Maarten]
+    v3:
+      %s/content_protection_type/hdcp_content_type [Pekka]
+    v4:
+      property is created for the first requested connector and then reused.
+            [Danvet]
+    v5:
+      kernel doc nits addressed [Daniel]
+      Rebased as part of patch reordering.
+    v6:
+      Kernel docs are modified [pekka]
+    v7:
+      More details in Kernel docs. [pekka]
+    v8:
+      Few more clarification into kernel doc of content type [pekka]
+    v9:
+      Small fixes in coding style.
+    v10:
+      Moving DRM_MODE_HDCP_CONTENT_TYPEx definition to drm_hdcp.h [pekka]
+    
+    Signed-off-by: Ramalingam C <ramalingam.c@intel.com>
+    Reviewed-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+    Acked-by: Pekka Paalanen <pekka.paalanen@collabora.com>
+    Acked-by: Jani Nikula <jani.nikula@intel.com>
+    Link: https://patchwork.freedesktop.org/patch/320957/?series=57232&rev=14
+
+diff --git a/drivers/gpu/drm/drm_connector.c b/drivers/gpu/drm/drm_connector.c
+index d49e19f3de3a..cddb97f75415 100644
+--- a/drivers/gpu/drm/drm_connector.c
++++ b/drivers/gpu/drm/drm_connector.c
+@@ -988,6 +988,57 @@ static const struct drm_prop_enum_list hdmi_colorspaces[] = {
+  *	  is no longer protected and userspace should take appropriate action
+  *	  (whatever that might be).
+  *
++ * HDCP Content Type:
++ *	This Enum property is used by the userspace to declare the content type
++ *	of the display stream, to kernel. Here display stream stands for any
++ *	display content that userspace intended to display through HDCP
++ *	encryption.
++ *
++ *	Content Type of a stream is decided by the owner of the stream, as
++ *	"HDCP Type0" or "HDCP Type1".
++ *
++ *	The value of the property can be one of the below:
++ *	  - "HDCP Type0": DRM_MODE_HDCP_CONTENT_TYPE0 = 0
++ *	  - "HDCP Type1": DRM_MODE_HDCP_CONTENT_TYPE1 = 1
++ *
++ *	When kernel starts the HDCP authentication (see "Content Protection"
++ *	for details), it uses the content type in "HDCP Content Type"
++ *	for performing the HDCP authentication with the display sink.
++ *
++ *	Please note in HDCP spec versions, a link can be authenticated with
++ *	HDCP 2.2 for Content Type 0/Content Type 1. Where as a link can be
++ *	authenticated with HDCP1.4 only for Content Type 0(though it is implicit
++ *	in nature. As there is no reference for Content Type in HDCP1.4).
++ *
++ *	HDCP2.2 authentication protocol itself takes the "Content Type" as a
++ *	parameter, which is a input for the DP HDCP2.2 encryption algo.
++ *
++ *	In case of Type 0 content protection request, kernel driver can choose
++ *	either of HDCP spec versions 1.4 and 2.2. When HDCP2.2 is used for
++ *	"HDCP Type 0", a HDCP 2.2 capable repeater in the downstream can send
++ *	that content to a HDCP 1.4 authenticated HDCP sink (Type0 link).
++ *	But if the content is classified as "HDCP Type 1", above mentioned
++ *	HDCP 2.2 repeater wont send the content to the HDCP sink as it can't
++ *	authenticate the HDCP1.4 capable sink for "HDCP Type 1".
++ *
++ *	Please note userspace can be ignorant of the HDCP versions used by the
++ *	kernel driver to achieve the "HDCP Content Type".
++ *
++ *	At current scenario, classifying a content as Type 1 ensures that the
++ *	content will be displayed only through the HDCP2.2 encrypted link.
++ *
++ *	Note that the HDCP Content Type property is introduced at HDCP 2.2, and
++ *	defaults to type 0. It is only exposed by drivers supporting HDCP 2.2
++ *	(hence supporting Type 0 and Type 1). Based on how next versions of
++ *	HDCP specs are defined content Type could be used for higher versions
++ *	too.
++ *
++ *	If content type is changed when "Content Protection" is not UNDESIRED,
++ *	then kernel will disable the HDCP and re-enable with new type in the
++ *	same atomic commit. And when "Content Protection" is ENABLED, it means
++ *	that link is HDCP authenticated and encrypted, for the transmission of
++ *	the Type of stream mentioned at "HDCP Content Type".
++ *
+  * HDR_OUTPUT_METADATA:
+  *	Connector property to enable userspace to send HDR Metadata to
+  *	driver. This metadata is based on the composition and blending

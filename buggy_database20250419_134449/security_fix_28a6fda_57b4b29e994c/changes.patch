@@ -1,0 +1,83 @@
+diff --git a/arch/x86/kvm/i8259.c b/arch/x86/kvm/i8259.c
+index e498b18f010c..90c84f947d45 100644
+--- a/arch/x86/kvm/i8259.c
++++ b/arch/x86/kvm/i8259.c
+@@ -190,17 +190,17 @@ void kvm_pic_update_irq(struct kvm_pic *s)
+ 
+ int kvm_pic_set_irq(struct kvm_pic *s, int irq, int irq_source_id, int level)
+ {
+-	int ret = -1;
++	int ret, irq_level;
++
++	BUG_ON(irq < 0 || irq >= PIC_NUM_PINS);
+ 
+ 	pic_lock(s);
+-	if (irq >= 0 && irq < PIC_NUM_PINS) {
+-		int irq_level = __kvm_irq_line_state(&s->irq_states[irq],
+-						     irq_source_id, level);
+-		ret = pic_set_irq1(&s->pics[irq >> 3], irq & 7, irq_level);
+-		pic_update_irq(s);
+-		trace_kvm_pic_set_irq(irq >> 3, irq & 7, s->pics[irq >> 3].elcr,
+-				      s->pics[irq >> 3].imr, ret == 0);
+-	}
++	irq_level = __kvm_irq_line_state(&s->irq_states[irq],
++					 irq_source_id, level);
++	ret = pic_set_irq1(&s->pics[irq >> 3], irq & 7, irq_level);
++	pic_update_irq(s);
++	trace_kvm_pic_set_irq(irq >> 3, irq & 7, s->pics[irq >> 3].elcr,
++			      s->pics[irq >> 3].imr, ret == 0);
+ 	pic_unlock(s);
+ 
+ 	return ret;
+diff --git a/virt/kvm/ioapic.c b/virt/kvm/ioapic.c
+index ef61d529a6c4..cfb7e4d52dc2 100644
+--- a/virt/kvm/ioapic.c
++++ b/virt/kvm/ioapic.c
+@@ -197,28 +197,29 @@ int kvm_ioapic_set_irq(struct kvm_ioapic *ioapic, int irq, int irq_source_id,
+ 	u32 old_irr;
+ 	u32 mask = 1 << irq;
+ 	union kvm_ioapic_redirect_entry entry;
+-	int ret = 1;
++	int ret, irq_level;
++
++	BUG_ON(irq < 0 || irq >= IOAPIC_NUM_PINS);
+ 
+ 	spin_lock(&ioapic->lock);
+ 	old_irr = ioapic->irr;
+-	if (irq >= 0 && irq < IOAPIC_NUM_PINS) {
+-		int irq_level = __kvm_irq_line_state(&ioapic->irq_states[irq],
+-						     irq_source_id, level);
+-		entry = ioapic->redirtbl[irq];
+-		irq_level ^= entry.fields.polarity;
+-		if (!irq_level)
+-			ioapic->irr &= ~mask;
+-		else {
+-			int edge = (entry.fields.trig_mode == IOAPIC_EDGE_TRIG);
+-			ioapic->irr |= mask;
+-			if ((edge && old_irr != ioapic->irr) ||
+-			    (!edge && !entry.fields.remote_irr))
+-				ret = ioapic_service(ioapic, irq);
+-			else
+-				ret = 0; /* report coalesced interrupt */
+-		}
+-		trace_kvm_ioapic_set_irq(entry.bits, irq, ret == 0);
++	irq_level = __kvm_irq_line_state(&ioapic->irq_states[irq],
++					 irq_source_id, level);
++	entry = ioapic->redirtbl[irq];
++	irq_level ^= entry.fields.polarity;
++	if (!irq_level) {
++		ioapic->irr &= ~mask;
++		ret = 1;
++	} else {
++		int edge = (entry.fields.trig_mode == IOAPIC_EDGE_TRIG);
++		ioapic->irr |= mask;
++		if ((edge && old_irr != ioapic->irr) ||
++		    (!edge && !entry.fields.remote_irr))
++			ret = ioapic_service(ioapic, irq);
++		else
++			ret = 0; /* report coalesced interrupt */
+ 	}
++	trace_kvm_ioapic_set_irq(entry.bits, irq, ret == 0);
+ 	spin_unlock(&ioapic->lock);
+ 
+ 	return ret;

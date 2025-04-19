@@ -1,0 +1,37 @@
+commit 40cab6e88cb0b6c56d3f30b7491a20e803f948f6
+Author: Takashi Iwai <tiwai@suse.de>
+Date:   Fri Mar 23 08:03:26 2018 +0100
+
+    ALSA: pcm: Return -EBUSY for OSS ioctls changing busy streams
+    
+    OSS PCM stream management isn't modal but it allows ioctls issued at
+    any time for changing the parameters.  In the previous hardening
+    patch ("ALSA: pcm: Avoid potential races between OSS ioctls and
+    read/write"), we covered these races and prevent the corruption by
+    protecting the concurrent accesses via params_lock mutex.  However,
+    this means that some ioctls that try to change the stream parameter
+    (e.g. channels or format) would be blocked until the read/write
+    finishes, and it may take really long.
+    
+    Basically changing the parameter while reading/writing is an invalid
+    operation, hence it's even more user-friendly from the API POV if it
+    returns -EBUSY in such a situation.
+    
+    This patch adds such checks in the relevant ioctls with the addition
+    of read/write access refcount.
+    
+    Cc: <stable@vger.kernel.org>
+    Signed-off-by: Takashi Iwai <tiwai@suse.de>
+
+diff --git a/include/sound/pcm_oss.h b/include/sound/pcm_oss.h
+index 760c969d885d..12bbf8c81112 100644
+--- a/include/sound/pcm_oss.h
++++ b/include/sound/pcm_oss.h
+@@ -57,6 +57,7 @@ struct snd_pcm_oss_runtime {
+ 	char *buffer;				/* vmallocated period */
+ 	size_t buffer_used;			/* used length from period buffer */
+ 	struct mutex params_lock;
++	atomic_t rw_ref;		/* concurrent read/write accesses */
+ #ifdef CONFIG_SND_PCM_OSS_PLUGINS
+ 	struct snd_pcm_plugin *plugin_first;
+ 	struct snd_pcm_plugin *plugin_last;

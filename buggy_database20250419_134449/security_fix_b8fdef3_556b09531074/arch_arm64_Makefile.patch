@@ -1,0 +1,53 @@
+commit b8fdef311a0bd9223f10754f94fdcf1a594a3457
+Author: Mark Brown <broonie@kernel.org>
+Date:   Tue Mar 31 20:44:59 2020 +0100
+
+    arm64: Always force a branch protection mode when the compiler has one
+    
+    Compilers with branch protection support can be configured to enable it by
+    default, it is likely that distributions will do this as part of deploying
+    branch protection system wide. As well as the slight overhead from having
+    some extra NOPs for unused branch protection features this can cause more
+    serious problems when the kernel is providing pointer authentication to
+    userspace but not built for pointer authentication itself. In that case our
+    switching of keys for userspace can affect the kernel unexpectedly, causing
+    pointer authentication instructions in the kernel to corrupt addresses.
+    
+    To ensure that we get consistent and reliable behaviour always explicitly
+    initialise the branch protection mode, ensuring that the kernel is built
+    the same way regardless of the compiler defaults.
+    
+    Fixes: 7503197562567 (arm64: add basic pointer authentication support)
+    Reported-by: Szabolcs Nagy <szabolcs.nagy@arm.com>
+    Signed-off-by: Mark Brown <broonie@kernel.org>
+    Cc: stable@vger.kernel.org
+    [catalin.marinas@arm.com: remove Kconfig option in favour of Makefile check]
+    Signed-off-by: Catalin Marinas <catalin.marinas@arm.com>
+
+diff --git a/arch/arm64/Makefile b/arch/arm64/Makefile
+index f15f92ba53e6..85e4149cc5d5 100644
+--- a/arch/arm64/Makefile
++++ b/arch/arm64/Makefile
+@@ -65,6 +65,10 @@ stack_protector_prepare: prepare0
+ 					include/generated/asm-offsets.h))
+ endif
+ 
++# Ensure that if the compiler supports branch protection we default it
++# off, this will be overridden if we are using branch protection.
++branch-prot-flags-y += $(call cc-option,-mbranch-protection=none)
++
+ ifeq ($(CONFIG_ARM64_PTR_AUTH),y)
+ branch-prot-flags-$(CONFIG_CC_HAS_SIGN_RETURN_ADDRESS) := -msign-return-address=all
+ branch-prot-flags-$(CONFIG_CC_HAS_BRANCH_PROT_PAC_RET) := -mbranch-protection=pac-ret+leaf
+@@ -73,9 +77,10 @@ branch-prot-flags-$(CONFIG_CC_HAS_BRANCH_PROT_PAC_RET) := -mbranch-protection=pa
+ # we pass it only to the assembler. This option is utilized only in case of non
+ # integrated assemblers.
+ branch-prot-flags-$(CONFIG_AS_HAS_PAC) += -Wa,-march=armv8.3-a
+-KBUILD_CFLAGS += $(branch-prot-flags-y)
+ endif
+ 
++KBUILD_CFLAGS += $(branch-prot-flags-y)
++
+ ifeq ($(CONFIG_CPU_BIG_ENDIAN), y)
+ KBUILD_CPPFLAGS	+= -mbig-endian
+ CHECKFLAGS	+= -D__AARCH64EB__

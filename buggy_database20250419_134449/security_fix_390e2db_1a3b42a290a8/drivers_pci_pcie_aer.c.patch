@@ -1,0 +1,49 @@
+commit 390e2db8248075ae2f31a7046a88eda0f9784310
+Author: Keith Busch <kbusch@kernel.org>
+Date:   Thu Oct 11 12:34:11 2018 -0600
+
+    PCI/AER: Abstract AER interrupt handling
+    
+    The aer_inject module was directly calling aer_irq().  This required the
+    AER driver export its private IRQ handler for no other reason than to
+    support error injection.  A driver should not have to expose its private
+    interfaces, so use the IRQ subsystem to route injection to the AER driver,
+    and make aer_irq() a private interface.
+    
+    This provides additional benefits:
+    
+    First, directly calling the IRQ handler bypassed the IRQ subsytem so the
+    injection wasn't really synthesizing what happens if a shared AER interrupt
+    occurs.
+    
+    The error injection had to provide the callback data directly, which may be
+    racing with a removal that is freeing that structure.  The IRQ subsystem
+    can handle that race.
+    
+    Finally, using the IRQ subsystem automatically reacts to threaded IRQs,
+    keeping the error injection abstracted from that implementation detail.
+    
+    Signed-off-by: Keith Busch <keith.busch@intel.com>
+    Signed-off-by: Bjorn Helgaas <bhelgaas@google.com>
+
+diff --git a/drivers/pci/pcie/aer.c b/drivers/pci/pcie/aer.c
+index 90b53abf621d..a90a9194ac4a 100644
+--- a/drivers/pci/pcie/aer.c
++++ b/drivers/pci/pcie/aer.c
+@@ -1229,7 +1229,7 @@ static irqreturn_t aer_isr(int irq, void *context)
+  *
+  * Invoked when Root Port detects AER messages.
+  */
+-irqreturn_t aer_irq(int irq, void *context)
++static irqreturn_t aer_irq(int irq, void *context)
+ {
+ 	struct pcie_device *pdev = (struct pcie_device *)context;
+ 	struct aer_rpc *rpc = get_service_data(pdev);
+@@ -1249,7 +1249,6 @@ irqreturn_t aer_irq(int irq, void *context)
+ 
+ 	return IRQ_WAKE_THREAD;
+ }
+-EXPORT_SYMBOL_GPL(aer_irq);
+ 
+ static int set_device_error_reporting(struct pci_dev *dev, void *data)
+ {

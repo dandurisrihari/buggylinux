@@ -1,0 +1,113 @@
+commit ec02f2b134d86b4a91c5d82eed03319060718a97
+Author: Namhyung Kim <namhyung@kernel.org>
+Date:   Mon Jul 19 15:31:53 2021 -0700
+
+    perf tools: Add pipe_test.sh to verify pipe operations
+    
+    It builds a test program and use it to verify pipe behavior with perf
+    record, inject and report.
+    
+      $ perf test pipe -v
+      80: perf pipe recording and injection test                          :
+      --- start ---
+      test child forked, pid 1109301
+      [ perf record: Woken up 1 times to write data ]
+      [ perf record: Captured and wrote 0.000 MB - ]
+         1109315  1109315       -1 |test.file.MGNff
+      [ perf record: Woken up 1 times to write data ]
+      [ perf record: Captured and wrote 0.000 MB - ]
+          99.99%  test.file.MGNff  test.file.MGNffM  [.] noploop
+      [ perf record: Woken up 1 times to write data ]
+      [ perf record: Captured and wrote 0.000 MB - ]
+          99.99%  test.file.MGNff  test.file.MGNffM  [.] noploop
+      [ perf record: Woken up 1 times to write data ]
+      [ perf record: Captured and wrote 0.153 MB /tmp/perf.data.dmsnlx (3995 samples) ]
+          99.99%  test.file.MGNff  test.file.MGNffM  [.] noploop
+      test child finished with 0
+      ---- end ----
+      perf pipe recording and injection test: Ok
+    
+    Signed-off-by: Namhyung Kim <namhyung@kernel.org>
+    Acked-by: Jiri Olsa <jolsa@redhat.com>
+    Cc: Adrian Hunter <adrian.hunter@intel.com>
+    Cc: Andi Kleen <ak@linux.intel.com>
+    Cc: Ian Rogers <irogers@google.com>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Link: http://lore.kernel.org/lkml/20210719223153.1618812-6-namhyung@kernel.org
+    Signed-off-by: Arnaldo Carvalho de Melo <acme@redhat.com>
+
+diff --git a/tools/perf/tests/shell/pipe_test.sh b/tools/perf/tests/shell/pipe_test.sh
+new file mode 100755
+index 000000000000..1b32b4f28391
+--- /dev/null
++++ b/tools/perf/tests/shell/pipe_test.sh
+@@ -0,0 +1,69 @@
++#!/bin/sh
++# perf pipe recording and injection test
++# SPDX-License-Identifier: GPL-2.0
++
++# skip if there's no compiler
++if ! [ -x "$(command -v cc)" ]; then
++	echo "failed: no compiler, install gcc"
++	exit 2
++fi
++
++file=$(mktemp /tmp/test.file.XXXXXX)
++data=$(mktemp /tmp/perf.data.XXXXXX)
++
++cat <<EOF | cc -o ${file} -x c -
++#include <signal.h>
++#include <stdlib.h>
++#include <unistd.h>
++
++volatile int done;
++
++void sigalrm(int sig) {
++	done = 1;
++}
++
++__attribute__((noinline)) void noploop(void) {
++	while (!done)
++		continue;
++}
++
++int main(int argc, char *argv[]) {
++	int sec = 1;
++
++	if (argc > 1)
++		sec = atoi(argv[1]);
++
++	signal(SIGALRM, sigalrm);
++	alarm(sec);
++
++	noploop();
++	return 0;
++}
++EOF
++
++
++if ! perf record -e task-clock:u -o - ${file} | perf report -i - --task | grep test.file; then
++	echo "cannot find the test file in the perf report"
++	exit 1
++fi
++
++if ! perf record -e task-clock:u -o - ${file} | perf inject -b | perf report -i - | grep noploop; then
++	echo "cannot find noploop function in pipe #1"
++	exit 1
++fi
++
++perf record -e task-clock:u -o - ${file} | perf inject -b -o ${data}
++if ! perf report -i ${data} | grep noploop; then
++	echo "cannot find noploop function in pipe #2"
++	exit 1
++fi
++
++perf record -e task-clock:u -o ${data} ${file}
++if ! perf inject -b -i ${data} | perf report -i - | grep noploop; then
++	echo "cannot find noploop function in pipe #3"
++	exit 1
++fi
++
++
++rm -f ${file} ${data} ${data}.old
++exit 0

@@ -1,0 +1,57 @@
+commit 2fc1c63d2763ad7562ea7d241da79b42538a557b
+Author: Christophe Leroy <christophe.leroy@csgroup.eu>
+Date:   Tue Sep 20 19:36:42 2022 +0200
+
+    powerpc/highmem: Properly handle fragmented memory
+    
+    In addition to checking whether a page is reserved before allocating
+    it to highmem, verify that it is valid memory.
+    
+    Otherwise the kernel Oopses as below:
+    
+      mem auto-init: stack:off, heap alloc:off, heap free:off
+      Kernel attempted to read user page (7df58) - exploit attempt? (uid: 0)
+      BUG: Unable to handle kernel data access on read at 0x0007df58
+      Faulting instruction address: 0xc01c8348
+      Oops: Kernel access of bad area, sig: 11 [#1]
+      BE PAGE_SIZE=4K SMP NR_CPUS=2 P2020RDB-PC
+      Modules linked in:
+      CPU: 0 PID: 0 Comm: swapper Not tainted 6.0.0-rc2-0caacb197b677410bdac81bc34f05235+ #121
+      NIP:  c01c8348 LR: c01cb2bc CTR: 0000000a
+      REGS: c10d7e20 TRAP: 0300   Not tainted  (6.0.0-rc2-0caacb197b677410bdac81bc34f05235+)
+      MSR:  00021000 <CE,ME>  CR: 48044224  XER: 00000000
+      DEAR: 0007df58 ESR: 00000000
+      GPR00: c01cb294 c10d7f10 c1045340 00000001 00000004 c112bcc0 00000015 eedf1000
+      GPR08: 00000003 0007df58 00000000 f0000000 28044228 00000200 00000000 00000000
+      GPR16: 00000000 00000000 00000000 0275cb7a c0000000 00000001 0000075f 00000000
+      GPR24: c1031004 00000000 00000000 00000001 c10f0000 eedf1000 00080000 00080000
+      NIP free_unref_page_prepare.part.93+0x48/0x60
+      LR  free_unref_page+0x84/0x4b8
+      Call Trace:
+        0xeedf1000 (unreliable)
+        free_unref_page+0x5c/0x4b8
+        mem_init+0xd0/0x194
+        start_kernel+0x4c0/0x6d0
+        set_ivor+0x13c/0x178
+    
+    Reported-by: Pali Rohár <pali@kernel.org>
+    Signed-off-by: Christophe Leroy <christophe.leroy@csgroup.eu>
+    Fixes: b0e0d68b1c52 ("powerpc/32: Allow fragmented physical memory")
+    Tested-by: Pali Rohár <pali@kernel.org>
+    [mpe: Trim oops]
+    Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+    Link: https://lore.kernel.org/r/f08cca5c46d67399c53262eca48e015dcf1841f9.1663695394.git.christophe.leroy@csgroup.eu
+
+diff --git a/arch/powerpc/mm/mem.c b/arch/powerpc/mm/mem.c
+index 01772e79fd93..6ddbd6cb3a2a 100644
+--- a/arch/powerpc/mm/mem.c
++++ b/arch/powerpc/mm/mem.c
+@@ -302,7 +302,7 @@ void __init mem_init(void)
+ 		for (pfn = highmem_mapnr; pfn < max_mapnr; ++pfn) {
+ 			phys_addr_t paddr = (phys_addr_t)pfn << PAGE_SHIFT;
+ 			struct page *page = pfn_to_page(pfn);
+-			if (!memblock_is_reserved(paddr))
++			if (memblock_is_memory(paddr) && !memblock_is_reserved(paddr))
+ 				free_highmem_page(page);
+ 		}
+ 	}

@@ -1,0 +1,54 @@
+commit da345174ceca052469e4775e4ae263b5f27a9355
+Author: Christoffer Dall <christoffer.dall@arm.com>
+Date:   Fri Oct 11 13:07:06 2019 +0200
+
+    KVM: arm/arm64: Allow user injection of external data aborts
+    
+    In some scenarios, such as buggy guest or incorrect configuration of the
+    VMM and firmware description data, userspace will detect a memory access
+    to a portion of the IPA, which is not mapped to any MMIO region.
+    
+    For this purpose, the appropriate action is to inject an external abort
+    to the guest.  The kernel already has functionality to inject an
+    external abort, but we need to wire up a signal from user space that
+    lets user space tell the kernel to do this.
+    
+    It turns out, we already have the set event functionality which we can
+    perfectly reuse for this.
+    
+    Signed-off-by: Christoffer Dall <christoffer.dall@arm.com>
+    Signed-off-by: Marc Zyngier <maz@kernel.org>
+
+diff --git a/arch/arm/kvm/guest.c b/arch/arm/kvm/guest.c
+index 684cf64b4033..735f9b007e58 100644
+--- a/arch/arm/kvm/guest.c
++++ b/arch/arm/kvm/guest.c
+@@ -255,6 +255,12 @@ int __kvm_arm_vcpu_get_events(struct kvm_vcpu *vcpu,
+ {
+ 	events->exception.serror_pending = !!(*vcpu_hcr(vcpu) & HCR_VA);
+ 
++	/*
++	 * We never return a pending ext_dabt here because we deliver it to
++	 * the virtual CPU directly when setting the event and it's no longer
++	 * 'pending' at this point.
++	 */
++
+ 	return 0;
+ }
+ 
+@@ -263,12 +269,16 @@ int __kvm_arm_vcpu_set_events(struct kvm_vcpu *vcpu,
+ {
+ 	bool serror_pending = events->exception.serror_pending;
+ 	bool has_esr = events->exception.serror_has_esr;
++	bool ext_dabt_pending = events->exception.ext_dabt_pending;
+ 
+ 	if (serror_pending && has_esr)
+ 		return -EINVAL;
+ 	else if (serror_pending)
+ 		kvm_inject_vabt(vcpu);
+ 
++	if (ext_dabt_pending)
++		kvm_inject_dabt(vcpu, kvm_vcpu_get_hfar(vcpu));
++
+ 	return 0;
+ }

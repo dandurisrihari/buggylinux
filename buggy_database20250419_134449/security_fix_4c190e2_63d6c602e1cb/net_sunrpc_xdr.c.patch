@@ -1,0 +1,75 @@
+commit 4c190e2f913f038c9c91ee63b59cd037260ba353
+Author: Jeff Layton <jlayton@kernel.org>
+Date:   Wed Feb 6 08:28:55 2013 -0500
+
+    sunrpc: trim off trailing checksum before returning decrypted or integrity authenticated buffer
+    
+    When GSSAPI integrity signatures are in use, or when we're using GSSAPI
+    privacy with the v2 token format, there is a trailing checksum on the
+    xdr_buf that is returned.
+    
+    It's checked during the authentication stage, and afterward nothing
+    cares about it. Ordinarily, it's not a problem since the XDR code
+    generally ignores it, but it will be when we try to compute a checksum
+    over the buffer to help prevent XID collisions in the duplicate reply
+    cache.
+    
+    Fix the code to trim off the checksums after verifying them. Note that
+    in unwrap_integ_data, we must avoid trying to reverify the checksum if
+    the request was deferred since it will no longer be present when it's
+    revisited.
+    
+    Signed-off-by: Jeff Layton <jlayton@redhat.com>
+
+diff --git a/net/sunrpc/xdr.c b/net/sunrpc/xdr.c
+index 56055632f151..75edcfad6e26 100644
+--- a/net/sunrpc/xdr.c
++++ b/net/sunrpc/xdr.c
+@@ -879,6 +879,47 @@ xdr_buf_subsegment(struct xdr_buf *buf, struct xdr_buf *subbuf,
+ }
+ EXPORT_SYMBOL_GPL(xdr_buf_subsegment);
+ 
++/**
++ * xdr_buf_trim - lop at most "len" bytes off the end of "buf"
++ * @buf: buf to be trimmed
++ * @len: number of bytes to reduce "buf" by
++ *
++ * Trim an xdr_buf by the given number of bytes by fixing up the lengths. Note
++ * that it's possible that we'll trim less than that amount if the xdr_buf is
++ * too small, or if (for instance) it's all in the head and the parser has
++ * already read too far into it.
++ */
++void xdr_buf_trim(struct xdr_buf *buf, unsigned int len)
++{
++	size_t cur;
++	unsigned int trim = len;
++
++	if (buf->tail[0].iov_len) {
++		cur = min_t(size_t, buf->tail[0].iov_len, trim);
++		buf->tail[0].iov_len -= cur;
++		trim -= cur;
++		if (!trim)
++			goto fix_len;
++	}
++
++	if (buf->page_len) {
++		cur = min_t(unsigned int, buf->page_len, trim);
++		buf->page_len -= cur;
++		trim -= cur;
++		if (!trim)
++			goto fix_len;
++	}
++
++	if (buf->head[0].iov_len) {
++		cur = min_t(size_t, buf->head[0].iov_len, trim);
++		buf->head[0].iov_len -= cur;
++		trim -= cur;
++	}
++fix_len:
++	buf->len -= (len - trim);
++}
++EXPORT_SYMBOL_GPL(xdr_buf_trim);
++
+ static void __read_bytes_from_xdr_buf(struct xdr_buf *subbuf, void *obj, unsigned int len)
+ {
+ 	unsigned int this_len;

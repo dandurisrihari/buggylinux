@@ -1,0 +1,45 @@
+commit 1befd944e05050d76950014f3dc04ed47faba2c3
+Author: Christoph Hellwig <hch@lst.de>
+Date:   Tue Sep 20 15:37:18 2022 +0200
+
+    nvmet-auth: don't try to cancel a non-initialized work_struct
+    
+    Currently blktests nvme/002 trips up debugobjects if CONFIG_NVME_AUTH is
+    enabled, but authentication is not on a queue.  This is because
+    nvmet_auth_sq_free cancels sq->auth_expired_work unconditionaly, while
+    auth_expired_work is only ever initialized if authentication is enabled
+    for a given controller.
+    
+    Fix this by calling most of what is nvmet_init_auth unconditionally
+    when initializing the SQ, and just do the setting of the result
+    field in the connect command handler.
+    
+    Fixes: db1312dd9548 ("nvmet: implement basic In-Band Authentication")
+    Signed-off-by: Christoph Hellwig <hch@lst.de>
+    Reviewed-by: Sagi Grimberg <sagi@grimberg.me>
+    Reviewed-by: Hannes Reinecke <hare@suse.de>
+
+diff --git a/drivers/nvme/target/fabrics-cmd.c b/drivers/nvme/target/fabrics-cmd.c
+index c1dfdfb92ebf..c7e903589d37 100644
+--- a/drivers/nvme/target/fabrics-cmd.c
++++ b/drivers/nvme/target/fabrics-cmd.c
+@@ -272,7 +272,8 @@ static void nvmet_execute_admin_connect(struct nvmet_req *req)
+ 	req->cqe->result.u16 = cpu_to_le16(ctrl->cntlid);
+ 
+ 	if (nvmet_has_auth(ctrl))
+-		nvmet_init_auth(ctrl, req);
++		req->cqe->result.u32 |=
++			cpu_to_le32((u32)NVME_CONNECT_AUTHREQ_ATR << 16);
+ out:
+ 	kfree(d);
+ complete:
+@@ -333,7 +334,8 @@ static void nvmet_execute_io_connect(struct nvmet_req *req)
+ 
+ 	pr_debug("adding queue %d to ctrl %d.\n", qid, ctrl->cntlid);
+ 	if (nvmet_has_auth(ctrl))
+-		nvmet_init_auth(ctrl, req);
++		req->cqe->result.u32 |=
++			cpu_to_le32((u32)NVME_CONNECT_AUTHREQ_ATR << 16);
+ 
+ out:
+ 	kfree(d);

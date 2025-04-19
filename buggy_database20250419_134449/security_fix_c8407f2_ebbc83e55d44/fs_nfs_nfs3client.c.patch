@@ -1,0 +1,55 @@
+commit c8407f2e560c53c4c73e77cb5604c8a408dbe7f7
+Author: Chuck Lever <chuck.lever@oracle.com>
+Date:   Wed Jun 7 10:00:09 2023 -0400
+
+    NFS: Add an "xprtsec=" NFS mount option
+    
+    After some discussion, we decided that controlling transport layer
+    security policy should be separate from the setting for the user
+    authentication flavor. To accomplish this, add a new NFS mount
+    option to select a transport layer security policy for RPC
+    operations associated with the mount point.
+    
+      xprtsec=none     - Transport layer security is forced off.
+    
+      xprtsec=tls      - Establish an encryption-only TLS session. If
+                         the initial handshake fails, the mount fails.
+                         If TLS is not available on a reconnect, drop
+                         the connection and try again.
+    
+      xprtsec=mtls     - Both sides authenticate and an encrypted
+                         session is created. If the initial handshake
+                         fails, the mount fails. If TLS is not available
+                         on a reconnect, drop the connection and try
+                         again.
+    
+    To support client peer authentication (mtls), the handshake daemon
+    will have configurable default authentication material (certificate
+    or pre-shared key). In the future, mount options can be added that
+    can provide this material on a per-mount basis.
+    
+    Updates to mount.nfs (to support xprtsec=auto) and nfs(5) will be
+    sent under separate cover.
+    
+    Signed-off-by: Chuck Lever <chuck.lever@oracle.com>
+    Signed-off-by: Trond Myklebust <trond.myklebust@hammerspace.com>
+
+diff --git a/fs/nfs/nfs3client.c b/fs/nfs/nfs3client.c
+index 8fa187a9c46d..0844f1651e0f 100644
+--- a/fs/nfs/nfs3client.c
++++ b/fs/nfs/nfs3client.c
+@@ -103,8 +103,12 @@ struct nfs_client *nfs3_set_ds_client(struct nfs_server *mds_srv,
+ 		return ERR_PTR(-EINVAL);
+ 	cl_init.hostname = buf;
+ 
+-	if (mds_clp->cl_nconnect > 1 && ds_proto == XPRT_TRANSPORT_TCP)
+-		cl_init.nconnect = mds_clp->cl_nconnect;
++	switch (ds_proto) {
++	case XPRT_TRANSPORT_TCP:
++	case XPRT_TRANSPORT_TCP_TLS:
++		if (mds_clp->cl_nconnect > 1)
++			cl_init.nconnect = mds_clp->cl_nconnect;
++	}
+ 
+ 	if (mds_srv->flags & NFS_MOUNT_NORESVPORT)
+ 		__set_bit(NFS_CS_NORESVPORT, &cl_init.init_flags);

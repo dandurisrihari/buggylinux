@@ -1,0 +1,69 @@
+diff --git a/fs/nfs/nfs3proc.c b/fs/nfs/nfs3proc.c
+index 1e750e4574a9..c55be7a7679e 100644
+--- a/fs/nfs/nfs3proc.c
++++ b/fs/nfs/nfs3proc.c
+@@ -699,7 +699,7 @@ nfs3_proc_statfs(struct nfs_server *server, struct nfs_fh *fhandle,
+ }
+ 
+ static int
+-nfs3_proc_fsinfo(struct nfs_server *server, struct nfs_fh *fhandle,
++do_proc_fsinfo(struct rpc_clnt *client, struct nfs_fh *fhandle,
+ 		 struct nfs_fsinfo *info)
+ {
+ 	struct rpc_message msg = {
+@@ -711,11 +711,27 @@ nfs3_proc_fsinfo(struct nfs_server *server, struct nfs_fh *fhandle,
+ 
+ 	dprintk("NFS call  fsinfo\n");
+ 	nfs_fattr_init(info->fattr);
+-	status = rpc_call_sync(server->nfs_client->cl_rpcclient, &msg, 0);
++	status = rpc_call_sync(client, &msg, 0);
+ 	dprintk("NFS reply fsinfo: %d\n", status);
+ 	return status;
+ }
+ 
++/*
++ * Bare-bones access to fsinfo: this is for nfs_get_root/nfs_get_sb via
++ * nfs_create_server
++ */
++static int
++nfs3_proc_fsinfo(struct nfs_server *server, struct nfs_fh *fhandle,
++		   struct nfs_fsinfo *info)
++{
++	int	status;
++
++	status = do_proc_fsinfo(server->client, fhandle, info);
++	if (status && server->nfs_client->cl_rpcclient != server->client)
++		status = do_proc_fsinfo(server->nfs_client->cl_rpcclient, fhandle, info);
++	return status;
++}
++
+ static int
+ nfs3_proc_pathconf(struct nfs_server *server, struct nfs_fh *fhandle,
+ 		   struct nfs_pathconf *info)
+diff --git a/fs/nfs/proc.c b/fs/nfs/proc.c
+index 4dbb84df1b68..193465210d7c 100644
+--- a/fs/nfs/proc.c
++++ b/fs/nfs/proc.c
+@@ -65,14 +65,20 @@ nfs_proc_get_root(struct nfs_server *server, struct nfs_fh *fhandle,
+ 
+ 	dprintk("%s: call getattr\n", __func__);
+ 	nfs_fattr_init(fattr);
+-	status = rpc_call_sync(server->nfs_client->cl_rpcclient, &msg, 0);
++	status = rpc_call_sync(server->client, &msg, 0);
++	/* Retry with default authentication if different */
++	if (status && server->nfs_client->cl_rpcclient != server->client)
++		status = rpc_call_sync(server->nfs_client->cl_rpcclient, &msg, 0);
+ 	dprintk("%s: reply getattr: %d\n", __func__, status);
+ 	if (status)
+ 		return status;
+ 	dprintk("%s: call statfs\n", __func__);
+ 	msg.rpc_proc = &nfs_procedures[NFSPROC_STATFS];
+ 	msg.rpc_resp = &fsinfo;
+-	status = rpc_call_sync(server->nfs_client->cl_rpcclient, &msg, 0);
++	status = rpc_call_sync(server->client, &msg, 0);
++	/* Retry with default authentication if different */
++	if (status && server->nfs_client->cl_rpcclient != server->client)
++		status = rpc_call_sync(server->nfs_client->cl_rpcclient, &msg, 0);
+ 	dprintk("%s: reply statfs: %d\n", __func__, status);
+ 	if (status)
+ 		return status;

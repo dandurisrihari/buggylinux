@@ -1,0 +1,46 @@
+commit bd03b0214ad426c078d46c2b54a3b14f81b97f6b
+Author: Pascal van Leeuwen <pvanleeuwen@rambus.com>
+Date:   Tue Sep 8 08:10:45 2020 +0200
+
+    crypto: inside-secure - Prevent missing of processing errors
+    
+    On systems with coherence issues, packet processed could succeed while
+    it should have failed, e.g. because of an authentication fail.
+    This is because the driver would read stale status information that had
+    all error bits initialised to zero = no error.
+    Since this is potential a security risk, we want to prevent it from being
+    a possibility at all. So initialize all error bits to error state, so
+    that reading stale status information will always result in errors.
+    
+    Signed-off-by: Pascal van Leeuwen <pvanleeuwen@rambus.com>
+    Acked-by: Antoine Tenart <antoine.tenart@bootlin.com>
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+diff --git a/drivers/crypto/inside-secure/safexcel_ring.c b/drivers/crypto/inside-secure/safexcel_ring.c
+index e454c3d44f07..90f15032c8df 100644
+--- a/drivers/crypto/inside-secure/safexcel_ring.c
++++ b/drivers/crypto/inside-secure/safexcel_ring.c
+@@ -236,8 +236,8 @@ struct safexcel_result_desc *safexcel_add_rdesc(struct safexcel_crypto_priv *pri
+ 
+ 	rdesc->particle_size = len;
+ 	rdesc->rsvd0 = 0;
+-	rdesc->descriptor_overflow = 0;
+-	rdesc->buffer_overflow = 0;
++	rdesc->descriptor_overflow = 1; /* assume error */
++	rdesc->buffer_overflow = 1;     /* assume error */
+ 	rdesc->last_seg = last;
+ 	rdesc->first_seg = first;
+ 	rdesc->result_size = EIP197_RD64_RESULT_SIZE;
+@@ -245,9 +245,10 @@ struct safexcel_result_desc *safexcel_add_rdesc(struct safexcel_crypto_priv *pri
+ 	rdesc->data_lo = lower_32_bits(data);
+ 	rdesc->data_hi = upper_32_bits(data);
+ 
+-	/* Clear length & error code in result token */
++	/* Clear length in result token */
+ 	rtoken->packet_length = 0;
+-	rtoken->error_code = 0;
++	/* Assume errors - HW will clear if not the case */
++	rtoken->error_code = 0x7fff;
+ 
+ 	return rdesc;
+ }

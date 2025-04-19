@@ -1,0 +1,104 @@
+diff --git a/drivers/crypto/ccp/dbc.c b/drivers/crypto/ccp/dbc.c
+index f65e93a81e53..c6f5fb3658ca 100644
+--- a/drivers/crypto/ccp/dbc.c
++++ b/drivers/crypto/ccp/dbc.c
+@@ -117,6 +117,24 @@ static long dbc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+ 			goto unlock;
+ 		}
+ 		break;
++	case DBCIOCUID:
++		dbc_dev->mbox->req.header.payload_size = sizeof(dbc_dev->mbox->dbc_set_uid);
++		if (copy_from_user(&dbc_dev->mbox->dbc_set_uid.user, argp,
++				   sizeof(struct dbc_user_setuid))) {
++			ret = -EFAULT;
++			goto unlock;
++		}
++
++		ret = send_dbc_cmd(dbc_dev, PSP_DYNAMIC_BOOST_SET_UID);
++		if (ret)
++			goto unlock;
++
++		if (copy_to_user(argp, &dbc_dev->mbox->dbc_set_uid.user,
++				 sizeof(struct dbc_user_setuid))) {
++			ret = -EFAULT;
++			goto unlock;
++		}
++		break;
+ 	default:
+ 		ret = -EINVAL;
+ 
+diff --git a/drivers/crypto/ccp/dbc.h b/drivers/crypto/ccp/dbc.h
+index 1c3a0a078d15..156435100076 100644
+--- a/drivers/crypto/ccp/dbc.h
++++ b/drivers/crypto/ccp/dbc.h
+@@ -33,9 +33,15 @@ struct dbc_nonce {
+ 	struct dbc_user_nonce		user;
+ } __packed;
+ 
++struct dbc_set_uid {
++	struct psp_req_buffer_hdr	header;
++	struct dbc_user_setuid		user;
++} __packed;
++
+ union dbc_buffer {
+ 	struct psp_request		req;
+ 	struct dbc_nonce		dbc_nonce;
++	struct dbc_set_uid		dbc_set_uid;
+ };
+ 
+ void dbc_dev_destroy(struct psp_device *psp);
+diff --git a/include/linux/psp-platform-access.h b/include/linux/psp-platform-access.h
+index 53b4a1df5180..18b9e0f0cb03 100644
+--- a/include/linux/psp-platform-access.h
++++ b/include/linux/psp-platform-access.h
+@@ -9,6 +9,7 @@ enum psp_platform_access_msg {
+ 	PSP_CMD_NONE = 0x0,
+ 	PSP_I2C_REQ_BUS_CMD = 0x64,
+ 	PSP_DYNAMIC_BOOST_GET_NONCE,
++	PSP_DYNAMIC_BOOST_SET_UID,
+ };
+ 
+ struct psp_req_buffer_hdr {
+diff --git a/include/uapi/linux/psp-dbc.h b/include/uapi/linux/psp-dbc.h
+index d032f78934e2..7443c78ede19 100644
+--- a/include/uapi/linux/psp-dbc.h
++++ b/include/uapi/linux/psp-dbc.h
+@@ -18,6 +18,7 @@
+ 
+ #define DBC_NONCE_SIZE		16
+ #define DBC_SIG_SIZE		32
++#define DBC_UID_SIZE		16
+ 
+ /**
+  * struct dbc_user_nonce - Nonce exchange structure (input/output).
+@@ -34,6 +35,16 @@ struct dbc_user_nonce {
+ 	__u8	signature[DBC_SIG_SIZE];
+ } __packed;
+ 
++/**
++ * struct dbc_user_setuid - UID exchange structure (input).
++ * @uid:       16 byte value representing software identity
++ * @signature: 32 byte signature created by software using a previous nonce
++ */
++struct dbc_user_setuid {
++	__u8	uid[DBC_UID_SIZE];
++	__u8	signature[DBC_SIG_SIZE];
++} __packed;
++
+ /**
+  * Dynamic Boost Control (DBC) IOC
+  *
+@@ -64,4 +75,13 @@ struct dbc_user_nonce {
+  */
+ #define DBCIOCNONCE	_IOWR(DBC_IOC_TYPE, 0x1, struct dbc_user_nonce)
+ 
++/**
++ * DBCIOCUID - Set the user ID (UID) of a calling process.
++ *             The user ID is 8 bytes long. It must be programmed using a
++ *             32 byte signature built using the nonce fetched from
++ *             DBCIOCNONCE.
++ *             The UID can only be set once until the system is rebooted.
++ */
++#define DBCIOCUID	_IOW(DBC_IOC_TYPE, 0x2, struct dbc_user_setuid)
++
+ #endif /* __PSP_DBC_USER_H__ */

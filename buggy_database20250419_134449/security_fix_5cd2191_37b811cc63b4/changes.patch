@@ -1,0 +1,149 @@
+diff --git a/arch/x86/include/asm/kvm_emulate.h b/arch/x86/include/asm/kvm_emulate.h
+index 679245c9a55f..7fda16f89cc8 100644
+--- a/arch/x86/include/asm/kvm_emulate.h
++++ b/arch/x86/include/asm/kvm_emulate.h
+@@ -193,6 +193,7 @@ struct x86_emulate_ctxt {
+ 	/* interruptibility state, as a result of execution of STI or MOV SS */
+ 	int interruptibility;
+ 
++	bool restart; /* restart string instruction after writeback */
+ 	/* decode cache */
+ 	struct decode_cache decode;
+ };
+diff --git a/arch/x86/kvm/emulate.c b/arch/x86/kvm/emulate.c
+index 0579d9dd9aac..6de6ad1610d8 100644
+--- a/arch/x86/kvm/emulate.c
++++ b/arch/x86/kvm/emulate.c
+@@ -927,8 +927,11 @@ x86_decode_insn(struct x86_emulate_ctxt *ctxt, struct x86_emulate_ops *ops)
+ 	int mode = ctxt->mode;
+ 	int def_op_bytes, def_ad_bytes, group;
+ 
+-	/* Shadow copy of register state. Committed on successful emulation. */
+ 
++	/* we cannot decode insn before we complete previous rep insn */
++	WARN_ON(ctxt->restart);
++
++	/* Shadow copy of register state. Committed on successful emulation. */
+ 	memset(c, 0, sizeof(struct decode_cache));
+ 	c->eip = ctxt->eip;
+ 	ctxt->cs_base = seg_base(ctxt, VCPU_SREG_CS);
+@@ -2426,6 +2429,7 @@ x86_emulate_insn(struct x86_emulate_ctxt *ctxt, struct x86_emulate_ops *ops)
+ 	u64 msr_data;
+ 	struct decode_cache *c = &ctxt->decode;
+ 	int rc = X86EMUL_CONTINUE;
++	int saved_dst_type = c->dst.type;
+ 
+ 	ctxt->interruptibility = 0;
+ 
+@@ -2454,8 +2458,11 @@ x86_emulate_insn(struct x86_emulate_ctxt *ctxt, struct x86_emulate_ops *ops)
+ 	}
+ 
+ 	if (c->rep_prefix && (c->d & String)) {
++		ctxt->restart = true;
+ 		/* All REP prefixes have the same first termination condition */
+ 		if (address_mask(c, c->regs[VCPU_REGS_RCX]) == 0) {
++		string_done:
++			ctxt->restart = false;
+ 			kvm_rip_write(ctxt->vcpu, c->eip);
+ 			goto done;
+ 		}
+@@ -2467,17 +2474,13 @@ x86_emulate_insn(struct x86_emulate_ctxt *ctxt, struct x86_emulate_ops *ops)
+ 		 * 	- if REPNE/REPNZ and ZF = 1 then done
+ 		 */
+ 		if ((c->b == 0xa6) || (c->b == 0xa7) ||
+-				(c->b == 0xae) || (c->b == 0xaf)) {
++		    (c->b == 0xae) || (c->b == 0xaf)) {
+ 			if ((c->rep_prefix == REPE_PREFIX) &&
+-				((ctxt->eflags & EFLG_ZF) == 0)) {
+-					kvm_rip_write(ctxt->vcpu, c->eip);
+-					goto done;
+-			}
++			    ((ctxt->eflags & EFLG_ZF) == 0))
++				goto string_done;
+ 			if ((c->rep_prefix == REPNE_PREFIX) &&
+-				((ctxt->eflags & EFLG_ZF) == EFLG_ZF)) {
+-				kvm_rip_write(ctxt->vcpu, c->eip);
+-				goto done;
+-			}
++			    ((ctxt->eflags & EFLG_ZF) == EFLG_ZF))
++				goto string_done;
+ 		}
+ 		c->eip = ctxt->eip;
+ 	}
+@@ -2911,6 +2914,12 @@ x86_emulate_insn(struct x86_emulate_ctxt *ctxt, struct x86_emulate_ops *ops)
+ 	if (rc != X86EMUL_CONTINUE)
+ 		goto done;
+ 
++	/*
++	 * restore dst type in case the decoding will be reused
++	 * (happens for string instruction )
++	 */
++	c->dst.type = saved_dst_type;
++
+ 	if ((c->d & SrcMask) == SrcSI)
+ 		string_addr_inc(ctxt, seg_override_base(ctxt, c), VCPU_REGS_RSI,
+ 				&c->src);
+@@ -2918,8 +2927,11 @@ x86_emulate_insn(struct x86_emulate_ctxt *ctxt, struct x86_emulate_ops *ops)
+ 	if ((c->d & DstMask) == DstDI)
+ 		string_addr_inc(ctxt, es_base(ctxt), VCPU_REGS_RDI, &c->dst);
+ 
+-	if (c->rep_prefix && (c->d & String))
++	if (c->rep_prefix && (c->d & String)) {
+ 		register_address_increment(c, &c->regs[VCPU_REGS_RCX], -1);
++		if (!(c->regs[VCPU_REGS_RCX] & 0x3ff))
++			ctxt->restart = false;
++	}
+ 
+ 	/* Commit shadow register state. */
+ 	memcpy(ctxt->vcpu->arch.regs, c->regs, sizeof c->regs);
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 658e8e8155cb..c88cb8145283 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -3755,6 +3755,7 @@ int emulate_instruction(struct kvm_vcpu *vcpu,
+ 		return EMULATE_DONE;
+ 	}
+ 
++restart:
+ 	r = x86_emulate_insn(&vcpu->arch.emulate_ctxt, &emulate_ops);
+ 	shadow_mask = vcpu->arch.emulate_ctxt.interruptibility;
+ 
+@@ -3777,7 +3778,7 @@ int emulate_instruction(struct kvm_vcpu *vcpu,
+ 
+ 	if (r) {
+ 		if (kvm_mmu_unprotect_page_virt(vcpu, cr2))
+-			return EMULATE_DONE;
++			goto done;
+ 		if (!vcpu->mmio_needed) {
+ 			kvm_report_emulation_failure(vcpu, "mmio");
+ 			return EMULATE_FAIL;
+@@ -3792,6 +3793,13 @@ int emulate_instruction(struct kvm_vcpu *vcpu,
+ 		return EMULATE_DO_MMIO;
+ 	}
+ 
++done:
++	if (vcpu->arch.exception.pending)
++		vcpu->arch.emulate_ctxt.restart = false;
++
++	if (vcpu->arch.emulate_ctxt.restart)
++		goto restart;
++
+ 	return EMULATE_DONE;
+ }
+ EXPORT_SYMBOL_GPL(emulate_instruction);
+@@ -4560,6 +4568,15 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu, struct kvm_run *kvm_run)
+ 			goto out;
+ 		}
+ 	}
++	if (vcpu->arch.emulate_ctxt.restart) {
++		vcpu->srcu_idx = srcu_read_lock(&vcpu->kvm->srcu);
++		r = emulate_instruction(vcpu, 0, 0, EMULTYPE_NO_DECODE);
++		srcu_read_unlock(&vcpu->kvm->srcu, vcpu->srcu_idx);
++		if (r == EMULATE_DO_MMIO) {
++			r = 0;
++			goto out;
++		}
++	}
+ 	if (kvm_run->exit_reason == KVM_EXIT_HYPERCALL)
+ 		kvm_register_write(vcpu, VCPU_REGS_RAX,
+ 				     kvm_run->hypercall.ret);

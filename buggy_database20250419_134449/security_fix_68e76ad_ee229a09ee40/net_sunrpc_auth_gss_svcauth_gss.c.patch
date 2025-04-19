@@ -1,0 +1,92 @@
+commit 68e76ad0baf8f5d5060377c2423ee6eed5c63057
+Author: Olga Kornievskaia <aglo@citi.umich.edu>
+Date:   Tue Dec 23 16:17:15 2008 -0500
+
+    nfsd: pass client principal name in rsc downcall
+    
+    Two principals are involved in krb5 authentication: the target, who we
+    authenticate *to* (normally the name of the server, like
+    nfs/server.citi.umich.edu@CITI.UMICH.EDU), and the source, we we
+    authenticate *as* (normally a user, like bfields@UMICH.EDU)
+    
+    In the case of NFSv4 callbacks, the target of the callback should be the
+    source of the client's setclientid call, and the source should be the
+    nfs server's own principal.
+    
+    Therefore we allow svcgssd to pass down the name of the principal that
+    just authenticated, so that on setclientid we can store that principal
+    name with the new client, to be used later on callbacks.
+    
+    Signed-off-by: Olga Kornievskaia <aglo@citi.umich.edu>
+    Signed-off-by: J. Bruce Fields <bfields@citi.umich.edu>
+    Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+
+diff --git a/net/sunrpc/auth_gss/svcauth_gss.c b/net/sunrpc/auth_gss/svcauth_gss.c
+index 12803da95dc4..e9baa6ebb1dd 100644
+--- a/net/sunrpc/auth_gss/svcauth_gss.c
++++ b/net/sunrpc/auth_gss/svcauth_gss.c
+@@ -332,6 +332,7 @@ struct rsc {
+ 	struct svc_cred		cred;
+ 	struct gss_svc_seq_data	seqdata;
+ 	struct gss_ctx		*mechctx;
++	char			*client_name;
+ };
+ 
+ static struct cache_head *rsc_table[RSC_HASHMAX];
+@@ -346,6 +347,7 @@ static void rsc_free(struct rsc *rsci)
+ 		gss_delete_sec_context(&rsci->mechctx);
+ 	if (rsci->cred.cr_group_info)
+ 		put_group_info(rsci->cred.cr_group_info);
++	kfree(rsci->client_name);
+ }
+ 
+ static void rsc_put(struct kref *ref)
+@@ -383,6 +385,7 @@ rsc_init(struct cache_head *cnew, struct cache_head *ctmp)
+ 	tmp->handle.data = NULL;
+ 	new->mechctx = NULL;
+ 	new->cred.cr_group_info = NULL;
++	new->client_name = NULL;
+ }
+ 
+ static void
+@@ -397,6 +400,8 @@ update_rsc(struct cache_head *cnew, struct cache_head *ctmp)
+ 	spin_lock_init(&new->seqdata.sd_lock);
+ 	new->cred = tmp->cred;
+ 	tmp->cred.cr_group_info = NULL;
++	new->client_name = tmp->client_name;
++	tmp->client_name = NULL;
+ }
+ 
+ static struct cache_head *
+@@ -486,6 +491,15 @@ static int rsc_parse(struct cache_detail *cd,
+ 		status = gss_import_sec_context(buf, len, gm, &rsci.mechctx);
+ 		if (status)
+ 			goto out;
++
++		/* get client name */
++		len = qword_get(&mesg, buf, mlen);
++		if (len > 0) {
++			rsci.client_name = kstrdup(buf, GFP_KERNEL);
++			if (!rsci.client_name)
++				goto out;
++		}
++
+ 	}
+ 	rsci.h.expiry_time = expiry;
+ 	rscp = rsc_update(&rsci, rscp);
+@@ -913,6 +927,15 @@ struct gss_svc_data {
+ 	struct rsc			*rsci;
+ };
+ 
++char *svc_gss_principal(struct svc_rqst *rqstp)
++{
++	struct gss_svc_data *gd = (struct gss_svc_data *)rqstp->rq_auth_data;
++
++	if (gd && gd->rsci)
++		return gd->rsci->client_name;
++	return NULL;
++}
++
+ static int
+ svcauth_gss_set_client(struct svc_rqst *rqstp)
+ {

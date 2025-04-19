@@ -1,0 +1,39 @@
+commit ced9e191501e52b95e1b57b8e0db00943869eed0
+Author: Gustavo A. R. Silva <gustavo@embeddedor.com>
+Date:   Fri Jun 29 13:28:07 2018 -0500
+
+    atm: zatm: Fix potential Spectre v1
+    
+    pool can be indirectly controlled by user-space, hence leading to
+    a potential exploitation of the Spectre variant 1 vulnerability.
+    
+    This issue was detected with the help of Smatch:
+    
+    drivers/atm/zatm.c:1491 zatm_ioctl() warn: potential spectre issue
+    'zatm_dev->pool_info' (local cap)
+    
+    Fix this by sanitizing pool before using it to index
+    zatm_dev->pool_info
+    
+    Notice that given that speculation windows are large, the policy is
+    to kill the speculation on the first load and not worry if it can be
+    completed with a dependent load/store [1].
+    
+    [1] https://marc.info/?l=linux-kernel&m=152449131114778&w=2
+    
+    Signed-off-by: Gustavo A. R. Silva <gustavo@embeddedor.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/atm/zatm.c b/drivers/atm/zatm.c
+index a8d2eb0ceb8d..2c288d1f42bb 100644
+--- a/drivers/atm/zatm.c
++++ b/drivers/atm/zatm.c
+@@ -1483,6 +1483,8 @@ static int zatm_ioctl(struct atm_dev *dev,unsigned int cmd,void __user *arg)
+ 					return -EFAULT;
+ 				if (pool < 0 || pool > ZATM_LAST_POOL)
+ 					return -EINVAL;
++				pool = array_index_nospec(pool,
++							  ZATM_LAST_POOL + 1);
+ 				if (copy_from_user(&info,
+ 				    &((struct zatm_pool_req __user *) arg)->info,
+ 				    sizeof(info))) return -EFAULT;

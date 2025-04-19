@@ -1,0 +1,49 @@
+commit b2604315e87a3fa3c35561e1c37836f915c4e3d8
+Author: David Howells <dhowells@redhat.com>
+Date:   Mon Dec 16 20:41:10 2024 +0000
+
+    afs: Make afs_init_request() get a key if not given a file
+    
+    In a future patch, AFS directory caching will go through netfslib and this
+    will involve, at times, running on behalf of ->lookup(), which doesn't
+    provide us with a file from which we can get an authentication key.
+    
+    If a file isn't provided, make afs_init_request() get a key from the
+    process's keyrings instead when setting up a read.
+    
+    Signed-off-by: David Howells <dhowells@redhat.com>
+    Link: https://lore.kernel.org/r/20241216204124.3752367-21-dhowells@redhat.com
+    cc: Marc Dionne <marc.dionne@auristor.com>
+    cc: linux-afs@lists.infradead.org
+    Signed-off-by: Christian Brauner <brauner@kernel.org>
+
+diff --git a/fs/afs/file.c b/fs/afs/file.c
+index f717168da4ab..a9d98d18407c 100644
+--- a/fs/afs/file.c
++++ b/fs/afs/file.c
+@@ -372,10 +372,26 @@ static int afs_symlink_read_folio(struct file *file, struct folio *folio)
+ 
+ static int afs_init_request(struct netfs_io_request *rreq, struct file *file)
+ {
++	struct afs_vnode *vnode = AFS_FS_I(rreq->inode);
++
+ 	if (file)
+ 		rreq->netfs_priv = key_get(afs_file_key(file));
+ 	rreq->rsize = 256 * 1024;
+ 	rreq->wsize = 256 * 1024 * 1024;
++
++	switch (rreq->origin) {
++	case NETFS_READ_SINGLE:
++		if (!file) {
++			struct key *key = afs_request_key(vnode->volume->cell);
++
++			if (IS_ERR(key))
++				return PTR_ERR(key);
++			rreq->netfs_priv = key;
++		}
++		break;
++	default:
++		break;
++	}
+ 	return 0;
+ }

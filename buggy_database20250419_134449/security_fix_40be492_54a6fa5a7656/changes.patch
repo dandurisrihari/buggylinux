@@ -1,0 +1,254 @@
+diff --git a/fs/compat_ioctl.c b/fs/compat_ioctl.c
+index 97dba0d92348..d63d430d3b26 100644
+--- a/fs/compat_ioctl.c
++++ b/fs/compat_ioctl.c
+@@ -2399,6 +2399,7 @@ COMPATIBLE_IOCTL(HCIGETDEVLIST)
+ COMPATIBLE_IOCTL(HCIGETDEVINFO)
+ COMPATIBLE_IOCTL(HCIGETCONNLIST)
+ COMPATIBLE_IOCTL(HCIGETCONNINFO)
++COMPATIBLE_IOCTL(HCIGETAUTHINFO)
+ COMPATIBLE_IOCTL(HCISETRAW)
+ COMPATIBLE_IOCTL(HCISETSCAN)
+ COMPATIBLE_IOCTL(HCISETAUTH)
+diff --git a/include/net/bluetooth/hci.h b/include/net/bluetooth/hci.h
+index 55576e848827..3cc294919312 100644
+--- a/include/net/bluetooth/hci.h
++++ b/include/net/bluetooth/hci.h
+@@ -72,8 +72,6 @@ enum {
+ 	HCI_INQUIRY,
+ 
+ 	HCI_RAW,
+-
+-	HCI_SECMGR
+ };
+ 
+ /* HCI ioctl defines */
+@@ -86,6 +84,7 @@ enum {
+ #define HCIGETDEVINFO	_IOR('H', 211, int)
+ #define HCIGETCONNLIST	_IOR('H', 212, int)
+ #define HCIGETCONNINFO	_IOR('H', 213, int)
++#define HCIGETAUTHINFO	_IOR('H', 215, int)
+ 
+ #define HCISETRAW	_IOW('H', 220, int)
+ #define HCISETSCAN	_IOW('H', 221, int)
+@@ -97,8 +96,6 @@ enum {
+ #define HCISETACLMTU	_IOW('H', 227, int)
+ #define HCISETSCOMTU	_IOW('H', 228, int)
+ 
+-#define HCISETSECMGR	_IOW('H', 230, int)
+-
+ #define HCIINQUIRY	_IOR('H', 240, int)
+ 
+ /* HCI timeouts */
+@@ -203,6 +200,14 @@ enum {
+ #define HCI_LM_RELIABLE	0x0010
+ #define HCI_LM_SECURE	0x0020
+ 
++/* Authentication types */
++#define HCI_AT_NO_BONDING		0x00
++#define HCI_AT_NO_BONDING_MITM		0x01
++#define HCI_AT_DEDICATED_BONDING	0x02
++#define HCI_AT_DEDICATED_BONDING_MITM	0x03
++#define HCI_AT_GENERAL_BONDING		0x04
++#define HCI_AT_GENERAL_BONDING_MITM	0x05
++
+ /* -----  HCI Commands ---- */
+ #define HCI_OP_INQUIRY			0x0401
+ struct hci_cp_inquiry {
+@@ -1001,6 +1006,11 @@ struct hci_conn_info_req {
+ 	struct   hci_conn_info conn_info[0];
+ };
+ 
++struct hci_auth_info_req {
++	bdaddr_t bdaddr;
++	__u8     type;
++};
++
+ struct hci_inquiry_req {
+ 	__u16 dev_id;
+ 	__u16 flags;
+diff --git a/include/net/bluetooth/hci_core.h b/include/net/bluetooth/hci_core.h
+index 28fbd0caa534..cbf751094688 100644
+--- a/include/net/bluetooth/hci_core.h
++++ b/include/net/bluetooth/hci_core.h
+@@ -168,6 +168,7 @@ struct hci_conn {
+ 	__u16            pkt_type;
+ 	__u16            link_policy;
+ 	__u32		 link_mode;
++	__u8             auth_type;
+ 	__u8             power_save;
+ 	unsigned long	 pend;
+ 
+@@ -422,6 +423,7 @@ int hci_get_dev_list(void __user *arg);
+ int hci_get_dev_info(void __user *arg);
+ int hci_get_conn_list(void __user *arg);
+ int hci_get_conn_info(struct hci_dev *hdev, void __user *arg);
++int hci_get_auth_info(struct hci_dev *hdev, void __user *arg);
+ int hci_inquiry(void __user *arg);
+ 
+ void hci_event_packet(struct hci_dev *hdev, struct sk_buff *skb);
+diff --git a/net/bluetooth/hci_conn.c b/net/bluetooth/hci_conn.c
+index 6f22533e7656..0d4b8aeb8e09 100644
+--- a/net/bluetooth/hci_conn.c
++++ b/net/bluetooth/hci_conn.c
+@@ -379,13 +379,21 @@ int hci_conn_auth(struct hci_conn *conn)
+ {
+ 	BT_DBG("conn %p", conn);
+ 
++	if (conn->ssp_mode > 0 && conn->hdev->ssp_mode > 0) {
++		if (!(conn->auth_type & 0x01)) {
++			conn->auth_type = HCI_AT_GENERAL_BONDING_MITM;
++			conn->link_mode &= ~HCI_LM_AUTH;
++		}
++	}
++
+ 	if (conn->link_mode & HCI_LM_AUTH)
+ 		return 1;
+ 
+ 	if (!test_and_set_bit(HCI_CONN_AUTH_PEND, &conn->pend)) {
+ 		struct hci_cp_auth_requested cp;
+ 		cp.handle = cpu_to_le16(conn->handle);
+-		hci_send_cmd(conn->hdev, HCI_OP_AUTH_REQUESTED, sizeof(cp), &cp);
++		hci_send_cmd(conn->hdev, HCI_OP_AUTH_REQUESTED,
++							sizeof(cp), &cp);
+ 	}
+ 	return 0;
+ }
+@@ -397,7 +405,7 @@ int hci_conn_encrypt(struct hci_conn *conn)
+ 	BT_DBG("conn %p", conn);
+ 
+ 	if (conn->link_mode & HCI_LM_ENCRYPT)
+-		return 1;
++		return hci_conn_auth(conn);
+ 
+ 	if (test_and_set_bit(HCI_CONN_ENCRYPT_PEND, &conn->pend))
+ 		return 0;
+@@ -406,7 +414,8 @@ int hci_conn_encrypt(struct hci_conn *conn)
+ 		struct hci_cp_set_conn_encrypt cp;
+ 		cp.handle  = cpu_to_le16(conn->handle);
+ 		cp.encrypt = 1;
+-		hci_send_cmd(conn->hdev, HCI_OP_SET_CONN_ENCRYPT, sizeof(cp), &cp);
++		hci_send_cmd(conn->hdev, HCI_OP_SET_CONN_ENCRYPT,
++							sizeof(cp), &cp);
+ 	}
+ 	return 0;
+ }
+@@ -420,7 +429,8 @@ int hci_conn_change_link_key(struct hci_conn *conn)
+ 	if (!test_and_set_bit(HCI_CONN_AUTH_PEND, &conn->pend)) {
+ 		struct hci_cp_change_conn_link_key cp;
+ 		cp.handle = cpu_to_le16(conn->handle);
+-		hci_send_cmd(conn->hdev, HCI_OP_CHANGE_CONN_LINK_KEY, sizeof(cp), &cp);
++		hci_send_cmd(conn->hdev, HCI_OP_CHANGE_CONN_LINK_KEY,
++							sizeof(cp), &cp);
+ 	}
+ 	return 0;
+ }
+@@ -624,3 +634,23 @@ int hci_get_conn_info(struct hci_dev *hdev, void __user *arg)
+ 
+ 	return copy_to_user(ptr, &ci, sizeof(ci)) ? -EFAULT : 0;
+ }
++
++int hci_get_auth_info(struct hci_dev *hdev, void __user *arg)
++{
++	struct hci_auth_info_req req;
++	struct hci_conn *conn;
++
++	if (copy_from_user(&req, arg, sizeof(req)))
++		return -EFAULT;
++
++	hci_dev_lock_bh(hdev);
++	conn = hci_conn_hash_lookup_ba(hdev, ACL_LINK, &req.bdaddr);
++	if (conn)
++		req.type = conn->auth_type;
++	hci_dev_unlock_bh(hdev);
++
++	if (!conn)
++		return -ENOENT;
++
++	return copy_to_user(arg, &req, sizeof(req)) ? -EFAULT : 0;
++}
+diff --git a/net/bluetooth/hci_sock.c b/net/bluetooth/hci_sock.c
+index 747fabd735d2..d62579b67959 100644
+--- a/net/bluetooth/hci_sock.c
++++ b/net/bluetooth/hci_sock.c
+@@ -193,19 +193,11 @@ static inline int hci_sock_bound_ioctl(struct sock *sk, unsigned int cmd, unsign
+ 
+ 		return 0;
+ 
+-	case HCISETSECMGR:
+-		if (!capable(CAP_NET_ADMIN))
+-			return -EACCES;
+-
+-		if (arg)
+-			set_bit(HCI_SECMGR, &hdev->flags);
+-		else
+-			clear_bit(HCI_SECMGR, &hdev->flags);
+-
+-		return 0;
+-
+ 	case HCIGETCONNINFO:
+-		return hci_get_conn_info(hdev, (void __user *)arg);
++		return hci_get_conn_info(hdev, (void __user *) arg);
++
++	case HCIGETAUTHINFO:
++		return hci_get_auth_info(hdev, (void __user *) arg);
+ 
+ 	default:
+ 		if (hdev->ioctl)
+@@ -217,7 +209,7 @@ static inline int hci_sock_bound_ioctl(struct sock *sk, unsigned int cmd, unsign
+ static int hci_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
+ {
+ 	struct sock *sk = sock->sk;
+-	void __user *argp = (void __user *)arg;
++	void __user *argp = (void __user *) arg;
+ 	int err;
+ 
+ 	BT_DBG("cmd %x arg %lx", cmd, arg);
+diff --git a/net/bluetooth/l2cap.c b/net/bluetooth/l2cap.c
+index 252264062f59..30ad59b717d5 100644
+--- a/net/bluetooth/l2cap.c
++++ b/net/bluetooth/l2cap.c
+@@ -2150,7 +2150,7 @@ static int l2cap_disconn_ind(struct hci_conn *hcon, u8 reason)
+ static int l2cap_auth_cfm(struct hci_conn *hcon, u8 status)
+ {
+ 	struct l2cap_chan_list *l;
+-	struct l2cap_conn *conn = conn = hcon->l2cap_data;
++	struct l2cap_conn *conn = hcon->l2cap_data;
+ 	struct l2cap_conn_rsp rsp;
+ 	struct sock *sk;
+ 	int result;
+@@ -2165,11 +2165,17 @@ static int l2cap_auth_cfm(struct hci_conn *hcon, u8 status)
+ 	read_lock(&l->lock);
+ 
+ 	for (sk = l->head; sk; sk = l2cap_pi(sk)->next_c) {
++		struct l2cap_pinfo *pi = l2cap_pi(sk);
++
+ 		bh_lock_sock(sk);
+ 
+-		if (sk->sk_state != BT_CONNECT2 ||
+-				(l2cap_pi(sk)->link_mode & L2CAP_LM_ENCRYPT) ||
+-				(l2cap_pi(sk)->link_mode & L2CAP_LM_SECURE)) {
++		if (sk->sk_state != BT_CONNECT2) {
++			bh_unlock_sock(sk);
++			continue;
++		}
++
++		if ((pi->link_mode & (L2CAP_LM_ENCRYPT | L2CAP_LM_SECURE)) &&
++					!(hcon->link_mode & HCI_LM_ENCRYPT)) {
+ 			bh_unlock_sock(sk);
+ 			continue;
+ 		}
+diff --git a/net/bluetooth/rfcomm/core.c b/net/bluetooth/rfcomm/core.c
+index e7a6a03cea37..e56bcfc35a49 100644
+--- a/net/bluetooth/rfcomm/core.c
++++ b/net/bluetooth/rfcomm/core.c
+@@ -1969,7 +1969,8 @@ static void rfcomm_auth_cfm(struct hci_conn *conn, u8 status)
+ 	list_for_each_safe(p, n, &s->dlcs) {
+ 		d = list_entry(p, struct rfcomm_dlc, list);
+ 
+-		if (d->link_mode & (RFCOMM_LM_ENCRYPT | RFCOMM_LM_SECURE))
++		if ((d->link_mode & (RFCOMM_LM_ENCRYPT | RFCOMM_LM_SECURE)) &&
++				!(conn->link_mode & HCI_LM_ENCRYPT) && !status)
+ 			continue;
+ 
+ 		if (!test_and_clear_bit(RFCOMM_AUTH_PENDING, &d->flags))

@@ -1,0 +1,90 @@
+commit a509a7cd79747074a2c018a45bbbc52d1f4aed44
+Author: Patrick Bellasi <patrick.bellasi@arm.com>
+Date:   Fri Jun 21 09:42:07 2019 +0100
+
+    sched/uclamp: Extend sched_setattr() to support utilization clamping
+    
+    The SCHED_DEADLINE scheduling class provides an advanced and formal
+    model to define tasks requirements that can translate into proper
+    decisions for both task placements and frequencies selections. Other
+    classes have a more simplified model based on the POSIX concept of
+    priorities.
+    
+    Such a simple priority based model however does not allow to exploit
+    most advanced features of the Linux scheduler like, for example, driving
+    frequencies selection via the schedutil cpufreq governor. However, also
+    for non SCHED_DEADLINE tasks, it's still interesting to define tasks
+    properties to support scheduler decisions.
+    
+    Utilization clamping exposes to user-space a new set of per-task
+    attributes the scheduler can use as hints about the expected/required
+    utilization for a task. This allows to implement a "proactive" per-task
+    frequency control policy, a more advanced policy than the current one
+    based just on "passive" measured task utilization. For example, it's
+    possible to boost interactive tasks (e.g. to get better performance) or
+    cap background tasks (e.g. to be more energy/thermal efficient).
+    
+    Introduce a new API to set utilization clamping values for a specified
+    task by extending sched_setattr(), a syscall which already allows to
+    define task specific properties for different scheduling classes. A new
+    pair of attributes allows to specify a minimum and maximum utilization
+    the scheduler can consider for a task.
+    
+    Do that by validating the required clamp values before and then applying
+    the required changes using _the_ same pattern already in use for
+    __setscheduler(). This ensures that the task is re-enqueued with the new
+    clamp values.
+    
+    Signed-off-by: Patrick Bellasi <patrick.bellasi@arm.com>
+    Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+    Cc: Alessio Balsini <balsini@android.com>
+    Cc: Dietmar Eggemann <dietmar.eggemann@arm.com>
+    Cc: Joel Fernandes <joelaf@google.com>
+    Cc: Juri Lelli <juri.lelli@redhat.com>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Cc: Morten Rasmussen <morten.rasmussen@arm.com>
+    Cc: Paul Turner <pjt@google.com>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Quentin Perret <quentin.perret@arm.com>
+    Cc: Rafael J . Wysocki <rafael.j.wysocki@intel.com>
+    Cc: Steve Muckle <smuckle@google.com>
+    Cc: Suren Baghdasaryan <surenb@google.com>
+    Cc: Tejun Heo <tj@kernel.org>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Todd Kjos <tkjos@google.com>
+    Cc: Vincent Guittot <vincent.guittot@linaro.org>
+    Cc: Viresh Kumar <viresh.kumar@linaro.org>
+    Link: https://lkml.kernel.org/r/20190621084217.8167-7-patrick.bellasi@arm.com
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index 5485f411e8e1..1113dd4706ae 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -587,6 +587,7 @@ struct sched_dl_entity {
+  * @value:		clamp value "assigned" to a se
+  * @bucket_id:		bucket index corresponding to the "assigned" value
+  * @active:		the se is currently refcounted in a rq's bucket
++ * @user_defined:	the requested clamp value comes from user-space
+  *
+  * The bucket_id is the index of the clamp bucket matching the clamp value
+  * which is pre-computed and stored to avoid expensive integer divisions from
+@@ -596,11 +597,19 @@ struct sched_dl_entity {
+  * which can be different from the clamp value "requested" from user-space.
+  * This allows to know a task is refcounted in the rq's bucket corresponding
+  * to the "effective" bucket_id.
++ *
++ * The user_defined bit is set whenever a task has got a task-specific clamp
++ * value requested from userspace, i.e. the system defaults apply to this task
++ * just as a restriction. This allows to relax default clamps when a less
++ * restrictive task-specific value has been requested, thus allowing to
++ * implement a "nice" semantic. For example, a task running with a 20%
++ * default boost can still drop its own boosting to 0%.
+  */
+ struct uclamp_se {
+ 	unsigned int value		: bits_per(SCHED_CAPACITY_SCALE);
+ 	unsigned int bucket_id		: bits_per(UCLAMP_BUCKETS);
+ 	unsigned int active		: 1;
++	unsigned int user_defined	: 1;
+ };
+ #endif /* CONFIG_UCLAMP_TASK */

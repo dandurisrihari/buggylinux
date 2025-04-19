@@ -1,0 +1,64 @@
+commit c9a211951c7c79cfb5de888d7d9550872868b086
+Author: Howard McLauchlan <hmclauchlan@fb.com>
+Date:   Wed Mar 21 18:59:08 2018 -0700
+
+    bpf: whitelist all syscalls for error injection
+    
+    Error injection is a useful mechanism to fail arbitrary kernel
+    functions. However, it is often hard to guarantee an error propagates
+    appropriately to user space programs. By injecting into syscalls, we can
+    return arbitrary values to user space directly; this increases
+    flexibility and robustness in testing, allowing us to test user space
+    error paths effectively.
+    
+    The following script, for example, fails calls to sys_open() from a
+    given pid:
+    
+    from bcc import BPF
+    from sys import argv
+    
+    pid = argv[1]
+    
+    prog = r"""
+    
+    int kprobe__SyS_open(struct pt_regs *ctx, const char *pathname, int flags)
+    {
+        u32 pid = bpf_get_current_pid_tgid();
+        if (pid == %s)
+            bpf_override_return(ctx, -ENOMEM);
+        return 0;
+    }
+    """ % pid
+    
+    b = BPF(text=prog)
+    while 1:
+        b.perf_buffer_poll()
+    
+    This patch whitelists all syscalls defined with SYSCALL_DEFINE and
+    COMPAT_SYSCALL_DEFINE for error injection. These changes are not
+    intended to be considered stable, and would normally be configured off.
+    
+    Signed-off-by: Howard McLauchlan <hmclauchlan@fb.com>
+    Signed-off-by: Dominik Brodowski <linux@dominikbrodowski.net>
+
+diff --git a/include/linux/compat.h b/include/linux/compat.h
+index 8cb8710db0ab..9847c5a013c3 100644
+--- a/include/linux/compat.h
++++ b/include/linux/compat.h
+@@ -33,6 +33,8 @@
+ #endif
+ 
+ #define COMPAT_SYSCALL_DEFINE0(name) \
++	asmlinkage long compat_sys_##name(void); \
++	ALLOW_ERROR_INJECTION(compat_sys_##name, ERRNO); \
+ 	asmlinkage long compat_sys_##name(void)
+ 
+ #define COMPAT_SYSCALL_DEFINE1(name, ...) \
+@@ -52,6 +54,7 @@
+ 	asmlinkage long compat_sys##name(__MAP(x,__SC_DECL,__VA_ARGS__));\
+ 	asmlinkage long compat_sys##name(__MAP(x,__SC_DECL,__VA_ARGS__))\
+ 		__attribute__((alias(__stringify(compat_SyS##name))));  \
++	ALLOW_ERROR_INJECTION(compat_sys##name, ERRNO);	\
+ 	static inline long C_SYSC##name(__MAP(x,__SC_DECL,__VA_ARGS__));\
+ 	asmlinkage long compat_SyS##name(__MAP(x,__SC_LONG,__VA_ARGS__));\
+ 	asmlinkage long compat_SyS##name(__MAP(x,__SC_LONG,__VA_ARGS__))\

@@ -1,0 +1,48 @@
+commit a4ae308143961bf688e1c8a62f6604e62b491120
+Author: Chuck Lever <chuck.lever@oracle.com>
+Date:   Thu Aug 5 10:25:49 2021 -0400
+
+    SUNRPC: Move client-side disconnect injection
+    
+    Disconnect injection stress-tests the ability for both client and
+    server implementations to behave resiliently in the face of network
+    instability.
+    
+    Convert the existing client-side disconnect injection infrastructure
+    to use the kernel's generic error injection facility. The generic
+    facility has a richer set of injection criteria.
+    
+    Signed-off-by: Chuck Lever <chuck.lever@oracle.com>
+
+diff --git a/net/sunrpc/xprt.c b/net/sunrpc/xprt.c
+index fb6db09725c7..05abe344a269 100644
+--- a/net/sunrpc/xprt.c
++++ b/net/sunrpc/xprt.c
+@@ -56,6 +56,7 @@
+ 
+ #include "sunrpc.h"
+ #include "sysfs.h"
++#include "fail.h"
+ 
+ /*
+  * Local variables
+@@ -855,6 +856,19 @@ xprt_init_autodisconnect(struct timer_list *t)
+ 	queue_work(xprtiod_workqueue, &xprt->task_cleanup);
+ }
+ 
++#if IS_ENABLED(CONFIG_FAIL_SUNRPC)
++static void xprt_inject_disconnect(struct rpc_xprt *xprt)
++{
++	if (!fail_sunrpc.ignore_client_disconnect &&
++	    should_fail(&fail_sunrpc.attr, 1))
++		xprt->ops->inject_disconnect(xprt);
++}
++#else
++static inline void xprt_inject_disconnect(struct rpc_xprt *xprt)
++{
++}
++#endif
++
+ bool xprt_lock_connect(struct rpc_xprt *xprt,
+ 		struct rpc_task *task,
+ 		void *cookie)

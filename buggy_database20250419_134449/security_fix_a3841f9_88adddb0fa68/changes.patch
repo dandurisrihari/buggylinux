@@ -1,0 +1,159 @@
+diff --cc drivers/block/brd.c
+index 588360d79fca,b2391bbd7e5a..8028a3a7e7fd
+--- a/drivers/block/brd.c
++++ b/drivers/block/brd.c
+@@@ -20,12 -20,6 +20,7 @@@
+  #include <linux/radix-tree.h>
+  #include <linux/fs.h>
+  #include <linux/slab.h>
+ +#include <linux/backing-dev.h>
+- #ifdef CONFIG_BLK_DEV_RAM_DAX
+- #include <linux/pfn_t.h>
+- #include <linux/dax.h>
+- #include <linux/uio.h>
+- #endif
+  
+  #include <linux/uaccess.h>
+  
+@@@ -449,23 -401,9 +401,10 @@@ static struct brd_device *brd_alloc(in
+  	disk->flags		= GENHD_FL_EXT_DEVT;
+  	sprintf(disk->disk_name, "ram%d", i);
+  	set_capacity(disk, rd_size * 2);
+ +	disk->queue->backing_dev_info->capabilities |= BDI_CAP_SYNCHRONOUS_IO;
+  
+- #ifdef CONFIG_BLK_DEV_RAM_DAX
+- 	queue_flag_set_unlocked(QUEUE_FLAG_DAX, brd->brd_queue);
+- 	brd->dax_dev = alloc_dax(brd, disk->disk_name, &brd_dax_ops);
+- 	if (!brd->dax_dev)
+- 		goto out_free_inode;
+- #endif
+- 
+- 
+  	return brd;
+  
+- #ifdef CONFIG_BLK_DEV_RAM_DAX
+- out_free_inode:
+- 	kill_dax(brd->dax_dev);
+- 	put_dax(brd->dax_dev);
+- #endif
+  out_free_queue:
+  	blk_cleanup_queue(brd->brd_queue);
+  out_free_dev:
+diff --cc fs/dax.c
+index 3652b26a0048,f757cd0e2d07..95981591977a
+--- a/fs/dax.c
++++ b/fs/dax.c
+@@@ -825,38 -820,42 +825,42 @@@ out
+  }
+  EXPORT_SYMBOL_GPL(dax_writeback_mapping_range);
+  
+- static int dax_insert_mapping(struct address_space *mapping,
+- 		struct block_device *bdev, struct dax_device *dax_dev,
+- 		sector_t sector, size_t size, void *entry,
+- 		struct vm_area_struct *vma, struct vm_fault *vmf)
++ static sector_t dax_iomap_sector(struct iomap *iomap, loff_t pos)
+  {
+- 	unsigned long vaddr = vmf->address;
+- 	void *ret, *kaddr;
+ -	return iomap->blkno + (((pos & PAGE_MASK) - iomap->offset) >> 9);
+++	return (iomap->addr + (pos & PAGE_MASK) - iomap->offset) >> 9;
++ }
++ 
++ static int dax_iomap_pfn(struct iomap *iomap, loff_t pos, size_t size,
++ 			 pfn_t *pfnp)
++ {
++ 	const sector_t sector = dax_iomap_sector(iomap, pos);
+  	pgoff_t pgoff;
++ 	void *kaddr;
+  	int id, rc;
+- 	pfn_t pfn;
++ 	long length;
+  
+- 	rc = bdev_dax_pgoff(bdev, sector, size, &pgoff);
++ 	rc = bdev_dax_pgoff(iomap->bdev, sector, size, &pgoff);
+  	if (rc)
+  		return rc;
+- 
+  	id = dax_read_lock();
+- 	rc = dax_direct_access(dax_dev, pgoff, PHYS_PFN(size), &kaddr, &pfn);
+- 	if (rc < 0) {
+- 		dax_read_unlock(id);
+- 		return rc;
++ 	length = dax_direct_access(iomap->dax_dev, pgoff, PHYS_PFN(size),
++ 				   &kaddr, pfnp);
++ 	if (length < 0) {
++ 		rc = length;
++ 		goto out;
+  	}
++ 	rc = -EINVAL;
++ 	if (PFN_PHYS(length) < size)
++ 		goto out;
++ 	if (pfn_t_to_pfn(*pfnp) & (PHYS_PFN(size)-1))
++ 		goto out;
++ 	/* For larger pages we need devmap */
++ 	if (length > 1 && !pfn_t_devmap(*pfnp))
++ 		goto out;
++ 	rc = 0;
++ out:
+  	dax_read_unlock(id);
+- 
+- 	ret = dax_insert_mapping_entry(mapping, vmf, entry, sector, 0);
+- 	if (IS_ERR(ret))
+- 		return PTR_ERR(ret);
+- 
+- 	trace_dax_insert_mapping(mapping->host, vmf, ret);
+- 	if (vmf->flags & FAULT_FLAG_WRITE)
+- 		return vm_insert_mixed_mkwrite(vma, vaddr, pfn);
+- 	else
+- 		return vm_insert_mixed(vma, vaddr, pfn);
++ 	return rc;
+  }
+  
+  /*
+diff --cc fs/ext4/inode.c
+index 8d2b582fb141,ee4d907a4251..0992d76f7ab1
+--- a/fs/ext4/inode.c
++++ b/fs/ext4/inode.c
+@@@ -3384,6 -3393,20 +3384,19 @@@ static int ext4_releasepage(struct pag
+  		return try_to_free_buffers(page);
+  }
+  
+ -#ifdef CONFIG_FS_DAX
++ static bool ext4_inode_datasync_dirty(struct inode *inode)
++ {
++ 	journal_t *journal = EXT4_SB(inode->i_sb)->s_journal;
++ 
++ 	if (journal)
++ 		return !jbd2_transaction_committed(journal,
++ 					EXT4_I(inode)->i_datasync_tid);
++ 	/* Any metadata buffers to write? */
++ 	if (!list_empty(&inode->i_mapping->private_list))
++ 		return true;
++ 	return inode->i_state & I_DIRTY_DATASYNC;
++ }
++ 
+  static int ext4_iomap_begin(struct inode *inode, loff_t offset, loff_t length,
+  			    unsigned flags, struct iomap *iomap)
+  {
+diff --cc include/linux/iomap.h
+index ca10767ab73d,73e3b7085dbe..19a07de28212
+--- a/include/linux/iomap.h
++++ b/include/linux/iomap.h
+@@@ -21,9 -20,13 +21,13 @@@ struct vm_fault
+  
+  /*
+   * Flags for all iomap mappings:
+ - */
+ -#define IOMAP_F_NEW	0x01	/* blocks have been newly allocated */
+ -/*
+++ *
++  * IOMAP_F_DIRTY indicates the inode has uncommitted metadata needed to access
++  * written data and requires fdatasync to commit them to persistent storage.
+   */
+ -#define IOMAP_F_DIRTY	0x02
+ +#define IOMAP_F_NEW		0x01	/* blocks have been newly allocated */
+ +#define IOMAP_F_BOUNDARY	0x02	/* mapping ends at metadata boundary */
+++#define IOMAP_F_DIRTY		0x04	/* uncommitted metadata */
+  
+  /*
+   * Flags that only need to be reported for IOMAP_REPORT requests:

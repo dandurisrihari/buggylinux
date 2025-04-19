@@ -1,0 +1,85 @@
+diff --git a/fs/nfs/callback_xdr.c b/fs/nfs/callback_xdr.c
+index 06233bfa6d73..73a5a5ea2976 100644
+--- a/fs/nfs/callback_xdr.c
++++ b/fs/nfs/callback_xdr.c
+@@ -983,7 +983,7 @@ static __be32 nfs4_callback_compound(struct svc_rqst *rqstp)
+ 
+ out_invalidcred:
+ 	pr_warn_ratelimited("NFS: NFSv4 callback contains invalid cred\n");
+-	return rpc_autherr_badcred;
++	return svc_return_autherr(rqstp, rpc_autherr_badcred);
+ }
+ 
+ /*
+diff --git a/include/linux/sunrpc/svc.h b/include/linux/sunrpc/svc.h
+index e52385340b3b..7ff12c9dbeaf 100644
+--- a/include/linux/sunrpc/svc.h
++++ b/include/linux/sunrpc/svc.h
+@@ -271,6 +271,7 @@ struct svc_rqst {
+ #define	RQ_VICTIM	(5)			/* about to be shut down */
+ #define	RQ_BUSY		(6)			/* request is busy */
+ #define	RQ_DATA		(7)			/* request has data */
++#define RQ_AUTHERR	(8)			/* Request status is auth error */
+ 	unsigned long		rq_flags;	/* flags field */
+ 	ktime_t			rq_qtime;	/* enqueue time */
+ 
+@@ -504,6 +505,7 @@ unsigned int	   svc_fill_write_vector(struct svc_rqst *rqstp,
+ char		  *svc_fill_symlink_pathname(struct svc_rqst *rqstp,
+ 					     struct kvec *first, void *p,
+ 					     size_t total);
++__be32		   svc_return_autherr(struct svc_rqst *rqstp, __be32 auth_err);
+ 
+ #define	RPC_MAX_ADDRBUFLEN	(63U)
+ 
+diff --git a/net/sunrpc/svc.c b/net/sunrpc/svc.c
+index dbd19697ee38..3d5dd6b86652 100644
+--- a/net/sunrpc/svc.c
++++ b/net/sunrpc/svc.c
+@@ -1144,6 +1144,22 @@ void svc_printk(struct svc_rqst *rqstp, const char *fmt, ...)
+ static __printf(2,3) void svc_printk(struct svc_rqst *rqstp, const char *fmt, ...) {}
+ #endif
+ 
++__be32
++svc_return_autherr(struct svc_rqst *rqstp, __be32 auth_err)
++{
++	set_bit(RQ_AUTHERR, &rqstp->rq_flags);
++	return auth_err;
++}
++EXPORT_SYMBOL_GPL(svc_return_autherr);
++
++static __be32
++svc_get_autherr(struct svc_rqst *rqstp, __be32 *statp)
++{
++	if (test_and_clear_bit(RQ_AUTHERR, &rqstp->rq_flags))
++		return *statp;
++	return rpc_auth_ok;
++}
++
+ /*
+  * Common routine for processing the RPC request.
+  */
+@@ -1290,11 +1306,9 @@ svc_process_common(struct svc_rqst *rqstp, struct kvec *argv, struct kvec *resv)
+ 				procp->pc_release(rqstp);
+ 			goto dropit;
+ 		}
+-		if (*statp == rpc_autherr_badcred) {
+-			if (procp->pc_release)
+-				procp->pc_release(rqstp);
+-			goto err_bad_auth;
+-		}
++		auth_stat = svc_get_autherr(rqstp, statp);
++		if (auth_stat != rpc_auth_ok)
++			goto err_release_bad_auth;
+ 		if (*statp == rpc_success && procp->pc_encode &&
+ 		    !procp->pc_encode(rqstp, resv->iov_base + resv->iov_len)) {
+ 			dprintk("svc: failed to encode reply\n");
+@@ -1351,6 +1365,9 @@ svc_process_common(struct svc_rqst *rqstp, struct kvec *argv, struct kvec *resv)
+ 	svc_putnl(resv, 2);
+ 	goto sendit;
+ 
++err_release_bad_auth:
++	if (procp->pc_release)
++		procp->pc_release(rqstp);
+ err_bad_auth:
+ 	dprintk("svc: authentication failed (%d)\n", ntohl(auth_stat));
+ 	serv->sv_stats->rpcbadauth++;

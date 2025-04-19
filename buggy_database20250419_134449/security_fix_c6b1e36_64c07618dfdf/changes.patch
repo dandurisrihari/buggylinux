@@ -1,0 +1,95 @@
+diff --cc drivers/md/dm-io.c
+index 8d5ca30f6551,81248a8a8b57..25039607f3cb
+--- a/drivers/md/dm-io.c
++++ b/drivers/md/dm-io.c
+@@@ -317,9 -318,9 +318,9 @@@ static void do_region(int op, int op_fl
+  	else if (op == REQ_OP_WRITE_SAME)
+  		special_cmd_max_sectors = q->limits.max_write_same_sectors;
+  	if ((op == REQ_OP_DISCARD || op == REQ_OP_WRITE_ZEROES ||
+ -	     op == REQ_OP_WRITE_SAME)  &&
+ -	    special_cmd_max_sectors == 0) {
+ +	     op == REQ_OP_WRITE_SAME) && special_cmd_max_sectors == 0) {
+ +		atomic_inc(&io->count);
+- 		dec_count(io, region, -EOPNOTSUPP);
++ 		dec_count(io, region, BLK_STS_NOTSUPP);
+  		return;
+  	}
+  
+diff --cc drivers/md/dm-raid1.c
+index 4da8858856fb,3ab584b686e0..a4fbd911d566
+--- a/drivers/md/dm-raid1.c
++++ b/drivers/md/dm-raid1.c
+@@@ -1255,26 -1253,16 +1256,26 @@@ static int mirror_end_io(struct dm_targ
+  		if (!(bio->bi_opf & REQ_PREFLUSH) &&
+  		    bio_op(bio) != REQ_OP_DISCARD)
+  			dm_rh_dec(ms->rh, bio_record->write_region);
+- 		return error;
++ 		return DM_ENDIO_DONE;
+  	}
+  
+- 	if (error == -EOPNOTSUPP)
++ 	if (*error == BLK_STS_NOTSUPP)
+ -		return DM_ENDIO_DONE;
+ +		goto out;
+  
+- 	if ((error == -EWOULDBLOCK) && (bio->bi_opf & REQ_RAHEAD))
++ 	if (bio->bi_opf & REQ_RAHEAD)
+ -		return DM_ENDIO_DONE;
+ +		goto out;
+  
+- 	if (unlikely(error)) {
++ 	if (unlikely(*error)) {
+ +		if (!bio_record->details.bi_bdev) {
+ +			/*
+ +			 * There wasn't enough memory to record necessary
+ +			 * information for a retry or there was no other
+ +			 * mirror in-sync.
+ +			 */
+ +			DMERR_LIMIT("Mirror read failed.");
+- 			return -EIO;
+++			return DM_ENDIO_DONE;
+ +		}
+ +
+  		m = bio_record->m;
+  
+  		DMERR("Mirror read failed from %s. Trying alternative device.",
+@@@ -1290,8 -1278,7 +1291,8 @@@
+  			bd = &bio_record->details;
+  
+  			dm_bio_restore(bd, bio);
+ +			bio_record->details.bi_bdev = NULL;
+- 			bio->bi_error = 0;
++ 			bio->bi_status = 0;
+  
+  			queue_bio(ms, bio, rw);
+  			return DM_ENDIO_INCOMPLETE;
+@@@ -1299,10 -1286,7 +1300,10 @@@
+  		DMERR("All replicated volumes dead, failing I/O");
+  	}
+  
+ +out:
+ +	bio_record->details.bi_bdev = NULL;
+ +
+- 	return error;
++ 	return DM_ENDIO_DONE;
+  }
+  
+  static void mirror_presuspend(struct dm_target *ti)
+diff --cc fs/block_dev.c
+index 0a7404ef9335,2c5f08696fff..a7df151f8aba
+--- a/fs/block_dev.c
++++ b/fs/block_dev.c
+@@@ -262,11 -263,8 +263,11 @@@ __blkdev_direct_IO_simple(struct kiocb 
+  	if (vecs != inline_vecs)
+  		kfree(vecs);
+  
+- 	if (unlikely(bio.bi_error))
+- 		ret = bio.bi_error;
++ 	if (unlikely(bio.bi_status))
+ -		return blk_status_to_errno(bio.bi_status);
+++		ret = blk_status_to_errno(bio.bi_status);
+ +
+ +	bio_uninit(&bio);
+ +
+  	return ret;
+  }

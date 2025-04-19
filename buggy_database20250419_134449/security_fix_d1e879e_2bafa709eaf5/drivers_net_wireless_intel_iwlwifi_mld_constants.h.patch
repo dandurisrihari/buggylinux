@@ -1,0 +1,174 @@
+commit d1e879ec600f9b3bdd253167533959facfefb17b
+Author: Miri Korenblit <miriam.rachel.korenblit@intel.com>
+Date:   Sun Feb 16 11:42:40 2025 +0200
+
+    wifi: iwlwifi: add iwlmld sub-driver
+    
+    iwlwifi is the driver of all Intel wifi devices since 2008.
+    Since then, the hardware has changed a lot, but the firmware
+    API has changed even more. The need to keep one driver that
+    supports all those different APIs led us to introduce a new
+    architecture circa 2012 which allowed us to keep the same
+    interface to the hardware (DMAs, Tx queues, etc...) with a
+    new layer to implement the mid-layer between mac80211 and
+    the firmware. The first component is called the 'transport'
+    and the latter is called 'operation_mode' a.k.a  op_mode.
+    
+    In 2013 we took advantage of the new architecture to
+    introduce iwlmvm which allowed us to implement the, then,
+    new firmware API. This op_mode supports 7260 and up, those
+    devices supports support at least VHT.
+    
+    Since then, wifi evolved and so did the firmware. It became
+    much bigger and took a lot of functionality from the driver.
+    It became increasingly hard to keep the same op_mode for the
+    newest devices and we experienced frequent regressions on
+    older devices. In order to avoid those regressions and keep
+    the code maintainable, we decided it was about time to start
+    a new op_mode.
+    
+    iwlmld is a new op_mode that supports BE200 or newer if the
+    firmware being used is 97.ucode or newer. If the user has
+    an older devices or BE200 with .96.ucode, iwlmvm will be
+    loaded. Of course, this op_mode selection is seamless.
+    
+    All the features supported in iwlmvm are supported in
+    iwlmld besides a few seldom used use cases: injection and
+    Hotspot 2.0. Those are under work.
+    
+    A few points about the implementation:
+     * iwlmld doesn't have any mutexes, it relies on the
+       wiphy_lock
+     * iwlmld is more "resource oriented": stations, links and
+       interfaces are allocated and freed only after all the
+       relevant flows are completed.
+     * Firmware notifications' sizes are validated in a more
+       structured way.
+    
+    We would love to see this new op_mode merged in 6.15. The
+    firmware for this new driver (.97.ucode) is not yet publicly
+    available but it'll be sent very soon.
+    People eager to get an early version of this firmware can
+    contact Emmanuel at:
+    emmanuel.grumbach@intel.com
+    
+    I've listed the people who directly contributed
+    code, but many others from various teams have
+    contributed in other ways.
+    
+    Co-developed-by: Johannes Berg <johannes.berg@intel.com>
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+    Co-developed-by: Avraham Stern <avraham.stern@intel.com>
+    Signed-off-by: Avraham Stern <avraham.stern@intel.com>
+    Co-developed-by: Daniel Gabay <daniel.gabay@intel.com>
+    Signed-off-by: Daniel Gabay <daniel.gabay@intel.com>
+    Co-developed-by: Emmanuel Grumbach <emmanuel.grumbach@intel.com>
+    Signed-off-by: Emmanuel Grumbach <emmanuel.grumbach@intel.com>
+    Co-developed-by: Anjaneyulu <pagadala.yesu.anjaneyulu@intel.com>
+    Signed-off-by: Anjaneyulu <pagadala.yesu.anjaneyulu@intel.com>
+    Co-developed-by: Yedidya Benshimol <yedidya.ben.shimol@intel.com>
+    Signed-off-by: Yedidya Benshimol <yedidya.ben.shimol@intel.com>
+    Co-developed-by: Benjamin Berg <benjamin.berg@intel.com>
+    Signed-off-by: Benjamin Berg <benjamin.berg@intel.com>
+    Co-developed-by: Shaul Triebitz <shaul.triebitz@intel.com>
+    Signed-off-by: Shaul Triebitz <shaul.triebitz@intel.com>
+    Signed-off-by: Miri Korenblit <miriam.rachel.korenblit@intel.com>
+    Link: https://lore.kernel.org/linux-wireless/20250216094321.537988-1-miriam.rachel.korenblit@intel.com/
+    [fix Kconfig, fix api/phy.h includes, SPDX tag and coding
+     style issues, duplicated includes per 0-day robot]
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+diff --git a/drivers/net/wireless/intel/iwlwifi/mld/constants.h b/drivers/net/wireless/intel/iwlwifi/mld/constants.h
+new file mode 100644
+index 000000000000..9a24996014b8
+--- /dev/null
++++ b/drivers/net/wireless/intel/iwlwifi/mld/constants.h
+@@ -0,0 +1,88 @@
++/* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
++/*
++ * Copyright (C) 2024-2025 Intel Corporation
++ */
++#ifndef __iwl_mld_constants_h__
++#define __iwl_mld_constants_h__
++
++#define IWL_MLD_MISSED_BEACONS_SINCE_RX_THOLD			4
++#define IWL_MLD_MISSED_BEACONS_THRESHOLD			8
++#define IWL_MLD_MISSED_BEACONS_THRESHOLD_LONG			19
++#define IWL_MLD_BCN_LOSS_EXIT_ESR_THRESH_2_LINKS		5
++#define IWL_MLD_BCN_LOSS_EXIT_ESR_THRESH			15
++#define IWL_MLD_BCN_LOSS_EXIT_ESR_THRESH_BSS_PARAM_CHANGED	11
++#define IWL_MLD_LOW_RSSI_MLO_SCAN_THRESH			-72
++
++#define IWL_MLD_DEFAULT_PS_TX_DATA_TIMEOUT	(100 * USEC_PER_MSEC)
++#define IWL_MLD_DEFAULT_PS_RX_DATA_TIMEOUT	(100 * USEC_PER_MSEC)
++#define IWL_MLD_WOWLAN_PS_TX_DATA_TIMEOUT	(10 * USEC_PER_MSEC)
++#define IWL_MLD_WOWLAN_PS_RX_DATA_TIMEOUT	(10 * USEC_PER_MSEC)
++#define IWL_MLD_SHORT_PS_TX_DATA_TIMEOUT	(2 * 1024) /* defined in TU */
++#define IWL_MLD_SHORT_PS_RX_DATA_TIMEOUT	(40 * 1024) /* defined in TU */
++
++#define IWL_MLD_UAPSD_RX_DATA_TIMEOUT		(50 * USEC_PER_MSEC)
++#define IWL_MLD_UAPSD_TX_DATA_TIMEOUT		(50 * USEC_PER_MSEC)
++
++#define IWL_MLD_PS_SNOOZE_INTERVAL		25
++#define IWL_MLD_PS_SNOOZE_INTERVAL		25
++#define IWL_MLD_PS_SNOOZE_WINDOW		50
++
++#define IWL_MLD_PS_SNOOZE_HEAVY_TX_THLD_PACKETS	30
++#define IWL_MLD_PS_SNOOZE_HEAVY_RX_THLD_PACKETS	20
++
++#define IWL_MLD_PS_HEAVY_TX_THLD_PERCENT	50
++#define IWL_MLD_PS_HEAVY_RX_THLD_PERCENT	50
++#define IWL_MLD_PS_HEAVY_TX_THLD_PACKETS	20
++#define IWL_MLD_PS_HEAVY_RX_THLD_PACKETS	8
++
++#define IWL_MLD_TRIGGER_LINK_SEL_TIME_SEC	30
++#define IWL_MLD_SCAN_EXPIRE_TIME_SEC		20
++
++#define IWL_MLD_TPT_COUNT_WINDOW (5 * HZ)
++
++/* OMI reduced BW thresholds (channel load percentage) */
++#define IWL_MLD_OMI_ENTER_CHAN_LOAD		10
++#define IWL_MLD_OMI_EXIT_CHAN_LOAD_160		20
++#define IWL_MLD_OMI_EXIT_CHAN_LOAD_320		30
++/* time (in milliseconds) to let AP "settle" the OMI */
++#define IWL_MLD_OMI_AP_SETTLE_DELAY		27
++/* time (in milliseconds) to not enter OMI reduced BW after leaving */
++#define IWL_MLD_OMI_EXIT_PROTECTION		5000
++
++#define IWL_MLD_DIS_RANDOM_FW_ID                false
++#define IWL_MLD_D3_DEBUG                        false
++#define IWL_MLD_NON_TRANSMITTING_AP	        false
++#define IWL_MLD_6GHZ_PASSIVE_SCAN_TIMEOUT       3000 /* in seconds */
++#define IWL_MLD_6GHZ_PASSIVE_SCAN_ASSOC_TIMEOUT 60   /* in seconds */
++#define IWL_MLD_CONN_LISTEN_INTERVAL		10
++#define IWL_MLD_ADAPTIVE_DWELL_NUM_APS_OVERRIDE 0
++#define IWL_MLD_AUTO_EML_ENABLE			true
++
++#define IWL_MLD_HIGH_RSSI_THRESH_20MHZ		-67
++#define IWL_MLD_LOW_RSSI_THRESH_20MHZ		-72
++#define IWL_MLD_HIGH_RSSI_THRESH_40MHZ		-64
++#define IWL_MLD_LOW_RSSI_THRESH_40MHZ		-72
++#define IWL_MLD_HIGH_RSSI_THRESH_80MHZ		-61
++#define IWL_MLD_LOW_RSSI_THRESH_80MHZ		-72
++#define IWL_MLD_HIGH_RSSI_THRESH_160MHZ		-58
++#define IWL_MLD_LOW_RSSI_THRESH_160MHZ		-72
++
++#define IWL_MLD_ENTER_EMLSR_TPT_THRESH		400
++#define IWL_MLD_CHAN_LOAD_THRESH		2 /* in percentage */
++
++#define IWL_MLD_FTM_INITIATOR_ALGO		IWL_TOF_ALGO_TYPE_MAX_LIKE
++#define IWL_MLD_FTM_INITIATOR_DYNACK		true
++#define IWL_MLD_FTM_LMR_FEEDBACK_TERMINATE	false
++#define IWL_MLD_FTM_TEST_INCORRECT_SAC		false
++#define IWL_MLD_FTM_R2I_MAX_REP			7
++#define IWL_MLD_FTM_I2R_MAX_REP			7
++#define IWL_MLD_FTM_R2I_MAX_STS			1
++#define IWL_MLD_FTM_I2R_MAX_STS			1
++#define IWL_MLD_FTM_R2I_MAX_TOTAL_LTF		3
++#define IWL_MLD_FTM_I2R_MAX_TOTAL_LTF		3
++#define IWL_MLD_FTM_RESP_NDP_SUPPORT		true
++#define IWL_MLD_FTM_RESP_LMR_FEEDBACK_SUPPORT	true
++#define IWL_MLD_FTM_NON_TB_MIN_TIME_BETWEEN_MSR	7
++#define IWL_MLD_FTM_NON_TB_MAX_TIME_BETWEEN_MSR	1000
++
++#endif /* __iwl_mld_constants_h__ */

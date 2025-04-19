@@ -1,0 +1,131 @@
+commit 81c4b5bf30de01a0f6b43ccaa1d220f4a0a5d99c
+Author: Lukas Wunner <lukas@wunner.de>
+Date:   Sat Sep 8 09:59:01 2018 +0200
+
+    PCI: hotplug: Constify hotplug_slot_ops
+    
+    Hotplug drivers cannot declare their hotplug_slot_ops const, making them
+    attractive targets for attackers, because upon registration of a hotplug
+    slot, __pci_hp_initialize() writes to the "owner" and "mod_name" members
+    in that struct.
+    
+    Fix by moving these members to struct hotplug_slot and constify every
+    driver's hotplug_slot_ops except for pciehp.
+    
+    pciehp constructs its hotplug_slot_ops at runtime based on the PCIe
+    port's capabilities, hence cannot declare them const.  It can be
+    converted to __write_rarely once that's mainlined:
+    http://www.openwall.com/lists/kernel-hardening/2016/11/16/3
+    
+    Signed-off-by: Lukas Wunner <lukas@wunner.de>
+    Signed-off-by: Bjorn Helgaas <bhelgaas@google.com>
+    Reviewed-by: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
+    Acked-by: Tyrel Datwyler <tyreld@linux.vnet.ibm.com>  # drivers/pci/hotplug/rpa*
+    Acked-by: Andy Shevchenko <andy.shevchenko@gmail.com> # drivers/platform/x86
+    Cc: Len Brown <lenb@kernel.org>
+    Cc: Scott Murray <scott@spiteful.org>
+    Cc: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+    Cc: Paul Mackerras <paulus@samba.org>
+    Cc: Michael Ellerman <mpe@ellerman.id.au>
+    Cc: Oliver OHalloran <oliveroh@au1.ibm.com>
+    Cc: Gavin Shan <gwshan@linux.vnet.ibm.com>
+    Cc: Sebastian Ott <sebott@linux.vnet.ibm.com>
+    Cc: Gerald Schaefer <gerald.schaefer@de.ibm.com>
+    Cc: Corentin Chary <corentin.chary@gmail.com>
+    Cc: Darren Hart <dvhart@infradead.org>
+
+diff --git a/drivers/pci/hotplug/pci_hotplug_core.c b/drivers/pci/hotplug/pci_hotplug_core.c
+index 90fde5f106d8..ede2ed6f4ce0 100644
+--- a/drivers/pci/hotplug/pci_hotplug_core.c
++++ b/drivers/pci/hotplug/pci_hotplug_core.c
+@@ -49,15 +49,15 @@ static DEFINE_MUTEX(pci_hp_mutex);
+ #define GET_STATUS(name, type)	\
+ static int get_##name(struct hotplug_slot *slot, type *value)		\
+ {									\
+-	struct hotplug_slot_ops *ops = slot->ops;			\
++	const struct hotplug_slot_ops *ops = slot->ops;			\
+ 	int retval = 0;							\
+-	if (!try_module_get(ops->owner))				\
++	if (!try_module_get(slot->owner))				\
+ 		return -ENODEV;						\
+ 	if (ops->get_##name)						\
+ 		retval = ops->get_##name(slot, value);			\
+ 	else								\
+ 		*value = slot->info->name;				\
+-	module_put(ops->owner);						\
++	module_put(slot->owner);					\
+ 	return retval;							\
+ }
+ 
+@@ -90,7 +90,7 @@ static ssize_t power_write_file(struct pci_slot *pci_slot, const char *buf,
+ 	power = (u8)(lpower & 0xff);
+ 	dbg("power = %d\n", power);
+ 
+-	if (!try_module_get(slot->ops->owner)) {
++	if (!try_module_get(slot->owner)) {
+ 		retval = -ENODEV;
+ 		goto exit;
+ 	}
+@@ -109,7 +109,7 @@ static ssize_t power_write_file(struct pci_slot *pci_slot, const char *buf,
+ 		err("Illegal value specified for power\n");
+ 		retval = -EINVAL;
+ 	}
+-	module_put(slot->ops->owner);
++	module_put(slot->owner);
+ 
+ exit:
+ 	if (retval)
+@@ -138,7 +138,8 @@ static ssize_t attention_read_file(struct pci_slot *pci_slot, char *buf)
+ static ssize_t attention_write_file(struct pci_slot *pci_slot, const char *buf,
+ 				    size_t count)
+ {
+-	struct hotplug_slot_ops *ops = pci_slot->hotplug->ops;
++	struct hotplug_slot *slot = pci_slot->hotplug;
++	const struct hotplug_slot_ops *ops = slot->ops;
+ 	unsigned long lattention;
+ 	u8 attention;
+ 	int retval = 0;
+@@ -147,13 +148,13 @@ static ssize_t attention_write_file(struct pci_slot *pci_slot, const char *buf,
+ 	attention = (u8)(lattention & 0xff);
+ 	dbg(" - attention = %d\n", attention);
+ 
+-	if (!try_module_get(ops->owner)) {
++	if (!try_module_get(slot->owner)) {
+ 		retval = -ENODEV;
+ 		goto exit;
+ 	}
+ 	if (ops->set_attention_status)
+-		retval = ops->set_attention_status(pci_slot->hotplug, attention);
+-	module_put(ops->owner);
++		retval = ops->set_attention_status(slot, attention);
++	module_put(slot->owner);
+ 
+ exit:
+ 	if (retval)
+@@ -213,13 +214,13 @@ static ssize_t test_write_file(struct pci_slot *pci_slot, const char *buf,
+ 	test = (u32)(ltest & 0xffffffff);
+ 	dbg("test = %d\n", test);
+ 
+-	if (!try_module_get(slot->ops->owner)) {
++	if (!try_module_get(slot->owner)) {
+ 		retval = -ENODEV;
+ 		goto exit;
+ 	}
+ 	if (slot->ops->hardware_test)
+ 		retval = slot->ops->hardware_test(slot, test);
+-	module_put(slot->ops->owner);
++	module_put(slot->owner);
+ 
+ exit:
+ 	if (retval)
+@@ -447,8 +448,8 @@ int __pci_hp_initialize(struct hotplug_slot *slot, struct pci_bus *bus,
+ 	if ((slot->info == NULL) || (slot->ops == NULL))
+ 		return -EINVAL;
+ 
+-	slot->ops->owner = owner;
+-	slot->ops->mod_name = mod_name;
++	slot->owner = owner;
++	slot->mod_name = mod_name;
+ 
+ 	/*
+ 	 * No problems if we call this interface from both ACPI_PCI_SLOT

@@ -1,0 +1,96 @@
+commit 8c3ed7aa2b9ef666195b789e9b02e28383243fa8
+Author: Markus Theil <markus.theil@tu-ilmenau.de>
+Date:   Wed Jan 15 13:55:22 2020 +0100
+
+    nl80211: add src and dst addr attributes for control port tx/rx
+    
+    When using control port over nl80211 in AP mode with
+    pre-authentication, APs need to forward frames to other
+    APs defined by their MAC address. Before this patch,
+    pre-auth frames reaching user space over nl80211 control
+    port  have no longer any information about the dest attached,
+    which can be used for forwarding to a controller or injecting
+    the frame back to a ethernet interface over a AF_PACKET
+    socket.
+    Analog problems exist, when forwarding pre-auth frames from
+    AP -> STA.
+    
+    This patch therefore adds the NL80211_ATTR_DST_MAC and
+    NL80211_ATTR_SRC_MAC attributes to provide more context
+    information when forwarding.
+    The respective arguments are optional on tx and included on rx.
+    Therefore unaware existing software is not affected.
+    
+    Software which wants to detect this feature, can do so
+    by checking against:
+      NL80211_EXT_FEATURE_CONTROL_PORT_OVER_NL80211_MAC_ADDRS
+    
+    Signed-off-by: Markus Theil <markus.theil@tu-ilmenau.de>
+    Link: https://lore.kernel.org/r/20200115125522.3755-1-markus.theil@tu-ilmenau.de
+    [split into separate cfg80211/mac80211 patches]
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+diff --git a/net/wireless/nl80211.c b/net/wireless/nl80211.c
+index 4c0ea54e0f59..33fe6ac1c242 100644
+--- a/net/wireless/nl80211.c
++++ b/net/wireless/nl80211.c
+@@ -633,6 +633,8 @@ const struct nla_policy nl80211_policy[NUM_NL80211_ATTR] = {
+ 	[NL80211_ATTR_HE_OBSS_PD] = NLA_POLICY_NESTED(he_obss_pd_policy),
+ 	[NL80211_ATTR_VLAN_ID] = NLA_POLICY_RANGE(NLA_U16, 1, VLAN_N_VID - 2),
+ 	[NL80211_ATTR_HE_BSS_COLOR] = NLA_POLICY_NESTED(he_bss_color_policy),
++	[NL80211_ATTR_SRC_MAC] = NLA_POLICY_ETH_ADDR,
++	[NL80211_ATTR_DST_MAC] = NLA_POLICY_ETH_ADDR,
+ };
+ 
+ /* policy for the key attributes */
+@@ -13694,6 +13696,7 @@ static int nl80211_tx_control_port(struct sk_buff *skb, struct genl_info *info)
+ 	const u8 *buf;
+ 	size_t len;
+ 	u8 *dest;
++	u8 src[ETH_ALEN];
+ 	u16 proto;
+ 	bool noencrypt;
+ 	int err;
+@@ -13731,6 +13734,13 @@ static int nl80211_tx_control_port(struct sk_buff *skb, struct genl_info *info)
+ 		goto out;
+ 	}
+ 
++	/* copy src address under wdev_lock, as we may copy wdev_address */
++	if (info->attrs[NL80211_ATTR_SRC_MAC])
++		ether_addr_copy(src,
++				nla_data(info->attrs[NL80211_ATTR_SRC_MAC]));
++	else
++		ether_addr_copy(src, wdev_address(wdev));
++
+ 	wdev_unlock(wdev);
+ 
+ 	buf = nla_data(info->attrs[NL80211_ATTR_FRAME]);
+@@ -13741,7 +13751,7 @@ static int nl80211_tx_control_port(struct sk_buff *skb, struct genl_info *info)
+ 		nla_get_flag(info->attrs[NL80211_ATTR_CONTROL_PORT_NO_ENCRYPT]);
+ 
+ 	return rdev_tx_control_port(rdev, dev, buf, len,
+-				    dest, cpu_to_be16(proto), noencrypt);
++				    dest, src, cpu_to_be16(proto), noencrypt);
+ 
+  out:
+ 	wdev_unlock(wdev);
+@@ -15996,7 +16006,8 @@ static int __nl80211_rx_control_port(struct net_device *dev,
+ 	struct wireless_dev *wdev = dev->ieee80211_ptr;
+ 	struct cfg80211_registered_device *rdev = wiphy_to_rdev(wdev->wiphy);
+ 	struct ethhdr *ehdr = eth_hdr(skb);
+-	const u8 *addr = ehdr->h_source;
++	const u8 *daddr = ehdr->h_dest;
++	const u8 *saddr = ehdr->h_source;
+ 	u16 proto = be16_to_cpu(skb->protocol);
+ 	struct sk_buff *msg;
+ 	void *hdr;
+@@ -16021,7 +16032,8 @@ static int __nl80211_rx_control_port(struct net_device *dev,
+ 	    nla_put_u32(msg, NL80211_ATTR_IFINDEX, dev->ifindex) ||
+ 	    nla_put_u64_64bit(msg, NL80211_ATTR_WDEV, wdev_id(wdev),
+ 			      NL80211_ATTR_PAD) ||
+-	    nla_put(msg, NL80211_ATTR_MAC, ETH_ALEN, addr) ||
++	    nla_put(msg, NL80211_ATTR_MAC, ETH_ALEN, saddr) ||
++	    nla_put(msg, NL80211_ATTR_DST_MAC, ETH_ALEN, daddr) ||
+ 	    nla_put_u16(msg, NL80211_ATTR_CONTROL_PORT_ETHERTYPE, proto) ||
+ 	    (unencrypted && nla_put_flag(msg,
+ 					 NL80211_ATTR_CONTROL_PORT_NO_ENCRYPT)))

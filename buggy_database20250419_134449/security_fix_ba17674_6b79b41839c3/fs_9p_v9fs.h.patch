@@ -1,0 +1,69 @@
+commit ba17674fe02909fef049fd4b620a2805bdb8c693
+Author: Latchesar Ionkov <lucho@ionkov.net>
+Date:   Wed Oct 17 14:31:07 2007 -0500
+
+    9p: attach-per-user
+    
+    The 9P2000 protocol requires the authentication and permission checks to be
+    done in the file server. For that reason every user that accesses the file
+    server tree has to authenticate and attach to the server separately.
+    Multiple users can share the same connection to the server.
+    
+    Currently v9fs does a single attach and executes all I/O operations as a
+    single user. This makes using v9fs in multiuser environment unsafe as it
+    depends on the client doing the permission checking.
+    
+    This patch improves the 9P2000 support by allowing every user to attach
+    separately. The patch defines three modes of access (new mount option
+    'access'):
+    
+    - attach-per-user (access=user) (default mode for 9P2000.u)
+     If a user tries to access a file served by v9fs for the first time, v9fs
+     sends an attach command to the server (Tattach) specifying the user. If
+     the attach succeeds, the user can access the v9fs tree.
+     As there is no uname->uid (string->integer) mapping yet, this mode works
+     only with the 9P2000.u dialect.
+    
+    - allow only one user to access the tree (access=<uid>)
+     Only the user with uid can access the v9fs tree. Other users that attempt
+     to access it will get EPERM error.
+    
+    - do all operations as a single user (access=any) (default for 9P2000)
+     V9fs does a single attach and all operations are done as a single user.
+     If this mode is selected, the v9fs behavior is identical with the current
+     one.
+    
+    Signed-off-by: Latchesar Ionkov <lucho@ionkov.net>
+    Signed-off-by: Eric Van Hensbergen <ericvh@gmail.com>
+
+diff --git a/fs/9p/v9fs.h b/fs/9p/v9fs.h
+index 8e0999b3d0cc..db4b4193f2e2 100644
+--- a/fs/9p/v9fs.h
++++ b/fs/9p/v9fs.h
+@@ -36,10 +36,11 @@ struct v9fs_session_info {
+ 	unsigned int cache;	/* cache mode */
+ 
+ 	char *options;		/* copy of mount options */
+-	char *name;		/* user name to mount as */
+-	char *remotename;	/* name of remote hierarchy being mounted */
++	char *uname;		/* user name to mount as */
++	char *aname;		/* name of remote hierarchy being mounted */
+ 	unsigned int dfltuid;	/* default uid/muid for legacy support */
+ 	unsigned int dfltgid;	/* default gid for legacy support */
++	u32 uid;		/* if ACCESS_SINGLE, the uid that has access */
+ 	struct p9_trans_module *trans; /* 9p transport */
+ 	struct p9_client *clnt;	/* 9p client */
+ 	struct dentry *debugfs_dir;
+@@ -47,7 +48,11 @@ struct v9fs_session_info {
+ 
+ /* session flags */
+ enum {
+-	V9FS_EXTENDED,
++	V9FS_EXTENDED		= 0x01,	/* 9P2000.u */
++	V9FS_ACCESS_MASK	= 0x06,	/* access mask */
++	V9FS_ACCESS_SINGLE	= 0x02,	/* only one user can access the files */
++	V9FS_ACCESS_USER	= 0x04,	/* attache per user */
++	V9FS_ACCESS_ANY		= 0x06,	/* use the same attach for all users */
+ };
+ 
+ /* possible values of ->cache */

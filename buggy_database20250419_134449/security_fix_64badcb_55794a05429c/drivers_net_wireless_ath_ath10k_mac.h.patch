@@ -1,0 +1,46 @@
+commit 64badcb6d6459cc6f7b46f7d45e44c95ab874337
+Author: Michal Kazior <michal.kazior@tieto.com>
+Date:   Thu Sep 18 11:18:02 2014 +0300
+
+    ath10k: workaround fw beaconing bug
+    
+    Some firmware revisions don't wait for beacon tx
+    completion before sending another SWBA event. This
+    could lead to hardware using old (freed) beacon
+    data in some cases, e.g. tx credit starvation
+    combined with missed TBTT. This is very very rare.
+    
+    On non-IOMMU-enabled hosts this could be a
+    possible security issue because hw could beacon
+    some random data on the air.  On IOMMU-enabled
+    hosts DMAR faults would occur in most cases and
+    target device would crash.
+    
+    Since there are no beacon tx completions (implicit
+    nor explicit) propagated to host the only
+    workaround for this is to allocate a DMA-coherent
+    buffer for a lifetime of a vif and use it for all
+    beacon tx commands. Worst case for this approach
+    is some beacons may become corrupted, e.g. garbled
+    IEs or out-of-date TIM bitmap.
+    
+    Keep the original beacon-related code as-is in
+    case future firmware revisions solve this problem
+    so that the old path can be easily re-enabled with
+    a fw_feature flag.
+    
+    Signed-off-by: Michal Kazior <michal.kazior@tieto.com>
+    Signed-off-by: Kalle Valo <kvalo@qca.qualcomm.com>
+
+diff --git a/drivers/net/wireless/ath/ath10k/mac.h b/drivers/net/wireless/ath/ath10k/mac.h
+index 6c80eeada3e2..965c51117499 100644
+--- a/drivers/net/wireless/ath/ath10k/mac.h
++++ b/drivers/net/wireless/ath/ath10k/mac.h
+@@ -39,6 +39,7 @@ void ath10k_offchan_tx_work(struct work_struct *work);
+ void ath10k_mgmt_over_wmi_tx_purge(struct ath10k *ar);
+ void ath10k_mgmt_over_wmi_tx_work(struct work_struct *work);
+ void ath10k_halt(struct ath10k *ar);
++void ath10k_mac_vif_beacon_free(struct ath10k_vif *arvif);
+ 
+ static inline struct ath10k_vif *ath10k_vif_to_arvif(struct ieee80211_vif *vif)
+ {

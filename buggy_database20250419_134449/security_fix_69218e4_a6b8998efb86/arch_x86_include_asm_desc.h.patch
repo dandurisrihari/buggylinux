@@ -1,0 +1,191 @@
+commit 69218e47994da614e7af600bf06887750ab6657a
+Author: Thomas Garnier <thgarnie@google.com>
+Date:   Tue Mar 14 10:05:07 2017 -0700
+
+    x86: Remap GDT tables in the fixmap section
+    
+    Each processor holds a GDT in its per-cpu structure. The sgdt
+    instruction gives the base address of the current GDT. This address can
+    be used to bypass KASLR memory randomization. With another bug, an
+    attacker could target other per-cpu structures or deduce the base of
+    the main memory section (PAGE_OFFSET).
+    
+    This patch relocates the GDT table for each processor inside the
+    fixmap section. The space is reserved based on number of supported
+    processors.
+    
+    For consistency, the remapping is done by default on 32 and 64-bit.
+    
+    Each processor switches to its remapped GDT at the end of
+    initialization. For hibernation, the main processor returns with the
+    original GDT and switches back to the remapping at completion.
+    
+    This patch was tested on both architectures. Hibernation and KVM were
+    both tested specially for their usage of the GDT.
+    
+    Thanks to Boris Ostrovsky <boris.ostrovsky@oracle.com> for testing and
+    recommending changes for Xen support.
+    
+    Signed-off-by: Thomas Garnier <thgarnie@google.com>
+    Cc: Alexander Potapenko <glider@google.com>
+    Cc: Andrew Morton <akpm@linux-foundation.org>
+    Cc: Andrey Ryabinin <aryabinin@virtuozzo.com>
+    Cc: Andy Lutomirski <luto@kernel.org>
+    Cc: Ard Biesheuvel <ard.biesheuvel@linaro.org>
+    Cc: Boris Ostrovsky <boris.ostrovsky@oracle.com>
+    Cc: Borislav Petkov <bp@suse.de>
+    Cc: Chris Wilson <chris@chris-wilson.co.uk>
+    Cc: Christian Borntraeger <borntraeger@de.ibm.com>
+    Cc: Dmitry Vyukov <dvyukov@google.com>
+    Cc: Frederic Weisbecker <fweisbec@gmail.com>
+    Cc: Jiri Kosina <jikos@kernel.org>
+    Cc: Joerg Roedel <joro@8bytes.org>
+    Cc: Jonathan Corbet <corbet@lwn.net>
+    Cc: Josh Poimboeuf <jpoimboe@redhat.com>
+    Cc: Juergen Gross <jgross@suse.com>
+    Cc: Kees Cook <keescook@chromium.org>
+    Cc: Len Brown <len.brown@intel.com>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Cc: Lorenzo Stoakes <lstoakes@gmail.com>
+    Cc: Luis R . Rodriguez <mcgrof@kernel.org>
+    Cc: Matt Fleming <matt@codeblueprint.co.uk>
+    Cc: Michal Hocko <mhocko@suse.com>
+    Cc: Paolo Bonzini <pbonzini@redhat.com>
+    Cc: Paul Gortmaker <paul.gortmaker@windriver.com>
+    Cc: Pavel Machek <pavel@ucw.cz>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Radim Krčmář <rkrcmar@redhat.com>
+    Cc: Rafael J . Wysocki <rjw@rjwysocki.net>
+    Cc: Rusty Russell <rusty@rustcorp.com.au>
+    Cc: Stanislaw Gruszka <sgruszka@redhat.com>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Tim Chen <tim.c.chen@linux.intel.com>
+    Cc: Vitaly Kuznetsov <vkuznets@redhat.com>
+    Cc: kasan-dev@googlegroups.com
+    Cc: kernel-hardening@lists.openwall.com
+    Cc: kvm@vger.kernel.org
+    Cc: lguest@lists.ozlabs.org
+    Cc: linux-doc@vger.kernel.org
+    Cc: linux-efi@vger.kernel.org
+    Cc: linux-mm@kvack.org
+    Cc: linux-pm@vger.kernel.org
+    Cc: xen-devel@lists.xenproject.org
+    Cc: zijun_hu <zijun_hu@htc.com>
+    Link: http://lkml.kernel.org/r/20170314170508.100882-2-thgarnie@google.com
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+diff --git a/arch/x86/include/asm/desc.h b/arch/x86/include/asm/desc.h
+index 1548ca92ad3f..4b5ef0c64291 100644
+--- a/arch/x86/include/asm/desc.h
++++ b/arch/x86/include/asm/desc.h
+@@ -4,6 +4,7 @@
+ #include <asm/desc_defs.h>
+ #include <asm/ldt.h>
+ #include <asm/mmu.h>
++#include <asm/fixmap.h>
+ 
+ #include <linux/smp.h>
+ #include <linux/percpu.h>
+@@ -38,6 +39,7 @@ extern struct desc_ptr idt_descr;
+ extern gate_desc idt_table[];
+ extern const struct desc_ptr debug_idt_descr;
+ extern gate_desc debug_idt_table[];
++extern pgprot_t pg_fixmap_gdt_flags;
+ 
+ struct gdt_page {
+ 	struct desc_struct gdt[GDT_ENTRIES];
+@@ -45,11 +47,57 @@ struct gdt_page {
+ 
+ DECLARE_PER_CPU_PAGE_ALIGNED(struct gdt_page, gdt_page);
+ 
+-static inline struct desc_struct *get_cpu_gdt_table(unsigned int cpu)
++/* Provide the original GDT */
++static inline struct desc_struct *get_cpu_gdt_rw(unsigned int cpu)
+ {
+ 	return per_cpu(gdt_page, cpu).gdt;
+ }
+ 
++static inline unsigned long get_cpu_gdt_rw_vaddr(unsigned int cpu)
++{
++	return (unsigned long)get_cpu_gdt_rw(cpu);
++}
++
++/* Provide the current original GDT */
++static inline struct desc_struct *get_current_gdt_rw(void)
++{
++	return this_cpu_ptr(&gdt_page)->gdt;
++}
++
++static inline unsigned long get_current_gdt_rw_vaddr(void)
++{
++	return (unsigned long)get_current_gdt_rw();
++}
++
++/* Get the fixmap index for a specific processor */
++static inline unsigned int get_cpu_gdt_ro_index(int cpu)
++{
++	return FIX_GDT_REMAP_BEGIN + cpu;
++}
++
++/* Provide the fixmap address of the remapped GDT */
++static inline struct desc_struct *get_cpu_gdt_ro(int cpu)
++{
++	unsigned int idx = get_cpu_gdt_ro_index(cpu);
++	return (struct desc_struct *)__fix_to_virt(idx);
++}
++
++static inline unsigned long get_cpu_gdt_ro_vaddr(int cpu)
++{
++	return (unsigned long)get_cpu_gdt_ro(cpu);
++}
++
++/* Provide the current read-only GDT */
++static inline struct desc_struct *get_current_gdt_ro(void)
++{
++	return get_cpu_gdt_ro(smp_processor_id());
++}
++
++static inline unsigned long get_current_gdt_ro_vaddr(void)
++{
++	return (unsigned long)get_current_gdt_ro();
++}
++
+ #ifdef CONFIG_X86_64
+ 
+ static inline void pack_gate(gate_desc *gate, unsigned type, unsigned long func,
+@@ -174,7 +222,7 @@ static inline void set_tssldt_descriptor(void *d, unsigned long addr, unsigned t
+ 
+ static inline void __set_tss_desc(unsigned cpu, unsigned int entry, void *addr)
+ {
+-	struct desc_struct *d = get_cpu_gdt_table(cpu);
++	struct desc_struct *d = get_cpu_gdt_rw(cpu);
+ 	tss_desc tss;
+ 
+ 	set_tssldt_descriptor(&tss, (unsigned long)addr, DESC_TSS,
+@@ -194,7 +242,7 @@ static inline void native_set_ldt(const void *addr, unsigned int entries)
+ 
+ 		set_tssldt_descriptor(&ldt, (unsigned long)addr, DESC_LDT,
+ 				      entries * LDT_ENTRY_SIZE - 1);
+-		write_gdt_entry(get_cpu_gdt_table(cpu), GDT_ENTRY_LDT,
++		write_gdt_entry(get_cpu_gdt_rw(cpu), GDT_ENTRY_LDT,
+ 				&ldt, DESC_LDT);
+ 		asm volatile("lldt %w0"::"q" (GDT_ENTRY_LDT*8));
+ 	}
+@@ -209,7 +257,7 @@ DECLARE_PER_CPU(bool, __tss_limit_invalid);
+ 
+ static inline void force_reload_TR(void)
+ {
+-	struct desc_struct *d = get_cpu_gdt_table(smp_processor_id());
++	struct desc_struct *d = get_current_gdt_rw();
+ 	tss_desc tss;
+ 
+ 	memcpy(&tss, &d[GDT_ENTRY_TSS], sizeof(tss_desc));
+@@ -288,7 +336,7 @@ static inline unsigned long native_store_tr(void)
+ 
+ static inline void native_load_tls(struct thread_struct *t, unsigned int cpu)
+ {
+-	struct desc_struct *gdt = get_cpu_gdt_table(cpu);
++	struct desc_struct *gdt = get_cpu_gdt_rw(cpu);
+ 	unsigned int i;
+ 
+ 	for (i = 0; i < GDT_ENTRY_TLS_ENTRIES; i++)

@@ -1,0 +1,81 @@
+diff --git a/drivers/net/ethernet/mscc/ocelot.c b/drivers/net/ethernet/mscc/ocelot.c
+index 5abb7d2b0a9e..83eb7c325061 100644
+--- a/drivers/net/ethernet/mscc/ocelot.c
++++ b/drivers/net/ethernet/mscc/ocelot.c
+@@ -421,10 +421,15 @@ int ocelot_port_add_txtstamp_skb(struct ocelot_port *ocelot_port,
+ 
+ 	if (ocelot->ptp && shinfo->tx_flags & SKBTX_HW_TSTAMP &&
+ 	    ocelot_port->ptp_cmd == IFH_REW_OP_TWO_STEP_PTP) {
++		spin_lock(&ocelot_port->ts_id_lock);
++
+ 		shinfo->tx_flags |= SKBTX_IN_PROGRESS;
+ 		/* Store timestamp ID in cb[0] of sk_buff */
+-		skb->cb[0] = ocelot_port->ts_id % 4;
++		skb->cb[0] = ocelot_port->ts_id;
++		ocelot_port->ts_id = (ocelot_port->ts_id + 1) % 4;
+ 		skb_queue_tail(&ocelot_port->tx_skbs, skb);
++
++		spin_unlock(&ocelot_port->ts_id_lock);
+ 		return 0;
+ 	}
+ 	return -ENODATA;
+@@ -1300,6 +1305,7 @@ void ocelot_init_port(struct ocelot *ocelot, int port)
+ 	struct ocelot_port *ocelot_port = ocelot->ports[port];
+ 
+ 	skb_queue_head_init(&ocelot_port->tx_skbs);
++	spin_lock_init(&ocelot_port->ts_id_lock);
+ 
+ 	/* Basic L2 initialization */
+ 
+diff --git a/drivers/net/ethernet/mscc/ocelot_net.c b/drivers/net/ethernet/mscc/ocelot_net.c
+index cacabc23215a..8490e42e9e2d 100644
+--- a/drivers/net/ethernet/mscc/ocelot_net.c
++++ b/drivers/net/ethernet/mscc/ocelot_net.c
+@@ -349,10 +349,8 @@ static int ocelot_port_xmit(struct sk_buff *skb, struct net_device *dev)
+ 
+ 	if (ocelot->ptp && shinfo->tx_flags & SKBTX_HW_TSTAMP) {
+ 		info.rew_op = ocelot_port->ptp_cmd;
+-		if (ocelot_port->ptp_cmd == IFH_REW_OP_TWO_STEP_PTP) {
+-			info.rew_op |= (ocelot_port->ts_id  % 4) << 3;
+-			ocelot_port->ts_id++;
+-		}
++		if (ocelot_port->ptp_cmd == IFH_REW_OP_TWO_STEP_PTP)
++			info.rew_op |= skb->cb[0] << 3;
+ 	}
+ 
+ 	ocelot_gen_ifh(ifh, &info);
+diff --git a/include/soc/mscc/ocelot.h b/include/soc/mscc/ocelot.h
+index da369b12005f..4521dd602ddc 100644
+--- a/include/soc/mscc/ocelot.h
++++ b/include/soc/mscc/ocelot.h
+@@ -566,6 +566,7 @@ struct ocelot_port {
+ 	u8				ptp_cmd;
+ 	struct sk_buff_head		tx_skbs;
+ 	u8				ts_id;
++	spinlock_t			ts_id_lock;
+ 
+ 	phy_interface_t			phy_mode;
+ 
+diff --git a/net/dsa/tag_ocelot.c b/net/dsa/tag_ocelot.c
+index 42f327c06dca..b4fc05cafaa6 100644
+--- a/net/dsa/tag_ocelot.c
++++ b/net/dsa/tag_ocelot.c
+@@ -160,11 +160,14 @@ static struct sk_buff *ocelot_xmit(struct sk_buff *skb,
+ 	packing(injection, &qos_class, 19,  17, OCELOT_TAG_LEN, PACK, 0);
+ 
+ 	if (ocelot->ptp && (skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP)) {
++		struct sk_buff *clone = DSA_SKB_CB(skb)->clone;
++
+ 		rew_op = ocelot_port->ptp_cmd;
+-		if (ocelot_port->ptp_cmd == IFH_REW_OP_TWO_STEP_PTP) {
+-			rew_op |= (ocelot_port->ts_id  % 4) << 3;
+-			ocelot_port->ts_id++;
+-		}
++		/* Retrieve timestamp ID populated inside skb->cb[0] of the
++		 * clone by ocelot_port_add_txtstamp_skb
++		 */
++		if (ocelot_port->ptp_cmd == IFH_REW_OP_TWO_STEP_PTP)
++			rew_op |= clone->cb[0] << 3;
+ 
+ 		packing(injection, &rew_op, 125, 117, OCELOT_TAG_LEN, PACK, 0);
+ 	}

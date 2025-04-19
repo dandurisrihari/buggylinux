@@ -1,0 +1,53 @@
+commit a9f61ca793becabdefab03b77568d6c6f8c1bc79
+Author: Vitaly Kuznetsov <vkuznets@redhat.com>
+Date:   Fri Jun 3 17:09:22 2016 -0700
+
+    Drivers: hv: avoid vfree() on crash
+    
+    When we crash from NMI context (e.g. after NMI injection from host when
+    'sysctl -w kernel.unknown_nmi_panic=1' is set) we hit
+    
+        kernel BUG at mm/vmalloc.c:1530!
+    
+    as vfree() is denied. While the issue could be solved with in_nmi() check
+    instead I opted for skipping vfree on all sorts of crashes to reduce the
+    amount of work which can cause consequent crashes. We don't really need to
+    free anything on crash.
+    
+    Signed-off-by: Vitaly Kuznetsov <vkuznets@redhat.com>
+    Signed-off-by: K. Y. Srinivasan <kys@microsoft.com>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/hv/hv.c b/drivers/hv/hv.c
+index a1c086ba3b9a..60dbd6cb4640 100644
+--- a/drivers/hv/hv.c
++++ b/drivers/hv/hv.c
+@@ -278,7 +278,7 @@ int hv_init(void)
+  *
+  * This routine is called normally during driver unloading or exiting.
+  */
+-void hv_cleanup(void)
++void hv_cleanup(bool crash)
+ {
+ 	union hv_x64_msr_hypercall_contents hypercall_msr;
+ 
+@@ -288,7 +288,8 @@ void hv_cleanup(void)
+ 	if (hv_context.hypercall_page) {
+ 		hypercall_msr.as_uint64 = 0;
+ 		wrmsrl(HV_X64_MSR_HYPERCALL, hypercall_msr.as_uint64);
+-		vfree(hv_context.hypercall_page);
++		if (!crash)
++			vfree(hv_context.hypercall_page);
+ 		hv_context.hypercall_page = NULL;
+ 	}
+ 
+@@ -308,7 +309,8 @@ void hv_cleanup(void)
+ 
+ 		hypercall_msr.as_uint64 = 0;
+ 		wrmsrl(HV_X64_MSR_REFERENCE_TSC, hypercall_msr.as_uint64);
+-		vfree(hv_context.tsc_page);
++		if (!crash)
++			vfree(hv_context.tsc_page);
+ 		hv_context.tsc_page = NULL;
+ 	}
+ #endif

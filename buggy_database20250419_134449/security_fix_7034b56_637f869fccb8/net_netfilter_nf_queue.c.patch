@@ -1,0 +1,111 @@
+commit 7034b566a4e7d550621c2dfafd380b77b3787cd9
+Author: Pablo Neira Ayuso <pablo@netfilter.org>
+Date:   Mon Oct 17 18:05:32 2016 +0100
+
+    netfilter: fix nf_queue handling
+    
+    nf_queue handling is broken since e3b37f11e6e4 ("netfilter: replace
+    list_head with single linked list") for two reasons:
+    
+    1) If the bypass flag is set on, there are no userspace listeners and
+       we still have more hook entries to iterate over, then jump to the
+       next hook. Otherwise accept the packet. On nf_reinject() path, the
+       okfn() needs to be invoked.
+    
+    2) We should not re-enter the same hook on packet reinjection. If the
+       packet is accepted, we have to skip the current hook from where the
+       packet was enqueued, otherwise the packets gets enqueued over and
+       over again.
+    
+    This restores the previous list_for_each_entry_continue() behaviour
+    happening from nf_iterate() that was dealing with these two cases.
+    This patch introduces a new nf_queue() wrapper function so this fix
+    becomes simpler.
+    
+    Fixes: e3b37f11e6e4 ("netfilter: replace list_head with single linked list")
+    Signed-off-by: Pablo Neira Ayuso <pablo@netfilter.org>
+
+diff --git a/net/netfilter/nf_queue.c b/net/netfilter/nf_queue.c
+index 96964a0070e1..8f08d759844a 100644
+--- a/net/netfilter/nf_queue.c
++++ b/net/netfilter/nf_queue.c
+@@ -107,13 +107,8 @@ void nf_queue_nf_hook_drop(struct net *net, const struct nf_hook_entry *entry)
+ 	rcu_read_unlock();
+ }
+ 
+-/*
+- * Any packet that leaves via this function must come back
+- * through nf_reinject().
+- */
+-int nf_queue(struct sk_buff *skb,
+-	     struct nf_hook_state *state,
+-	     unsigned int queuenum)
++static int __nf_queue(struct sk_buff *skb, const struct nf_hook_state *state,
++		      unsigned int queuenum)
+ {
+ 	int status = -ENOENT;
+ 	struct nf_queue_entry *entry = NULL;
+@@ -161,6 +156,27 @@ int nf_queue(struct sk_buff *skb,
+ 	return status;
+ }
+ 
++/* Packets leaving via this function must come back through nf_reinject(). */
++int nf_queue(struct sk_buff *skb, struct nf_hook_state *state,
++	     struct nf_hook_entry **entryp, unsigned int verdict)
++{
++	struct nf_hook_entry *entry = *entryp;
++	int ret;
++
++	RCU_INIT_POINTER(state->hook_entries, entry);
++	ret = __nf_queue(skb, state, verdict >> NF_VERDICT_QBITS);
++	if (ret < 0) {
++		if (ret == -ESRCH &&
++		    (verdict & NF_VERDICT_FLAG_QUEUE_BYPASS)) {
++			*entryp = rcu_dereference(entry->next);
++			return 1;
++		}
++		kfree_skb(skb);
++	}
++
++	return 0;
++}
++
+ void nf_reinject(struct nf_queue_entry *entry, unsigned int verdict)
+ {
+ 	struct nf_hook_entry *hook_entry;
+@@ -187,26 +203,26 @@ void nf_reinject(struct nf_queue_entry *entry, unsigned int verdict)
+ 	entry->state.thresh = INT_MIN;
+ 
+ 	if (verdict == NF_ACCEPT) {
+-	next_hook:
+-		verdict = nf_iterate(skb, &entry->state, &hook_entry);
++		hook_entry = rcu_dereference(hook_entry->next);
++		if (hook_entry)
++next_hook:
++			verdict = nf_iterate(skb, &entry->state, &hook_entry);
+ 	}
+ 
+ 	switch (verdict & NF_VERDICT_MASK) {
+ 	case NF_ACCEPT:
+ 	case NF_STOP:
++okfn:
+ 		local_bh_disable();
+ 		entry->state.okfn(entry->state.net, entry->state.sk, skb);
+ 		local_bh_enable();
+ 		break;
+ 	case NF_QUEUE:
+-		RCU_INIT_POINTER(entry->state.hook_entries, hook_entry);
+-		err = nf_queue(skb, &entry->state,
+-			       verdict >> NF_VERDICT_QBITS);
+-		if (err < 0) {
+-			if (err == -ESRCH &&
+-			   (verdict & NF_VERDICT_FLAG_QUEUE_BYPASS))
++		err = nf_queue(skb, &entry->state, &hook_entry, verdict);
++		if (err == 1) {
++			if (hook_entry)
+ 				goto next_hook;
+-			kfree_skb(skb);
++			goto okfn;
+ 		}
+ 		break;
+ 	case NF_STOLEN:

@@ -1,0 +1,61 @@
+commit 10cb8e617560fc050a759a897a2dde07a5fe04cb
+Author: Markus Theil <markus.theil@tu-ilmenau.de>
+Date:   Sat Feb 6 12:51:12 2021 +0100
+
+    mac80211: enable QoS support for nl80211 ctrl port
+    
+    This patch unifies sending control port frames
+    over nl80211 and AF_PACKET sockets a little more.
+    
+    Before this patch, EAPOL frames got QoS prioritization
+    only when using AF_PACKET sockets.
+    
+    __ieee80211_select_queue only selects a QoS-enabled queue
+    for control port frames, when the control port protocol
+    is set correctly on the skb. For the AF_PACKET path this
+    works, but the nl80211 path used ETH_P_802_3.
+    
+    Another check for injected frames in wme.c then prevented
+    the QoS TID to be copied in the frame.
+    
+    In order to fix this, get rid of the frame injection marking
+    for nl80211 ctrl port and set the correct ethernet protocol.
+    
+    Please note:
+    An erlier version of this path tried to prevent
+    frame aggregation for control port frames in order to speed up
+    the initial connection setup a little. This seemed to cause
+    issues on my older Intel dvm-based hardware, and was therefore
+    removed again. Future commits which try to reintroduce this
+    have to check carefully how hw behaves with aggregated and
+    non-aggregated traffic for the same TID.
+    My NIC: Intel(R) Centrino(R) Ultimate-N 6300 AGN, REV=0x74
+    
+    Reported-by: kernel test robot <lkp@intel.com>
+    Signed-off-by: Markus Theil <markus.theil@tu-ilmenau.de>
+    Link: https://lore.kernel.org/r/20210206115112.567881-1-markus.theil@tu-ilmenau.de
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+diff --git a/net/mac80211/status.c b/net/mac80211/status.c
+index 3485610755ef..9baf185ee4c7 100644
+--- a/net/mac80211/status.c
++++ b/net/mac80211/status.c
+@@ -628,16 +628,12 @@ static void ieee80211_report_ack_skb(struct ieee80211_local *local,
+ 		u64 cookie = IEEE80211_SKB_CB(skb)->ack.cookie;
+ 		struct ieee80211_sub_if_data *sdata;
+ 		struct ieee80211_hdr *hdr = (void *)skb->data;
+-		__be16 ethertype = 0;
+-
+-		if (skb->len >= ETH_HLEN && skb->protocol == cpu_to_be16(ETH_P_802_3))
+-			skb_copy_bits(skb, 2 * ETH_ALEN, &ethertype, ETH_TLEN);
+ 
+ 		rcu_read_lock();
+ 		sdata = ieee80211_sdata_from_skb(local, skb);
+ 		if (sdata) {
+-			if (ethertype == sdata->control_port_protocol ||
+-			    ethertype == cpu_to_be16(ETH_P_PREAUTH))
++			if (skb->protocol == sdata->control_port_protocol ||
++			    skb->protocol == cpu_to_be16(ETH_P_PREAUTH))
+ 				cfg80211_control_port_tx_status(&sdata->wdev,
+ 								cookie,
+ 								skb->data,

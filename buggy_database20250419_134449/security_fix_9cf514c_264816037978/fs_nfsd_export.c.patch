@@ -1,0 +1,95 @@
+commit 9cf514ccfacb301f3b1b4509a8ce25dffad55880
+Author: Christoph Hellwig <hch@lst.de>
+Date:   Mon May 5 13:11:59 2014 +0200
+
+    nfsd: implement pNFS operations
+    
+    Add support for the GETDEVICEINFO, LAYOUTGET, LAYOUTCOMMIT and
+    LAYOUTRETURN NFSv4.1 operations, as well as backing code to manage
+    outstanding layouts and devices.
+    
+    Layout management is very straight forward, with a nfs4_layout_stateid
+    structure that extends nfs4_stid to manage layout stateids as the
+    top-level structure.  It is linked into the nfs4_file and nfs4_client
+    structures like the other stateids, and contains a linked list of
+    layouts that hang of the stateid.  The actual layout operations are
+    implemented in layout drivers that are not part of this commit, but
+    will be added later.
+    
+    The worst part of this commit is the management of the pNFS device IDs,
+    which suffers from a specification that is not sanely implementable due
+    to the fact that the device-IDs are global and not bound to an export,
+    and have a small enough size so that we can't store the fsid portion of
+    a file handle, and must never be reused.  As we still do need perform all
+    export authentication and validation checks on a device ID passed to
+    GETDEVICEINFO we are caught between a rock and a hard place.  To work
+    around this issue we add a new hash that maps from a 64-bit integer to a
+    fsid so that we can look up the export to authenticate against it,
+    a 32-bit integer as a generation that we can bump when changing the device,
+    and a currently unused 32-bit integer that could be used in the future
+    to handle more than a single device per export.  Entries in this hash
+    table are never deleted as we can't reuse the ids anyway, and would have
+    a severe lifetime problem anyway as Linux export structures are temporary
+    structures that can go away under load.
+    
+    Parts of the XDR data, structures and marshaling/unmarshaling code, as
+    well as many concepts are derived from the old pNFS server implementation
+    from Andy Adamson, Benny Halevy, Dean Hildebrand, Marc Eshel, Fred Isaman,
+    Mike Sager, Ricardo Labiaga and many others.
+    
+    Signed-off-by: Christoph Hellwig <hch@lst.de>
+
+diff --git a/fs/nfsd/export.c b/fs/nfsd/export.c
+index 30a739d896ff..c3e3b6e55ae2 100644
+--- a/fs/nfsd/export.c
++++ b/fs/nfsd/export.c
+@@ -20,6 +20,7 @@
+ #include "nfsd.h"
+ #include "nfsfh.h"
+ #include "netns.h"
++#include "pnfs.h"
+ 
+ #define NFSDDBG_FACILITY	NFSDDBG_EXPORT
+ 
+@@ -545,6 +546,7 @@ static int svc_export_parse(struct cache_detail *cd, char *mesg, int mlen)
+ 
+ 	exp.ex_client = dom;
+ 	exp.cd = cd;
++	exp.ex_devid_map = NULL;
+ 
+ 	/* expiry */
+ 	err = -EINVAL;
+@@ -621,6 +623,8 @@ static int svc_export_parse(struct cache_detail *cd, char *mesg, int mlen)
+ 		if (!gid_valid(exp.ex_anon_gid))
+ 			goto out4;
+ 		err = 0;
++
++		nfsd4_setup_layout_type(&exp);
+ 	}
+ 
+ 	expp = svc_export_lookup(&exp);
+@@ -703,6 +707,7 @@ static void svc_export_init(struct cache_head *cnew, struct cache_head *citem)
+ 	new->ex_fslocs.locations = NULL;
+ 	new->ex_fslocs.locations_count = 0;
+ 	new->ex_fslocs.migrated = 0;
++	new->ex_layout_type = 0;
+ 	new->ex_uuid = NULL;
+ 	new->cd = item->cd;
+ }
+@@ -717,6 +722,8 @@ static void export_update(struct cache_head *cnew, struct cache_head *citem)
+ 	new->ex_anon_uid = item->ex_anon_uid;
+ 	new->ex_anon_gid = item->ex_anon_gid;
+ 	new->ex_fsid = item->ex_fsid;
++	new->ex_devid_map = item->ex_devid_map;
++	item->ex_devid_map = NULL;
+ 	new->ex_uuid = item->ex_uuid;
+ 	item->ex_uuid = NULL;
+ 	new->ex_fslocs.locations = item->ex_fslocs.locations;
+@@ -725,6 +732,7 @@ static void export_update(struct cache_head *cnew, struct cache_head *citem)
+ 	item->ex_fslocs.locations_count = 0;
+ 	new->ex_fslocs.migrated = item->ex_fslocs.migrated;
+ 	item->ex_fslocs.migrated = 0;
++	new->ex_layout_type = item->ex_layout_type;
+ 	new->ex_nflavors = item->ex_nflavors;
+ 	for (i = 0; i < MAX_SECINFO_LIST; i++) {
+ 		new->ex_flavors[i] = item->ex_flavors[i];

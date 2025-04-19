@@ -1,0 +1,67 @@
+commit 4531220b71f0399e71cda0c4cf749e7281a7416a
+Author: Jan Kiszka <jan.kiszka@siemens.com>
+Date:   Thu Dec 11 16:54:54 2008 +0100
+
+    KVM: x86: Rework user space NMI injection as KVM_CAP_USER_NMI
+    
+    There is no point in doing the ready_for_nmi_injection/
+    request_nmi_window dance with user space. First, we don't do this for
+    in-kernel irqchip anyway, while the code path is the same as for user
+    space irqchip mode. And second, there is nothing to loose if a pending
+    NMI is overwritten by another one (in contrast to IRQs where we have to
+    save the number). Actually, there is even the risk of raising spurious
+    NMIs this way because the reason for the held-back NMI might already be
+    handled while processing the first one.
+    
+    Therefore this patch creates a simplified user space NMI injection
+    interface, exporting it under KVM_CAP_USER_NMI and dropping the old
+    KVM_CAP_NMI capability. And this time we also take care to provide the
+    interface only on archs supporting NMIs via KVM (right now only x86).
+    
+    Signed-off-by: Jan Kiszka <jan.kiszka@siemens.com>
+    Signed-off-by: Avi Kivity <avi@redhat.com>
+
+diff --git a/include/linux/kvm.h b/include/linux/kvm.h
+index 48807767e726..35525ac63337 100644
+--- a/include/linux/kvm.h
++++ b/include/linux/kvm.h
+@@ -84,21 +84,18 @@ struct kvm_irqchip {
+ #define KVM_EXIT_S390_RESET       14
+ #define KVM_EXIT_DCR              15
+ #define KVM_EXIT_NMI              16
+-#define KVM_EXIT_NMI_WINDOW_OPEN  17
+ 
+ /* for KVM_RUN, returned by mmap(vcpu_fd, offset=0) */
+ struct kvm_run {
+ 	/* in */
+ 	__u8 request_interrupt_window;
+-	__u8 request_nmi_window;
+-	__u8 padding1[6];
++	__u8 padding1[7];
+ 
+ 	/* out */
+ 	__u32 exit_reason;
+ 	__u8 ready_for_interrupt_injection;
+ 	__u8 if_flag;
+-	__u8 ready_for_nmi_injection;
+-	__u8 padding2;
++	__u8 padding2[2];
+ 
+ 	/* in (pre_kvm_run), out (post_kvm_run) */
+ 	__u64 cr8;
+@@ -391,12 +388,14 @@ struct kvm_trace_rec {
+ #define KVM_CAP_DEVICE_ASSIGNMENT 17
+ #endif
+ #define KVM_CAP_IOMMU 18
+-#define KVM_CAP_NMI 19
+ #if defined(CONFIG_X86)
+ #define KVM_CAP_DEVICE_MSI 20
+ #endif
+ /* Bug in KVM_SET_USER_MEMORY_REGION fixed: */
+ #define KVM_CAP_DESTROY_MEMORY_REGION_WORKS 21
++#if defined(CONFIG_X86)
++#define KVM_CAP_USER_NMI 22
++#endif
+ 
+ /*
+  * ioctls for VM fds

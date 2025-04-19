@@ -1,0 +1,197 @@
+diff --git a/tools/testing/selftests/powerpc/Makefile b/tools/testing/selftests/powerpc/Makefile
+index b3ad909aefbc..644770c3b754 100644
+--- a/tools/testing/selftests/powerpc/Makefile
++++ b/tools/testing/selftests/powerpc/Makefile
+@@ -26,6 +26,7 @@ SUB_DIRS = alignment		\
+ 	   switch_endian	\
+ 	   syscalls		\
+ 	   tm			\
++	   eeh			\
+ 	   vphn         \
+ 	   math		\
+ 	   ptrace	\
+diff --git a/tools/testing/selftests/powerpc/eeh/Makefile b/tools/testing/selftests/powerpc/eeh/Makefile
+new file mode 100644
+index 000000000000..b397babd569b
+--- /dev/null
++++ b/tools/testing/selftests/powerpc/eeh/Makefile
+@@ -0,0 +1,9 @@
++# SPDX-License-Identifier: GPL-2.0
++noarg:
++	$(MAKE) -C ../
++
++TEST_PROGS := eeh-basic.sh
++TEST_FILES := eeh-functions.sh
++
++top_srcdir = ../../../../..
++include ../../lib.mk
+diff --git a/tools/testing/selftests/powerpc/eeh/eeh-basic.sh b/tools/testing/selftests/powerpc/eeh/eeh-basic.sh
+new file mode 100755
+index 000000000000..f988d2f42e8f
+--- /dev/null
++++ b/tools/testing/selftests/powerpc/eeh/eeh-basic.sh
+@@ -0,0 +1,82 @@
++#!/bin/sh
++# SPDX-License-Identifier: GPL-2.0-only
++
++. ./eeh-functions.sh
++
++if ! eeh_supported ; then
++	echo "EEH not supported on this system, skipping"
++	exit 0;
++fi
++
++if [ ! -e "/sys/kernel/debug/powerpc/eeh_dev_check" ] && \
++   [ ! -e "/sys/kernel/debug/powerpc/eeh_dev_break" ] ; then
++	echo "debugfs EEH testing files are missing. Is debugfs mounted?"
++	exit 1;
++fi
++
++pre_lspci=`mktemp`
++lspci > $pre_lspci
++
++# Bump the max freeze count to something absurd so we don't
++# trip over it while breaking things.
++echo 5000 > /sys/kernel/debug/powerpc/eeh_max_freezes
++
++# record the devices that we break in here. Assuming everything
++# goes to plan we should get them back once the recover process
++# is finished.
++devices=""
++
++# Build up a list of candidate devices.
++for dev in `ls -1 /sys/bus/pci/devices/ | grep '\.0$'` ; do
++	# skip bridges since we can't recover them (yet...)
++	if [ -e "/sys/bus/pci/devices/$dev/pci_bus" ] ; then
++		echo "$dev, Skipped: bridge"
++		continue;
++	fi
++
++	# Skip VFs for now since we don't have a reliable way
++	# to break them.
++	if [ -e "/sys/bus/pci/devices/$dev/physfn" ] ; then
++		echo "$dev, Skipped: virtfn"
++		continue;
++	fi
++
++	# Don't inject errosr into an already-frozen PE. This happens with
++	# PEs that contain multiple PCI devices (e.g. multi-function cards)
++	# and injecting new errors during the recovery process will probably
++	# result in the recovery failing and the device being marked as
++	# failed.
++	if ! pe_ok $dev ; then
++		echo "$dev, Skipped: Bad initial PE state"
++		continue;
++	fi
++
++	echo "$dev, Added"
++
++	# Add to this list of device to check
++	devices="$devices $dev"
++done
++
++dev_count="$(echo $devices | wc -w)"
++echo "Found ${dev_count} breakable devices..."
++
++failed=0
++for dev in $devices ; do
++	echo "Breaking $dev..."
++
++	if ! pe_ok $dev ; then
++		echo "Skipping $dev, Initial PE state is not ok"
++		failed="$((failed + 1))"
++		continue;
++	fi
++
++	if ! eeh_one_dev $dev ; then
++		failed="$((failed + 1))"
++	fi
++done
++
++echo "$failed devices failed to recover ($dev_count tested)"
++lspci | diff -u $pre_lspci -
++rm -f $pre_lspci
++
++exit $failed
+diff --git a/tools/testing/selftests/powerpc/eeh/eeh-functions.sh b/tools/testing/selftests/powerpc/eeh/eeh-functions.sh
+new file mode 100755
+index 000000000000..26112ab5cdf4
+--- /dev/null
++++ b/tools/testing/selftests/powerpc/eeh/eeh-functions.sh
+@@ -0,0 +1,76 @@
++#!/bin/sh
++# SPDX-License-Identifier: GPL-2.0-only
++
++pe_ok() {
++	local dev="$1"
++	local path="/sys/bus/pci/devices/$dev/eeh_pe_state"
++
++	if ! [ -e "$path" ] ; then
++		return 1;
++	fi
++
++	local fw_state="$(cut -d' ' -f1 < $path)"
++	local sw_state="$(cut -d' ' -f2 < $path)"
++
++	# If EEH_PE_ISOLATED or EEH_PE_RECOVERING are set then the PE is in an
++	# error state or being recovered. Either way, not ok.
++	if [ "$((sw_state & 0x3))" -ne 0 ] ; then
++		return 1
++	fi
++
++	# A functioning PE should have the EEH_STATE_MMIO_ACTIVE and
++	# EEH_STATE_DMA_ACTIVE flags set. For some goddamn stupid reason
++	# the platform backends set these when the PE is in reset. The
++	# RECOVERING check above should stop any false positives though.
++	if [ "$((fw_state & 0x18))" -ne "$((0x18))" ] ; then
++		return 1
++	fi
++
++	return 0;
++}
++
++eeh_supported() {
++	test -e /proc/powerpc/eeh && \
++	grep -q 'EEH Subsystem is enabled' /proc/powerpc/eeh
++}
++
++eeh_one_dev() {
++	local dev="$1"
++
++	# Using this function from the command line is sometimes useful for
++	# testing so check that the argument is a well-formed sysfs device
++	# name.
++	if ! test -e /sys/bus/pci/devices/$dev/ ; then
++		echo "Error: '$dev' must be a sysfs device name (DDDD:BB:DD.F)"
++		return 1;
++	fi
++
++	# Break it
++	echo $dev >/sys/kernel/debug/powerpc/eeh_dev_break
++
++	# Force an EEH device check. If the kernel has already
++	# noticed the EEH (due to a driver poll or whatever), this
++	# is a no-op.
++	echo $dev >/sys/kernel/debug/powerpc/eeh_dev_check
++
++	# Enforce a 30s timeout for recovery. Even the IPR, which is infamously
++	# slow to reset, should recover within 30s.
++	max_wait=30
++
++	for i in `seq 0 ${max_wait}` ; do
++		if pe_ok $dev ; then
++			break;
++		fi
++		echo "$dev, waited $i/${max_wait}"
++		sleep 1
++	done
++
++	if ! pe_ok $dev ; then
++		echo "$dev, Failed to recover!"
++		return 1;
++	fi
++
++	echo "$dev, Recovered after $i seconds"
++	return 0;
++}
++

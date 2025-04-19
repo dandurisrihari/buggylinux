@@ -1,0 +1,83 @@
+commit 5d8beee20d89e34ff1dcb0da84adf7607858c59d
+Author: Dan Williams <dan.j.williams@intel.com>
+Date:   Tue May 1 06:49:45 2018 -0700
+
+    x86, nfit_test: Add unit test for memcpy_mcsafe()
+    
+    Given the fact that the ACPI "EINJ" (error injection) facility is not
+    universally available, implement software infrastructure to validate the
+    memcpy_mcsafe() exception handling implementation.
+    
+    For each potential read exception point in memcpy_mcsafe(), inject a
+    emulated exception point at the address identified by 'mcsafe_inject'
+    variable. With this infrastructure implement a test to validate that the
+    'bytes remaining' calculation is correct for a range of various source
+    buffer alignments.
+    
+    This code is compiled out by default. The CONFIG_MCSAFE_DEBUG
+    configuration symbol needs to be manually enabled by editing
+    Kconfig.debug. I.e. this functionality can not be accidentally enabled
+    by a user / distro, it's only for development.
+    
+    Cc: <x86@kernel.org>
+    Cc: Ingo Molnar <mingo@redhat.com>
+    Cc: Borislav Petkov <bp@alien8.de>
+    Cc: Tony Luck <tony.luck@intel.com>
+    Cc: Al Viro <viro@zeniv.linux.org.uk>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Andy Lutomirski <luto@amacapital.net>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Andrew Morton <akpm@linux-foundation.org>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Reported-by: Tony Luck <tony.luck@intel.com>
+    Signed-off-by: Dan Williams <dan.j.williams@intel.com>
+
+diff --git a/arch/x86/lib/memcpy_64.S b/arch/x86/lib/memcpy_64.S
+index c3b527a9f95d..298ef1479240 100644
+--- a/arch/x86/lib/memcpy_64.S
++++ b/arch/x86/lib/memcpy_64.S
+@@ -3,6 +3,7 @@
+ #include <linux/linkage.h>
+ #include <asm/errno.h>
+ #include <asm/cpufeatures.h>
++#include <asm/mcsafe_test.h>
+ #include <asm/alternative-asm.h>
+ #include <asm/export.h>
+ 
+@@ -183,6 +184,9 @@ ENTRY(memcpy_orig)
+ ENDPROC(memcpy_orig)
+ 
+ #ifndef CONFIG_UML
++
++MCSAFE_TEST_CTL
++
+ /*
+  * __memcpy_mcsafe - memory copy with machine check exception handling
+  * Note that we only catch machine checks when reading the source addresses.
+@@ -206,6 +210,8 @@ ENTRY(__memcpy_mcsafe)
+ 	subl %ecx, %edx
+ .L_read_leading_bytes:
+ 	movb (%rsi), %al
++	MCSAFE_TEST_SRC %rsi 1 .E_leading_bytes
++	MCSAFE_TEST_DST %rdi 1 .E_leading_bytes
+ .L_write_leading_bytes:
+ 	movb %al, (%rdi)
+ 	incq %rsi
+@@ -221,6 +227,8 @@ ENTRY(__memcpy_mcsafe)
+ 
+ .L_read_words:
+ 	movq (%rsi), %r8
++	MCSAFE_TEST_SRC %rsi 8 .E_read_words
++	MCSAFE_TEST_DST %rdi 8 .E_write_words
+ .L_write_words:
+ 	movq %r8, (%rdi)
+ 	addq $8, %rsi
+@@ -237,6 +245,8 @@ ENTRY(__memcpy_mcsafe)
+ 	movl %edx, %ecx
+ .L_read_trailing_bytes:
+ 	movb (%rsi), %al
++	MCSAFE_TEST_SRC %rsi 1 .E_trailing_bytes
++	MCSAFE_TEST_DST %rdi 1 .E_trailing_bytes
+ .L_write_trailing_bytes:
+ 	movb %al, (%rdi)
+ 	incq %rsi

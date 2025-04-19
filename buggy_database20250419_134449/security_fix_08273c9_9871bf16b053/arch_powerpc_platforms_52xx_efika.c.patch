@@ -1,0 +1,55 @@
+commit 08273c9f619cb32fb041935724f576e607101f3b
+Author: Nathan Lynch <nathanl@linux.ibm.com>
+Date:   Fri Feb 10 12:42:08 2023 -0600
+
+    powerpc/rtas: arch-wide function token lookup conversions
+    
+    With the tokens for all implemented RTAS functions now available via
+    rtas_function_token(), which is optimal and safe for arbitrary
+    contexts, there is no need to use rtas_token() or cache its result.
+    
+    Most conversions are trivial, but a few are worth describing in more
+    detail:
+    
+    * Error injection token comparisons for lockdown purposes are
+      consolidated into a simple predicate: token_is_restricted_errinjct().
+    
+    * A couple of special cases in block_rtas_call() do not use
+      rtas_token() but perform string comparisons against names in the
+      function table. These are converted to compare against token values
+      instead, which is logically equivalent but less expensive.
+    
+    * The lookup for the ibm,os-term token can be deferred until needed,
+      instead of caching it at boot to avoid device tree traversal during
+      panic.
+    
+    * Since rtas_function_token() accesses a read-only data structure
+      without taking any locks, xmon's lookup of set-indicator can be
+      performed as needed instead of cached at startup.
+    
+    Signed-off-by: Nathan Lynch <nathanl@linux.ibm.com>
+    Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+    Link: https://lore.kernel.org/r/20230125-b4-powerpc-rtas-queue-v3-20-26929c8cce78@linux.ibm.com
+
+diff --git a/arch/powerpc/platforms/52xx/efika.c b/arch/powerpc/platforms/52xx/efika.c
+index e0647720ed5e..61dfec74ff85 100644
+--- a/arch/powerpc/platforms/52xx/efika.c
++++ b/arch/powerpc/platforms/52xx/efika.c
+@@ -41,7 +41,7 @@ static int rtas_read_config(struct pci_bus *bus, unsigned int devfn, int offset,
+ 	int ret = -1;
+ 	int rval;
+ 
+-	rval = rtas_call(rtas_token("read-pci-config"), 2, 2, &ret, addr, len);
++	rval = rtas_call(rtas_function_token(RTAS_FN_READ_PCI_CONFIG), 2, 2, &ret, addr, len);
+ 	*val = ret;
+ 	return rval ? PCIBIOS_DEVICE_NOT_FOUND : PCIBIOS_SUCCESSFUL;
+ }
+@@ -55,7 +55,7 @@ static int rtas_write_config(struct pci_bus *bus, unsigned int devfn,
+ 	    | (hose->global_number << 24);
+ 	int rval;
+ 
+-	rval = rtas_call(rtas_token("write-pci-config"), 3, 1, NULL,
++	rval = rtas_call(rtas_function_token(RTAS_FN_WRITE_PCI_CONFIG), 3, 1, NULL,
+ 			 addr, len, val);
+ 	return rval ? PCIBIOS_DEVICE_NOT_FOUND : PCIBIOS_SUCCESSFUL;
+ }

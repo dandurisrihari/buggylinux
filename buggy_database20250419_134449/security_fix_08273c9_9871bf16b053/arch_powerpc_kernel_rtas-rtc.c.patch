@@ -1,0 +1,64 @@
+commit 08273c9f619cb32fb041935724f576e607101f3b
+Author: Nathan Lynch <nathanl@linux.ibm.com>
+Date:   Fri Feb 10 12:42:08 2023 -0600
+
+    powerpc/rtas: arch-wide function token lookup conversions
+    
+    With the tokens for all implemented RTAS functions now available via
+    rtas_function_token(), which is optimal and safe for arbitrary
+    contexts, there is no need to use rtas_token() or cache its result.
+    
+    Most conversions are trivial, but a few are worth describing in more
+    detail:
+    
+    * Error injection token comparisons for lockdown purposes are
+      consolidated into a simple predicate: token_is_restricted_errinjct().
+    
+    * A couple of special cases in block_rtas_call() do not use
+      rtas_token() but perform string comparisons against names in the
+      function table. These are converted to compare against token values
+      instead, which is logically equivalent but less expensive.
+    
+    * The lookup for the ibm,os-term token can be deferred until needed,
+      instead of caching it at boot to avoid device tree traversal during
+      panic.
+    
+    * Since rtas_function_token() accesses a read-only data structure
+      without taking any locks, xmon's lookup of set-indicator can be
+      performed as needed instead of cached at startup.
+    
+    Signed-off-by: Nathan Lynch <nathanl@linux.ibm.com>
+    Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+    Link: https://lore.kernel.org/r/20230125-b4-powerpc-rtas-queue-v3-20-26929c8cce78@linux.ibm.com
+
+diff --git a/arch/powerpc/kernel/rtas-rtc.c b/arch/powerpc/kernel/rtas-rtc.c
+index 5a31d1829bca..6996214532bd 100644
+--- a/arch/powerpc/kernel/rtas-rtc.c
++++ b/arch/powerpc/kernel/rtas-rtc.c
+@@ -21,7 +21,7 @@ time64_t __init rtas_get_boot_time(void)
+ 
+ 	max_wait_tb = get_tb() + tb_ticks_per_usec * 1000 * MAX_RTC_WAIT;
+ 	do {
+-		error = rtas_call(rtas_token("get-time-of-day"), 0, 8, ret);
++		error = rtas_call(rtas_function_token(RTAS_FN_GET_TIME_OF_DAY), 0, 8, ret);
+ 
+ 		wait_time = rtas_busy_delay_time(error);
+ 		if (wait_time) {
+@@ -53,7 +53,7 @@ void rtas_get_rtc_time(struct rtc_time *rtc_tm)
+ 
+ 	max_wait_tb = get_tb() + tb_ticks_per_usec * 1000 * MAX_RTC_WAIT;
+ 	do {
+-		error = rtas_call(rtas_token("get-time-of-day"), 0, 8, ret);
++		error = rtas_call(rtas_function_token(RTAS_FN_GET_TIME_OF_DAY), 0, 8, ret);
+ 
+ 		wait_time = rtas_busy_delay_time(error);
+ 		if (wait_time) {
+@@ -90,7 +90,7 @@ int rtas_set_rtc_time(struct rtc_time *tm)
+ 
+ 	max_wait_tb = get_tb() + tb_ticks_per_usec * 1000 * MAX_RTC_WAIT;
+ 	do {
+-	        error = rtas_call(rtas_token("set-time-of-day"), 7, 1, NULL,
++		error = rtas_call(rtas_function_token(RTAS_FN_SET_TIME_OF_DAY), 7, 1, NULL,
+ 				  tm->tm_year + 1900, tm->tm_mon + 1,
+ 				  tm->tm_mday, tm->tm_hour, tm->tm_min,
+ 				  tm->tm_sec, 0);

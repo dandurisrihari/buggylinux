@@ -1,0 +1,59 @@
+commit d84ad2c0d80c3ee1b7d758e2c07d043fcf32d568
+Author: Daniel Machon <daniel.machon@microchip.com>
+Date:   Mon Jan 13 20:36:09 2025 +0100
+
+    net: lan969x: add FDMA implementation
+    
+    The lan969x switch device supports manual frame injection and extraction
+    to and from the switch core, using a number of injection and extraction
+    queues.  This technique is currently supported, but delivers poor
+    performance compared to Frame DMA (FDMA).
+    
+    This lan969x implementation of FDMA, hooks into the existing FDMA for
+    Sparx5, but requires its own RX and TX handling, as lan969x does not
+    support the same native cache coherency that Sparx5 does. Effectively,
+    this means that we are going to use the DMA mapping API for mapping and
+    unmapping TX buffers. The RX loop will utilize the page pool API for
+    efficient RX handling. Other than that, the implementation is largely
+    the same, and utilizes the FDMA library for DCB and DB handling.
+    
+    Some numbers:
+    
+    Manual injection/extraction (before this series):
+    
+    // iperf3 -c 1.0.1.1
+    
+    [ ID] Interval           Transfer     Bitrate
+    [  5]   0.00-10.02  sec   345 MBytes   289 Mbits/sec  sender
+    [  5]   0.00-10.06  sec   345 MBytes   288 Mbits/sec  receiver
+    
+    FDMA (after this series):
+    
+    // iperf3 -c 1.0.1.1
+    
+    [ ID] Interval           Transfer     Bitrate
+    [  5]   0.00-10.03  sec  1.10 GBytes   940 Mbits/sec  sender
+    [  5]   0.00-10.07  sec  1.10 GBytes   936 Mbits/sec  receiver
+    
+    Reviewed-by: Steen Hegelund <Steen.Hegelund@microchip.com>
+    Signed-off-by: Daniel Machon <daniel.machon@microchip.com>
+    Link: https://patch.msgid.link/20250113-sparx5-lan969x-switch-driver-5-v2-5-c468f02fd623@microchip.com
+    Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+diff --git a/drivers/net/ethernet/microchip/sparx5/sparx5_packet.c b/drivers/net/ethernet/microchip/sparx5/sparx5_packet.c
+index f39cf01dee0f..138ac58fae51 100644
+--- a/drivers/net/ethernet/microchip/sparx5/sparx5_packet.c
++++ b/drivers/net/ethernet/microchip/sparx5/sparx5_packet.c
+@@ -267,6 +267,12 @@ netdev_tx_t sparx5_port_xmit_impl(struct sk_buff *skb, struct net_device *dev)
+ 	if (ret < 0)
+ 		goto drop;
+ 
++	if (!is_sparx5(sparx5))
++		/* When lan969x and TX_OK, stats and SKB consumption is handled
++		 * in the TX completion loop, so dont go any further.
++		 */
++		return NETDEV_TX_OK;
++
+ 	stats->tx_bytes += skb->len;
+ 	stats->tx_packets++;
+ 	sparx5->tx.packets++;

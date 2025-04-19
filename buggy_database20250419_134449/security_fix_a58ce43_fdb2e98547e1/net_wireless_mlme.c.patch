@@ -1,0 +1,81 @@
+commit a58ce43f2fb17b728395ff530f019ca53c80145f
+Author: Johannes Berg <johannes@sipsolutions.net>
+Date:   Thu Nov 19 12:45:42 2009 +0100
+
+    mac80211: avoid spurious deauth frames/messages
+    
+    With WEXT, it happens frequently that the SME
+    requests an authentication but then deauthenticates
+    right away because some new parameters came along.
+    Every time this happens we print a deauth message
+    and send a deauth frame, but both of that is rather
+    confusing. Avoid it by aborting the authentication
+    process silently, and telling cfg80211 about that.
+    
+    The patch looks larger than it really is:
+    __cfg80211_auth_remove() is split out from
+    cfg80211_send_auth_timeout(), there's no new code
+    except __cfg80211_auth_canceled() (a one-liner) and
+    the mac80211 bits (7 new lines of code).
+    
+    Signed-off-by: Johannes Berg <johannes@sipsolutions.net>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/wireless/mlme.c b/net/wireless/mlme.c
+index 622af5649b9a..1001db4912f7 100644
+--- a/net/wireless/mlme.c
++++ b/net/wireless/mlme.c
+@@ -243,21 +243,12 @@ void cfg80211_send_disassoc(struct net_device *dev, const u8 *buf, size_t len)
+ }
+ EXPORT_SYMBOL(cfg80211_send_disassoc);
+ 
+-void cfg80211_send_auth_timeout(struct net_device *dev, const u8 *addr)
++static void __cfg80211_auth_remove(struct wireless_dev *wdev, const u8 *addr)
+ {
+-	struct wireless_dev *wdev = dev->ieee80211_ptr;
+-	struct wiphy *wiphy = wdev->wiphy;
+-	struct cfg80211_registered_device *rdev = wiphy_to_dev(wiphy);
+ 	int i;
+ 	bool done = false;
+ 
+-	wdev_lock(wdev);
+-
+-	nl80211_send_auth_timeout(rdev, dev, addr, GFP_KERNEL);
+-	if (wdev->sme_state == CFG80211_SME_CONNECTING)
+-		__cfg80211_connect_result(dev, addr, NULL, 0, NULL, 0,
+-					  WLAN_STATUS_UNSPECIFIED_FAILURE,
+-					  false, NULL);
++	ASSERT_WDEV_LOCK(wdev);
+ 
+ 	for (i = 0; addr && i < MAX_AUTH_BSSES; i++) {
+ 		if (wdev->authtry_bsses[i] &&
+@@ -272,6 +263,29 @@ void cfg80211_send_auth_timeout(struct net_device *dev, const u8 *addr)
+ 	}
+ 
+ 	WARN_ON(!done);
++}
++
++void __cfg80211_auth_canceled(struct net_device *dev, const u8 *addr)
++{
++	__cfg80211_auth_remove(dev->ieee80211_ptr, addr);
++}
++EXPORT_SYMBOL(__cfg80211_auth_canceled);
++
++void cfg80211_send_auth_timeout(struct net_device *dev, const u8 *addr)
++{
++	struct wireless_dev *wdev = dev->ieee80211_ptr;
++	struct wiphy *wiphy = wdev->wiphy;
++	struct cfg80211_registered_device *rdev = wiphy_to_dev(wiphy);
++
++	wdev_lock(wdev);
++
++	nl80211_send_auth_timeout(rdev, dev, addr, GFP_KERNEL);
++	if (wdev->sme_state == CFG80211_SME_CONNECTING)
++		__cfg80211_connect_result(dev, addr, NULL, 0, NULL, 0,
++					  WLAN_STATUS_UNSPECIFIED_FAILURE,
++					  false, NULL);
++
++	__cfg80211_auth_remove(wdev, addr);
+ 
+ 	wdev_unlock(wdev);
+ }

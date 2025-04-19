@@ -1,0 +1,71 @@
+commit b5cb15d9372abc9adc4e844c0c1bf594ca6a7695
+Author: Chris von Recklinghausen <crecklin@redhat.com>
+Date:   Tue Jul 3 15:43:08 2018 -0400
+
+    usercopy: Allow boot cmdline disabling of hardening
+    
+    Enabling HARDENED_USERCOPY may cause measurable regressions in networking
+    performance: up to 8% under UDP flood.
+    
+    I ran a small packet UDP flood using pktgen vs. a host b2b connected. On
+    the receiver side the UDP packets are processed by a simple user space
+    process that just reads and drops them:
+    
+    https://github.com/netoptimizer/network-testing/blob/master/src/udp_sink.c
+    
+    Not very useful from a functional PoV, but it helps to pin-point
+    bottlenecks in the networking stack.
+    
+    When running a kernel with CONFIG_HARDENED_USERCOPY=y, I see a 5-8%
+    regression in the receive tput, compared to the same kernel without this
+    option enabled.
+    
+    With CONFIG_HARDENED_USERCOPY=y, perf shows ~6% of CPU time spent
+    cumulatively in __check_object_size (~4%) and __virt_addr_valid (~2%).
+    
+    The call-chain is:
+    
+    __GI___libc_recvfrom
+    entry_SYSCALL_64_after_hwframe
+    do_syscall_64
+    __x64_sys_recvfrom
+    __sys_recvfrom
+    inet_recvmsg
+    udp_recvmsg
+    __check_object_size
+    
+    udp_recvmsg() actually calls copy_to_iter() (inlined) and the latters
+    calls check_copy_size() (again, inlined).
+    
+    A generic distro may want to enable HARDENED_USERCOPY in their default
+    kernel config, but at the same time, such distro may want to be able to
+    avoid the performance penalties in with the default configuration and
+    disable the stricter check on a per-boot basis.
+    
+    This change adds a boot parameter that conditionally disables
+    HARDENED_USERCOPY via "hardened_usercopy=off".
+    
+    Signed-off-by: Chris von Recklinghausen <crecklin@redhat.com>
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+
+diff --git a/Documentation/admin-guide/kernel-parameters.txt b/Documentation/admin-guide/kernel-parameters.txt
+index efc7aa7a0670..560d4dc66f02 100644
+--- a/Documentation/admin-guide/kernel-parameters.txt
++++ b/Documentation/admin-guide/kernel-parameters.txt
+@@ -816,6 +816,17 @@
+ 	disable=	[IPV6]
+ 			See Documentation/networking/ipv6.txt.
+ 
++	hardened_usercopy=
++                        [KNL] Under CONFIG_HARDENED_USERCOPY, whether
++                        hardening is enabled for this boot. Hardened
++                        usercopy checking is used to protect the kernel
++                        from reading or writing beyond known memory
++                        allocation boundaries as a proactive defense
++                        against bounds-checking flaws in the kernel's
++                        copy_to_user()/copy_from_user() interface.
++                on      Perform hardened usercopy checks (default).
++                off     Disable hardened usercopy checks.
++
+ 	disable_radix	[PPC]
+ 			Disable RADIX MMU mode on POWER9

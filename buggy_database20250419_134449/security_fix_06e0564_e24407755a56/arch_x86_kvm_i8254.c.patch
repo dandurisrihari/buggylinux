@@ -1,0 +1,38 @@
+commit 06e05645661211b9eaadaf6344c335d2e80f0ba2
+Author: Marcelo Tosatti <mtosatti@redhat.com>
+Date:   Fri Jun 6 16:37:36 2008 -0300
+
+    KVM: close timer injection race window in __vcpu_run
+    
+    If a timer fires after kvm_inject_pending_timer_irqs() but before
+    local_irq_disable() the code will enter guest mode and only inject such
+    timer interrupt the next time an unrelated event causes an exit.
+    
+    It would be simpler if the timer->pending irq conversion could be done
+    with IRQ's disabled, so that the above problem cannot happen.
+    
+    For now introduce a new vcpu requests bit to cancel guest entry.
+    
+    Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
+    Signed-off-by: Avi Kivity <avi@qumranet.com>
+
+diff --git a/arch/x86/kvm/i8254.c b/arch/x86/kvm/i8254.c
+index f2f5d260874e..3829aa7b663f 100644
+--- a/arch/x86/kvm/i8254.c
++++ b/arch/x86/kvm/i8254.c
+@@ -200,9 +200,12 @@ int __pit_timer_fn(struct kvm_kpit_state *ps)
+ 
+ 	atomic_inc(&pt->pending);
+ 	smp_mb__after_atomic_inc();
+-	if (vcpu0 && waitqueue_active(&vcpu0->wq)) {
+-		vcpu0->arch.mp_state = KVM_MP_STATE_RUNNABLE;
+-		wake_up_interruptible(&vcpu0->wq);
++	if (vcpu0) {
++		set_bit(KVM_REQ_PENDING_TIMER, &vcpu0->requests);
++		if (waitqueue_active(&vcpu0->wq)) {
++			vcpu0->arch.mp_state = KVM_MP_STATE_RUNNABLE;
++			wake_up_interruptible(&vcpu0->wq);
++		}
+ 	}
+ 
+ 	pt->timer.expires = ktime_add_ns(pt->timer.expires, pt->period);

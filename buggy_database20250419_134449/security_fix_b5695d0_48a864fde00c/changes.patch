@@ -1,0 +1,118 @@
+diff --git a/fs/ecryptfs/keystore.c b/fs/ecryptfs/keystore.c
+index d95dd505433e..03e609c45012 100644
+--- a/fs/ecryptfs/keystore.c
++++ b/fs/ecryptfs/keystore.c
+@@ -516,10 +516,11 @@ ecryptfs_find_global_auth_tok_for_sig(
+ 			goto out_invalid_auth_tok;
+ 		}
+ 
++		down_write(&(walker->global_auth_tok_key->sem));
+ 		rc = ecryptfs_verify_auth_tok_from_key(
+ 				walker->global_auth_tok_key, auth_tok);
+ 		if (rc)
+-			goto out_invalid_auth_tok;
++			goto out_invalid_auth_tok_unlock;
+ 
+ 		(*auth_tok_key) = walker->global_auth_tok_key;
+ 		key_get(*auth_tok_key);
+@@ -527,6 +528,8 @@ ecryptfs_find_global_auth_tok_for_sig(
+ 	}
+ 	rc = -ENOENT;
+ 	goto out;
++out_invalid_auth_tok_unlock:
++	up_write(&(walker->global_auth_tok_key->sem));
+ out_invalid_auth_tok:
+ 	printk(KERN_WARNING "Invalidating auth tok with sig = [%s]\n", sig);
+ 	walker->flags |= ECRYPTFS_AUTH_TOK_INVALID;
+@@ -869,8 +872,10 @@ ecryptfs_write_tag_70_packet(char *dest, size_t *remaining_bytes,
+ out_unlock:
+ 	mutex_unlock(s->tfm_mutex);
+ out:
+-	if (auth_tok_key)
++	if (auth_tok_key) {
++		up_write(&(auth_tok_key->sem));
+ 		key_put(auth_tok_key);
++	}
+ 	kfree(s);
+ 	return rc;
+ }
+@@ -1106,8 +1111,10 @@ ecryptfs_parse_tag_70_packet(char **filename, size_t *filename_size,
+ 		(*filename_size) = 0;
+ 		(*filename) = NULL;
+ 	}
+-	if (auth_tok_key)
++	if (auth_tok_key) {
++		up_write(&(auth_tok_key->sem));
+ 		key_put(auth_tok_key);
++	}
+ 	kfree(s);
+ 	return rc;
+ }
+@@ -1638,9 +1645,10 @@ int ecryptfs_keyring_auth_tok_for_sig(struct key **auth_tok_key,
+ 		(*auth_tok_key) = NULL;
+ 		goto out;
+ 	}
+-
++	down_write(&(*auth_tok_key)->sem);
+ 	rc = ecryptfs_verify_auth_tok_from_key(*auth_tok_key, auth_tok);
+ 	if (rc) {
++		up_write(&(*auth_tok_key)->sem);
+ 		key_put(*auth_tok_key);
+ 		(*auth_tok_key) = NULL;
+ 		goto out;
+@@ -1865,6 +1873,7 @@ int ecryptfs_parse_packet_set(struct ecryptfs_crypt_stat *crypt_stat,
+ find_next_matching_auth_tok:
+ 	found_auth_tok = 0;
+ 	if (auth_tok_key) {
++		up_write(&(auth_tok_key->sem));
+ 		key_put(auth_tok_key);
+ 		auth_tok_key = NULL;
+ 	}
+@@ -1951,8 +1960,10 @@ int ecryptfs_parse_packet_set(struct ecryptfs_crypt_stat *crypt_stat,
+ out_wipe_list:
+ 	wipe_auth_tok_list(&auth_tok_list);
+ out:
+-	if (auth_tok_key)
++	if (auth_tok_key) {
++		up_write(&(auth_tok_key->sem));
+ 		key_put(auth_tok_key);
++	}
+ 	return rc;
+ }
+ 
+@@ -2446,6 +2457,7 @@ ecryptfs_generate_key_packet_set(char *dest_base,
+ 			rc = -EINVAL;
+ 			goto out_free;
+ 		}
++		up_write(&(auth_tok_key->sem));
+ 		key_put(auth_tok_key);
+ 		auth_tok_key = NULL;
+ 	}
+@@ -2460,8 +2472,10 @@ ecryptfs_generate_key_packet_set(char *dest_base,
+ out:
+ 	if (rc)
+ 		(*len) = 0;
+-	if (auth_tok_key)
++	if (auth_tok_key) {
++		up_write(&(auth_tok_key->sem));
+ 		key_put(auth_tok_key);
++	}
+ 
+ 	mutex_unlock(&crypt_stat->keysig_list_mutex);
+ 	return rc;
+diff --git a/fs/ecryptfs/main.c b/fs/ecryptfs/main.c
+index 520d05f5ad01..c27c0ecf90bc 100644
+--- a/fs/ecryptfs/main.c
++++ b/fs/ecryptfs/main.c
+@@ -254,8 +254,10 @@ static int ecryptfs_init_global_auth_toks(
+ 			       "option: [%s]\n", global_auth_tok->sig);
+ 			global_auth_tok->flags |= ECRYPTFS_AUTH_TOK_INVALID;
+ 			goto out;
+-		} else
++		} else {
+ 			global_auth_tok->flags &= ~ECRYPTFS_AUTH_TOK_INVALID;
++			up_write(&(global_auth_tok->global_auth_tok_key)->sem);
++		}
+ 	}
+ out:
+ 	return rc;

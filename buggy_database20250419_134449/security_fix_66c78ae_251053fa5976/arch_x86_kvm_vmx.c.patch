@@ -1,0 +1,101 @@
+commit 66c78ae40cd0a7258d01ef433ede74e33e4adbbe
+Author: Nadav Har'El <nyh@il.ibm.com>
+Date:   Wed May 25 23:14:07 2011 +0300
+
+    KVM: nVMX: Correct handling of idt vectoring info
+    
+    This patch adds correct handling of IDT_VECTORING_INFO_FIELD for the nested
+    case.
+    
+    When a guest exits while delivering an interrupt or exception, we get this
+    information in IDT_VECTORING_INFO_FIELD in the VMCS. When L2 exits to L1,
+    there's nothing we need to do, because L1 will see this field in vmcs12, and
+    handle it itself. However, when L2 exits and L0 handles the exit itself and
+    plans to return to L2, L0 must inject this event to L2.
+    
+    In the normal non-nested case, the idt_vectoring_info case is discovered after
+    the exit, and the decision to inject (though not the injection itself) is made
+    at that point. However, in the nested case a decision of whether to return
+    to L2 or L1 also happens during the injection phase (see the previous
+    patches), so in the nested case we can only decide what to do about the
+    idt_vectoring_info right after the injection, i.e., in the beginning of
+    vmx_vcpu_run, which is the first time we know for sure if we're staying in
+    L2.
+    
+    Therefore, when we exit L2 (is_guest_mode(vcpu)), we disable the regular
+    vmx_complete_interrupts() code which queues the idt_vectoring_info for
+    injection on next entry - because such injection would not be appropriate
+    if we will decide to exit to L1. Rather, we just save the idt_vectoring_info
+    and related fields in vmcs12 (which is a convenient place to save these
+    fields). On the next entry in vmx_vcpu_run (*after* the injection phase,
+    potentially exiting to L1 to inject an event requested by user space), if
+    we find ourselves in L1 we don't need to do anything with those values
+    we saved (as explained above). But if we find that we're in L2, or rather
+    *still* at L2 (it's not nested_run_pending, meaning that this is the first
+    round of L2 running after L1 having just launched it), we need to inject
+    the event saved in those fields - by writing the appropriate VMCS fields.
+    
+    Signed-off-by: Nadav Har'El <nyh@il.ibm.com>
+    Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
+
+diff --git a/arch/x86/kvm/vmx.c b/arch/x86/kvm/vmx.c
+index 9604af7675e8..1e6bd69ae433 100644
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -5797,6 +5797,8 @@ static void __vmx_complete_interrupts(struct vcpu_vmx *vmx,
+ 
+ static void vmx_complete_interrupts(struct vcpu_vmx *vmx)
+ {
++	if (is_guest_mode(&vmx->vcpu))
++		return;
+ 	__vmx_complete_interrupts(vmx, vmx->idt_vectoring_info,
+ 				  VM_EXIT_INSTRUCTION_LEN,
+ 				  IDT_VECTORING_ERROR_CODE);
+@@ -5804,6 +5806,8 @@ static void vmx_complete_interrupts(struct vcpu_vmx *vmx)
+ 
+ static void vmx_cancel_injection(struct kvm_vcpu *vcpu)
+ {
++	if (is_guest_mode(vcpu))
++		return;
+ 	__vmx_complete_interrupts(to_vmx(vcpu),
+ 				  vmcs_read32(VM_ENTRY_INTR_INFO_FIELD),
+ 				  VM_ENTRY_INSTRUCTION_LEN,
+@@ -5824,6 +5828,21 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
+ {
+ 	struct vcpu_vmx *vmx = to_vmx(vcpu);
+ 
++	if (is_guest_mode(vcpu) && !vmx->nested.nested_run_pending) {
++		struct vmcs12 *vmcs12 = get_vmcs12(vcpu);
++		if (vmcs12->idt_vectoring_info_field &
++				VECTORING_INFO_VALID_MASK) {
++			vmcs_write32(VM_ENTRY_INTR_INFO_FIELD,
++				vmcs12->idt_vectoring_info_field);
++			vmcs_write32(VM_ENTRY_INSTRUCTION_LEN,
++				vmcs12->vm_exit_instruction_len);
++			if (vmcs12->idt_vectoring_info_field &
++					VECTORING_INFO_DELIVER_CODE_MASK)
++				vmcs_write32(VM_ENTRY_EXCEPTION_ERROR_CODE,
++					vmcs12->idt_vectoring_error_code);
++		}
++	}
++
+ 	/* Record the guest's net vcpu time for enforced NMI injections. */
+ 	if (unlikely(!cpu_has_virtual_nmis() && vmx->soft_vnmi_blocked))
+ 		vmx->entry_time = ktime_get();
+@@ -5956,6 +5975,17 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
+ 
+ 	vmx->idt_vectoring_info = vmcs_read32(IDT_VECTORING_INFO_FIELD);
+ 
++	if (is_guest_mode(vcpu)) {
++		struct vmcs12 *vmcs12 = get_vmcs12(vcpu);
++		vmcs12->idt_vectoring_info_field = vmx->idt_vectoring_info;
++		if (vmx->idt_vectoring_info & VECTORING_INFO_VALID_MASK) {
++			vmcs12->idt_vectoring_error_code =
++				vmcs_read32(IDT_VECTORING_ERROR_CODE);
++			vmcs12->vm_exit_instruction_len =
++				vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
++		}
++	}
++
+ 	asm("mov %0, %%ds; mov %0, %%es" : : "r"(__USER_DS));
+ 	vmx->loaded_vmcs->launched = 1;

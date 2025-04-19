@@ -1,0 +1,105 @@
+diff --git a/include/linux/skbuff.h b/include/linux/skbuff.h
+index a828cf99c521..2d01b2bbb746 100644
+--- a/include/linux/skbuff.h
++++ b/include/linux/skbuff.h
+@@ -4150,6 +4150,9 @@ enum skb_ext_id {
+ #endif
+ #if IS_ENABLED(CONFIG_MPTCP)
+ 	SKB_EXT_MPTCP,
++#endif
++#if IS_ENABLED(CONFIG_KCOV)
++	SKB_EXT_KCOV_HANDLE,
+ #endif
+ 	SKB_EXT_NUM, /* must be last */
+ };
+@@ -4605,5 +4608,35 @@ static inline void skb_reset_redirect(struct sk_buff *skb)
+ #endif
+ }
+ 
++#ifdef CONFIG_KCOV
++static inline void skb_set_kcov_handle(struct sk_buff *skb,
++				       const u64 kcov_handle)
++{
++	/* Do not allocate skb extensions only to set kcov_handle to zero
++	 * (as it is zero by default). However, if the extensions are
++	 * already allocated, update kcov_handle anyway since
++	 * skb_set_kcov_handle can be called to zero a previously set
++	 * value.
++	 */
++	if (skb_has_extensions(skb) || kcov_handle) {
++		u64 *kcov_handle_ptr = skb_ext_add(skb, SKB_EXT_KCOV_HANDLE);
++
++		if (kcov_handle_ptr)
++			*kcov_handle_ptr = kcov_handle;
++	}
++}
++
++static inline u64 skb_get_kcov_handle(struct sk_buff *skb)
++{
++	u64 *kcov_handle = skb_ext_find(skb, SKB_EXT_KCOV_HANDLE);
++
++	return kcov_handle ? *kcov_handle : 0;
++}
++#else
++static inline void skb_set_kcov_handle(struct sk_buff *skb,
++				       const u64 kcov_handle) { }
++static inline u64 skb_get_kcov_handle(struct sk_buff *skb) { return 0; }
++#endif /* CONFIG_KCOV */
++
+ #endif	/* __KERNEL__ */
+ #endif	/* _LINUX_SKBUFF_H */
+diff --git a/lib/Kconfig.debug b/lib/Kconfig.debug
+index d7a7bc3b6098..d171a032db78 100644
+--- a/lib/Kconfig.debug
++++ b/lib/Kconfig.debug
+@@ -1870,6 +1870,7 @@ config KCOV
+ 	depends on CC_HAS_SANCOV_TRACE_PC || GCC_PLUGINS
+ 	select DEBUG_FS
+ 	select GCC_PLUGIN_SANCOV if !CC_HAS_SANCOV_TRACE_PC
++	select SKB_EXTENSIONS
+ 	help
+ 	  KCOV exposes kernel code coverage information in a form suitable
+ 	  for coverage-guided fuzzing (randomized testing).
+diff --git a/net/core/skbuff.c b/net/core/skbuff.c
+index 1ba8f0163744..c5e6c0b83a92 100644
+--- a/net/core/skbuff.c
++++ b/net/core/skbuff.c
+@@ -249,6 +249,9 @@ struct sk_buff *__alloc_skb(unsigned int size, gfp_t gfp_mask,
+ 
+ 		fclones->skb2.fclone = SKB_FCLONE_CLONE;
+ 	}
++
++	skb_set_kcov_handle(skb, kcov_common_handle());
++
+ out:
+ 	return skb;
+ nodata:
+@@ -282,6 +285,8 @@ static struct sk_buff *__build_skb_around(struct sk_buff *skb,
+ 	memset(shinfo, 0, offsetof(struct skb_shared_info, dataref));
+ 	atomic_set(&shinfo->dataref, 1);
+ 
++	skb_set_kcov_handle(skb, kcov_common_handle());
++
+ 	return skb;
+ }
+ 
+@@ -4203,6 +4208,9 @@ static const u8 skb_ext_type_len[] = {
+ #if IS_ENABLED(CONFIG_MPTCP)
+ 	[SKB_EXT_MPTCP] = SKB_EXT_CHUNKSIZEOF(struct mptcp_ext),
+ #endif
++#if IS_ENABLED(CONFIG_KCOV)
++	[SKB_EXT_KCOV_HANDLE] = SKB_EXT_CHUNKSIZEOF(u64),
++#endif
+ };
+ 
+ static __always_inline unsigned int skb_ext_total_length(void)
+@@ -4219,6 +4227,9 @@ static __always_inline unsigned int skb_ext_total_length(void)
+ #endif
+ #if IS_ENABLED(CONFIG_MPTCP)
+ 		skb_ext_type_len[SKB_EXT_MPTCP] +
++#endif
++#if IS_ENABLED(CONFIG_KCOV)
++		skb_ext_type_len[SKB_EXT_KCOV_HANDLE] +
+ #endif
+ 		0;
+ }

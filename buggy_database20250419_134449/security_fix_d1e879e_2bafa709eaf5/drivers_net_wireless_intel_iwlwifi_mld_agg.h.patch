@@ -1,0 +1,213 @@
+commit d1e879ec600f9b3bdd253167533959facfefb17b
+Author: Miri Korenblit <miriam.rachel.korenblit@intel.com>
+Date:   Sun Feb 16 11:42:40 2025 +0200
+
+    wifi: iwlwifi: add iwlmld sub-driver
+    
+    iwlwifi is the driver of all Intel wifi devices since 2008.
+    Since then, the hardware has changed a lot, but the firmware
+    API has changed even more. The need to keep one driver that
+    supports all those different APIs led us to introduce a new
+    architecture circa 2012 which allowed us to keep the same
+    interface to the hardware (DMAs, Tx queues, etc...) with a
+    new layer to implement the mid-layer between mac80211 and
+    the firmware. The first component is called the 'transport'
+    and the latter is called 'operation_mode' a.k.a  op_mode.
+    
+    In 2013 we took advantage of the new architecture to
+    introduce iwlmvm which allowed us to implement the, then,
+    new firmware API. This op_mode supports 7260 and up, those
+    devices supports support at least VHT.
+    
+    Since then, wifi evolved and so did the firmware. It became
+    much bigger and took a lot of functionality from the driver.
+    It became increasingly hard to keep the same op_mode for the
+    newest devices and we experienced frequent regressions on
+    older devices. In order to avoid those regressions and keep
+    the code maintainable, we decided it was about time to start
+    a new op_mode.
+    
+    iwlmld is a new op_mode that supports BE200 or newer if the
+    firmware being used is 97.ucode or newer. If the user has
+    an older devices or BE200 with .96.ucode, iwlmvm will be
+    loaded. Of course, this op_mode selection is seamless.
+    
+    All the features supported in iwlmvm are supported in
+    iwlmld besides a few seldom used use cases: injection and
+    Hotspot 2.0. Those are under work.
+    
+    A few points about the implementation:
+     * iwlmld doesn't have any mutexes, it relies on the
+       wiphy_lock
+     * iwlmld is more "resource oriented": stations, links and
+       interfaces are allocated and freed only after all the
+       relevant flows are completed.
+     * Firmware notifications' sizes are validated in a more
+       structured way.
+    
+    We would love to see this new op_mode merged in 6.15. The
+    firmware for this new driver (.97.ucode) is not yet publicly
+    available but it'll be sent very soon.
+    People eager to get an early version of this firmware can
+    contact Emmanuel at:
+    emmanuel.grumbach@intel.com
+    
+    I've listed the people who directly contributed
+    code, but many others from various teams have
+    contributed in other ways.
+    
+    Co-developed-by: Johannes Berg <johannes.berg@intel.com>
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+    Co-developed-by: Avraham Stern <avraham.stern@intel.com>
+    Signed-off-by: Avraham Stern <avraham.stern@intel.com>
+    Co-developed-by: Daniel Gabay <daniel.gabay@intel.com>
+    Signed-off-by: Daniel Gabay <daniel.gabay@intel.com>
+    Co-developed-by: Emmanuel Grumbach <emmanuel.grumbach@intel.com>
+    Signed-off-by: Emmanuel Grumbach <emmanuel.grumbach@intel.com>
+    Co-developed-by: Anjaneyulu <pagadala.yesu.anjaneyulu@intel.com>
+    Signed-off-by: Anjaneyulu <pagadala.yesu.anjaneyulu@intel.com>
+    Co-developed-by: Yedidya Benshimol <yedidya.ben.shimol@intel.com>
+    Signed-off-by: Yedidya Benshimol <yedidya.ben.shimol@intel.com>
+    Co-developed-by: Benjamin Berg <benjamin.berg@intel.com>
+    Signed-off-by: Benjamin Berg <benjamin.berg@intel.com>
+    Co-developed-by: Shaul Triebitz <shaul.triebitz@intel.com>
+    Signed-off-by: Shaul Triebitz <shaul.triebitz@intel.com>
+    Signed-off-by: Miri Korenblit <miriam.rachel.korenblit@intel.com>
+    Link: https://lore.kernel.org/linux-wireless/20250216094321.537988-1-miriam.rachel.korenblit@intel.com/
+    [fix Kconfig, fix api/phy.h includes, SPDX tag and coding
+     style issues, duplicated includes per 0-day robot]
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+diff --git a/drivers/net/wireless/intel/iwlwifi/mld/agg.h b/drivers/net/wireless/intel/iwlwifi/mld/agg.h
+new file mode 100644
+index 000000000000..651c80d1c7cd
+--- /dev/null
++++ b/drivers/net/wireless/intel/iwlwifi/mld/agg.h
+@@ -0,0 +1,127 @@
++/* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
++/*
++ * Copyright (C) 2024 Intel Corporation
++ */
++#ifndef __iwl_agg_h__
++#define __iwl_agg_h__
++
++#include "mld.h"
++#include "fw/api/rx.h"
++
++/**
++ * struct iwl_mld_reorder_buffer - per ra/tid/queue reorder buffer
++ * @head_sn: reorder window head sequence number
++ * @num_stored: number of MPDUs stored in the buffer
++ * @queue: queue of this reorder buffer
++ * @valid: true if reordering is valid for this queue
++ */
++struct iwl_mld_reorder_buffer {
++	u16 head_sn;
++	u16 num_stored;
++	int queue;
++	bool valid;
++} ____cacheline_aligned_in_smp;
++
++/**
++ * struct iwl_mld_reorder_buf_entry - reorder buffer entry per-queue/per-seqno
++ * @frames: list of skbs stored. a list is necessary because in an A-MSDU,
++ *	all sub-frames share the same sequence number, so they are stored
++ *	together in the same list.
++ */
++struct iwl_mld_reorder_buf_entry {
++	struct sk_buff_head frames;
++}
++#ifndef __CHECKER__
++/* sparse doesn't like this construct: "bad integer constant expression" */
++__aligned(roundup_pow_of_two(sizeof(struct sk_buff_head)))
++#endif
++;
++
++/**
++ * struct iwl_mld_baid_data - Block Ack session data
++ * @rcu_head: RCU head for freeing this data
++ * @sta_mask: station mask for the BAID
++ * @tid: tid of the session
++ * @baid: baid of the session
++ * @buf_size: the reorder buffer size as set by the last ADDBA request
++ * @entries_per_queue: number of buffers per queue, this actually gets
++ *	aligned up to avoid cache line sharing between queues
++ * @timeout: the timeout value specified in the ADDBA request.
++ * @last_rx_timestamp: timestamp of the last received packet (in jiffies). This
++ *	value is updated only when the configured @timeout has passed since
++ *	the last update to minimize cache bouncing between RX queues.
++ * @session_timer: timer is set to expire after 2 * @timeout (since we want
++ *	to minimize the cache bouncing by updating @last_rx_timestamp only once
++ *	after @timeout has passed). If no packets are received within this
++ *	period, it informs mac80211 to initiate delBA flow, terminating the
++ *	BA session.
++ * @rcu_ptr: BA data RCU protected access
++ * @mld: mld pointer, needed for timer context
++ * @reorder_buf: reorder buffer, allocated per queue
++ * @entries: data
++ */
++struct iwl_mld_baid_data {
++	struct rcu_head rcu_head;
++	u32 sta_mask;
++	u8 tid;
++	u8 baid;
++	u16 buf_size;
++	u16 entries_per_queue;
++	u16 timeout;
++	struct timer_list session_timer;
++	unsigned long last_rx_timestamp;
++	struct iwl_mld_baid_data __rcu **rcu_ptr;
++	struct iwl_mld *mld;
++	struct iwl_mld_reorder_buffer reorder_buf[IWL_MAX_RX_HW_QUEUES];
++	struct iwl_mld_reorder_buf_entry entries[] ____cacheline_aligned_in_smp;
++};
++
++/**
++ * struct iwl_mld_delba_data - RX queue sync data for %IWL_MLD_RXQ_NOTIF_DEL_BA
++ *
++ * @baid: Block Ack id, used to identify the BA session to be removed
++ */
++struct iwl_mld_delba_data {
++	u32 baid;
++} __packed;
++
++/**
++ * enum iwl_mld_reorder_result - Possible return values for iwl_mld_reorder()
++ * indicating how the caller should handle the skb based on the result.
++ *
++ * @IWL_MLD_PASS_SKB: skb should be passed to upper layer.
++ * @IWL_MLD_BUFFERED_SKB: skb has been buffered, don't pass it to upper layer.
++ * @IWL_MLD_DROP_SKB: skb should be dropped and freed by the caller.
++ */
++enum iwl_mld_reorder_result {
++	IWL_MLD_PASS_SKB,
++	IWL_MLD_BUFFERED_SKB,
++	IWL_MLD_DROP_SKB
++};
++
++int iwl_mld_ampdu_rx_start(struct iwl_mld *mld, struct ieee80211_sta *sta,
++			   int tid, u16 ssn, u16 buf_size, u16 timeout);
++int iwl_mld_ampdu_rx_stop(struct iwl_mld *mld, struct ieee80211_sta *sta,
++			  int tid);
++
++enum iwl_mld_reorder_result
++iwl_mld_reorder(struct iwl_mld *mld, struct napi_struct *napi,
++		int queue, struct ieee80211_sta *sta,
++		struct sk_buff *skb, struct iwl_rx_mpdu_desc *desc);
++
++void iwl_mld_handle_frame_release_notif(struct iwl_mld *mld,
++					struct napi_struct *napi,
++					struct iwl_rx_packet *pkt, int queue);
++void iwl_mld_handle_bar_frame_release_notif(struct iwl_mld *mld,
++					    struct napi_struct *napi,
++					    struct iwl_rx_packet *pkt,
++					    int queue);
++
++void iwl_mld_del_ba(struct iwl_mld *mld, int queue,
++		    struct iwl_mld_delba_data *data);
++
++int iwl_mld_update_sta_baids(struct iwl_mld *mld,
++			     u32 old_sta_mask,
++			     u32 new_sta_mask);
++
++#endif /* __iwl_agg_h__ */

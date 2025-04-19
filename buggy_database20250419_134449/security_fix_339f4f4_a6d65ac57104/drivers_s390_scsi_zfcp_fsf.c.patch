@@ -1,0 +1,71 @@
+commit 339f4f4eab80caa6cf0d39fb057ad6ddb84ba91e
+Author: Christof Schmitt <christof.schmitt@de.ibm.com>
+Date:   Fri Jul 16 15:37:43 2010 +0200
+
+    [SCSI] zfcp: Trigger logging in the FCP channel on qdio error conditions
+    
+    Exploit the cio siosl function to trigger logging in the FCP channel
+    on qdio error conditions. Add a helper function in zfcp_qdio to ensure
+    that tracing is only triggered once before calling qdio_shutdown.
+    
+    Trigger in zfcp for hardware logs are:
+     - timeout for FSF requests to the FCP channel
+     - "no recommendation" status from FCP channel
+     - invalid FSF protocol status
+     - stalled outbound queue
+     - unknown request id on inbound queue
+     - QDIO_ERROR_SLSB_STATE
+    
+    All of the above triggers run from the Linux qdio softirq context, so
+    no additional synchronization is necessary for the handling of the
+    ZFCP_STATUS_ADAPTER_SIOSL_ISSUED flag.
+    
+    Reviewed-by: Swen Schillig <swen@vnet.ibm.com>
+    Signed-off-by: Christof Schmitt <christof.schmitt@de.ibm.com>
+    Signed-off-by: James Bottomley <James.Bottomley@suse.de>
+
+diff --git a/drivers/s390/scsi/zfcp_fsf.c b/drivers/s390/scsi/zfcp_fsf.c
+index f9be5d60d92a..9d1d7d1842ce 100644
+--- a/drivers/s390/scsi/zfcp_fsf.c
++++ b/drivers/s390/scsi/zfcp_fsf.c
+@@ -21,6 +21,7 @@
+ static void zfcp_fsf_request_timeout_handler(unsigned long data)
+ {
+ 	struct zfcp_adapter *adapter = (struct zfcp_adapter *) data;
++	zfcp_qdio_siosl(adapter);
+ 	zfcp_erp_adapter_reopen(adapter, ZFCP_STATUS_COMMON_ERP_FAILED,
+ 				"fsrth_1", NULL);
+ }
+@@ -326,6 +327,7 @@ static void zfcp_fsf_fsfstatus_qual_eval(struct zfcp_fsf_req *req)
+ 		dev_err(&req->adapter->ccw_device->dev,
+ 			"The FCP adapter reported a problem "
+ 			"that cannot be recovered\n");
++		zfcp_qdio_siosl(req->adapter);
+ 		zfcp_erp_adapter_shutdown(req->adapter, 0, "fsfsqe1", req);
+ 		break;
+ 	}
+@@ -416,6 +418,7 @@ static void zfcp_fsf_protstatus_eval(struct zfcp_fsf_req *req)
+ 		dev_err(&adapter->ccw_device->dev,
+ 			"0x%x is not a valid transfer protocol status\n",
+ 			qtcb->prefix.prot_status);
++		zfcp_qdio_siosl(adapter);
+ 		zfcp_erp_adapter_shutdown(adapter, 0, "fspse_9", req);
+ 	}
+ 	req->status |= ZFCP_STATUS_FSFREQ_ERROR;
+@@ -2485,13 +2488,15 @@ void zfcp_fsf_reqid_check(struct zfcp_qdio *qdio, int sbal_idx)
+ 		req_id = (unsigned long) sbale->addr;
+ 		fsf_req = zfcp_reqlist_find_rm(adapter->req_list, req_id);
+ 
+-		if (!fsf_req)
++		if (!fsf_req) {
+ 			/*
+ 			 * Unknown request means that we have potentially memory
+ 			 * corruption and must stop the machine immediately.
+ 			 */
++			zfcp_qdio_siosl(adapter);
+ 			panic("error: unknown req_id (%lx) on adapter %s.\n",
+ 			      req_id, dev_name(&adapter->ccw_device->dev));
++		}
+ 
+ 		fsf_req->qdio_req.sbal_response = sbal_idx;
+ 		zfcp_fsf_req_complete(fsf_req);

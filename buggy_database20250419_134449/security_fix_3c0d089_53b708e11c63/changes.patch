@@ -1,0 +1,108 @@
+diff --git a/include/linux/ceph/auth.h b/include/linux/ceph/auth.h
+index 71b5d481c653..39425e2f7cb2 100644
+--- a/include/linux/ceph/auth.h
++++ b/include/linux/ceph/auth.h
+@@ -50,7 +50,7 @@ struct ceph_auth_client_ops {
+ 	 * another request.
+ 	 */
+ 	int (*build_request)(struct ceph_auth_client *ac, void *buf, void *end);
+-	int (*handle_reply)(struct ceph_auth_client *ac, int result,
++	int (*handle_reply)(struct ceph_auth_client *ac,
+ 			    void *buf, void *end, u8 *session_key,
+ 			    int *session_key_len, u8 *con_secret,
+ 			    int *con_secret_len);
+diff --git a/net/ceph/auth.c b/net/ceph/auth.c
+index de407e8feb97..3a9d44eee941 100644
+--- a/net/ceph/auth.c
++++ b/net/ceph/auth.c
+@@ -260,14 +260,19 @@ int ceph_handle_auth_reply(struct ceph_auth_client *ac,
+ 		ac->negotiating = false;
+ 	}
+ 
+-	ret = ac->ops->handle_reply(ac, result, payload, payload_end,
++	if (result) {
++		pr_err("auth protocol '%s' mauth authentication failed: %d\n",
++		       ceph_auth_proto_name(ac->protocol), result);
++		ret = result;
++		goto out;
++	}
++
++	ret = ac->ops->handle_reply(ac, payload, payload_end,
+ 				    NULL, NULL, NULL, NULL);
+ 	if (ret == -EAGAIN) {
+ 		ret = build_request(ac, true, reply_buf, reply_len);
+ 		goto out;
+ 	} else if (ret) {
+-		pr_err("auth protocol '%s' mauth authentication failed: %d\n",
+-		       ceph_auth_proto_name(ac->protocol), result);
+ 		goto out;
+ 	}
+ 
+@@ -480,7 +485,7 @@ int ceph_auth_handle_reply_more(struct ceph_auth_client *ac, void *reply,
+ 	int ret;
+ 
+ 	mutex_lock(&ac->mutex);
+-	ret = ac->ops->handle_reply(ac, 0, reply, reply + reply_len,
++	ret = ac->ops->handle_reply(ac, reply, reply + reply_len,
+ 				    NULL, NULL, NULL, NULL);
+ 	if (ret == -EAGAIN)
+ 		ret = build_request(ac, false, buf, buf_len);
+@@ -498,7 +503,7 @@ int ceph_auth_handle_reply_done(struct ceph_auth_client *ac,
+ 	int ret;
+ 
+ 	mutex_lock(&ac->mutex);
+-	ret = ac->ops->handle_reply(ac, 0, reply, reply + reply_len,
++	ret = ac->ops->handle_reply(ac, reply, reply + reply_len,
+ 				    session_key, session_key_len,
+ 				    con_secret, con_secret_len);
+ 	if (!ret)
+diff --git a/net/ceph/auth_none.c b/net/ceph/auth_none.c
+index 70e86e462250..aab490a111eb 100644
+--- a/net/ceph/auth_none.c
++++ b/net/ceph/auth_none.c
+@@ -69,7 +69,7 @@ static int build_request(struct ceph_auth_client *ac, void *buf, void *end)
+  * the generic auth code decode the global_id, and we carry no actual
+  * authenticate state, so nothing happens here.
+  */
+-static int handle_reply(struct ceph_auth_client *ac, int result,
++static int handle_reply(struct ceph_auth_client *ac,
+ 			void *buf, void *end, u8 *session_key,
+ 			int *session_key_len, u8 *con_secret,
+ 			int *con_secret_len)
+@@ -77,7 +77,7 @@ static int handle_reply(struct ceph_auth_client *ac, int result,
+ 	struct ceph_auth_none_info *xi = ac->private;
+ 
+ 	xi->starting = false;
+-	return result;
++	return 0;
+ }
+ 
+ static void ceph_auth_none_destroy_authorizer(struct ceph_authorizer *a)
+diff --git a/net/ceph/auth_x.c b/net/ceph/auth_x.c
+index 79641c4afee9..cab99c5581b0 100644
+--- a/net/ceph/auth_x.c
++++ b/net/ceph/auth_x.c
+@@ -661,7 +661,7 @@ static int handle_auth_session_key(struct ceph_auth_client *ac,
+ 	return -EINVAL;
+ }
+ 
+-static int ceph_x_handle_reply(struct ceph_auth_client *ac, int result,
++static int ceph_x_handle_reply(struct ceph_auth_client *ac,
+ 			       void *buf, void *end,
+ 			       u8 *session_key, int *session_key_len,
+ 			       u8 *con_secret, int *con_secret_len)
+@@ -669,13 +669,11 @@ static int ceph_x_handle_reply(struct ceph_auth_client *ac, int result,
+ 	struct ceph_x_info *xi = ac->private;
+ 	struct ceph_x_ticket_handler *th;
+ 	int len = end - buf;
++	int result;
+ 	void *p;
+ 	int op;
+ 	int ret;
+ 
+-	if (result)
+-		return result;  /* XXX hmm? */
+-
+ 	if (xi->starting) {
+ 		/* it's a hello */
+ 		struct ceph_x_server_challenge *sc = buf;

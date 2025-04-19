@@ -1,0 +1,59 @@
+commit e1b9e80236c540fa85d76e2d510d1b38e1968c5d
+Author: Vladimir Oltean <vladimir.oltean@nxp.com>
+Date:   Thu Aug 15 03:07:03 2024 +0300
+
+    net: mscc: ocelot: fix QoS class for injected packets with "ocelot-8021q"
+    
+    There are 2 distinct code paths (listed below) in the source code which
+    set up an injection header for Ocelot(-like) switches. Code path (2)
+    lacks the QoS class and source port being set correctly. Especially the
+    improper QoS classification is a problem for the "ocelot-8021q"
+    alternative DSA tagging protocol, because we support tc-taprio and each
+    packet needs to be scheduled precisely through its time slot. This
+    includes PTP, which is normally assigned to a traffic class other than
+    0, but would be sent through TC 0 nonetheless.
+    
+    The code paths are:
+    
+    (1) ocelot_xmit_common() from net/dsa/tag_ocelot.c - called only by the
+        standard "ocelot" DSA tagging protocol which uses NPI-based
+        injection - sets up bit fields in the tag manually to account for
+        a small difference (destination port offset) between Ocelot and
+        Seville. Namely, ocelot_ifh_set_dest() is omitted out of
+        ocelot_xmit_common(), because there's also seville_ifh_set_dest().
+    
+    (2) ocelot_ifh_set_basic(), called by:
+        - ocelot_fdma_prepare_skb() for FDMA transmission of the ocelot
+          switchdev driver
+        - ocelot_port_xmit() -> ocelot_port_inject_frame() for
+          register-based transmission of the ocelot switchdev driver
+        - felix_port_deferred_xmit() -> ocelot_port_inject_frame() for the
+          DSA tagger ocelot-8021q when it must transmit PTP frames (also
+          through register-based injection).
+        sets the bit fields according to its own logic.
+    
+    The problem is that (2) doesn't call ocelot_ifh_set_qos_class().
+    Copying that logic from ocelot_xmit_common() fixes that.
+    
+    Unfortunately, although desirable, it is not easily possible to
+    de-duplicate code paths (1) and (2), and make net/dsa/tag_ocelot.c
+    directly call ocelot_ifh_set_basic()), because of the ocelot/seville
+    difference. This is the "minimal" fix with some logic duplicated (but
+    at least more consolidated).
+    
+    Fixes: 0a6f17c6ae21 ("net: dsa: tag_ocelot_8021q: add support for PTP timestamping")
+    Signed-off-by: Vladimir Oltean <vladimir.oltean@nxp.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/mscc/ocelot_fdma.c b/drivers/net/ethernet/mscc/ocelot_fdma.c
+index 87b59cc5e441..00326ae8c708 100644
+--- a/drivers/net/ethernet/mscc/ocelot_fdma.c
++++ b/drivers/net/ethernet/mscc/ocelot_fdma.c
+@@ -665,7 +665,6 @@ static int ocelot_fdma_prepare_skb(struct ocelot *ocelot, int port, u32 rew_op,
+ 
+ 	ifh = skb_push(skb, OCELOT_TAG_LEN);
+ 	skb_put(skb, ETH_FCS_LEN);
+-	memset(ifh, 0, OCELOT_TAG_LEN);
+ 	ocelot_ifh_set_basic(ifh, ocelot, port, rew_op, skb);
+ 
+ 	return 0;

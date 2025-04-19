@@ -1,0 +1,63 @@
+commit 1ecc0c5c50ce8834f7e35b63be7480bf1aaa4155
+Author: Chao Yu <chao@kernel.org>
+Date:   Fri Sep 23 21:30:09 2016 +0800
+
+    f2fs: support configuring fault injection per superblock
+    
+    Previously, we only support global fault injection configuration, so that
+    when we configure type/rate of fault injection through sysfs, mount
+    option, it will influence all f2fs partition which is being used.
+    
+    It is not make sence, since it will be not convenient if developer want
+    to test separated partitions with different fault injection rate/type
+    simultaneously, also it's not possible to enable fault injection in one
+    partition and disable fault injection in other one.
+    
+    >From now on, we move global configuration of fault injection in module
+    into per-superblock, hence injection testing can be more flexible.
+    
+    Signed-off-by: Chao Yu <yuchao0@huawei.com>
+    Signed-off-by: Jaegeuk Kim <jaegeuk@kernel.org>
+
+diff --git a/fs/f2fs/acl.c b/fs/f2fs/acl.c
+index 4dcc9e28dc5c..1e29630f49c1 100644
+--- a/fs/f2fs/acl.c
++++ b/fs/f2fs/acl.c
+@@ -109,14 +109,16 @@ static struct posix_acl *f2fs_acl_from_disk(const char *value, size_t size)
+ 	return ERR_PTR(-EINVAL);
+ }
+ 
+-static void *f2fs_acl_to_disk(const struct posix_acl *acl, size_t *size)
++static void *f2fs_acl_to_disk(struct f2fs_sb_info *sbi,
++				const struct posix_acl *acl, size_t *size)
+ {
+ 	struct f2fs_acl_header *f2fs_acl;
+ 	struct f2fs_acl_entry *entry;
+ 	int i;
+ 
+-	f2fs_acl = f2fs_kmalloc(sizeof(struct f2fs_acl_header) + acl->a_count *
+-			sizeof(struct f2fs_acl_entry), GFP_NOFS);
++	f2fs_acl = f2fs_kmalloc(sbi, sizeof(struct f2fs_acl_header) +
++			acl->a_count * sizeof(struct f2fs_acl_entry),
++			GFP_NOFS);
+ 	if (!f2fs_acl)
+ 		return ERR_PTR(-ENOMEM);
+ 
+@@ -175,7 +177,7 @@ static struct posix_acl *__f2fs_get_acl(struct inode *inode, int type,
+ 
+ 	retval = f2fs_getxattr(inode, name_index, "", NULL, 0, dpage);
+ 	if (retval > 0) {
+-		value = f2fs_kmalloc(retval, GFP_F2FS_ZERO);
++		value = f2fs_kmalloc(F2FS_I_SB(inode), retval, GFP_F2FS_ZERO);
+ 		if (!value)
+ 			return ERR_PTR(-ENOMEM);
+ 		retval = f2fs_getxattr(inode, name_index, "", value,
+@@ -230,7 +232,7 @@ static int __f2fs_set_acl(struct inode *inode, int type,
+ 	}
+ 
+ 	if (acl) {
+-		value = f2fs_acl_to_disk(acl, &size);
++		value = f2fs_acl_to_disk(F2FS_I_SB(inode), acl, &size);
+ 		if (IS_ERR(value)) {
+ 			clear_inode_flag(inode, FI_ACL_MODE);
+ 			return (int)PTR_ERR(value);

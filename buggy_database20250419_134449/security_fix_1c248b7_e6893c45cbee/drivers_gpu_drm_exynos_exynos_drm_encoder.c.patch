@@ -1,0 +1,404 @@
+commit 1c248b7d2960faec3e1b8f3f9c5d9d0df28e0a3c
+Author: Inki Dae <inki.dae@samsung.com>
+Date:   Tue Oct 4 19:19:01 2011 +0900
+
+    DRM: add DRM Driver for Samsung SoC EXYNOS4210.
+    
+    This patch is a DRM Driver for Samsung SoC Exynos4210 and now enables
+    only FIMD yet but we will add HDMI support also in the future.
+    
+    this patch is based on git repository below:
+    git://people.freedesktop.org/~airlied/linux.git
+    branch name: drm-next
+    commit-id: 88ef4e3f4f616462b78a7838eb3ffc3818d30f67
+    
+    you can refer to our working repository below:
+    http://git.infradead.org/users/kmpark/linux-2.6-samsung
+    branch name: samsung-drm
+    
+    We tried to re-use lowlevel codes of the FIMD driver(s3c-fb.c
+    based on Linux framebuffer) but couldn't so because lowlevel codes
+    of s3c-fb.c are included internally and so FIMD module of this driver has
+    its own lowlevel codes.
+    
+    We used GEM framework for buffer management and DMA APIs(dma_alloc_*)
+    for buffer allocation so we can allocate physically continuous memory
+    for DMA through it and also we could use CMA later if CMA is applied to
+    mainline.
+    
+    Refer to this link for CMA(Continuous Memory Allocator):
+    http://lkml.org/lkml/2011/7/20/45
+    
+    this driver supports only physically continuous memory(non-iommu).
+    
+    Links to previous versions of the patchset:
+    v1: < https://lwn.net/Articles/454380/ >
+    v2: < http://www.spinics.net/lists/kernel/msg1224275.html >
+    v3: < http://www.spinics.net/lists/dri-devel/msg13755.html >
+    v4: < http://permalink.gmane.org/gmane.comp.video.dri.devel/60439 >
+    v5: < http://comments.gmane.org/gmane.comp.video.dri.devel/60802 >
+    
+    Changelog v2:
+    DRM: add DRM_IOCTL_SAMSUNG_GEM_MMAP ioctl command.
+    
+        this feature maps user address space to physical memory region
+        once user application requests DRM_IOCTL_SAMSUNG_GEM_MMAP ioctl.
+    
+    DRM: code clean and add exception codes.
+    
+    Changelog v3:
+    DRM: Support multiple irq.
+    
+        FIMD and HDMI have their own irq handler but DRM Framework can regiter
+        only one irq handler this patch supports mutiple irq for Samsung SoC.
+    
+    DRM: Consider modularization.
+    
+        each DRM, FIMD could be built as a module.
+    
+    DRM: Have indenpendent crtc object.
+    
+        crtc isn't specific to SoC Platform so this patch gets a crtc
+        to be used as common object.
+        created crtc could be attached to any encoder object.
+    
+    DRM: code clean and add exception codes.
+    
+    Changelog v4:
+    DRM: remove is_defult from samsung_fb.
+    
+        is_default isn't used for default framebuffer.
+    
+    DRM: code refactoring to fimd module.
+        this patch is be considered with multiple display objects and
+        would use its own request_irq() to register a irq handler instead of
+        drm framework's one.
+    
+    DRM: remove find_samsung_drm_gem_object()
+    
+    DRM: move kernel private data structures and definitions to driver folder.
+    
+        samsung_drm.h would contain only public information for userspace
+        ioctl interface.
+    
+    DRM: code refactoring to gem modules.
+        buffer module isn't dependent of gem module anymore.
+    
+    DRM: fixed security issue.
+    
+    DRM: remove encoder porinter from specific connector.
+    
+        samsung connector doesn't need to have generic encoder.
+    
+    DRM: code clean and add exception codes.
+    
+    Changelog v5:
+    DRM: updated fimd(display controller) driver.
+        added various pixel formats, color key and pixel blending features.
+    
+    DRM: removed end_buf_off from samsung_drm_overlay structure.
+        this variable isn't used and end buffer address would be
+        calculated by each sub driver.
+    
+    DRM: use generic function for mmap_offset.
+        replaced samsung_drm_gem_create_mmap_offset() and
+        samsung_drm_free_mmap_offset() with generic ones applied
+        to mainline recentrly.
+    
+    DRM: removed unnecessary codes and added exception codes.
+    
+    DRM: added comments and code clean.
+    
+    Changelog v6:
+    DRM: added default config options.
+    
+    DRM: added padding for 64-bit align.
+    
+    DRM: changed prefix 'samsung' to 'exynos'
+    
+    Signed-off-by: Inki Dae <inki.dae@samsung.com>
+    Signed-off-by: Joonyoung Shim <jy0922.shim@samsung.com>
+    Signed-off-by: Seung-Woo Kim <sw0312.kim@samsung.com>
+    Signed-off-by: Kyungmin Park <kyungmin.park@samsung.com>
+    Reviewed-by: Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+    Reviewed-by: Dave Airlie <airlied@redhat.com>
+    Reviewed-by: Rob Clark <robdclark@gmail.com>
+    Signed-off-by: Dave Airlie <airlied@redhat.com>
+
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_encoder.c b/drivers/gpu/drm/exynos/exynos_drm_encoder.c
+new file mode 100644
+index 000000000000..7cf6fa86a67e
+--- /dev/null
++++ b/drivers/gpu/drm/exynos/exynos_drm_encoder.c
+@@ -0,0 +1,271 @@
++/* exynos_drm_encoder.c
++ *
++ * Copyright (c) 2011 Samsung Electronics Co., Ltd.
++ * Authors:
++ *	Inki Dae <inki.dae@samsung.com>
++ *	Joonyoung Shim <jy0922.shim@samsung.com>
++ *	Seung-Woo Kim <sw0312.kim@samsung.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * VA LINUX SYSTEMS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
++ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
++ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ * OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#include "drmP.h"
++#include "drm_crtc_helper.h"
++
++#include "exynos_drm_drv.h"
++#include "exynos_drm_crtc.h"
++#include "exynos_drm_encoder.h"
++
++#define to_exynos_encoder(x)	container_of(x, struct exynos_drm_encoder,\
++				drm_encoder)
++
++/*
++ * exynos specific encoder structure.
++ *
++ * @drm_encoder: encoder object.
++ * @manager: specific encoder has its own manager to control a hardware
++ *	appropriately and we can access a hardware drawing on this manager.
++ */
++struct exynos_drm_encoder {
++	struct drm_encoder		drm_encoder;
++	struct exynos_drm_manager	*manager;
++};
++
++static void exynos_drm_encoder_dpms(struct drm_encoder *encoder, int mode)
++{
++	struct drm_device *dev = encoder->dev;
++	struct drm_connector *connector;
++	struct exynos_drm_manager *manager = exynos_drm_get_manager(encoder);
++
++	DRM_DEBUG_KMS("%s, encoder dpms: %d\n", __FILE__, mode);
++
++	list_for_each_entry(connector, &dev->mode_config.connector_list, head) {
++		if (connector->encoder == encoder) {
++			struct exynos_drm_display *display = manager->display;
++
++			if (display && display->power_on)
++				display->power_on(manager->dev, mode);
++		}
++	}
++}
++
++static bool
++exynos_drm_encoder_mode_fixup(struct drm_encoder *encoder,
++			       struct drm_display_mode *mode,
++			       struct drm_display_mode *adjusted_mode)
++{
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	/* drm framework doesn't check NULL. */
++
++	return true;
++}
++
++static void exynos_drm_encoder_mode_set(struct drm_encoder *encoder,
++					 struct drm_display_mode *mode,
++					 struct drm_display_mode *adjusted_mode)
++{
++	struct drm_device *dev = encoder->dev;
++	struct drm_connector *connector;
++	struct exynos_drm_manager *manager = exynos_drm_get_manager(encoder);
++	struct exynos_drm_manager_ops *manager_ops = manager->ops;
++	struct exynos_drm_overlay_ops *overlay_ops = manager->overlay_ops;
++	struct exynos_drm_overlay *overlay = get_exynos_drm_overlay(dev,
++						encoder->crtc);
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	mode = adjusted_mode;
++
++	list_for_each_entry(connector, &dev->mode_config.connector_list, head) {
++		if (connector->encoder == encoder) {
++			if (manager_ops && manager_ops->mode_set)
++				manager_ops->mode_set(manager->dev, mode);
++
++			if (overlay_ops && overlay_ops->mode_set)
++				overlay_ops->mode_set(manager->dev, overlay);
++		}
++	}
++}
++
++static void exynos_drm_encoder_prepare(struct drm_encoder *encoder)
++{
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	/* drm framework doesn't check NULL. */
++}
++
++static void exynos_drm_encoder_commit(struct drm_encoder *encoder)
++{
++	struct exynos_drm_manager *manager = exynos_drm_get_manager(encoder);
++	struct exynos_drm_manager_ops *manager_ops = manager->ops;
++	struct exynos_drm_overlay_ops *overlay_ops = manager->overlay_ops;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	if (manager_ops && manager_ops->commit)
++		manager_ops->commit(manager->dev);
++
++	if (overlay_ops && overlay_ops->commit)
++		overlay_ops->commit(manager->dev);
++}
++
++static struct drm_crtc *
++exynos_drm_encoder_get_crtc(struct drm_encoder *encoder)
++{
++	return encoder->crtc;
++}
++
++static struct drm_encoder_helper_funcs exynos_encoder_helper_funcs = {
++	.dpms		= exynos_drm_encoder_dpms,
++	.mode_fixup	= exynos_drm_encoder_mode_fixup,
++	.mode_set	= exynos_drm_encoder_mode_set,
++	.prepare	= exynos_drm_encoder_prepare,
++	.commit		= exynos_drm_encoder_commit,
++	.get_crtc	= exynos_drm_encoder_get_crtc,
++};
++
++static void exynos_drm_encoder_destroy(struct drm_encoder *encoder)
++{
++	struct exynos_drm_encoder *exynos_encoder =
++		to_exynos_encoder(encoder);
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	exynos_encoder->manager->pipe = -1;
++
++	drm_encoder_cleanup(encoder);
++	encoder->dev->mode_config.num_encoder--;
++	kfree(exynos_encoder);
++}
++
++static struct drm_encoder_funcs exynos_encoder_funcs = {
++	.destroy = exynos_drm_encoder_destroy,
++};
++
++struct drm_encoder *
++exynos_drm_encoder_create(struct drm_device *dev,
++			   struct exynos_drm_manager *manager,
++			   unsigned int possible_crtcs)
++{
++	struct drm_encoder *encoder;
++	struct exynos_drm_encoder *exynos_encoder;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	if (!manager || !possible_crtcs)
++		return NULL;
++
++	if (!manager->dev)
++		return NULL;
++
++	exynos_encoder = kzalloc(sizeof(*exynos_encoder), GFP_KERNEL);
++	if (!exynos_encoder) {
++		DRM_ERROR("failed to allocate encoder\n");
++		return NULL;
++	}
++
++	exynos_encoder->manager = manager;
++	encoder = &exynos_encoder->drm_encoder;
++	encoder->possible_crtcs = possible_crtcs;
++
++	DRM_DEBUG_KMS("possible_crtcs = 0x%x\n", encoder->possible_crtcs);
++
++	drm_encoder_init(dev, encoder, &exynos_encoder_funcs,
++			DRM_MODE_ENCODER_TMDS);
++
++	drm_encoder_helper_add(encoder, &exynos_encoder_helper_funcs);
++
++	DRM_DEBUG_KMS("encoder has been created\n");
++
++	return encoder;
++}
++
++struct exynos_drm_manager *exynos_drm_get_manager(struct drm_encoder *encoder)
++{
++	return to_exynos_encoder(encoder)->manager;
++}
++
++void exynos_drm_fn_encoder(struct drm_crtc *crtc, void *data,
++			    void (*fn)(struct drm_encoder *, void *))
++{
++	struct drm_device *dev = crtc->dev;
++	struct drm_encoder *encoder;
++
++	list_for_each_entry(encoder, &dev->mode_config.encoder_list, head) {
++		if (encoder->crtc != crtc)
++			continue;
++
++		fn(encoder, data);
++	}
++}
++
++void exynos_drm_enable_vblank(struct drm_encoder *encoder, void *data)
++{
++	struct exynos_drm_manager *manager =
++		to_exynos_encoder(encoder)->manager;
++	struct exynos_drm_manager_ops *manager_ops = manager->ops;
++	int crtc = *(int *)data;
++
++	if (manager->pipe == -1)
++		manager->pipe = crtc;
++
++	if (manager_ops->enable_vblank)
++		manager_ops->enable_vblank(manager->dev);
++}
++
++void exynos_drm_disable_vblank(struct drm_encoder *encoder, void *data)
++{
++	struct exynos_drm_manager *manager =
++		to_exynos_encoder(encoder)->manager;
++	struct exynos_drm_manager_ops *manager_ops = manager->ops;
++	int crtc = *(int *)data;
++
++	if (manager->pipe == -1)
++		manager->pipe = crtc;
++
++	if (manager_ops->disable_vblank)
++		manager_ops->disable_vblank(manager->dev);
++}
++
++void exynos_drm_encoder_crtc_commit(struct drm_encoder *encoder, void *data)
++{
++	struct exynos_drm_manager *manager =
++		to_exynos_encoder(encoder)->manager;
++	struct exynos_drm_overlay_ops *overlay_ops = manager->overlay_ops;
++
++	overlay_ops->commit(manager->dev);
++}
++
++void exynos_drm_encoder_crtc_mode_set(struct drm_encoder *encoder, void *data)
++{
++	struct exynos_drm_manager *manager =
++		to_exynos_encoder(encoder)->manager;
++	struct exynos_drm_overlay_ops *overlay_ops = manager->overlay_ops;
++	struct exynos_drm_overlay *overlay = data;
++
++	overlay_ops->mode_set(manager->dev, overlay);
++}
++
++MODULE_AUTHOR("Inki Dae <inki.dae@samsung.com>");
++MODULE_AUTHOR("Joonyoung Shim <jy0922.shim@samsung.com>");
++MODULE_AUTHOR("Seung-Woo Kim <sw0312.kim@samsung.com>");
++MODULE_DESCRIPTION("Samsung SoC DRM Encoder Driver");
++MODULE_LICENSE("GPL");

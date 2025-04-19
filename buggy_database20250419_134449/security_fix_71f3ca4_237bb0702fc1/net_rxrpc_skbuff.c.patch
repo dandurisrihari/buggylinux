@@ -1,0 +1,132 @@
+commit 71f3ca408fd43b586c02480768a503af075b247e
+Author: David Howells <dhowells@redhat.com>
+Date:   Sat Sep 17 10:49:14 2016 +0100
+
+    rxrpc: Improve skb tracing
+    
+    Improve sk_buff tracing within AF_RXRPC by the following means:
+    
+     (1) Use an enum to note the event type rather than plain integers and use
+         an array of event names rather than a big multi ?: list.
+    
+     (2) Distinguish Rx from Tx packets and account them separately.  This
+         requires the call phase to be tracked so that we know what we might
+         find in rxtx_buffer[].
+    
+     (3) Add a parameter to rxrpc_{new,see,get,free}_skb() to indicate the
+         event type.
+    
+     (4) A pair of 'rotate' events are added to indicate packets that are about
+         to be rotated out of the Rx and Tx windows.
+    
+     (5) A pair of 'lost' events are added, along with rxrpc_lose_skb() for
+         packet loss injection recording.
+    
+    Signed-off-by: David Howells <dhowells@redhat.com>
+
+diff --git a/net/rxrpc/skbuff.c b/net/rxrpc/skbuff.c
+index 620d9ccaf3c1..5154cbf7e540 100644
+--- a/net/rxrpc/skbuff.c
++++ b/net/rxrpc/skbuff.c
+@@ -18,54 +18,76 @@
+ #include <net/af_rxrpc.h>
+ #include "ar-internal.h"
+ 
++#define select_skb_count(op) (op >= rxrpc_skb_tx_cleaned ? &rxrpc_n_tx_skbs : &rxrpc_n_rx_skbs)
++
+ /*
+- * Note the existence of a new-to-us socket buffer (allocated or dequeued).
++ * Note the allocation or reception of a socket buffer.
+  */
+-void rxrpc_new_skb(struct sk_buff *skb)
++void rxrpc_new_skb(struct sk_buff *skb, enum rxrpc_skb_trace op)
+ {
+ 	const void *here = __builtin_return_address(0);
+-	int n = atomic_inc_return(&rxrpc_n_skbs);
+-	trace_rxrpc_skb(skb, 0, atomic_read(&skb->users), n, here);
++	int n = atomic_inc_return(select_skb_count(op));
++	trace_rxrpc_skb(skb, op, atomic_read(&skb->users), n, here);
+ }
+ 
+ /*
+  * Note the re-emergence of a socket buffer from a queue or buffer.
+  */
+-void rxrpc_see_skb(struct sk_buff *skb)
++void rxrpc_see_skb(struct sk_buff *skb, enum rxrpc_skb_trace op)
+ {
+ 	const void *here = __builtin_return_address(0);
+ 	if (skb) {
+-		int n = atomic_read(&rxrpc_n_skbs);
+-		trace_rxrpc_skb(skb, 1, atomic_read(&skb->users), n, here);
++		int n = atomic_read(select_skb_count(op));
++		trace_rxrpc_skb(skb, op, atomic_read(&skb->users), n, here);
+ 	}
+ }
+ 
+ /*
+  * Note the addition of a ref on a socket buffer.
+  */
+-void rxrpc_get_skb(struct sk_buff *skb)
++void rxrpc_get_skb(struct sk_buff *skb, enum rxrpc_skb_trace op)
+ {
+ 	const void *here = __builtin_return_address(0);
+-	int n = atomic_inc_return(&rxrpc_n_skbs);
+-	trace_rxrpc_skb(skb, 2, atomic_read(&skb->users), n, here);
++	int n = atomic_inc_return(select_skb_count(op));
++	trace_rxrpc_skb(skb, op, atomic_read(&skb->users), n, here);
+ 	skb_get(skb);
+ }
+ 
+ /*
+  * Note the destruction of a socket buffer.
+  */
+-void rxrpc_free_skb(struct sk_buff *skb)
++void rxrpc_free_skb(struct sk_buff *skb, enum rxrpc_skb_trace op)
+ {
+ 	const void *here = __builtin_return_address(0);
+ 	if (skb) {
+ 		int n;
+ 		CHECK_SLAB_OKAY(&skb->users);
+-		n = atomic_dec_return(&rxrpc_n_skbs);
+-		trace_rxrpc_skb(skb, 3, atomic_read(&skb->users), n, here);
++		n = atomic_dec_return(select_skb_count(op));
++		trace_rxrpc_skb(skb, op, atomic_read(&skb->users), n, here);
+ 		kfree_skb(skb);
+ 	}
+ }
+ 
++/*
++ * Note the injected loss of a socket buffer.
++ */
++void rxrpc_lose_skb(struct sk_buff *skb, enum rxrpc_skb_trace op)
++{
++	const void *here = __builtin_return_address(0);
++	if (skb) {
++		int n;
++		CHECK_SLAB_OKAY(&skb->users);
++		if (op == rxrpc_skb_tx_lost) {
++			n = atomic_read(select_skb_count(op));
++			trace_rxrpc_skb(skb, op, atomic_read(&skb->users), n, here);
++		} else {
++			n = atomic_dec_return(select_skb_count(op));
++			trace_rxrpc_skb(skb, op, atomic_read(&skb->users), n, here);
++			kfree_skb(skb);
++		}
++	}
++}
++
+ /*
+  * Clear a queue of socket buffers.
+  */
+@@ -74,8 +96,9 @@ void rxrpc_purge_queue(struct sk_buff_head *list)
+ 	const void *here = __builtin_return_address(0);
+ 	struct sk_buff *skb;
+ 	while ((skb = skb_dequeue((list))) != NULL) {
+-		int n = atomic_dec_return(&rxrpc_n_skbs);
+-		trace_rxrpc_skb(skb, 4, atomic_read(&skb->users), n, here);
++		int n = atomic_dec_return(select_skb_count(rxrpc_skb_rx_purged));
++		trace_rxrpc_skb(skb, rxrpc_skb_rx_purged,
++				atomic_read(&skb->users), n, here);
+ 		kfree_skb(skb);
+ 	}
+ }

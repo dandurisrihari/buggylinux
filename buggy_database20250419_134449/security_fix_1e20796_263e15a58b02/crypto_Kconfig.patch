@@ -1,0 +1,54 @@
+commit 1e207964566738b49b003e80063fd712af75b82c
+Author: Nicolai Stange <nstange@suse.de>
+Date:   Mon Feb 21 13:10:55 2022 +0100
+
+    crypto: dh - implement private key generation primitive for ffdheXYZ(dh)
+    
+    The support for NVME in-band authentication currently in the works ([1])
+    needs to generate ephemeral DH keys for use with the RFC 7919 safe-prime
+    FFDHE groups.
+    
+    In analogy to ECDH and its ecc_gen_privkey(), implement a
+    dh_safe_prime_gen_privkey() and invoke it from the ffdheXYZ(dh) templates'
+    common ->set_secret(), i.e. dh_safe_prime_set_secret(), in case the input
+    ->key_size is zero.
+    
+    As the RFC 7919 FFDHE groups are classified as approved safe-prime groups
+    by SP800-56Arev3, it's worthwhile to make the new
+    dh_safe_prime_gen_privkey() to follow the approach specified in
+    SP800-56Arev3, sec. 5.6.1.1.3 ("Key-Pair Generation Using Extra Random
+    Bits") in order to achieve conformance.
+    
+    SP800-56Arev3 specifies a lower as well as an upper bound on the generated
+    key's length:
+    - it must be >= two times the maximum supported security strength of
+      the group in question and
+    - it must be <= the length of the domain parameter Q.
+    
+    For any safe-prime group Q = (P - 1)/2 by definition and the individual
+    maximum supported security strengths as specified by SP800-56Arev3 have
+    been made available as part of the FFDHE dh_safe_prime definitions
+    introduced with a previous patch. Make dh_safe_prime_gen_privkey() pick
+    twice the maximum supported strength rounded up to the next power of two
+    for the output key size. This choice respects both, the lower and upper
+    bounds given by SP800-90Arev3 for any of the approved safe-prime groups and
+    is also in line with the NVME base spec 2.0, which requires the key size to
+    be >= 256bits.
+    
+    [1] https://lore.kernel.org/r/20211202152358.60116-1-hare@suse.de
+    
+    Signed-off-by: Nicolai Stange <nstange@suse.de>
+    Reviewed-by: Hannes Reinecke <hare@suse.de>
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+diff --git a/crypto/Kconfig b/crypto/Kconfig
+index ba9434ad06ef..d6d7e84bb7f8 100644
+--- a/crypto/Kconfig
++++ b/crypto/Kconfig
+@@ -234,6 +234,7 @@ config CRYPTO_DH
+ config CRYPTO_DH_RFC7919_GROUPS
+ 	bool "Support for RFC 7919 FFDHE group parameters"
+ 	depends on CRYPTO_DH
++	select CRYPTO_RNG_DEFAULT
+ 	help
+ 	  Provide support for RFC 7919 FFDHE group parameters. If unsure, say N.

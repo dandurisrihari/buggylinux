@@ -1,0 +1,55 @@
+commit f64c3f54940d6929a2b6dcffaab942bd62be2e66
+Author: Balbir Singh <balbir@linux.vnet.ibm.com>
+Date:   Wed Sep 23 15:56:37 2009 -0700
+
+    memory controller: soft limit organize cgroups
+    
+    Organize cgroups over soft limit in a RB-Tree
+    
+    Introduce an RB-Tree for storing memory cgroups that are over their soft
+    limit.  The overall goal is to
+    
+    1. Add a memory cgroup to the RB-Tree when the soft limit is exceeded.
+       We are careful about updates, updates take place only after a particular
+       time interval has passed
+    2. We remove the node from the RB-Tree when the usage goes below the soft
+       limit
+    
+    The next set of patches will exploit the RB-Tree to get the group that is
+    over its soft limit by the largest amount and reclaim from it, when we
+    face memory contention.
+    
+    [hugh.dickins@tiscali.co.uk: CONFIG_CGROUP_MEM_RES_CTLR=y CONFIG_PREEMPT=y fails to boot]
+    Signed-off-by: Balbir Singh <balbir@linux.vnet.ibm.com>
+    Signed-off-by: KAMEZAWA Hiroyuki <kamezawa.hiroyu@jp.fujitsu.com>
+    Cc: Li Zefan <lizf@cn.fujitsu.com>
+    Cc: KOSAKI Motohiro <kosaki.motohiro@jp.fujitsu.com>
+    Signed-off-by: Hugh Dickins <hugh.dickins@tiscali.co.uk>
+    Cc: Jiri Slaby <jirislaby@gmail.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/include/linux/res_counter.h b/include/linux/res_counter.h
+index fcb9884df618..731af71cddc9 100644
+--- a/include/linux/res_counter.h
++++ b/include/linux/res_counter.h
+@@ -114,7 +114,8 @@ void res_counter_init(struct res_counter *counter, struct res_counter *parent);
+ int __must_check res_counter_charge_locked(struct res_counter *counter,
+ 		unsigned long val);
+ int __must_check res_counter_charge(struct res_counter *counter,
+-		unsigned long val, struct res_counter **limit_fail_at);
++		unsigned long val, struct res_counter **limit_fail_at,
++		struct res_counter **soft_limit_at);
+ 
+ /*
+  * uncharge - tell that some portion of the resource is released
+@@ -127,7 +128,8 @@ int __must_check res_counter_charge(struct res_counter *counter,
+  */
+ 
+ void res_counter_uncharge_locked(struct res_counter *counter, unsigned long val);
+-void res_counter_uncharge(struct res_counter *counter, unsigned long val);
++void res_counter_uncharge(struct res_counter *counter, unsigned long val,
++				bool *was_soft_limit_excess);
+ 
+ static inline bool res_counter_limit_check_locked(struct res_counter *cnt)
+ {

@@ -1,0 +1,62 @@
+commit 16a26b20d2afd0cf063816725b45b12e78d5bb31
+Author: Sascha Hauer <s.hauer@pengutronix.de>
+Date:   Fri Sep 7 14:36:35 2018 +0200
+
+    ubifs: authentication: Add hashes to index nodes
+    
+    With this patch the hashes over the index nodes stored in the tree node
+    cache are written to flash and are checked when read back from flash.
+    The hash of the root index node is stored in the master node.
+    
+    During journal replay the hashes are regenerated from the read nodes
+    and stored in the tree node cache. This means the nodes must previously
+    be authenticated by other means. This is done in a later patch.
+    
+    Signed-off-by: Sascha Hauer <s.hauer@pengutronix.de>
+    Signed-off-by: Richard Weinberger <richard@nod.at>
+
+diff --git a/fs/ubifs/tnc_misc.c b/fs/ubifs/tnc_misc.c
+index 6ce75999f273..d1815e959007 100644
+--- a/fs/ubifs/tnc_misc.c
++++ b/fs/ubifs/tnc_misc.c
+@@ -293,6 +293,12 @@ static int read_znode(struct ubifs_info *c, struct ubifs_zbranch *zzbr,
+ 		return err;
+ 	}
+ 
++	err = ubifs_node_check_hash(c, idx, zzbr->hash);
++	if (err) {
++		ubifs_bad_hash(c, idx, zzbr->hash, lnum, offs);
++		return err;
++	}
++
+ 	znode->child_cnt = le16_to_cpu(idx->child_cnt);
+ 	znode->level = le16_to_cpu(idx->level);
+ 
+@@ -309,13 +315,14 @@ static int read_znode(struct ubifs_info *c, struct ubifs_zbranch *zzbr,
+ 	}
+ 
+ 	for (i = 0; i < znode->child_cnt; i++) {
+-		const struct ubifs_branch *br = ubifs_idx_branch(c, idx, i);
++		struct ubifs_branch *br = ubifs_idx_branch(c, idx, i);
+ 		struct ubifs_zbranch *zbr = &znode->zbranch[i];
+ 
+ 		key_read(c, &br->key, &zbr->key);
+ 		zbr->lnum = le32_to_cpu(br->lnum);
+ 		zbr->offs = le32_to_cpu(br->offs);
+ 		zbr->len  = le32_to_cpu(br->len);
++		ubifs_copy_hash(c, ubifs_branch_hash(c, br), zbr->hash);
+ 		zbr->znode = NULL;
+ 
+ 		/* Validate branch */
+@@ -497,5 +504,11 @@ int ubifs_tnc_read_node(struct ubifs_info *c, struct ubifs_zbranch *zbr,
+ 		return -EINVAL;
+ 	}
+ 
++	err = ubifs_node_check_hash(c, node, zbr->hash);
++	if (err) {
++		ubifs_bad_hash(c, node, zbr->hash, zbr->lnum, zbr->offs);
++		return err;
++	}
++
+ 	return 0;
+ }

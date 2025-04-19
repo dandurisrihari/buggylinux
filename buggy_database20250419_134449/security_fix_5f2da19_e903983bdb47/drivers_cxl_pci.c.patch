@@ -1,0 +1,51 @@
+commit 5f2da19714465739da2449253b13ac06cb353a26
+Author: Dan Williams <dan.j.williams@intel.com>
+Date:   Wed Oct 4 16:49:36 2023 -0700
+
+    cxl/pci: Fix sanitize notifier setup
+    
+    Fix a race condition between the mailbox-background command interrupt
+    firing and the security-state sysfs attribute being removed.
+    
+    The race is difficult to see due to the awkward placement of the
+    sanitize-notifier setup code and the multiple places the teardown calls
+    are made, cxl_memdev_security_init() and cxl_memdev_security_shutdown().
+    
+    Unify setup in one place, cxl_sanitize_setup_notifier(). Arrange for
+    the paired cxl_sanitize_teardown_notifier() to safely quiet the notifier
+    and let the cxl_memdev + irq be unregistered later in the flow.
+    
+    Note: The special wrinkle of the sanitize notifier is that it interacts
+    with interrupts, which are enabled early in the flow, and it interacts
+    with memdev sysfs which is not initialized until late in the flow. Hence
+    why this setup routine takes an @cxlmd argument, and not just @mds.
+    
+    This fix is also needed as a preparation fix for a memdev unregistration
+    crash.
+    
+    Reported-by: Jonathan Cameron <Jonathan.Cameron@Huawei.com>
+    Closes: http://lore.kernel.org/r/20230929100316.00004546@Huawei.com
+    Cc: Dave Jiang <dave.jiang@intel.com>
+    Cc: Davidlohr Bueso <dave@stgolabs.net>
+    Fixes: 0c36b6ad436a ("cxl/mbox: Add sanitization handling machinery")
+    Reviewed-by: Dave Jiang <dave.jiang@intel.com>
+    Reviewed-by: Ira Weiny <ira.weiny@intel.com>
+    Reviewed-by: Davidlohr Bueso <dave@stgolabs.net>
+    Reviewed-by: Jonathan Cameron <Jonathan.Cameron@huawei.com>
+    Signed-off-by: Dan Williams <dan.j.williams@intel.com>
+
+diff --git a/drivers/cxl/pci.c b/drivers/cxl/pci.c
+index 7c117eb62750..9955871e9ec1 100644
+--- a/drivers/cxl/pci.c
++++ b/drivers/cxl/pci.c
+@@ -875,6 +875,10 @@ static int cxl_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
+ 	if (rc)
+ 		return rc;
+ 
++	rc = devm_cxl_sanitize_setup_notifier(&pdev->dev, cxlmd);
++	if (rc)
++		return rc;
++
+ 	pmu_count = cxl_count_regblock(pdev, CXL_REGLOC_RBI_PMU);
+ 	for (i = 0; i < pmu_count; i++) {
+ 		struct cxl_pmu_regs pmu_regs;

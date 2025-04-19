@@ -1,0 +1,62 @@
+diff --cc drivers/vhost/scsi.c
+index 4264840ef7dc,b35193807f0b..06adf31a9248
+--- a/drivers/vhost/scsi.c
++++ b/drivers/vhost/scsi.c
+@@@ -555,28 -564,22 +567,22 @@@ tcm_vhost_allocate_evt(struct vhost_scs
+  	return evt;
+  }
+  
+ -static void vhost_scsi_free_cmd(struct tcm_vhost_cmd *tv_cmd)
+ +static void vhost_scsi_free_cmd(struct tcm_vhost_cmd *cmd)
+  {
+ -	struct se_cmd *se_cmd = &tv_cmd->tvc_se_cmd;
+ +	struct se_cmd *se_cmd = &cmd->tvc_se_cmd;
+  
+  	/* TODO locking against target/backend threads? */
+- 	transport_generic_free_cmd(se_cmd, 1);
++ 	transport_generic_free_cmd(se_cmd, 0);
+  
+- 	if (cmd->tvc_sgl_count) {
+- 		u32 i;
+- 		for (i = 0; i < cmd->tvc_sgl_count; i++)
+- 			put_page(sg_page(&cmd->tvc_sgl[i]));
+- 
+- 		kfree(cmd->tvc_sgl);
+- 	}
+- 
+- 	tcm_vhost_put_inflight(cmd->inflight);
++ }
+  
+- 	kfree(cmd);
++ static int vhost_scsi_check_stop_free(struct se_cmd *se_cmd)
++ {
++ 	return target_put_sess_cmd(se_cmd->se_sess, se_cmd);
+  }
+  
+ -static void tcm_vhost_do_evt_work(struct vhost_scsi *vs,
+ -	struct tcm_vhost_evt *evt)
+ +static void
+ +tcm_vhost_do_evt_work(struct vhost_scsi *vs, struct tcm_vhost_evt *evt)
+  {
+  	struct vhost_virtqueue *vq = &vs->vqs[VHOST_SCSI_VQ_EVT].vq;
+  	struct virtio_scsi_event *event = &evt->event;
+@@@ -850,13 -847,13 +856,13 @@@ static void tcm_vhost_submission_work(s
+  	} else {
+  		sg_ptr = NULL;
+  	}
+ -	tv_nexus = tv_cmd->tvc_nexus;
+ +	tv_nexus = cmd->tvc_nexus;
+  
+  	rc = target_submit_cmd_map_sgls(se_cmd, tv_nexus->tvn_se_sess,
+ -			tv_cmd->tvc_cdb, &tv_cmd->tvc_sense_buf[0],
+ -			tv_cmd->tvc_lun, tv_cmd->tvc_exp_data_len,
+ -			tv_cmd->tvc_task_attr, tv_cmd->tvc_data_direction,
+ -			TARGET_SCF_ACK_KREF, sg_ptr, tv_cmd->tvc_sgl_count,
+ +			cmd->tvc_cdb, &cmd->tvc_sense_buf[0],
+ +			cmd->tvc_lun, cmd->tvc_exp_data_len,
+ +			cmd->tvc_task_attr, cmd->tvc_data_direction,
+- 			0, sg_ptr, cmd->tvc_sgl_count,
+++			TARGET_SCF_ACK_KREF, sg_ptr, cmd->tvc_sgl_count,
+  			sg_bidi_ptr, sg_no_bidi);
+  	if (rc < 0) {
+  		transport_send_check_condition_and_sense(se_cmd,

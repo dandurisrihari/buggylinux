@@ -1,0 +1,92 @@
+commit 4953919feedaeb6d0161ecea920c35d1d1f639d3
+Author: David Hildenbrand <dahi@linux.vnet.ibm.com>
+Date:   Fri Feb 21 08:59:59 2014 +0100
+
+    KVM: s390: interpretive execution of SIGP EXTERNAL CALL
+    
+    If the sigp interpretation facility is installed, most SIGP EXTERNAL CALL
+    operations will be interpreted instead of intercepted. A partial execution
+    interception will occurr at the sending cpu only if the target cpu is in the
+    wait state ("W" bit in the cpuflags set). Instruction interception will only
+    happen in error cases (e.g. cpu addr invalid).
+    
+    As a sending cpu might set the external call interrupt pending flags at the
+    target cpu at every point in time, we can't handle this kind of interrupt using
+    our kvm interrupt injection mechanism. The injection will be done automatically
+    by the SIE when preparing the start of the target cpu.
+    
+    Signed-off-by: David Hildenbrand <dahi@linux.vnet.ibm.com>
+    Reviewed-by: Cornelia Huck <cornelia.huck@de.ibm.com>
+    CC: Thomas Huth <thuth@linux.vnet.ibm.com>
+    [Adopt external call injection to check for sigp interpretion]
+    Signed-off-by: Christian Borntraeger <borntraeger@de.ibm.com>
+
+diff --git a/arch/s390/kvm/interrupt.c b/arch/s390/kvm/interrupt.c
+index 75cd3217cd5a..bf0d9bc15bcd 100644
+--- a/arch/s390/kvm/interrupt.c
++++ b/arch/s390/kvm/interrupt.c
+@@ -148,9 +148,8 @@ static void __unset_cpu_idle(struct kvm_vcpu *vcpu)
+ 
+ static void __reset_intercept_indicators(struct kvm_vcpu *vcpu)
+ {
+-	atomic_clear_mask(CPUSTAT_ECALL_PEND |
+-		CPUSTAT_IO_INT | CPUSTAT_EXT_INT | CPUSTAT_STOP_INT,
+-		&vcpu->arch.sie_block->cpuflags);
++	atomic_clear_mask(CPUSTAT_IO_INT | CPUSTAT_EXT_INT | CPUSTAT_STOP_INT,
++			  &vcpu->arch.sie_block->cpuflags);
+ 	vcpu->arch.sie_block->lctl = 0x0000;
+ 	vcpu->arch.sie_block->ictl &= ~(ICTL_LPSW | ICTL_STCTL | ICTL_PINT);
+ 
+@@ -524,6 +523,20 @@ static void deliver_ckc_interrupt(struct kvm_vcpu *vcpu)
+ 	}
+ }
+ 
++/* Check whether SIGP interpretation facility has an external call pending */
++int kvm_s390_si_ext_call_pending(struct kvm_vcpu *vcpu)
++{
++	atomic_t *sigp_ctrl = &vcpu->kvm->arch.sca->cpu[vcpu->vcpu_id].ctrl;
++
++	if (!psw_extint_disabled(vcpu) &&
++	    (vcpu->arch.sie_block->gcr[0] & 0x2000ul) &&
++	    (atomic_read(sigp_ctrl) & SIGP_CTRL_C) &&
++	    (atomic_read(&vcpu->arch.sie_block->cpuflags) & CPUSTAT_ECALL_PEND))
++		return 1;
++
++	return 0;
++}
++
+ int kvm_cpu_has_interrupt(struct kvm_vcpu *vcpu)
+ {
+ 	struct kvm_s390_local_interrupt *li = &vcpu->arch.local_int;
+@@ -554,6 +567,9 @@ int kvm_cpu_has_interrupt(struct kvm_vcpu *vcpu)
+ 	if (!rc && kvm_cpu_has_pending_timer(vcpu))
+ 		rc = 1;
+ 
++	if (!rc && kvm_s390_si_ext_call_pending(vcpu))
++		rc = 1;
++
+ 	return rc;
+ }
+ 
+@@ -610,7 +626,8 @@ int kvm_s390_handle_wait(struct kvm_vcpu *vcpu)
+ 	while (list_empty(&vcpu->arch.local_int.list) &&
+ 		list_empty(&vcpu->arch.local_int.float_int->list) &&
+ 		(!vcpu->arch.local_int.timer_due) &&
+-		!signal_pending(current)) {
++		!signal_pending(current) &&
++		!kvm_s390_si_ext_call_pending(vcpu)) {
+ 		set_current_state(TASK_INTERRUPTIBLE);
+ 		spin_unlock_bh(&vcpu->arch.local_int.lock);
+ 		spin_unlock(&vcpu->arch.local_int.float_int->lock);
+@@ -667,6 +684,11 @@ void kvm_s390_clear_local_irqs(struct kvm_vcpu *vcpu)
+ 	}
+ 	atomic_set(&li->active, 0);
+ 	spin_unlock_bh(&li->lock);
++
++	/* clear pending external calls set by sigp interpretation facility */
++	atomic_clear_mask(CPUSTAT_ECALL_PEND, &vcpu->arch.sie_block->cpuflags);
++	atomic_clear_mask(SIGP_CTRL_C,
++			  &vcpu->kvm->arch.sca->cpu[vcpu->vcpu_id].ctrl);
+ }
+ 
+ void kvm_s390_deliver_pending_interrupts(struct kvm_vcpu *vcpu)

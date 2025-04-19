@@ -1,0 +1,43 @@
+commit fb3bd914b3ec28f5fb697ac55c4846ac2d542855
+Author: Borislav Petkov (AMD) <bp@alien8.de>
+Date:   Wed Jun 28 11:02:39 2023 +0200
+
+    x86/srso: Add a Speculative RAS Overflow mitigation
+    
+    Add a mitigation for the speculative return address stack overflow
+    vulnerability found on AMD processors.
+    
+    The mitigation works by ensuring all RET instructions speculate to
+    a controlled location, similar to how speculation is controlled in the
+    retpoline sequence.  To accomplish this, the __x86_return_thunk forces
+    the CPU to mispredict every function return using a 'safe return'
+    sequence.
+    
+    To ensure the safety of this mitigation, the kernel must ensure that the
+    safe return sequence is itself free from attacker interference.  In Zen3
+    and Zen4, this is accomplished by creating a BTB alias between the
+    untraining function srso_untrain_ret_alias() and the safe return
+    function srso_safe_ret_alias() which results in evicting a potentially
+    poisoned BTB entry and using that safe one for all function returns.
+    
+    In older Zen1 and Zen2, this is accomplished using a reinterpretation
+    technique similar to Retbleed one: srso_untrain_ret() and
+    srso_safe_ret().
+    
+    Signed-off-by: Borislav Petkov (AMD) <bp@alien8.de>
+
+diff --git a/arch/x86/kernel/alternative.c b/arch/x86/kernel/alternative.c
+index 2dcf3a06af09..920a8ca7a8f8 100644
+--- a/arch/x86/kernel/alternative.c
++++ b/arch/x86/kernel/alternative.c
+@@ -707,7 +707,9 @@ static int patch_return(void *addr, struct insn *insn, u8 *bytes)
+ 	int i = 0;
+ 
+ 	/* Patch the custom return thunks... */
+-	if (cpu_feature_enabled(X86_FEATURE_RETHUNK)) {
++	if (cpu_feature_enabled(X86_FEATURE_RETHUNK) ||
++	    cpu_feature_enabled(X86_FEATURE_SRSO) ||
++	    cpu_feature_enabled(X86_FEATURE_SRSO_ALIAS)) {
+ 		i = JMP32_INSN_SIZE;
+ 		__text_gen_insn(bytes, JMP32_INSN_OPCODE, addr, x86_return_thunk, i);
+ 	} else {

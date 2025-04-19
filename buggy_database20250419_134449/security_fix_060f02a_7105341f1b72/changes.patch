@@ -1,0 +1,115 @@
+diff --git a/include/linux/xfrm.h b/include/linux/xfrm.h
+index a7c9e4cfb15b..b53f799189af 100644
+--- a/include/linux/xfrm.h
++++ b/include/linux/xfrm.h
+@@ -235,6 +235,7 @@ enum xfrm_attr_type_t {
+ 	XFRMA_REPLAY_THRESH,
+ 	XFRMA_ETIMER_THRESH,
+ 	XFRMA_SRCADDR,		/* xfrm_address_t */
++	XFRMA_COADDR,		/* xfrm_address_t */
+ 	__XFRMA_MAX
+ 
+ #define XFRMA_MAX (__XFRMA_MAX - 1)
+diff --git a/include/net/xfrm.h b/include/net/xfrm.h
+index aa93cc1f6299..872a2a4022b2 100644
+--- a/include/net/xfrm.h
++++ b/include/net/xfrm.h
+@@ -134,6 +134,9 @@ struct xfrm_state
+ 	/* Data for encapsulator */
+ 	struct xfrm_encap_tmpl	*encap;
+ 
++	/* Data for care-of address */
++	xfrm_address_t	*coaddr;
++
+ 	/* IPComp needs an IPIP tunnel for handling uncompressed packets */
+ 	struct xfrm_state	*tunnel;
+ 
+diff --git a/net/xfrm/xfrm_state.c b/net/xfrm/xfrm_state.c
+index f05371556cce..3da89c01ea71 100644
+--- a/net/xfrm/xfrm_state.c
++++ b/net/xfrm/xfrm_state.c
+@@ -78,6 +78,7 @@ static void xfrm_state_gc_destroy(struct xfrm_state *x)
+ 	kfree(x->ealg);
+ 	kfree(x->calg);
+ 	kfree(x->encap);
++	kfree(x->coaddr);
+ 	if (x->mode)
+ 		xfrm_put_mode(x->mode);
+ 	if (x->type) {
+@@ -603,6 +604,11 @@ int xfrm_state_update(struct xfrm_state *x)
+ 	if (likely(x1->km.state == XFRM_STATE_VALID)) {
+ 		if (x->encap && x1->encap)
+ 			memcpy(x1->encap, x->encap, sizeof(*x1->encap));
++		if (x->coaddr && x1->coaddr) {
++			memcpy(x1->coaddr, x->coaddr, sizeof(*x1->coaddr));
++		}
++		if (!use_spi && memcmp(&x1->sel, &x->sel, sizeof(x1->sel)))
++			memcpy(&x1->sel, &x->sel, sizeof(x1->sel));
+ 		memcpy(&x1->lft, &x->lft, sizeof(x1->lft));
+ 		x1->km.dying = 0;
+ 
+diff --git a/net/xfrm/xfrm_user.c b/net/xfrm/xfrm_user.c
+index b5f8ab71aa54..939808de9e20 100644
+--- a/net/xfrm/xfrm_user.c
++++ b/net/xfrm/xfrm_user.c
+@@ -187,11 +187,14 @@ static int verify_newsa_info(struct xfrm_usersa_info *p,
+ 		goto out;
+ 	if ((err = verify_sec_ctx_len(xfrma)))
+ 		goto out;
++	if ((err = verify_one_addr(xfrma, XFRMA_COADDR, NULL)))
++		goto out;
+ 
+ 	err = -EINVAL;
+ 	switch (p->mode) {
+ 	case XFRM_MODE_TRANSPORT:
+ 	case XFRM_MODE_TUNNEL:
++	case XFRM_MODE_ROUTEOPTIMIZATION:
+ 		break;
+ 
+ 	default:
+@@ -276,6 +279,24 @@ static int attach_sec_ctx(struct xfrm_state *x, struct rtattr *u_arg)
+ 	return security_xfrm_state_alloc(x, uctx);
+ }
+ 
++static int attach_one_addr(xfrm_address_t **addrpp, struct rtattr *u_arg)
++{
++	struct rtattr *rta = u_arg;
++	xfrm_address_t *p, *uaddrp;
++
++	if (!rta)
++		return 0;
++
++	uaddrp = RTA_DATA(rta);
++	p = kmalloc(sizeof(*p), GFP_KERNEL);
++	if (!p)
++		return -ENOMEM;
++
++	memcpy(p, uaddrp, sizeof(*p));
++	*addrpp = p;
++	return 0;
++}
++
+ static void copy_from_user_state(struct xfrm_state *x, struct xfrm_usersa_info *p)
+ {
+ 	memcpy(&x->id, &p->id, sizeof(x->id));
+@@ -365,7 +386,8 @@ static struct xfrm_state *xfrm_state_construct(struct xfrm_usersa_info *p,
+ 		goto error;
+ 	if ((err = attach_encap_tmpl(&x->encap, xfrma[XFRMA_ENCAP-1])))
+ 		goto error;
+-
++	if ((err = attach_one_addr(&x->coaddr, xfrma[XFRMA_COADDR-1])))
++		goto error;
+ 	err = xfrm_init_state(x);
+ 	if (err)
+ 		goto error;
+@@ -569,6 +591,10 @@ static int dump_one_state(struct xfrm_state *x, int count, void *ptr)
+ 		uctx->ctx_len = x->security->ctx_len;
+ 		memcpy(uctx + 1, x->security->ctx_str, x->security->ctx_len);
+ 	}
++
++	if (x->coaddr)
++		RTA_PUT(skb, XFRMA_COADDR, sizeof(*x->coaddr), x->coaddr);
++
+ 	nlh->nlmsg_len = skb->tail - b;
+ out:
+ 	sp->this_idx++;

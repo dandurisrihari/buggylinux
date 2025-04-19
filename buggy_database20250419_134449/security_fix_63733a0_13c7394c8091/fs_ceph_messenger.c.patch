@@ -1,0 +1,48 @@
+commit 63733a0fc55cca74b1911769633dc5dfd1a45907
+Author: Sage Weil <sage@newdream.net>
+Date:   Mon Mar 15 15:47:22 2010 -0700
+
+    ceph: fix authenticator timeout
+    
+    We were failing to reconnect to services due to an old authenticator, even
+    though we had the new ticket, because we weren't properly retrying the
+    connect handshake, because we were calling an old/incorrect helper that
+    left in_base_pos incorrect.  The result was a failure to reconnect to the
+    OSD or MDS (with an authentication error) if the MDS restarted after the
+    service had been up a few hours (long enough for the original authenticator
+    to be invalid).  This was only a problem if the AUTH_X authentication was
+    enabled.
+    
+    Now that the 'negotiate' and 'connect' stages are fully separated, we
+    should use the prepare_read_connect() helper instead, and remove the
+    obsolete one.
+    
+    Signed-off-by: Sage Weil <sage@newdream.net>
+
+diff --git a/fs/ceph/messenger.c b/fs/ceph/messenger.c
+index 781656a49bf8..203c4359b549 100644
+--- a/fs/ceph/messenger.c
++++ b/fs/ceph/messenger.c
+@@ -830,13 +830,6 @@ static void prepare_read_connect(struct ceph_connection *con)
+ 	con->in_base_pos = 0;
+ }
+ 
+-static void prepare_read_connect_retry(struct ceph_connection *con)
+-{
+-	dout("prepare_read_connect_retry %p\n", con);
+-	con->in_base_pos = strlen(CEPH_BANNER) + sizeof(con->actual_peer_addr)
+-		+ sizeof(con->peer_addr_for_me);
+-}
+-
+ static void prepare_read_ack(struct ceph_connection *con)
+ {
+ 	dout("prepare_read_ack %p\n", con);
+@@ -1146,7 +1139,7 @@ static int process_connect(struct ceph_connection *con)
+ 		}
+ 		con->auth_retry = 1;
+ 		prepare_write_connect(con->msgr, con, 0);
+-		prepare_read_connect_retry(con);
++		prepare_read_connect(con);
+ 		break;
+ 
+ 	case CEPH_MSGR_TAG_RESETSESSION:

@@ -1,0 +1,142 @@
+commit 8a8b6502fb669c3a0638a08955442814cedc86b1
+Author: Akinobu Mita <akinobu.mita@gmail.com>
+Date:   Fri Dec 8 02:39:44 2006 -0800
+
+    [PATCH] fault-injection capability for kmalloc
+    
+    This patch provides fault-injection capability for kmalloc.
+    
+    Boot option:
+    
+    failslab=<interval>,<probability>,<space>,<times>
+    
+            <interval> -- specifies the interval of failures.
+    
+            <probability> -- specifies how often it should fail in percent.
+    
+            <space> -- specifies the size of free space where memory can be
+                       allocated safely in bytes.
+    
+            <times> -- specifies how many times failures may happen at most.
+    
+    Debugfs:
+    
+    /debug/failslab/interval
+    /debug/failslab/probability
+    /debug/failslab/specifies
+    /debug/failslab/times
+    /debug/failslab/ignore-gfp-highmem
+    /debug/failslab/ignore-gfp-wait
+    
+    Example:
+    
+            failslab=10,100,0,-1
+    
+    slab allocation (kmalloc(), kmem_cache_alloc(),..) fails once per 10 times.
+    
+    Cc: Pekka Enberg <penberg@cs.helsinki.fi>
+    Signed-off-by: Akinobu Mita <akinobu.mita@gmail.com>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/mm/slab.c b/mm/slab.c
+index e90b6100a927..47011e2ef3c9 100644
+--- a/mm/slab.c
++++ b/mm/slab.c
+@@ -107,6 +107,7 @@
+ #include	<linux/nodemask.h>
+ #include	<linux/mempolicy.h>
+ #include	<linux/mutex.h>
++#include	<linux/fault-inject.h>
+ #include	<linux/rtmutex.h>
+ 
+ #include	<asm/cacheflush.h>
+@@ -3088,12 +3089,88 @@ static void *cache_alloc_debugcheck_after(struct kmem_cache *cachep,
+ #define cache_alloc_debugcheck_after(a,b,objp,d) (objp)
+ #endif
+ 
++#ifdef CONFIG_FAILSLAB
++
++static struct failslab_attr {
++
++	struct fault_attr attr;
++
++	u32 ignore_gfp_wait;
++#ifdef CONFIG_FAULT_INJECTION_DEBUG_FS
++	struct dentry *ignore_gfp_wait_file;
++#endif
++
++} failslab = {
++	.attr = FAULT_ATTR_INITIALIZER,
++};
++
++static int __init setup_failslab(char *str)
++{
++	return setup_fault_attr(&failslab.attr, str);
++}
++__setup("failslab=", setup_failslab);
++
++static int should_failslab(struct kmem_cache *cachep, gfp_t flags)
++{
++	if (cachep == &cache_cache)
++		return 0;
++	if (flags & __GFP_NOFAIL)
++		return 0;
++	if (failslab.ignore_gfp_wait && (flags & __GFP_WAIT))
++		return 0;
++
++	return should_fail(&failslab.attr, obj_size(cachep));
++}
++
++#ifdef CONFIG_FAULT_INJECTION_DEBUG_FS
++
++static int __init failslab_debugfs(void)
++{
++	mode_t mode = S_IFREG | S_IRUSR | S_IWUSR;
++	struct dentry *dir;
++	int err;
++
++       	err = init_fault_attr_dentries(&failslab.attr, "failslab");
++	if (err)
++		return err;
++	dir = failslab.attr.dentries.dir;
++
++	failslab.ignore_gfp_wait_file =
++		debugfs_create_bool("ignore-gfp-wait", mode, dir,
++				      &failslab.ignore_gfp_wait);
++
++	if (!failslab.ignore_gfp_wait_file) {
++		err = -ENOMEM;
++		debugfs_remove(failslab.ignore_gfp_wait_file);
++		cleanup_fault_attr_dentries(&failslab.attr);
++	}
++
++	return err;
++}
++
++late_initcall(failslab_debugfs);
++
++#endif /* CONFIG_FAULT_INJECTION_DEBUG_FS */
++
++#else /* CONFIG_FAILSLAB */
++
++static inline int should_failslab(struct kmem_cache *cachep, gfp_t flags)
++{
++	return 0;
++}
++
++#endif /* CONFIG_FAILSLAB */
++
+ static inline void *____cache_alloc(struct kmem_cache *cachep, gfp_t flags)
+ {
+ 	void *objp;
+ 	struct array_cache *ac;
+ 
+ 	check_irq_off();
++
++	if (should_failslab(cachep, flags))
++		return NULL;
++
+ 	ac = cpu_cache_get(cachep);
+ 	if (likely(ac->avail)) {
+ 		STATS_INC_ALLOCHIT(cachep);

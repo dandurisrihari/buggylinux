@@ -1,0 +1,298 @@
+diff --cc arch/arm64/include/asm/kvm_coproc.h
+index 454373704b8a,147f3a77e6a5..d6bb40122fdb
+--- a/arch/arm64/include/asm/kvm_coproc.h
++++ b/arch/arm64/include/asm/kvm_coproc.h
+@@@ -19,20 -19,12 +19,12 @@@ struct kvm_sys_reg_table 
+  	size_t num;
+  };
+  
+- struct kvm_sys_reg_target_table {
+- 	struct kvm_sys_reg_table table64;
+- 	struct kvm_sys_reg_table table32;
+- };
+- 
+- void kvm_register_target_sys_reg_table(unsigned int target,
+- 				       struct kvm_sys_reg_target_table *table);
+- 
+ -int kvm_handle_cp14_load_store(struct kvm_vcpu *vcpu, struct kvm_run *run);
+ -int kvm_handle_cp14_32(struct kvm_vcpu *vcpu, struct kvm_run *run);
+ -int kvm_handle_cp14_64(struct kvm_vcpu *vcpu, struct kvm_run *run);
+ -int kvm_handle_cp15_32(struct kvm_vcpu *vcpu, struct kvm_run *run);
+ -int kvm_handle_cp15_64(struct kvm_vcpu *vcpu, struct kvm_run *run);
+ -int kvm_handle_sys_reg(struct kvm_vcpu *vcpu, struct kvm_run *run);
+ +int kvm_handle_cp14_load_store(struct kvm_vcpu *vcpu);
+ +int kvm_handle_cp14_32(struct kvm_vcpu *vcpu);
+ +int kvm_handle_cp14_64(struct kvm_vcpu *vcpu);
+ +int kvm_handle_cp15_32(struct kvm_vcpu *vcpu);
+ +int kvm_handle_cp15_64(struct kvm_vcpu *vcpu);
+ +int kvm_handle_sys_reg(struct kvm_vcpu *vcpu);
+  
+  #define kvm_coproc_table_init kvm_sys_reg_table_init
+  void kvm_sys_reg_table_init(void);
+diff --cc arch/arm64/include/asm/kvm_host.h
+index f81151ad3d3c,e1a32c0707bb..65568b23868a
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@@ -369,24 -416,24 +405,29 @@@ struct kvm_vcpu_arch 
+  #define vcpu_has_sve(vcpu) (system_supports_sve() && \
+  			    ((vcpu)->arch.flags & KVM_ARM64_GUEST_HAS_SVE))
+  
+ -#define vcpu_has_ptrauth(vcpu)	((system_supports_address_auth() || \
+ -				  system_supports_generic_auth()) && \
+ -				 ((vcpu)->arch.flags & KVM_ARM64_GUEST_HAS_PTRAUTH))
+ +#ifdef CONFIG_ARM64_PTR_AUTH
+ +#define vcpu_has_ptrauth(vcpu)						\
+ +	((cpus_have_final_cap(ARM64_HAS_ADDRESS_AUTH) ||		\
+ +	  cpus_have_final_cap(ARM64_HAS_GENERIC_AUTH)) &&		\
+ +	 (vcpu)->arch.flags & KVM_ARM64_GUEST_HAS_PTRAUTH)
+ +#else
+ +#define vcpu_has_ptrauth(vcpu)		false
+ +#endif
+  
+- #define vcpu_gp_regs(v)		(&(v)->arch.ctxt.gp_regs)
++ #define vcpu_gp_regs(v)		(&(v)->arch.ctxt.regs)
+  
+  /*
+-  * Only use __vcpu_sys_reg if you know you want the memory backed version of a
+-  * register, and not the one most recently accessed by a running VCPU.  For
+-  * example, for userspace access or for system registers that are never context
+-  * switched, but only emulated.
++  * Only use __vcpu_sys_reg/ctxt_sys_reg if you know you want the
++  * memory backed version of a register, and not the one most recently
++  * accessed by a running VCPU.  For example, for userspace access or
++  * for system registers that are never context switched, but only
++  * emulated.
+   */
+- #define __vcpu_sys_reg(v,r)	((v)->arch.ctxt.sys_regs[(r)])
++ #define __ctxt_sys_reg(c,r)	(&(c)->sys_regs[(r)])
++ 
++ #define ctxt_sys_reg(c,r)	(*__ctxt_sys_reg(c,r))
++ 
++ #define __vcpu_sys_reg(v,r)	(ctxt_sys_reg(&(v)->arch.ctxt, (r)))
+  
+  u64 vcpu_read_sys_reg(const struct kvm_vcpu *vcpu, int reg);
+  void vcpu_write_sys_reg(struct kvm_vcpu *vcpu, u64 val, int reg);
+diff --cc arch/arm64/kvm/handle_exit.c
+index 1df3beafd73f,98ab33139982..fe6c7d79309d
+--- a/arch/arm64/kvm/handle_exit.c
++++ b/arch/arm64/kvm/handle_exit.c
+@@@ -87,9 -87,9 +87,9 @@@ static int handle_no_fpsimd(struct kvm_
+   * world-switches and schedule other host processes until there is an
+   * incoming IRQ or FIQ to the VM.
+   */
+ -static int kvm_handle_wfx(struct kvm_vcpu *vcpu, struct kvm_run *run)
+ +static int kvm_handle_wfx(struct kvm_vcpu *vcpu)
+  {
+- 	if (kvm_vcpu_get_hsr(vcpu) & ESR_ELx_WFx_ISS_WFE) {
++ 	if (kvm_vcpu_get_esr(vcpu) & ESR_ELx_WFx_ISS_WFE) {
+  		trace_kvm_wfx_arm64(*vcpu_pc(vcpu), true);
+  		vcpu->stat.wfe_exit_stat++;
+  		kvm_vcpu_on_spin(vcpu, vcpu_mode_priv(vcpu));
+@@@ -114,12 -115,11 +114,12 @@@
+   * guest and host are using the same debug facilities it will be up to
+   * userspace to re-inject the correct exception for guest delivery.
+   *
+ - * @return: 0 (while setting run->exit_reason), -1 for error
+ + * @return: 0 (while setting vcpu->run->exit_reason), -1 for error
+   */
+ -static int kvm_handle_guest_debug(struct kvm_vcpu *vcpu, struct kvm_run *run)
+ +static int kvm_handle_guest_debug(struct kvm_vcpu *vcpu)
+  {
+ +	struct kvm_run *run = vcpu->run;
+- 	u32 hsr = kvm_vcpu_get_hsr(vcpu);
++ 	u32 esr = kvm_vcpu_get_esr(vcpu);
+  	int ret = 0;
+  
+  	run->exit_reason = KVM_EXIT_DEBUG;
+@@@ -144,12 -144,12 +144,12 @@@
+  	return ret;
+  }
+  
+ -static int kvm_handle_unknown_ec(struct kvm_vcpu *vcpu, struct kvm_run *run)
+ +static int kvm_handle_unknown_ec(struct kvm_vcpu *vcpu)
+  {
+- 	u32 hsr = kvm_vcpu_get_hsr(vcpu);
++ 	u32 esr = kvm_vcpu_get_esr(vcpu);
+  
+- 	kvm_pr_unimpl("Unknown exception class: hsr: %#08x -- %s\n",
+- 		      hsr, esr_get_class_string(hsr));
++ 	kvm_pr_unimpl("Unknown exception class: esr: %#08x -- %s\n",
++ 		      esr, esr_get_class_string(esr));
+  
+  	kvm_inject_undefined(vcpu);
+  	return 1;
+@@@ -237,12 -237,11 +237,12 @@@ static int handle_trap_exceptions(struc
+   * Return > 0 to return to guest, < 0 on error, 0 (and set exit_reason) on
+   * proper exit to userspace.
+   */
+ -int handle_exit(struct kvm_vcpu *vcpu, struct kvm_run *run,
+ -		       int exception_index)
+ +int handle_exit(struct kvm_vcpu *vcpu, int exception_index)
+  {
+ +	struct kvm_run *run = vcpu->run;
+ +
+  	if (ARM_SERROR_PENDING(exception_index)) {
+- 		u8 hsr_ec = ESR_ELx_EC(kvm_vcpu_get_hsr(vcpu));
++ 		u8 esr_ec = ESR_ELx_EC(kvm_vcpu_get_esr(vcpu));
+  
+  		/*
+  		 * HVC/SMC already have an adjusted PC, which we need
+diff --cc arch/arm64/kvm/mmu.c
+index 7a7ddc4558a7,05e0e03fbdf8..0121ef2c7c8d
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@@ -124,11 -127,44 +127,12 @@@ static void stage2_dissolve_pud(struct 
+  	put_page(virt_to_page(pudp));
+  }
+  
+- static void clear_stage2_pgd_entry(struct kvm *kvm, pgd_t *pgd, phys_addr_t addr)
+ -static int mmu_topup_memory_cache(struct kvm_mmu_memory_cache *cache,
+ -				  int min, int max)
+ -{
+ -	void *page;
+ -
+ -	BUG_ON(max > KVM_NR_MEM_OBJS);
+ -	if (cache->nobjs >= min)
+ -		return 0;
+ -	while (cache->nobjs < max) {
+ -		page = (void *)__get_free_page(GFP_PGTABLE_USER);
+ -		if (!page)
+ -			return -ENOMEM;
+ -		cache->objects[cache->nobjs++] = page;
+ -	}
+ -	return 0;
+ -}
+ -
+ -static void mmu_free_memory_cache(struct kvm_mmu_memory_cache *mc)
+ -{
+ -	while (mc->nobjs)
+ -		free_page((unsigned long)mc->objects[--mc->nobjs]);
+ -}
+ -
+ -static void *mmu_memory_cache_alloc(struct kvm_mmu_memory_cache *mc)
+ -{
+ -	void *p;
+ -
+ -	BUG_ON(!mc || !mc->nobjs);
+ -	p = mc->objects[--mc->nobjs];
+ -	return p;
+ -}
+ -
++ static void clear_stage2_pgd_entry(struct kvm_s2_mmu *mmu, pgd_t *pgd, phys_addr_t addr)
+  {
++ 	struct kvm *kvm = mmu->kvm;
+  	p4d_t *p4d_table __maybe_unused = stage2_p4d_offset(kvm, pgd, 0UL);
+  	stage2_pgd_clear(kvm, pgd);
+- 	kvm_tlb_flush_vmid_ipa(kvm, addr);
++ 	kvm_tlb_flush_vmid_ipa(mmu, addr, S2_NO_LEVEL_HINT);
+  	stage2_p4d_free(kvm, p4d_table);
+  	put_page(virt_to_page(pgd));
+  }
+@@@ -1294,7 -1356,7 +1324,7 @@@ static bool stage2_get_leaf_entry(struc
+  	return true;
+  }
+  
+- static bool stage2_is_exec(struct kvm *kvm, phys_addr_t addr, unsigned long sz)
+ -static bool stage2_is_exec(struct kvm_s2_mmu *mmu, phys_addr_t addr)
+++static bool stage2_is_exec(struct kvm_s2_mmu *mmu, phys_addr_t addr, unsigned long sz)
+  {
+  	pud_t *pudp;
+  	pmd_t *pmdp;
+@@@ -1306,14 -1368,15 +1336,15 @@@
+  		return false;
+  
+  	if (pudp)
+ -		return kvm_s2pud_exec(pudp);
+ +		return sz <= PUD_SIZE && kvm_s2pud_exec(pudp);
+  	else if (pmdp)
+ -		return kvm_s2pmd_exec(pmdp);
+ +		return sz <= PMD_SIZE && kvm_s2pmd_exec(pmdp);
+  	else
+ -		return kvm_s2pte_exec(ptep);
+ +		return sz == PAGE_SIZE && kvm_s2pte_exec(ptep);
+  }
+  
+- static int stage2_set_pte(struct kvm *kvm, struct kvm_mmu_memory_cache *cache,
++ static int stage2_set_pte(struct kvm_s2_mmu *mmu,
++ 			  struct kvm_mmu_memory_cache *cache,
+  			  phys_addr_t addr, const pte_t *new_pte,
+  			  unsigned long flags)
+  {
+@@@ -1924,8 -1995,7 +1961,8 @@@ static int user_mem_abort(struct kvm_vc
+  	 * execute permissions, and we preserve whatever we have.
+  	 */
+  	needs_exec = exec_fault ||
+ -		(fault_status == FSC_PERM && stage2_is_exec(mmu, fault_ipa));
+ +		(fault_status == FSC_PERM &&
+- 		 stage2_is_exec(kvm, fault_ipa, vma_pagesize));
+++		 stage2_is_exec(mmu, fault_ipa, vma_pagesize));
+  
+  	if (vma_pagesize == PUD_SIZE) {
+  		pud_t new_pud = kvm_pfn_pud(pfn, mem_type);
+diff --cc arch/arm64/kvm/sys_regs.c
+index 138961d7ebe3,1fbab5f066bf..077293b5115f
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@@ -2335,40 -2327,24 +2327,24 @@@ static int kvm_handle_cp_32(struct kvm_
+  	return 1;
+  }
+  
+ -int kvm_handle_cp15_64(struct kvm_vcpu *vcpu, struct kvm_run *run)
+ +int kvm_handle_cp15_64(struct kvm_vcpu *vcpu)
+  {
+- 	const struct sys_reg_desc *target_specific;
+- 	size_t num;
+- 
+- 	target_specific = get_target_table(vcpu->arch.target, false, &num);
+- 	return kvm_handle_cp_64(vcpu,
+- 				cp15_64_regs, ARRAY_SIZE(cp15_64_regs),
+- 				target_specific, num);
++ 	return kvm_handle_cp_64(vcpu, cp15_64_regs, ARRAY_SIZE(cp15_64_regs));
+  }
+  
+ -int kvm_handle_cp15_32(struct kvm_vcpu *vcpu, struct kvm_run *run)
+ +int kvm_handle_cp15_32(struct kvm_vcpu *vcpu)
+  {
+- 	const struct sys_reg_desc *target_specific;
+- 	size_t num;
+- 
+- 	target_specific = get_target_table(vcpu->arch.target, false, &num);
+- 	return kvm_handle_cp_32(vcpu,
+- 				cp15_regs, ARRAY_SIZE(cp15_regs),
+- 				target_specific, num);
++ 	return kvm_handle_cp_32(vcpu, cp15_regs, ARRAY_SIZE(cp15_regs));
+  }
+  
+ -int kvm_handle_cp14_64(struct kvm_vcpu *vcpu, struct kvm_run *run)
+ +int kvm_handle_cp14_64(struct kvm_vcpu *vcpu)
+  {
+- 	return kvm_handle_cp_64(vcpu,
+- 				cp14_64_regs, ARRAY_SIZE(cp14_64_regs),
+- 				NULL, 0);
++ 	return kvm_handle_cp_64(vcpu, cp14_64_regs, ARRAY_SIZE(cp14_64_regs));
+  }
+  
+ -int kvm_handle_cp14_32(struct kvm_vcpu *vcpu, struct kvm_run *run)
+ +int kvm_handle_cp14_32(struct kvm_vcpu *vcpu)
+  {
+- 	return kvm_handle_cp_32(vcpu,
+- 				cp14_regs, ARRAY_SIZE(cp14_regs),
+- 				NULL, 0);
++ 	return kvm_handle_cp_32(vcpu, cp14_regs, ARRAY_SIZE(cp14_regs));
+  }
+  
+  static bool is_imp_def_sys_reg(struct sys_reg_params *params)
+@@@ -2416,11 -2392,12 +2392,11 @@@ void kvm_reset_sys_regs(struct kvm_vcp
+  /**
+   * kvm_handle_sys_reg -- handles a mrs/msr trap on a guest sys_reg access
+   * @vcpu: The VCPU pointer
+ - * @run:  The kvm_run struct
+   */
+ -int kvm_handle_sys_reg(struct kvm_vcpu *vcpu, struct kvm_run *run)
+ +int kvm_handle_sys_reg(struct kvm_vcpu *vcpu)
+  {
+  	struct sys_reg_params params;
+- 	unsigned long esr = kvm_vcpu_get_hsr(vcpu);
++ 	unsigned long esr = kvm_vcpu_get_esr(vcpu);
+  	int Rt = kvm_vcpu_sys_get_rt(vcpu);
+  	int ret;

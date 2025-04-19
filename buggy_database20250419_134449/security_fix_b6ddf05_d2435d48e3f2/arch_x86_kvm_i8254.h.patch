@@ -1,0 +1,46 @@
+commit b6ddf05ff68d81a7c1736717faf492b70e9bf4f9
+Author: Jan Kiszka <jan.kiszka@siemens.com>
+Date:   Tue Apr 24 16:40:17 2012 +0200
+
+    KVM: x86: Run PIT work in own kthread
+    
+    We can't run PIT IRQ injection work in the interrupt context of the host
+    timer. This would allow the user to influence the handler complexity by
+    asking for a broadcast to a large number of VCPUs. Therefore, this work
+    was pushed into workqueue context in 9d244caf2e. However, this prevents
+    prioritizing the PIT injection over other task as workqueues share
+    kernel threads.
+    
+    This replaces the workqueue with a kthread worker and gives that thread
+    a name in the format "kvm-pit/<owner-process-pid>". That allows to
+    identify and adjust the kthread priority according to the VM process
+    parameters.
+    
+    Signed-off-by: Jan Kiszka <jan.kiszka@siemens.com>
+    Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
+
+diff --git a/arch/x86/kvm/i8254.h b/arch/x86/kvm/i8254.h
+index 51a97426e791..fdf40425ea1d 100644
+--- a/arch/x86/kvm/i8254.h
++++ b/arch/x86/kvm/i8254.h
+@@ -1,6 +1,8 @@
+ #ifndef __I8254_H
+ #define __I8254_H
+ 
++#include <linux/kthread.h>
++
+ #include "iodev.h"
+ 
+ struct kvm_kpit_channel_state {
+@@ -39,8 +41,9 @@ struct kvm_pit {
+ 	struct kvm_kpit_state pit_state;
+ 	int irq_source_id;
+ 	struct kvm_irq_mask_notifier mask_notifier;
+-	struct workqueue_struct *wq;
+-	struct work_struct expired;
++	struct kthread_worker worker;
++	struct task_struct *worker_task;
++	struct kthread_work expired;
+ };
+ 
+ #define KVM_PIT_BASE_ADDRESS	    0x40

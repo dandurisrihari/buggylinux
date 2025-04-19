@@ -1,0 +1,75 @@
+commit 4d02e2de0e80a786452e70d7f3a20a50641e6620
+Author: Simona Vetter <simona.vetter@ffwll.ch>
+Date:   Tue Nov 11 10:12:00 2014 +0100
+
+    drm: Per-plane locking
+    
+    Turned out to be much simpler on top of my latest atomic stuff than
+    what I've feared. Some details:
+    
+    - Drop the modeset_lock_all snakeoil in drm_plane_init. Same
+      justification as for the equivalent change in drm_crtc_init done in
+    
+            commit d0fa1af40e784aaf7ebb7ba8a17b229bb3fa4c21
+            Author: Daniel Vetter <daniel.vetter@ffwll.ch>
+            Date:   Mon Sep 8 09:02:49 2014 +0200
+    
+                drm: Drop modeset locking from crtc init function
+    
+      Without these the drm_modeset_lock_init would fall over the exact
+      same way.
+    
+    - Since the atomic core code wraps the locking switching it to
+      per-plane locks was a one-line change.
+    
+    - For the legacy ioctls add a plane argument to the locking helper so
+      that we can grab the right plane lock (cursor or primary). Since the
+      universal cursor plane might not be there, or someone really crazy
+      might forgoe the primary plane even accept NULL.
+    
+    - Add some locking WARN_ON to the atomic helpers for good paranoid
+      measure and to check that it all works out.
+    
+    Tested on my exynos atomic hackfest with full lockdep checks and ww
+    backoff injection.
+    
+    v2: I've forgotten about the load-detect code in i915.
+    
+    v3: Thierry reported that in latest 3.18-rc vmwgfx doesn't compile any
+    more due to
+    
+    commit 21e88620aa21b48d4f62d29275e3e2944a5ea2b5
+    Author: Rob Clark <robdclark@gmail.com>
+    Date:   Thu Oct 30 13:39:04 2014 -0400
+    
+        drm/vmwgfx: fix lock breakage
+    
+    Rebased and fix this up.
+    
+    Cc: Thierry Reding <thierry.reding@gmail.com>
+    Signed-off-by: Daniel Vetter <daniel.vetter@intel.com>
+    Reviewed-by: Sean Paul <seanpaul@chromium.org>
+    Signed-off-by: Dave Airlie <airlied@redhat.com>
+
+diff --git a/drivers/gpu/drm/vmwgfx/vmwgfx_kms.c b/drivers/gpu/drm/vmwgfx/vmwgfx_kms.c
+index 941a7bc0b791..3725b521d931 100644
+--- a/drivers/gpu/drm/vmwgfx/vmwgfx_kms.c
++++ b/drivers/gpu/drm/vmwgfx/vmwgfx_kms.c
+@@ -252,7 +252,7 @@ int vmw_du_crtc_cursor_set(struct drm_crtc *crtc, struct drm_file *file_priv,
+ 	ret = 0;
+ out:
+ 	drm_modeset_unlock_all(dev_priv->dev);
+-	drm_modeset_lock_crtc(crtc);
++	drm_modeset_lock_crtc(crtc, crtc->cursor);
+ 
+ 	return ret;
+ }
+@@ -281,7 +281,7 @@ int vmw_du_crtc_cursor_move(struct drm_crtc *crtc, int x, int y)
+ 				   du->cursor_y + du->hotspot_y);
+ 
+ 	drm_modeset_unlock_all(dev_priv->dev);
+-	drm_modeset_lock_crtc(crtc);
++	drm_modeset_lock_crtc(crtc, crtc->cursor);
+ 
+ 	return 0;
+ }

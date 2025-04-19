@@ -1,0 +1,117 @@
+commit 65178db42a02c7984f711614546e97e9952d8e01
+Author: Bryan Schumaker <bjschuma@netapp.com>
+Date:   Tue Nov 1 13:35:21 2011 -0400
+
+    NFSD: Added fault injection
+    
+    Fault injection on the NFS server makes it easier to test the client's
+    state manager and recovery threads.  Simulating errors on the server is
+    easier than finding the right conditions that cause them naturally.
+    
+    This patch uses debugfs to add a simple framework for fault injection to
+    the server.  This framework is a config option, and can be enabled
+    through CONFIG_NFSD_FAULT_INJECTION.  Assuming you have debugfs mounted
+    to /sys/debug, a set of files will be created in /sys/debug/nfsd/.
+    Writing to any of these files will cause the corresponding action and
+    write a log entry to dmesg.
+    
+    Signed-off-by: Bryan Schumaker <bjschuma@netapp.com>
+    Signed-off-by: J. Bruce Fields <bfields@redhat.com>
+
+diff --git a/fs/nfsd/fault_inject.c b/fs/nfsd/fault_inject.c
+new file mode 100644
+index 000000000000..ce7f0758d84c
+--- /dev/null
++++ b/fs/nfsd/fault_inject.c
+@@ -0,0 +1,91 @@
++/*
++ * Copyright (c) 2011 Bryan Schumaker <bjschuma@netapp.com>
++ *
++ * Uses debugfs to create fault injection points for client testing
++ */
++
++#include <linux/types.h>
++#include <linux/fs.h>
++#include <linux/debugfs.h>
++#include <linux/module.h>
++
++#include "state.h"
++#include "fault_inject.h"
++
++struct nfsd_fault_inject_op {
++	char *file;
++	void (*func)(u64);
++};
++
++static struct nfsd_fault_inject_op inject_ops[] = {
++	{
++		.file   = "forget_clients",
++		.func   = nfsd_forget_clients,
++	},
++	{
++		.file   = "forget_locks",
++		.func   = nfsd_forget_locks,
++	},
++	{
++		.file   = "forget_openowners",
++		.func   = nfsd_forget_openowners,
++	},
++	{
++		.file   = "forget_delegations",
++		.func   = nfsd_forget_delegations,
++	},
++	{
++		.file   = "recall_delegations",
++		.func   = nfsd_recall_delegations,
++	},
++};
++
++static long int NUM_INJECT_OPS = sizeof(inject_ops) / sizeof(struct nfsd_fault_inject_op);
++static struct dentry *debug_dir;
++
++static int nfsd_inject_set(void *op_ptr, u64 val)
++{
++	struct nfsd_fault_inject_op *op = op_ptr;
++
++	if (val == 0)
++		printk(KERN_INFO "NFSD Fault Injection: %s (all)", op->file);
++	else
++		printk(KERN_INFO "NFSD Fault Injection: %s (n = %llu)", op->file, val);
++
++	op->func(val);
++	return 0;
++}
++
++static int nfsd_inject_get(void *data, u64 *val)
++{
++	return 0;
++}
++
++DEFINE_SIMPLE_ATTRIBUTE(fops_nfsd, nfsd_inject_get, nfsd_inject_set, "%llu\n");
++
++void nfsd_fault_inject_cleanup(void)
++{
++	debugfs_remove_recursive(debug_dir);
++}
++
++int nfsd_fault_inject_init(void)
++{
++	unsigned int i;
++	struct nfsd_fault_inject_op *op;
++	mode_t mode = S_IFREG | S_IRUSR | S_IWUSR;
++
++	debug_dir = debugfs_create_dir("nfsd", NULL);
++	if (!debug_dir)
++		goto fail;
++
++	for (i = 0; i < NUM_INJECT_OPS; i++) {
++		op = &inject_ops[i];
++		if (!debugfs_create_file(op->file, mode, debug_dir, op, &fops_nfsd))
++			goto fail;
++	}
++	return 0;
++
++fail:
++	nfsd_fault_inject_cleanup();
++	return -ENOMEM;
++}

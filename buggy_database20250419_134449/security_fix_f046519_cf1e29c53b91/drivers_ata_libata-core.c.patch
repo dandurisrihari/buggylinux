@@ -1,0 +1,79 @@
+commit f046519fc85a8fdf6a058b4ac9d897cdee6f3e52
+Author: Tejun Heo <htejun@gmail.com>
+Date:   Mon May 19 01:15:08 2008 +0900
+
+    libata: kill hotplug related race condition
+    
+    Originally, whole reset processing was done while the port is frozen
+    and SError was cleared during @postreset().  This had two race
+    conditions.  1: hotplug could occur after reset but before SError is
+    cleared and libata won't know about it.  2: hotplug could occur after
+    all the reset is complete but before the port is thawed.  As all
+    events are cleared on thaw, the hotplug event would be lost.
+    
+    Commit ac371987a81c61c2efbd6931245cdcaf43baad89 kills the first race
+    by clearing SError during link resume but before link onlineness test.
+    However, this doesn't fix race #2 and in some cases clearing SError
+    after SRST is a good idea.
+    
+    This patch solves this problem by cross checking link onlineness with
+    classification result after SError is cleared and port is thawed.
+    Reset is retried if link is online but all devices attached to the
+    link are unknown.  As all devices will be revalidated, this one-way
+    check is enough to ensure that all devices are detected and
+    revalidated reliably.
+    
+    This, luckily, also fixes the cases where host controller returns
+    bogus status while harddrive is spinning up after hotplug making
+    classification run before the device sends the first FIS and thus
+    causes misdetection.
+    
+    Low level drivers can bypass the logic by setting class explicitly to
+    ATA_DEV_NONE if ever necessary (currently none requires this).
+    
+    Signed-off-by: Tejun Heo <htejun@gmail.com>
+    Signed-off-by: Jeff Garzik <jgarzik@redhat.com>
+
+diff --git a/drivers/ata/libata-core.c b/drivers/ata/libata-core.c
+index c6c316fc8379..ffc689d9e972 100644
+--- a/drivers/ata/libata-core.c
++++ b/drivers/ata/libata-core.c
+@@ -3490,22 +3490,11 @@ int sata_link_resume(struct ata_link *link, const unsigned long *params,
+ 	if ((rc = sata_link_debounce(link, params, deadline)))
+ 		return rc;
+ 
+-	/* Clear SError.  PMP and some host PHYs require this to
+-	 * operate and clearing should be done before checking PHY
+-	 * online status to avoid race condition (hotplugging between
+-	 * link resume and status check).
+-	 */
++	/* clear SError, some PHYs require this even for SRST to work */
+ 	if (!(rc = sata_scr_read(link, SCR_ERROR, &serror)))
+ 		rc = sata_scr_write(link, SCR_ERROR, serror);
+-	if (rc == 0 || rc == -EINVAL) {
+-		unsigned long flags;
+ 
+-		spin_lock_irqsave(link->ap->lock, flags);
+-		link->eh_info.serror = 0;
+-		spin_unlock_irqrestore(link->ap->lock, flags);
+-		rc = 0;
+-	}
+-	return rc;
++	return rc != -EINVAL ? rc : 0;
+ }
+ 
+ /**
+@@ -3704,8 +3693,14 @@ int sata_std_hardreset(struct ata_link *link, unsigned int *class,
+  */
+ void ata_std_postreset(struct ata_link *link, unsigned int *classes)
+ {
++	u32 serror;
++
+ 	DPRINTK("ENTER\n");
+ 
++	/* reset complete, clear SError */
++	if (!sata_scr_read(link, SCR_ERROR, &serror))
++		sata_scr_write(link, SCR_ERROR, serror);
++
+ 	/* print link status */
+ 	sata_print_link_status(link);

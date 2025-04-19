@@ -1,0 +1,94 @@
+commit 13a857a4c4e826c587cde3a69bc3d1162d247d9d
+Author: Paolo Valente <paolo.valente@linaro.org>
+Date:   Tue Jun 25 07:12:47 2019 +0200
+
+    block, bfq: detect wakers and unconditionally inject their I/O
+    
+    A bfq_queue Q may happen to be synchronized with another
+    bfq_queue Q2, i.e., the I/O of Q2 may need to be completed for Q to
+    receive new I/O. We call Q2 "waker queue".
+    
+    If I/O plugging is being performed for Q, and Q is not receiving any
+    more I/O because of the above synchronization, then, thanks to BFQ's
+    injection mechanism, the waker queue is likely to get served before
+    the I/O-plugging timeout fires.
+    
+    Unfortunately, this fact may not be sufficient to guarantee a high
+    throughput during the I/O plugging, because the inject limit for Q may
+    be too low to guarantee a lot of injected I/O. In addition, the
+    duration of the plugging, i.e., the time before Q finally receives new
+    I/O, may not be minimized, because the waker queue may happen to be
+    served only after other queues.
+    
+    To address these issues, this commit introduces the explicit detection
+    of the waker queue, and the unconditional injection of a pending I/O
+    request of the waker queue on each invocation of
+    bfq_dispatch_request().
+    
+    One may be concerned that this systematic injection of I/O from the
+    waker queue delays the service of Q's I/O. Fortunately, it doesn't. On
+    the contrary, next Q's I/O is brought forward dramatically, for it is
+    not blocked for milliseconds.
+    
+    Reported-by: Srivatsa S. Bhat (VMware) <srivatsa@csail.mit.edu>
+    Tested-by: Srivatsa S. Bhat (VMware) <srivatsa@csail.mit.edu>
+    Signed-off-by: Paolo Valente <paolo.valente@linaro.org>
+    Signed-off-by: Jens Axboe <axboe@kernel.dk>
+
+diff --git a/block/bfq-iosched.h b/block/bfq-iosched.h
+index 584d3c9ed8ba..e80adf822bbe 100644
+--- a/block/bfq-iosched.h
++++ b/block/bfq-iosched.h
+@@ -357,6 +357,24 @@ struct bfq_queue {
+ 
+ 	/* max service rate measured so far */
+ 	u32 max_service_rate;
++
++	/*
++	 * Pointer to the waker queue for this queue, i.e., to the
++	 * queue Q such that this queue happens to get new I/O right
++	 * after some I/O request of Q is completed. For details, see
++	 * the comments on the choice of the queue for injection in
++	 * bfq_select_queue().
++	 */
++	struct bfq_queue *waker_bfqq;
++	/* node for woken_list, see below */
++	struct hlist_node woken_list_node;
++	/*
++	 * Head of the list of the woken queues for this queue, i.e.,
++	 * of the list of the queues for which this queue is a waker
++	 * queue. This list is used to reset the waker_bfqq pointer in
++	 * the woken queues when this queue exits.
++	 */
++	struct hlist_head woken_list;
+ };
+ 
+ /**
+@@ -533,6 +551,9 @@ struct bfq_data {
+ 	/* time of last request completion (ns) */
+ 	u64 last_completion;
+ 
++	/* bfqq owning the last completed rq */
++	struct bfq_queue *last_completed_rq_bfqq;
++
+ 	/* time of last transition from empty to non-empty (ns) */
+ 	u64 last_empty_occupied_ns;
+ 
+@@ -743,7 +764,8 @@ enum bfqq_state_flags {
+ 				 * update
+ 				 */
+ 	BFQQF_coop,		/* bfqq is shared */
+-	BFQQF_split_coop	/* shared bfqq will be split */
++	BFQQF_split_coop,	/* shared bfqq will be split */
++	BFQQF_has_waker		/* bfqq has a waker queue */
+ };
+ 
+ #define BFQ_BFQQ_FNS(name)						\
+@@ -763,6 +785,7 @@ BFQ_BFQQ_FNS(in_large_burst);
+ BFQ_BFQQ_FNS(coop);
+ BFQ_BFQQ_FNS(split_coop);
+ BFQ_BFQQ_FNS(softrt_update);
++BFQ_BFQQ_FNS(has_waker);
+ #undef BFQ_BFQQ_FNS
+ 
+ /* Expiration reasons. */

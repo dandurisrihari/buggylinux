@@ -1,0 +1,91 @@
+diff --git a/include/net/bluetooth/hci.h b/include/net/bluetooth/hci.h
+index a3f86de6f100..003b25283407 100644
+--- a/include/net/bluetooth/hci.h
++++ b/include/net/bluetooth/hci.h
+@@ -445,6 +445,7 @@ enum {
+ /* ---- HCI Error Codes ---- */
+ #define HCI_ERROR_UNKNOWN_CONN_ID	0x02
+ #define HCI_ERROR_AUTH_FAILURE		0x05
++#define HCI_ERROR_PIN_OR_KEY_MISSING	0x06
+ #define HCI_ERROR_MEMORY_EXCEEDED	0x07
+ #define HCI_ERROR_CONNECTION_TIMEOUT	0x08
+ #define HCI_ERROR_REJ_LIMITED_RESOURCES	0x0d
+diff --git a/include/net/bluetooth/hci_core.h b/include/net/bluetooth/hci_core.h
+index dc71473462ac..77d7fe115a0d 100644
+--- a/include/net/bluetooth/hci_core.h
++++ b/include/net/bluetooth/hci_core.h
+@@ -654,6 +654,7 @@ enum {
+ 	HCI_CONN_PARAM_REMOVAL_PEND,
+ 	HCI_CONN_NEW_LINK_KEY,
+ 	HCI_CONN_SCANNING,
++	HCI_CONN_AUTH_FAILURE,
+ };
+ 
+ static inline bool hci_conn_ssp_enabled(struct hci_conn *conn)
+diff --git a/include/net/bluetooth/mgmt.h b/include/net/bluetooth/mgmt.h
+index ea73e0826aa7..7647964b1efa 100644
+--- a/include/net/bluetooth/mgmt.h
++++ b/include/net/bluetooth/mgmt.h
+@@ -645,6 +645,7 @@ struct mgmt_ev_device_connected {
+ #define MGMT_DEV_DISCONN_TIMEOUT	0x01
+ #define MGMT_DEV_DISCONN_LOCAL_HOST	0x02
+ #define MGMT_DEV_DISCONN_REMOTE		0x03
++#define MGMT_DEV_DISCONN_AUTH_FAILURE	0x04
+ 
+ #define MGMT_EV_DEVICE_DISCONNECTED	0x000C
+ struct mgmt_ev_device_disconnected {
+diff --git a/net/bluetooth/hci_event.c b/net/bluetooth/hci_event.c
+index 3fb95c47243c..e17aacbc5630 100644
+--- a/net/bluetooth/hci_event.c
++++ b/net/bluetooth/hci_event.c
+@@ -2332,7 +2332,7 @@ static u8 hci_to_mgmt_reason(u8 err)
+ static void hci_disconn_complete_evt(struct hci_dev *hdev, struct sk_buff *skb)
+ {
+ 	struct hci_ev_disconn_complete *ev = (void *) skb->data;
+-	u8 reason = hci_to_mgmt_reason(ev->reason);
++	u8 reason;
+ 	struct hci_conn_params *params;
+ 	struct hci_conn *conn;
+ 	bool mgmt_connected;
+@@ -2355,6 +2355,12 @@ static void hci_disconn_complete_evt(struct hci_dev *hdev, struct sk_buff *skb)
+ 	conn->state = BT_CLOSED;
+ 
+ 	mgmt_connected = test_and_clear_bit(HCI_CONN_MGMT_CONNECTED, &conn->flags);
++
++	if (test_bit(HCI_CONN_AUTH_FAILURE, &conn->flags))
++		reason = MGMT_DEV_DISCONN_AUTH_FAILURE;
++	else
++		reason = hci_to_mgmt_reason(ev->reason);
++
+ 	mgmt_device_disconnected(hdev, &conn->dst, conn->type, conn->dst_type,
+ 				reason, mgmt_connected);
+ 
+@@ -2421,6 +2427,8 @@ static void hci_auth_complete_evt(struct hci_dev *hdev, struct sk_buff *skb)
+ 		goto unlock;
+ 
+ 	if (!ev->status) {
++		clear_bit(HCI_CONN_AUTH_FAILURE, &conn->flags);
++
+ 		if (!hci_conn_ssp_enabled(conn) &&
+ 		    test_bit(HCI_CONN_REAUTH_PEND, &conn->flags)) {
+ 			BT_INFO("re-auth of legacy device is not possible.");
+@@ -2429,6 +2437,9 @@ static void hci_auth_complete_evt(struct hci_dev *hdev, struct sk_buff *skb)
+ 			conn->sec_level = conn->pending_sec_level;
+ 		}
+ 	} else {
++		if (ev->status == HCI_ERROR_PIN_OR_KEY_MISSING)
++			set_bit(HCI_CONN_AUTH_FAILURE, &conn->flags);
++
+ 		mgmt_auth_failed(conn, ev->status);
+ 	}
+ 
+@@ -2613,6 +2624,9 @@ static void hci_encrypt_change_evt(struct hci_dev *hdev, struct sk_buff *skb)
+ 	clear_bit(HCI_CONN_ENCRYPT_PEND, &conn->flags);
+ 
+ 	if (ev->status && conn->state == BT_CONNECTED) {
++		if (ev->status == HCI_ERROR_PIN_OR_KEY_MISSING)
++			set_bit(HCI_CONN_AUTH_FAILURE, &conn->flags);
++
+ 		hci_disconnect(conn, HCI_ERROR_AUTH_FAILURE);
+ 		hci_conn_drop(conn);
+ 		goto unlock;

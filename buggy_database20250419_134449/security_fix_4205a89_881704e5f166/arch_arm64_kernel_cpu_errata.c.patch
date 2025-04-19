@@ -1,0 +1,50 @@
+commit 4205a89b8060141ac0216a507b9f70728f056a10
+Author: Marc Zyngier <maz@kernel.org>
+Date:   Tue Mar 13 12:40:39 2018 +0000
+
+    arm64: Make BP hardening slot counter available
+    
+    We're about to need to allocate hardening slots from other parts
+    of the kernel (in order to support ARM64_HARDEN_EL2_VECTORS).
+    
+    Turn the counter into an atomic_t and make it available to the
+    rest of the kernel. Also add BP_HARDEN_EL2_SLOTS as the number of
+    slots instead of the hardcoded 4...
+    
+    Acked-by: Catalin Marinas <catalin.marinas@arm.com>
+    Reviewed-by: Andrew Jones <drjones@redhat.com>
+    Signed-off-by: Marc Zyngier <marc.zyngier@arm.com>
+
+diff --git a/arch/arm64/kernel/cpu_errata.c b/arch/arm64/kernel/cpu_errata.c
+index 52f15cd896e1..8cf6b60a085a 100644
+--- a/arch/arm64/kernel/cpu_errata.c
++++ b/arch/arm64/kernel/cpu_errata.c
+@@ -60,6 +60,8 @@ static int cpu_enable_trap_ctr_access(void *__unused)
+ 	return 0;
+ }
+ 
++atomic_t arm64_el2_vector_last_slot = ATOMIC_INIT(-1);
++
+ #ifdef CONFIG_HARDEN_BRANCH_PREDICTOR
+ #include <asm/mmu_context.h>
+ #include <asm/cacheflush.h>
+@@ -90,7 +92,6 @@ static void __install_bp_hardening_cb(bp_hardening_cb_t fn,
+ 				      const char *hyp_vecs_start,
+ 				      const char *hyp_vecs_end)
+ {
+-	static int last_slot = -1;
+ 	static DEFINE_SPINLOCK(bp_lock);
+ 	int cpu, slot = -1;
+ 
+@@ -103,10 +104,8 @@ static void __install_bp_hardening_cb(bp_hardening_cb_t fn,
+ 	}
+ 
+ 	if (slot == -1) {
+-		last_slot++;
+-		BUG_ON(((__bp_harden_hyp_vecs_end - __bp_harden_hyp_vecs_start)
+-			/ SZ_2K) <= last_slot);
+-		slot = last_slot;
++		slot = atomic_inc_return(&arm64_el2_vector_last_slot);
++		BUG_ON(slot >= BP_HARDEN_EL2_SLOTS);
+ 		__copy_hyp_vect_bpi(slot, hyp_vecs_start, hyp_vecs_end);
+ 	}

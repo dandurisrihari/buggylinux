@@ -1,0 +1,121 @@
+diff --git a/drivers/ufs/core/ufs-fault-injection.c b/drivers/ufs/core/ufs-fault-injection.c
+index 5b1184aac585..169540417079 100644
+--- a/drivers/ufs/core/ufs-fault-injection.c
++++ b/drivers/ufs/core/ufs-fault-injection.c
+@@ -4,6 +4,7 @@
+ #include <linux/types.h>
+ #include <linux/fault-inject.h>
+ #include <linux/module.h>
++#include <ufs/ufshcd.h>
+ #include "ufs-fault-injection.h"
+ 
+ static int ufs_fault_get(char *buffer, const struct kernel_param *kp);
+@@ -59,12 +60,22 @@ static int ufs_fault_set(const char *val, const struct kernel_param *kp)
+ 	return 0;
+ }
+ 
+-bool ufs_trigger_eh(void)
++void ufs_fault_inject_hba_init(struct ufs_hba *hba)
+ {
+-	return should_fail(&ufs_trigger_eh_attr, 1);
++	hba->trigger_eh_attr = ufs_trigger_eh_attr;
++	hba->timeout_attr = ufs_timeout_attr;
++#ifdef CONFIG_FAULT_INJECTION_DEBUG_FS
++	fault_create_debugfs_attr("trigger_eh_inject", hba->debugfs_root, &hba->trigger_eh_attr);
++	fault_create_debugfs_attr("timeout_inject", hba->debugfs_root, &hba->timeout_attr);
++#endif
+ }
+ 
+-bool ufs_fail_completion(void)
++bool ufs_trigger_eh(struct ufs_hba *hba)
+ {
+-	return should_fail(&ufs_timeout_attr, 1);
++	return should_fail(&hba->trigger_eh_attr, 1);
++}
++
++bool ufs_fail_completion(struct ufs_hba *hba)
++{
++	return should_fail(&hba->timeout_attr, 1);
+ }
+diff --git a/drivers/ufs/core/ufs-fault-injection.h b/drivers/ufs/core/ufs-fault-injection.h
+index 6d0cd8e10c87..996a35769781 100644
+--- a/drivers/ufs/core/ufs-fault-injection.h
++++ b/drivers/ufs/core/ufs-fault-injection.h
+@@ -7,15 +7,20 @@
+ #include <linux/types.h>
+ 
+ #ifdef CONFIG_SCSI_UFS_FAULT_INJECTION
+-bool ufs_trigger_eh(void);
+-bool ufs_fail_completion(void);
++void ufs_fault_inject_hba_init(struct ufs_hba *hba);
++bool ufs_trigger_eh(struct ufs_hba *hba);
++bool ufs_fail_completion(struct ufs_hba *hba);
+ #else
+-static inline bool ufs_trigger_eh(void)
++static inline void ufs_fault_inject_hba_init(struct ufs_hba *hba)
++{
++}
++
++static inline bool ufs_trigger_eh(struct ufs_hba *hba)
+ {
+ 	return false;
+ }
+ 
+-static inline bool ufs_fail_completion(void)
++static inline bool ufs_fail_completion(struct ufs_hba *hba)
+ {
+ 	return false;
+ }
+diff --git a/drivers/ufs/core/ufshcd.c b/drivers/ufs/core/ufshcd.c
+index 8b1031fb0a44..63f0ee117399 100644
+--- a/drivers/ufs/core/ufshcd.c
++++ b/drivers/ufs/core/ufshcd.c
+@@ -2992,7 +2992,7 @@ static int ufshcd_queuecommand(struct Scsi_Host *host, struct scsi_cmnd *cmd)
+ 	ufshcd_send_command(hba, tag, hwq);
+ 
+ out:
+-	if (ufs_trigger_eh()) {
++	if (ufs_trigger_eh(hba)) {
+ 		unsigned long flags;
+ 
+ 		spin_lock_irqsave(hba->host->host_lock, flags);
+@@ -5649,7 +5649,7 @@ static irqreturn_t ufshcd_transfer_req_compl(struct ufs_hba *hba)
+ 	    !(hba->quirks & UFSHCI_QUIRK_SKIP_RESET_INTR_AGGR))
+ 		ufshcd_reset_intr_aggr(hba);
+ 
+-	if (ufs_fail_completion())
++	if (ufs_fail_completion(hba))
+ 		return IRQ_HANDLED;
+ 
+ 	/*
+@@ -9348,6 +9348,7 @@ static int ufshcd_hba_init(struct ufs_hba *hba)
+ 		goto out_disable_vreg;
+ 
+ 	ufs_debugfs_hba_init(hba);
++	ufs_fault_inject_hba_init(hba);
+ 
+ 	hba->is_powered = true;
+ 	goto out;
+diff --git a/include/ufs/ufshcd.h b/include/ufs/ufshcd.h
+index 7f0b2c5599cd..d862c8ddce03 100644
+--- a/include/ufs/ufshcd.h
++++ b/include/ufs/ufshcd.h
+@@ -16,6 +16,7 @@
+ #include <linux/blk-crypto-profile.h>
+ #include <linux/blk-mq.h>
+ #include <linux/devfreq.h>
++#include <linux/fault-inject.h>
+ #include <linux/msi.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/dma-direction.h>
+@@ -1057,6 +1058,10 @@ struct ufs_hba {
+ 	struct dentry *debugfs_root;
+ 	struct delayed_work debugfs_ee_work;
+ 	u32 debugfs_ee_rate_limit_ms;
++#endif
++#ifdef CONFIG_SCSI_UFS_FAULT_INJECTION
++	struct fault_attr trigger_eh_attr;
++	struct fault_attr timeout_attr;
+ #endif
+ 	u32 luns_avail;
+ 	unsigned int nr_hw_queues;

@@ -1,0 +1,34 @@
+commit 00682995409696866fe43984c74c8688bdf8f0a5
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Thu Aug 24 18:36:21 2023 -0700
+
+    KVM: SVM: Treat all "skip" emulation for SEV guests as outright failures
+    
+    Treat EMULTYPE_SKIP failures on SEV guests as unhandleable emulation
+    instead of simply resuming the guest, and drop the hack-a-fix which
+    effects that behavior for the INT3/INTO injection path.  If KVM can't
+    skip an instruction for which KVM has already done partial emulation,
+    resuming the guest is undesirable as doing so may corrupt guest state.
+    
+    Link: https://lore.kernel.org/r/20230825013621.2845700-5-seanjc@google.com
+    Signed-off-by: Sean Christopherson <seanjc@google.com>
+
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 104e6b4520a9..cc7d29e9104b 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -8874,8 +8874,13 @@ int x86_emulate_instruction(struct kvm_vcpu *vcpu, gpa_t cr2_or_gpa,
+ 	bool writeback = true;
+ 
+ 	r = kvm_check_emulate_insn(vcpu, emulation_type, insn, insn_len);
+-	if (r != X86EMUL_CONTINUE)
+-		return 1;
++	if (r != X86EMUL_CONTINUE) {
++		if (r == X86EMUL_RETRY_INSTR || r == X86EMUL_PROPAGATE_FAULT)
++			return 1;
++
++		WARN_ON_ONCE(r != X86EMUL_UNHANDLEABLE);
++		return handle_emulation_failure(vcpu, emulation_type);
++	}
+ 
+ 	vcpu->arch.l1tf_flush_l1d = true;

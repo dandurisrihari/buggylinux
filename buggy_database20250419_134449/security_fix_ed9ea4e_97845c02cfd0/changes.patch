@@ -1,0 +1,184 @@
+diff --cc drivers/scsi/qla2xxx/qla_target.c
+index b1d10f9935c7,bd9c725c08e1..8d85ed8d8917
+--- a/drivers/scsi/qla2xxx/qla_target.c
++++ b/drivers/scsi/qla2xxx/qla_target.c
+@@@ -2705,15 -2164,18 +2704,22 @@@ done
+  
+  void qlt_free_cmd(struct qla_tgt_cmd *cmd)
+  {
++ 	struct qla_tgt_sess *sess = cmd->sess;
++ 
+ -	BUG_ON(cmd->sg_mapped);
+ +	ql_dbg(ql_dbg_tgt, cmd->vha, 0xe074,
+ +	    "%s: se_cmd[%p] ox_id %04x\n",
+ +	    __func__, &cmd->se_cmd,
+ +	    be16_to_cpu(cmd->atio.u.isp24.fcp_hdr.ox_id));
+  
+ +	BUG_ON(cmd->sg_mapped);
+  	if (unlikely(cmd->free_sg))
+  		kfree(cmd->sg);
+- 	kmem_cache_free(qla_tgt_cmd_cachep, cmd);
++ 
++ 	if (!sess || !sess->se_sess) {
++ 		WARN_ON(1);
++ 		return;
++ 	}
++ 	percpu_ida_free(&sess->se_sess->sess_tag_pool, cmd->se_cmd.map_tag);
+  }
+  EXPORT_SYMBOL(qlt_free_cmd);
+  
+@@@ -3149,12 -2533,11 +3119,12 @@@ static void __qlt_do_work(struct qla_tg
+  	    atio->u.isp24.fcp_cmnd.add_cdb_len]));
+  
+  	ql_dbg(ql_dbg_tgt, vha, 0xe022,
+ -	    "qla_target: START qla command: %p lun: 0x%04x (tag %d)\n",
+ -	    cmd, cmd->unpacked_lun, cmd->tag);
+ +		"qla_target: START qla cmd: %p se_cmd %p lun: 0x%04x (tag %d) len(%d) ox_id %x\n",
+ +		cmd, &cmd->se_cmd, cmd->unpacked_lun, cmd->tag, data_length,
+ +		cmd->atio.u.isp24.fcp_hdr.ox_id);
+  
+- 	ret = vha->hw->tgt.tgt_ops->handle_cmd(vha, cmd, cdb, data_length,
+- 	    fcp_task_attr, data_dir, bidi);
++ 	ret = ha->tgt.tgt_ops->handle_cmd(vha, cmd, cdb, data_length,
++ 				          fcp_task_attr, data_dir, bidi);
+  	if (ret != 0)
+  		goto out_term;
+  	/*
+diff --cc drivers/scsi/virtio_scsi.c
+index 99fdb9403944,1c326b63ca55..89ee5929eb6d
+--- a/drivers/scsi/virtio_scsi.c
++++ b/drivers/scsi/virtio_scsi.c
+@@@ -396,10 -438,11 +398,10 @@@ static void virtscsi_event_done(struct 
+   */
+  static int virtscsi_add_cmd(struct virtqueue *vq,
+  			    struct virtio_scsi_cmd *cmd,
+ -			    size_t req_size, size_t resp_size, gfp_t gfp)
+ +			    size_t req_size, size_t resp_size)
+  {
+  	struct scsi_cmnd *sc = cmd->sc;
+- 	struct scatterlist *sgs[4], req, resp;
++ 	struct scatterlist *sgs[6], req, resp;
+  	struct sg_table *out, *in;
+  	unsigned out_num = 0, in_num = 0;
+  
+@@@ -425,10 -472,14 +431,14 @@@
+  	sgs[out_num + in_num++] = &resp;
+  
+  	/* Data-in buffer */
+- 	if (in)
++ 	if (in) {
++ 		/* Place READ protection SGLs before Data IN payload */
++ 		if (scsi_prot_sg_count(sc))
++ 			sgs[out_num + in_num++] = scsi_prot_sglist(sc);
+  		sgs[out_num + in_num++] = in->sgl;
++ 	}
+  
+ -	return virtqueue_add_sgs(vq, sgs, out_num, in_num, cmd, gfp);
+ +	return virtqueue_add_sgs(vq, sgs, out_num, in_num, cmd, GFP_ATOMIC);
+  }
+  
+  static int virtscsi_kick_cmd(struct virtio_scsi_vq *vq,
+@@@ -455,9 -538,10 +497,10 @@@ static int virtscsi_queuecommand(struc
+  				 struct virtio_scsi_vq *req_vq,
+  				 struct scsi_cmnd *sc)
+  {
+ -	struct virtio_scsi_cmd *cmd;
+ -	int ret, req_size;
+ -
+  	struct Scsi_Host *shost = virtio_scsi_host(vscsi->vdev);
+ +	struct virtio_scsi_cmd *cmd = scsi_cmd_priv(sc);
+++	int req_size;
+ +
+  	BUG_ON(scsi_sg_count(sc) > shost->sg_tablesize);
+  
+  	/* TODO: check feature bit and fail if unsupported?  */
+@@@ -466,26 -550,34 +509,24 @@@
+  	dev_dbg(&sc->device->sdev_gendev,
+  		"cmd %p CDB: %#02x\n", sc, sc->cmnd[0]);
+  
+ -	ret = SCSI_MLQUEUE_HOST_BUSY;
+ -	cmd = mempool_alloc(virtscsi_cmd_pool, GFP_ATOMIC);
+ -	if (!cmd)
+ -		goto out;
+ -
+  	memset(cmd, 0, sizeof(*cmd));
+  	cmd->sc = sc;
+- 	cmd->req.cmd = (struct virtio_scsi_cmd_req){
+- 		.lun[0] = 1,
+- 		.lun[1] = sc->device->id,
+- 		.lun[2] = (sc->device->lun >> 8) | 0x40,
+- 		.lun[3] = sc->device->lun & 0xff,
+- 		.tag = (unsigned long)sc,
+- 		.task_attr = VIRTIO_SCSI_S_SIMPLE,
+- 		.prio = 0,
+- 		.crn = 0,
+- 	};
+  
+  	BUG_ON(sc->cmd_len > VIRTIO_SCSI_CDB_SIZE);
+- 	memcpy(cmd->req.cmd.cdb, sc->cmnd, sc->cmd_len);
+  
+- 	if (virtscsi_kick_cmd(req_vq, cmd,
+- 			      sizeof cmd->req.cmd, sizeof cmd->resp.cmd) != 0)
++ 	if (virtio_has_feature(vscsi->vdev, VIRTIO_SCSI_F_T10_PI)) {
++ 		virtio_scsi_init_hdr_pi(&cmd->req.cmd_pi, sc);
++ 		memcpy(cmd->req.cmd_pi.cdb, sc->cmnd, sc->cmd_len);
++ 		req_size = sizeof(cmd->req.cmd_pi);
++ 	} else {
++ 		virtio_scsi_init_hdr(&cmd->req.cmd, sc);
++ 		memcpy(cmd->req.cmd.cdb, sc->cmnd, sc->cmd_len);
++ 		req_size = sizeof(cmd->req.cmd);
++ 	}
++ 
+ -	if (virtscsi_kick_cmd(req_vq, cmd, req_size, sizeof(cmd->resp.cmd),
+ -			      GFP_ATOMIC) == 0)
+ -		ret = 0;
+ -	else
+ -		mempool_free(cmd, virtscsi_cmd_pool);
+ -
+ -out:
+ -	return ret;
+++	if (virtscsi_kick_cmd(req_vq, cmd, req_size, sizeof(cmd->resp.cmd)) != 0)
+ +		return SCSI_MLQUEUE_HOST_BUSY;
+ +	return 0;
+  }
+  
+  static int virtscsi_queuecommand_single(struct Scsi_Host *sh,
+diff --cc drivers/vhost/scsi.c
+index e9c280f55819,03e484fa1ef4..4f4ffa4c604e
+--- a/drivers/vhost/scsi.c
++++ b/drivers/vhost/scsi.c
+@@@ -992,15 -1040,26 +1040,26 @@@ vhost_scsi_handle_vq(struct vhost_scsi 
+  			break;
+  		}
+  
+- 		if (unlikely(vq->iov[0].iov_len != sizeof(v_req))) {
+- 			vq_err(vq, "Expecting virtio_scsi_cmd_req, got %zu"
+- 				" bytes\n", vq->iov[0].iov_len);
+ -		if (vs->dev.acked_features & VIRTIO_SCSI_F_T10_PI) {
+++		if (vhost_has_feature(vq, VIRTIO_SCSI_F_T10_PI)) {
++ 			req = &v_req_pi;
++ 			lunp = &v_req_pi.lun[0];
++ 			target = &v_req_pi.lun[1];
++ 			req_size = sizeof(v_req_pi);
++ 			hdr_pi = true;
++ 		} else {
++ 			req = &v_req;
++ 			lunp = &v_req.lun[0];
++ 			target = &v_req.lun[1];
++ 			req_size = sizeof(v_req);
++ 			hdr_pi = false;
++ 		}
++ 
++ 		if (unlikely(vq->iov[0].iov_len < req_size)) {
++ 			pr_err("Expecting virtio-scsi header: %zu, got %zu\n",
++ 			       req_size, vq->iov[0].iov_len);
+  			break;
+  		}
+- 		pr_debug("Calling __copy_from_user: vq->iov[0].iov_base: %p,"
+- 			" len: %zu\n", vq->iov[0].iov_base, sizeof(v_req));
+- 		ret = __copy_from_user(&v_req, vq->iov[0].iov_base,
+- 				sizeof(v_req));
++ 		ret = memcpy_fromiovecend(req, &vq->iov[0], 0, req_size);
+  		if (unlikely(ret)) {
+  			vq_err(vq, "Faulted on virtio_scsi_cmd_req\n");
+  			break;

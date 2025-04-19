@@ -1,0 +1,106 @@
+commit 45888b40d2a6221d46bb69959e2600ddba71cc1f
+Author: Thomas Gleixner <tglx@linutronix.de>
+Date:   Sun Apr 22 18:23:55 2018 +0200
+
+    rslib: Allocate decoder buffers to avoid VLAs
+    
+    To get rid of the variable length arrays on stack in the RS decoder it's
+    necessary to allocate the decoder buffers per control structure instance.
+    
+    All usage sites have been checked for potential parallel decoder usage and
+    fixed where necessary. Kees confirmed that the pstore decoding is strictly
+    single threaded so there should be no surprises.
+    
+    Allocate them in the rs control structure sized depending on the number of
+    roots for the chosen codec and adapt the decoder code to make use of them.
+    
+    Document the fact that decode operations based on a particular rs control
+    instance cannot run in parallel and the caller has to ensure that as it's
+    not possible to provide a proper locking construct which fits all use
+    cases.
+    
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Acked-by: Kees Cook <keescook@chromium.org>
+    Cc: Boris Brezillon <boris.brezillon@free-electrons.com>
+    Cc: Tony Luck <tony.luck@intel.com>
+    Cc: Segher Boessenkool <segher@kernel.crashing.org>
+    Cc: Kernel Hardening <kernel-hardening@lists.openwall.com>
+    Cc: Richard Weinberger <richard@nod.at>
+    Cc: Mike Snitzer <snitzer@redhat.com>
+    Cc: Anton Vorontsov <anton@enomsg.org>
+    Cc: Colin Cross <ccross@android.com>
+    Cc: Andrew Morton <akpm@linuxfoundation.org>
+    Cc: David Woodhouse <dwmw2@infradead.org>
+    Cc: Alasdair Kergon <agk@redhat.com>
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+
+diff --git a/lib/reed_solomon/reed_solomon.c b/lib/reed_solomon/reed_solomon.c
+index cb21e8b5a4e0..dfcf54242fb9 100644
+--- a/lib/reed_solomon/reed_solomon.c
++++ b/lib/reed_solomon/reed_solomon.c
+@@ -37,6 +37,18 @@
+ #include <linux/slab.h>
+ #include <linux/mutex.h>
+ 
++enum {
++	RS_DECODE_LAMBDA,
++	RS_DECODE_SYN,
++	RS_DECODE_B,
++	RS_DECODE_T,
++	RS_DECODE_OMEGA,
++	RS_DECODE_ROOT,
++	RS_DECODE_REG,
++	RS_DECODE_LOC,
++	RS_DECODE_NUM_BUFFERS
++};
++
+ /* This list holds all currently allocated rs codec structures */
+ static LIST_HEAD(codec_list);
+ /* Protection for the list */
+@@ -204,6 +216,7 @@ static struct rs_control *init_rs_internal(int symsize, int gfpoly,
+ {
+ 	struct list_head *tmp;
+ 	struct rs_control *rs;
++	unsigned int bsize;
+ 
+ 	/* Sanity checks */
+ 	if (symsize < 1)
+@@ -215,7 +228,13 @@ static struct rs_control *init_rs_internal(int symsize, int gfpoly,
+ 	if (nroots < 0 || nroots >= (1<<symsize))
+ 		return NULL;
+ 
+-	rs = kzalloc(sizeof(*rs), GFP_KERNEL);
++	/*
++	 * The decoder needs buffers in each control struct instance to
++	 * avoid variable size or large fixed size allocations on
++	 * stack. Size the buffers to arrays of [nroots + 1].
++	 */
++	bsize = sizeof(uint16_t) * RS_DECODE_NUM_BUFFERS * (nroots + 1);
++	rs = kzalloc(sizeof(*rs) + bsize, gfp);
+ 	if (!rs)
+ 		return NULL;
+ 
+@@ -330,6 +349,11 @@ EXPORT_SYMBOL_GPL(encode_rs8);
+  *  The syndrome and parity uses a uint16_t data type to enable
+  *  symbol size > 8. The calling code must take care of decoding of the
+  *  syndrome result and the received parity before calling this code.
++ *
++ *  Note: The rs_control struct @rsc contains buffers which are used for
++ *  decoding, so the caller has to ensure that decoder invocations are
++ *  serialized.
++ *
+  *  Returns the number of corrected bits or -EBADMSG for uncorrectable errors.
+  */
+ int decode_rs8(struct rs_control *rsc, uint8_t *data, uint16_t *par, int len,
+@@ -374,6 +398,11 @@ EXPORT_SYMBOL_GPL(encode_rs16);
+  *  @corr:	buffer to store correction bitmask on eras_pos
+  *
+  *  Each field in the data array contains up to symbol size bits of valid data.
++ *
++ *  Note: The rc_control struct @rsc contains buffers which are used for
++ *  decoding, so the caller has to ensure that decoder invocations are
++ *  serialized.
++ *
+  *  Returns the number of corrected bits or -EBADMSG for uncorrectable errors.
+  */
+ int decode_rs16(struct rs_control *rsc, uint16_t *data, uint16_t *par, int len,

@@ -1,0 +1,55 @@
+commit 14a56ec65bab351a3e1535882f15a6af21912cac
+Author: Gao Xiang <xiang@kernel.org>
+Date:   Mon Mar 25 11:40:09 2019 +0800
+
+    staging: erofs: support IO read error injection
+    
+    Used to simulate disk IO read error for testing fatal
+    error tolerance.
+    
+    Here are the details,
+    1) use bio->bi_private to indicate super_block
+       for non-compressed bios since some (mainly meta)
+       pages can be of the corresponding bdev inode;
+    2) get super_block dynamically for compressed bios,
+       therefore it could not inject bios full of staging
+       pages, yet it doesn't affect the normal usage.
+    
+    Signed-off-by: Gao Xiang <gaoxiang25@huawei.com>
+    Reviewed-by: Chao Yu <yuchao0@huawei.com>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/staging/erofs/internal.h b/drivers/staging/erofs/internal.h
+index a66c7d495c35..c47778b3fabd 100644
+--- a/drivers/staging/erofs/internal.h
++++ b/drivers/staging/erofs/internal.h
+@@ -44,11 +44,12 @@
+ 
+ enum {
+ 	FAULT_KMALLOC,
++	FAULT_READ_IO,
+ 	FAULT_MAX,
+ };
+ 
+ #ifdef CONFIG_EROFS_FAULT_INJECTION
+-extern char *erofs_fault_name[FAULT_MAX];
++extern const char *erofs_fault_name[FAULT_MAX];
+ #define IS_FAULT_SET(fi, type) ((fi)->inject_type & (1 << (type)))
+ 
+ struct erofs_fault_info {
+@@ -467,7 +468,7 @@ static inline int z_erofs_map_blocks_iter(struct inode *inode,
+ /* data.c */
+ static inline struct bio *
+ erofs_grab_bio(struct super_block *sb,
+-	       erofs_blk_t blkaddr, unsigned int nr_pages,
++	       erofs_blk_t blkaddr, unsigned int nr_pages, void *bi_private,
+ 	       bio_end_io_t endio, bool nofail)
+ {
+ 	const gfp_t gfp = GFP_NOIO;
+@@ -489,6 +490,7 @@ erofs_grab_bio(struct super_block *sb,
+ 	bio->bi_end_io = endio;
+ 	bio_set_dev(bio, sb->s_bdev);
+ 	bio->bi_iter.bi_sector = (sector_t)blkaddr << LOG_SECTORS_PER_BLOCK;
++	bio->bi_private = bi_private;
+ 	return bio;
+ }

@@ -1,0 +1,71 @@
+commit c1150d8cf9e9d2b356fab52d79f2366985e5511b
+Author: Dor Laor <dor.laor@qumranet.com>
+Date:   Fri Jan 5 16:36:24 2007 -0800
+
+    [PATCH] KVM: Improve interrupt response
+    
+    The current interrupt injection mechanism might delay an interrupt under
+    the following circumstances:
+    
+     - if injection fails because the guest is not interruptible (rflags.IF clear,
+       or after a 'mov ss' or 'sti' instruction).  Userspace can check rflags,
+       but the other cases or not testable under the current API.
+     - if injection fails because of a fault during delivery.  This probably
+       never happens under normal guests.
+     - if injection fails due to a physical interrupt causing a vmexit so that
+       it can be handled by the host.
+    
+    In all cases the guest proceeds without processing the interrupt, reducing
+    the interactive feel and interrupt throughput of the guest.
+    
+    This patch fixes the situation by allowing userspace to request an exit
+    when the 'interrupt window' opens, so that it can re-inject the interrupt
+    at the right time.  Guest interactivity is very visibly improved.
+    
+    Signed-off-by: Dor Laor <dor.laor@qumranet.com>
+    Signed-off-by: Avi Kivity <avi@qumranet.com>
+    Acked-by: Ingo Molnar <mingo@elte.hu>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/include/linux/kvm.h b/include/linux/kvm.h
+index 28fdce1ac1db..bc8b4616bad7 100644
+--- a/include/linux/kvm.h
++++ b/include/linux/kvm.h
+@@ -11,7 +11,7 @@
+ #include <asm/types.h>
+ #include <linux/ioctl.h>
+ 
+-#define KVM_API_VERSION 1
++#define KVM_API_VERSION 2
+ 
+ /*
+  * Architectural interrupt line count, and the size of the bitmap needed
+@@ -45,6 +45,7 @@ enum kvm_exit_reason {
+ 	KVM_EXIT_DEBUG            = 4,
+ 	KVM_EXIT_HLT              = 5,
+ 	KVM_EXIT_MMIO             = 6,
++	KVM_EXIT_IRQ_WINDOW_OPEN  = 7,
+ };
+ 
+ /* for KVM_RUN */
+@@ -53,11 +54,19 @@ struct kvm_run {
+ 	__u32 vcpu;
+ 	__u32 emulated;  /* skip current instruction */
+ 	__u32 mmio_completed; /* mmio request completed */
++	__u8 request_interrupt_window;
++	__u8 padding1[3];
+ 
+ 	/* out */
+ 	__u32 exit_type;
+ 	__u32 exit_reason;
+ 	__u32 instruction_length;
++	__u8 ready_for_interrupt_injection;
++	__u8 if_flag;
++	__u16 padding2;
++	__u64 cr8;
++	__u64 apic_base;
++
+ 	union {
+ 		/* KVM_EXIT_UNKNOWN */
+ 		struct {

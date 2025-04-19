@@ -1,0 +1,45 @@
+commit d6364b8128439a8c0e381f80c38667de9f15eef8
+Author: Eneas U de Queiroz <cotequeiroz@gmail.com>
+Date:   Fri Feb 7 12:02:25 2020 -0300
+
+    crypto: qce - use cryptlen when adding extra sgl
+    
+    The qce crypto driver appends an extra entry to the dst sgl, to maintain
+    private state information.
+    
+    When the gcm driver sends requests to the ctr skcipher, it passes the
+    authentication tag after the actual crypto payload, but it must not be
+    touched.
+    
+    Commit 1336c2221bee ("crypto: qce - save a sg table slot for result
+    buf") limited the destination sgl to avoid overwriting the
+    authentication tag but it assumed the tag would be in a separate sgl
+    entry.
+    
+    This is not always the case, so it is better to limit the length of the
+    destination buffer to req->cryptlen before appending the result buf.
+    
+    Signed-off-by: Eneas U de Queiroz <cotequeiroz@gmail.com>
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+diff --git a/drivers/crypto/qce/skcipher.c b/drivers/crypto/qce/skcipher.c
+index 4217b745f124..63ae75809cb7 100644
+--- a/drivers/crypto/qce/skcipher.c
++++ b/drivers/crypto/qce/skcipher.c
+@@ -97,13 +97,14 @@ qce_skcipher_async_req_handle(struct crypto_async_request *async_req)
+ 
+ 	sg_init_one(&rctx->result_sg, qce->dma.result_buf, QCE_RESULT_BUF_SZ);
+ 
+-	sg = qce_sgtable_add(&rctx->dst_tbl, req->dst, rctx->dst_nents - 1);
++	sg = qce_sgtable_add(&rctx->dst_tbl, req->dst, req->cryptlen);
+ 	if (IS_ERR(sg)) {
+ 		ret = PTR_ERR(sg);
+ 		goto error_free;
+ 	}
+ 
+-	sg = qce_sgtable_add(&rctx->dst_tbl, &rctx->result_sg, 1);
++	sg = qce_sgtable_add(&rctx->dst_tbl, &rctx->result_sg,
++			     QCE_RESULT_BUF_SZ);
+ 	if (IS_ERR(sg)) {
+ 		ret = PTR_ERR(sg);
+ 		goto error_free;

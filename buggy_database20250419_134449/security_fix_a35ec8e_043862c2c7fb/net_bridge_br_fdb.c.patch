@@ -1,0 +1,152 @@
+commit a35ec8e38cdd1766f29924ca391a01de20163931
+Author: Hans J. Schultz <netdev@kapio-technology.com>
+Date:   Tue Nov 1 21:39:21 2022 +0200
+
+    bridge: Add MAC Authentication Bypass (MAB) support
+    
+    Hosts that support 802.1X authentication are able to authenticate
+    themselves by exchanging EAPOL frames with an authenticator (Ethernet
+    bridge, in this case) and an authentication server. Access to the
+    network is only granted by the authenticator to successfully
+    authenticated hosts.
+    
+    The above is implemented in the bridge using the "locked" bridge port
+    option. When enabled, link-local frames (e.g., EAPOL) can be locally
+    received by the bridge, but all other frames are dropped unless the host
+    is authenticated. That is, unless the user space control plane installed
+    an FDB entry according to which the source address of the frame is
+    located behind the locked ingress port. The entry can be dynamic, in
+    which case learning needs to be enabled so that the entry will be
+    refreshed by incoming traffic.
+    
+    There are deployments in which not all the devices connected to the
+    authenticator (the bridge) support 802.1X. Such devices can include
+    printers and cameras. One option to support such deployments is to
+    unlock the bridge ports connecting these devices, but a slightly more
+    secure option is to use MAB. When MAB is enabled, the MAC address of the
+    connected device is used as the user name and password for the
+    authentication.
+    
+    For MAB to work, the user space control plane needs to be notified about
+    MAC addresses that are trying to gain access so that they will be
+    compared against an allow list. This can be implemented via the regular
+    learning process with the sole difference that learned FDB entries are
+    installed with a new "locked" flag indicating that the entry cannot be
+    used to authenticate the device. The flag cannot be set by user space,
+    but user space can clear the flag by replacing the entry, thereby
+    authenticating the device.
+    
+    Locked FDB entries implement the following semantics with regards to
+    roaming, aging and forwarding:
+    
+    1. Roaming: Locked FDB entries can roam to unlocked (authorized) ports,
+       in which case the "locked" flag is cleared. FDB entries cannot roam
+       to locked ports regardless of MAB being enabled or not. Therefore,
+       locked FDB entries are only created if an FDB entry with the given {MAC,
+       VID} does not already exist. This behavior prevents unauthenticated
+       devices from disrupting traffic destined to already authenticated
+       devices.
+    
+    2. Aging: Locked FDB entries age and refresh by incoming traffic like
+       regular entries.
+    
+    3. Forwarding: Locked FDB entries forward traffic like regular entries.
+       If user space detects an unauthorized MAC behind a locked port and
+       wishes to prevent traffic with this MAC DA from reaching the host, it
+       can do so using tc or a different mechanism.
+    
+    Enable the above behavior using a new bridge port option called "mab".
+    It can only be enabled on a bridge port that is both locked and has
+    learning enabled. Locked FDB entries are flushed from the port once MAB
+    is disabled. A new option is added because there are pure 802.1X
+    deployments that are not interested in notifications about locked FDB
+    entries.
+    
+    Signed-off-by: Hans J. Schultz <netdev@kapio-technology.com>
+    Signed-off-by: Ido Schimmel <idosch@nvidia.com>
+    Acked-by: Nikolay Aleksandrov <razor@blackwall.org>
+    Reviewed-by: Vladimir Oltean <vladimir.oltean@nxp.com>
+    Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+diff --git a/net/bridge/br_fdb.c b/net/bridge/br_fdb.c
+index e7f4fccb6adb..3b83af4458b8 100644
+--- a/net/bridge/br_fdb.c
++++ b/net/bridge/br_fdb.c
+@@ -105,6 +105,7 @@ static int fdb_fill_info(struct sk_buff *skb, const struct net_bridge *br,
+ 	struct nda_cacheinfo ci;
+ 	struct nlmsghdr *nlh;
+ 	struct ndmsg *ndm;
++	u32 ext_flags = 0;
+ 
+ 	nlh = nlmsg_put(skb, portid, seq, type, sizeof(*ndm), flags);
+ 	if (nlh == NULL)
+@@ -125,11 +126,16 @@ static int fdb_fill_info(struct sk_buff *skb, const struct net_bridge *br,
+ 		ndm->ndm_flags |= NTF_EXT_LEARNED;
+ 	if (test_bit(BR_FDB_STICKY, &fdb->flags))
+ 		ndm->ndm_flags |= NTF_STICKY;
++	if (test_bit(BR_FDB_LOCKED, &fdb->flags))
++		ext_flags |= NTF_EXT_LOCKED;
+ 
+ 	if (nla_put(skb, NDA_LLADDR, ETH_ALEN, &fdb->key.addr))
+ 		goto nla_put_failure;
+ 	if (nla_put_u32(skb, NDA_MASTER, br->dev->ifindex))
+ 		goto nla_put_failure;
++	if (nla_put_u32(skb, NDA_FLAGS_EXT, ext_flags))
++		goto nla_put_failure;
++
+ 	ci.ndm_used	 = jiffies_to_clock_t(now - fdb->used);
+ 	ci.ndm_confirmed = 0;
+ 	ci.ndm_updated	 = jiffies_to_clock_t(now - fdb->updated);
+@@ -171,6 +177,7 @@ static inline size_t fdb_nlmsg_size(void)
+ 	return NLMSG_ALIGN(sizeof(struct ndmsg))
+ 		+ nla_total_size(ETH_ALEN) /* NDA_LLADDR */
+ 		+ nla_total_size(sizeof(u32)) /* NDA_MASTER */
++		+ nla_total_size(sizeof(u32)) /* NDA_FLAGS_EXT */
+ 		+ nla_total_size(sizeof(u16)) /* NDA_VLAN */
+ 		+ nla_total_size(sizeof(struct nda_cacheinfo))
+ 		+ nla_total_size(0) /* NDA_FDB_EXT_ATTRS */
+@@ -879,6 +886,11 @@ void br_fdb_update(struct net_bridge *br, struct net_bridge_port *source,
+ 						      &fdb->flags)))
+ 					clear_bit(BR_FDB_ADDED_BY_EXT_LEARN,
+ 						  &fdb->flags);
++				/* Clear locked flag when roaming to an
++				 * unlocked port.
++				 */
++				if (unlikely(test_bit(BR_FDB_LOCKED, &fdb->flags)))
++					clear_bit(BR_FDB_LOCKED, &fdb->flags);
+ 			}
+ 
+ 			if (unlikely(test_bit(BR_FDB_ADDED_BY_USER, &flags)))
+@@ -1082,6 +1094,9 @@ static int fdb_add_entry(struct net_bridge *br, struct net_bridge_port *source,
+ 		modified = true;
+ 	}
+ 
++	if (test_and_clear_bit(BR_FDB_LOCKED, &fdb->flags))
++		modified = true;
++
+ 	if (fdb_handle_notify(fdb, notify))
+ 		modified = true;
+ 
+@@ -1150,6 +1165,7 @@ int br_fdb_add(struct ndmsg *ndm, struct nlattr *tb[],
+ 	struct net_bridge_port *p = NULL;
+ 	struct net_bridge_vlan *v;
+ 	struct net_bridge *br = NULL;
++	u32 ext_flags = 0;
+ 	int err = 0;
+ 
+ 	trace_br_fdb_add(ndm, dev, addr, vid, nlh_flags);
+@@ -1178,6 +1194,14 @@ int br_fdb_add(struct ndmsg *ndm, struct nlattr *tb[],
+ 		vg = nbp_vlan_group(p);
+ 	}
+ 
++	if (tb[NDA_FLAGS_EXT])
++		ext_flags = nla_get_u32(tb[NDA_FLAGS_EXT]);
++
++	if (ext_flags & NTF_EXT_LOCKED) {
++		NL_SET_ERR_MSG_MOD(extack, "Cannot add FDB entry with \"locked\" flag set");
++		return -EINVAL;
++	}
++
+ 	if (tb[NDA_FDB_EXT_ATTRS]) {
+ 		attr = tb[NDA_FDB_EXT_ATTRS];
+ 		err = nla_parse_nested(nfea_tb, NFEA_MAX, attr,

@@ -1,0 +1,49 @@
+diff --git a/drivers/net/wireless/iwlwifi/dvm/rxon.c b/drivers/net/wireless/iwlwifi/dvm/rxon.c
+index 23be948cf162..a82b6b39d4ff 100644
+--- a/drivers/net/wireless/iwlwifi/dvm/rxon.c
++++ b/drivers/net/wireless/iwlwifi/dvm/rxon.c
+@@ -1419,6 +1419,14 @@ void iwlagn_bss_info_changed(struct ieee80211_hw *hw,
+ 
+ 	mutex_lock(&priv->mutex);
+ 
++	if (changes & BSS_CHANGED_IDLE && bss_conf->idle) {
++		/*
++		 * If we go idle, then clearly no "passive-no-rx"
++		 * workaround is needed any more, this is a reset.
++		 */
++		iwlagn_lift_passive_no_rx(priv);
++	}
++
+ 	if (unlikely(!iwl_is_ready(priv))) {
+ 		IWL_DEBUG_MAC80211(priv, "leave - not ready\n");
+ 		mutex_unlock(&priv->mutex);
+@@ -1450,16 +1458,6 @@ void iwlagn_bss_info_changed(struct ieee80211_hw *hw,
+ 			priv->timestamp = bss_conf->sync_tsf;
+ 			ctx->staging.filter_flags |= RXON_FILTER_ASSOC_MSK;
+ 		} else {
+-			/*
+-			 * If we disassociate while there are pending
+-			 * frames, just wake up the queues and let the
+-			 * frames "escape" ... This shouldn't really
+-			 * be happening to start with, but we should
+-			 * not get stuck in this case either since it
+-			 * can happen if userspace gets confused.
+-			 */
+-			iwlagn_lift_passive_no_rx(priv);
+-
+ 			ctx->staging.filter_flags &= ~RXON_FILTER_ASSOC_MSK;
+ 
+ 			if (ctx->ctxid == IWL_RXON_CTX_BSS)
+diff --git a/drivers/net/wireless/iwlwifi/dvm/tx.c b/drivers/net/wireless/iwlwifi/dvm/tx.c
+index 6aec2df3bb27..d1a670d7b10c 100644
+--- a/drivers/net/wireless/iwlwifi/dvm/tx.c
++++ b/drivers/net/wireless/iwlwifi/dvm/tx.c
+@@ -1192,7 +1192,7 @@ int iwlagn_rx_reply_tx(struct iwl_priv *priv, struct iwl_rx_cmd_buffer *rxb,
+ 			memset(&info->status, 0, sizeof(info->status));
+ 
+ 			if (status == TX_STATUS_FAIL_PASSIVE_NO_RX &&
+-			    iwl_is_associated_ctx(ctx) && ctx->vif &&
++			    ctx->vif &&
+ 			    ctx->vif->type == NL80211_IFTYPE_STATION) {
+ 				/* block and stop all queues */
+ 				priv->passive_no_rx = true;

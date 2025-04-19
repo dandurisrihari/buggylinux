@@ -1,0 +1,71 @@
+commit 3dbf100b0b10e91d65bd83b91cee3ef61f1b96c4
+Author: James Morse <james.morse@arm.com>
+Date:   Tue Jun 18 16:17:34 2019 +0100
+
+    KVM: arm64: Abstract the size of the HYP vectors pre-amble
+    
+    The EL2 vector hardening feature causes KVM to generate vectors for
+    each type of CPU present in the system. The generated sequences already
+    do some of the early guest-exit work (i.e. saving registers). To avoid
+    duplication the generated vectors branch to the original vector just
+    after the preamble. This size is hard coded.
+    
+    Adding new instructions to the HYP vector causes strange side effects,
+    which are difficult to debug as the affected code is patched in at
+    runtime.
+    
+    Add KVM_VECTOR_PREAMBLE to tell kvm_patch_vector_branch() how big
+    the preamble is. The valid_vect macro can then validate this at
+    build time.
+    
+    Reviewed-by: Julien Thierry <julien.thierry@arm.com>
+    Signed-off-by: James Morse <james.morse@arm.com>
+    Signed-off-by: Marc Zyngier <marc.zyngier@arm.com>
+
+diff --git a/arch/arm64/kvm/hyp/hyp-entry.S b/arch/arm64/kvm/hyp/hyp-entry.S
+index b8e045615961..318a2f3996fc 100644
+--- a/arch/arm64/kvm/hyp/hyp-entry.S
++++ b/arch/arm64/kvm/hyp/hyp-entry.S
+@@ -216,17 +216,32 @@ ENDPROC(\label)
+ 
+ 	.align 11
+ 
++.macro check_preamble_length start, end
++/* kvm_patch_vector_branch() generates code that jumps over the preamble. */
++.if ((\end-\start) != KVM_VECTOR_PREAMBLE)
++	.error "KVM vector preamble length mismatch"
++.endif
++.endm
++
+ .macro valid_vect target
+ 	.align 7
++661:
+ 	stp	x0, x1, [sp, #-16]!
++662:
+ 	b	\target
++
++check_preamble_length 661b, 662b
+ .endm
+ 
+ .macro invalid_vect target
+ 	.align 7
++661:
+ 	b	\target
++662:
+ 	ldp	x0, x1, [sp], #16
+ 	b	\target
++
++check_preamble_length 661b, 662b
+ .endm
+ 
+ ENTRY(__kvm_hyp_vector)
+@@ -271,7 +286,8 @@ ENDPROC(__kvm_hyp_vector)
+  * movk	x0, #((addr >> 32) & 0xffff), lsl #32
+  * br	x0
+  *
+- * Where addr = kern_hyp_va(__kvm_hyp_vector) + vector-offset + 4.
++ * Where:
++ * addr = kern_hyp_va(__kvm_hyp_vector) + vector-offset + KVM_VECTOR_PREAMBLE.
+  * See kvm_patch_vector_branch for details.
+  */
+ alternative_cb	kvm_patch_vector_branch

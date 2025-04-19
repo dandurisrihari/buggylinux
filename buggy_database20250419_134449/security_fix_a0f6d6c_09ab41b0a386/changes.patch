@@ -1,0 +1,102 @@
+diff --git a/drivers/net/wireless/mwifiex/cfg80211.c b/drivers/net/wireless/mwifiex/cfg80211.c
+index a460fb0cc503..6a81101bab44 100644
+--- a/drivers/net/wireless/mwifiex/cfg80211.c
++++ b/drivers/net/wireless/mwifiex/cfg80211.c
+@@ -873,6 +873,7 @@ mwifiex_cfg80211_assoc(struct mwifiex_private *priv, size_t ssid_len, u8 *ssid,
+ 	priv->sec_info.wpa2_enabled = false;
+ 	priv->wep_key_curr_index = 0;
+ 	priv->sec_info.encryption_mode = 0;
++	priv->sec_info.is_authtype_auto = 0;
+ 	ret = mwifiex_set_encode(priv, NULL, 0, 0, 1);
+ 
+ 	if (mode == NL80211_IFTYPE_ADHOC) {
+@@ -894,11 +895,12 @@ mwifiex_cfg80211_assoc(struct mwifiex_private *priv, size_t ssid_len, u8 *ssid,
+ 	}
+ 
+ 	/* Now handle infra mode. "sme" is valid for infra mode only */
+-	if (sme->auth_type == NL80211_AUTHTYPE_AUTOMATIC
+-			|| sme->auth_type == NL80211_AUTHTYPE_OPEN_SYSTEM)
++	if (sme->auth_type == NL80211_AUTHTYPE_AUTOMATIC) {
+ 		auth_type = NL80211_AUTHTYPE_OPEN_SYSTEM;
+-	else if (sme->auth_type == NL80211_AUTHTYPE_SHARED_KEY)
+-		auth_type = NL80211_AUTHTYPE_SHARED_KEY;
++		priv->sec_info.is_authtype_auto = 1;
++	} else {
++		auth_type = sme->auth_type;
++	}
+ 
+ 	if (sme->crypto.n_ciphers_pairwise) {
+ 		priv->sec_info.encryption_mode =
+diff --git a/drivers/net/wireless/mwifiex/cmdevt.c b/drivers/net/wireless/mwifiex/cmdevt.c
+index 6623db69e157..c82eb7ff2fa2 100644
+--- a/drivers/net/wireless/mwifiex/cmdevt.c
++++ b/drivers/net/wireless/mwifiex/cmdevt.c
+@@ -771,7 +771,7 @@ int mwifiex_process_cmdresp(struct mwifiex_adapter *adapter)
+ 
+ 	/* Check init command response */
+ 	if (adapter->hw_status == MWIFIEX_HW_STATUS_INITIALIZING) {
+-		if (ret == -1) {
++		if (ret) {
+ 			dev_err(adapter->dev, "%s: cmd %#x failed during "
+ 				"initialization\n", __func__, cmdresp_no);
+ 			mwifiex_init_fw_complete(adapter);
+@@ -781,10 +781,8 @@ int mwifiex_process_cmdresp(struct mwifiex_adapter *adapter)
+ 	}
+ 
+ 	if (adapter->curr_cmd) {
+-		if (adapter->curr_cmd->wait_q_enabled && (!ret))
+-			adapter->cmd_wait_q.status = 0;
+-		else if (adapter->curr_cmd->wait_q_enabled && (ret == -1))
+-			adapter->cmd_wait_q.status = -1;
++		if (adapter->curr_cmd->wait_q_enabled)
++			adapter->cmd_wait_q.status = ret;
+ 
+ 		/* Clean up and put current command back to cmd_free_q */
+ 		mwifiex_insert_cmd_to_free_q(adapter, adapter->curr_cmd);
+diff --git a/drivers/net/wireless/mwifiex/join.c b/drivers/net/wireless/mwifiex/join.c
+index ee439fc2f4f3..5c95e4839004 100644
+--- a/drivers/net/wireless/mwifiex/join.c
++++ b/drivers/net/wireless/mwifiex/join.c
+@@ -585,7 +585,7 @@ int mwifiex_ret_802_11_associate(struct mwifiex_private *priv,
+ 		       le16_to_cpu(assoc_rsp->cap_info_bitmap),
+ 		       le16_to_cpu(assoc_rsp->a_id));
+ 
+-		ret = -1;
++		ret = le16_to_cpu(assoc_rsp->status_code);
+ 		goto done;
+ 	}
+ 
+diff --git a/drivers/net/wireless/mwifiex/main.h b/drivers/net/wireless/mwifiex/main.h
+index 4c8621706278..dddb5563398a 100644
+--- a/drivers/net/wireless/mwifiex/main.h
++++ b/drivers/net/wireless/mwifiex/main.h
+@@ -219,6 +219,7 @@ struct mwifiex_802_11_security {
+ 	u8 wapi_key_on;
+ 	u8 wep_enabled;
+ 	u32 authentication_mode;
++	u8 is_authtype_auto;
+ 	u32 encryption_mode;
+ };
+ 
+diff --git a/drivers/net/wireless/mwifiex/sta_ioctl.c b/drivers/net/wireless/mwifiex/sta_ioctl.c
+index 866026ecca44..e10161f5894c 100644
+--- a/drivers/net/wireless/mwifiex/sta_ioctl.c
++++ b/drivers/net/wireless/mwifiex/sta_ioctl.c
+@@ -249,6 +249,17 @@ int mwifiex_bss_start(struct mwifiex_private *priv, struct cfg80211_bss *bss,
+ 		 * application retrieval */
+ 		priv->assoc_rsp_size = 0;
+ 		ret = mwifiex_associate(priv, bss_desc);
++
++		/* If auth type is auto and association fails using open mode,
++		 * try to connect using shared mode */
++		if (ret == WLAN_STATUS_NOT_SUPPORTED_AUTH_ALG &&
++		    priv->sec_info.is_authtype_auto &&
++		    priv->sec_info.wep_enabled) {
++			priv->sec_info.authentication_mode =
++						NL80211_AUTHTYPE_SHARED_KEY;
++			ret = mwifiex_associate(priv, bss_desc);
++		}
++
+ 		if (bss)
+ 			cfg80211_put_bss(bss);
+ 	} else {

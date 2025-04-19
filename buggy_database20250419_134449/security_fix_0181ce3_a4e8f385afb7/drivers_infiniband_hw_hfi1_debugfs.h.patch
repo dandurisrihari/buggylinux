@@ -1,0 +1,127 @@
+commit 0181ce31b26021f7c2f9506112a05c847a36f0f2
+Author: Don Hiatt <don.hiatt@intel.com>
+Date:   Mon Mar 20 17:26:14 2017 -0700
+
+    IB/hfi1: Add receive fault injection feature
+    
+    Add fault injection capability:
+      - Drop packets unconditionally (fault_by_packet)
+      - Drop packets based on opcode (fault_by_opcode)
+    
+    This feature reacts to the global FAULT_INJECTION
+    config flag.
+    
+    The faulting traces have been added:
+      - misc/fault_opcode
+      - misc/fault_packet
+    
+    See 'Documentation/fault-injection/fault-injection.txt'
+    for details.
+    
+    Examples:
+      - Dropping packets by opcode:
+        /sys/kernel/debug/hfi1/hfi1_X/fault_opcode
+            # Enable fault
+            echo Y > fault_by_opcode
+            # Setprobability of dropping (0-100%)
+            # echo 25 > probability
+            # Set opcode
+            echo 0x64 > opcode
+            # Number of times to fault
+            echo 3 > times
+            # An optional mask allows you to fault
+            # a range of opcodes
+            echo 0xf0 > mask
+        /sys/kernel/debug/hfi1/hfi1_X/fault_stats
+        contains a value in parentheses to indicate
+        number of each opcode dropped.
+    
+      - Dropping packets unconditionally
+        /sys/kernel/debug/hfi1/hfi1_X/fault_packet
+            # Enable fault
+            echo Y > fault_by_packet
+        /sys/kernel/debug/hfi1/hfi1_X/fault_packet/fault_stats
+        contains the number of packets dropped.
+    
+    Reviewed-by: Dennis Dalessandro <dennis.dalessandro@intel.com>
+    Signed-off-by: Mike Marciniszyn <mike.marciniszyn@intel.com>
+    Signed-off-by: Don Hiatt <don.hiatt@intel.com>
+    Signed-off-by: Dennis Dalessandro <dennis.dalessandro@intel.com>
+    Signed-off-by: Doug Ledford <dledford@redhat.com>
+
+diff --git a/drivers/infiniband/hw/hfi1/debugfs.h b/drivers/infiniband/hw/hfi1/debugfs.h
+index b6fb6814f1b8..70be5ca14736 100644
+--- a/drivers/infiniband/hw/hfi1/debugfs.h
++++ b/drivers/infiniband/hw/hfi1/debugfs.h
+@@ -53,23 +53,68 @@ void hfi1_dbg_ibdev_init(struct hfi1_ibdev *ibd);
+ void hfi1_dbg_ibdev_exit(struct hfi1_ibdev *ibd);
+ void hfi1_dbg_init(void);
+ void hfi1_dbg_exit(void);
++
++#ifdef CONFIG_FAULT_INJECTION
++#include <linux/fault-inject.h>
++struct fault_opcode {
++	struct fault_attr attr;
++	struct dentry *dir;
++	bool fault_by_opcode;
++	u64 n_rxfaults[256];
++	u64 n_txfaults[256];
++	u8 opcode;
++	u8 mask;
++};
++
++struct fault_packet {
++	struct fault_attr attr;
++	struct dentry *dir;
++	bool fault_by_packet;
++	u64 n_faults;
++};
++
++bool hfi1_dbg_fault_opcode(struct rvt_qp *qp, u32 opcode, bool rx);
++bool hfi1_dbg_fault_packet(struct hfi1_packet *packet);
++#else
++static inline bool hfi1_dbg_fault_packet(struct hfi1_packet *packet)
++{
++	return false;
++}
++
++static inline bool hfi1_dbg_fault_opcode(struct rvt_qp *qp,
++					 u32 opcode, bool rx)
++{
++	return false;
++}
++#endif
++
+ #else
+ static inline void hfi1_dbg_ibdev_init(struct hfi1_ibdev *ibd)
+ {
+ }
+ 
+-void hfi1_dbg_ibdev_exit(struct hfi1_ibdev *ibd)
++static inline void hfi1_dbg_ibdev_exit(struct hfi1_ibdev *ibd)
++{
++}
++
++static inline void hfi1_dbg_init(void)
+ {
+ }
+ 
+-void hfi1_dbg_init(void)
++static inline void hfi1_dbg_exit(void)
+ {
+ }
+ 
+-void hfi1_dbg_exit(void)
++static inline bool hfi1_dbg_fault_packet(struct hfi1_packet *packet)
+ {
++	return false;
+ }
+ 
++static inline bool hfi1_dbg_fault_opcode(struct rvt_qp *qp,
++					 u32 opcode, bool rx)
++{
++	return false;
++}
+ #endif
+ 
+ #endif                          /* _HFI1_DEBUGFS_H */

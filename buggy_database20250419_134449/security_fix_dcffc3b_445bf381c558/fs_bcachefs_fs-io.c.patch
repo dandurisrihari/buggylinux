@@ -1,0 +1,37 @@
+commit dcffc3b1ae3251d796a25c673f614e3099ca83d3
+Author: Kent Overstreet <kent.overstreet@linux.dev>
+Date:   Sat Mar 29 23:11:08 2025 -0400
+
+    bcachefs: Split up bch_dev.io_ref
+    
+    We now have separate per device io_refs for read and write access.
+    
+    This fixes a device removal bug where the discard workers were still
+    running while we're removing alloc info for that device.
+    
+    It's also a bit of hardening; we no longer allow writes to devices that
+    are read-only.
+    
+    Signed-off-by: Kent Overstreet <kent.overstreet@linux.dev>
+
+diff --git a/fs/bcachefs/fs-io.c b/fs/bcachefs/fs-io.c
+index c80ed3a54e70..42709ebe4d93 100644
+--- a/fs/bcachefs/fs-io.c
++++ b/fs/bcachefs/fs-io.c
+@@ -48,7 +48,7 @@ static void nocow_flush_endio(struct bio *_bio)
+ 	struct nocow_flush *bio = container_of(_bio, struct nocow_flush, bio);
+ 
+ 	closure_put(bio->cl);
+-	percpu_ref_put(&bio->ca->io_ref);
++	percpu_ref_put(&bio->ca->io_ref[WRITE]);
+ 	bio_put(&bio->bio);
+ }
+ 
+@@ -71,7 +71,7 @@ void bch2_inode_flush_nocow_writes_async(struct bch_fs *c,
+ 	for_each_set_bit(dev, devs.d, BCH_SB_MEMBERS_MAX) {
+ 		rcu_read_lock();
+ 		ca = rcu_dereference(c->devs[dev]);
+-		if (ca && !percpu_ref_tryget(&ca->io_ref))
++		if (ca && !percpu_ref_tryget(&ca->io_ref[WRITE]))
+ 			ca = NULL;
+ 		rcu_read_unlock();

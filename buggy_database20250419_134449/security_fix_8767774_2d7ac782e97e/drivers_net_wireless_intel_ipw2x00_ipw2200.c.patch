@@ -1,0 +1,104 @@
+commit 87677749463463973589a85edd96b1468c9ea4ea
+Author: Justin Stitt <justinstitt@google.com>
+Date:   Wed Aug 2 01:23:06 2023 +0000
+
+    wifi: ipw2x00: refactor to use kstrtoul
+    
+    The current implementation seems to reinvent what `kstrtoul` already does
+    in terms of functionality and error handling. Remove uses of `simple_strtoul()`
+    in favor of `kstrtoul()`.
+    
+    There is the following note at `lib/vsprintf.c:simple_strtoull()` which
+    further backs this change:
+    | * This function has caveats. Please use kstrtoull (or kstrtoul) instead.
+    
+    And here, simple_str* are explicitly deprecated [3].
+    
+    This patch also removes an instance of the deprecated `strncpy` which helps [2].
+    
+    Compile tested only.
+    
+    Link: https://lore.kernel.org/all/202308011602.3CC1C0244C@keescook/ [1]
+    Link: https://github.com/KSPP/linux/issues/90 [2]
+    Link: https://docs.kernel.org/process/deprecated.html#simple-strtol-simple-strtoll-simple-strtoul-simple-strtoull [3]
+    Cc: linux-hardening@vger.kernel.org
+    Suggested-by: Kees Cook <keescook@chromium.org>
+    Signed-off-by: Justin Stitt <justinstitt@google.com>
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Signed-off-by: Kalle Valo <kvalo@kernel.org>
+    Link: https://lore.kernel.org/r/20230802-wifi-ipw2x00-refactor-v2-1-d33f765e9cd5@google.com
+
+diff --git a/drivers/net/wireless/intel/ipw2x00/ipw2200.c b/drivers/net/wireless/intel/ipw2x00/ipw2200.c
+index dfe0f74369e6..820100cac491 100644
+--- a/drivers/net/wireless/intel/ipw2x00/ipw2200.c
++++ b/drivers/net/wireless/intel/ipw2x00/ipw2200.c
+@@ -1176,23 +1176,20 @@ static ssize_t debug_level_show(struct device_driver *d, char *buf)
+ static ssize_t debug_level_store(struct device_driver *d, const char *buf,
+ 				 size_t count)
+ {
+-	char *p = (char *)buf;
+-	u32 val;
++	unsigned long val;
+ 
+-	if (p[1] == 'x' || p[1] == 'X' || p[0] == 'x' || p[0] == 'X') {
+-		p++;
+-		if (p[0] == 'x' || p[0] == 'X')
+-			p++;
+-		val = simple_strtoul(p, &p, 16);
+-	} else
+-		val = simple_strtoul(p, &p, 10);
+-	if (p == buf)
++	int result = kstrtoul(buf, 0, &val);
++
++	if (result == -EINVAL)
+ 		printk(KERN_INFO DRV_NAME
+ 		       ": %s is not in hex or decimal form.\n", buf);
++	else if (result == -ERANGE)
++		printk(KERN_INFO DRV_NAME
++			 ": %s has overflowed.\n", buf);
+ 	else
+ 		ipw_debug_level = val;
+ 
+-	return strnlen(buf, count);
++	return count;
+ }
+ static DRIVER_ATTR_RW(debug_level);
+ 
+@@ -1461,25 +1458,13 @@ static ssize_t scan_age_store(struct device *d, struct device_attribute *attr,
+ {
+ 	struct ipw_priv *priv = dev_get_drvdata(d);
+ 	struct net_device *dev = priv->net_dev;
+-	char buffer[] = "00000000";
+-	unsigned long len =
+-	    (sizeof(buffer) - 1) > count ? count : sizeof(buffer) - 1;
+-	unsigned long val;
+-	char *p = buffer;
+ 
+ 	IPW_DEBUG_INFO("enter\n");
+ 
+-	strncpy(buffer, buf, len);
+-	buffer[len] = 0;
++	unsigned long val;
++	int result = kstrtoul(buf, 0, &val);
+ 
+-	if (p[1] == 'x' || p[1] == 'X' || p[0] == 'x' || p[0] == 'X') {
+-		p++;
+-		if (p[0] == 'x' || p[0] == 'X')
+-			p++;
+-		val = simple_strtoul(p, &p, 16);
+-	} else
+-		val = simple_strtoul(p, &p, 10);
+-	if (p == buffer) {
++	if (result == -EINVAL || result == -ERANGE) {
+ 		IPW_DEBUG_INFO("%s: user supplied invalid value.\n", dev->name);
+ 	} else {
+ 		priv->ieee->scan_age = val;
+@@ -1487,7 +1472,7 @@ static ssize_t scan_age_store(struct device *d, struct device_attribute *attr,
+ 	}
+ 
+ 	IPW_DEBUG_INFO("exit\n");
+-	return len;
++	return count;
+ }
+ 
+ static DEVICE_ATTR_RW(scan_age);

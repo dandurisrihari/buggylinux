@@ -1,0 +1,120 @@
+commit 039aeb9deb9291f3b19c375a8bc6fa7f768996cc
+Merge: 6b2591c21273 13ffbd8db1dd
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Wed Jun 3 15:13:47 2020 -0700
+
+    Merge tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm
+    
+    Pull kvm updates from Paolo Bonzini:
+     "ARM:
+       - Move the arch-specific code into arch/arm64/kvm
+    
+       - Start the post-32bit cleanup
+    
+       - Cherry-pick a few non-invasive pre-NV patches
+    
+      x86:
+       - Rework of TLB flushing
+    
+       - Rework of event injection, especially with respect to nested
+         virtualization
+    
+       - Nested AMD event injection facelift, building on the rework of
+         generic code and fixing a lot of corner cases
+    
+       - Nested AMD live migration support
+    
+       - Optimization for TSC deadline MSR writes and IPIs
+    
+       - Various cleanups
+    
+       - Asynchronous page fault cleanups (from tglx, common topic branch
+         with tip tree)
+    
+       - Interrupt-based delivery of asynchronous "page ready" events (host
+         side)
+    
+       - Hyper-V MSRs and hypercalls for guest debugging
+    
+       - VMX preemption timer fixes
+    
+      s390:
+       - Cleanups
+    
+      Generic:
+       - switch vCPU thread wakeup from swait to rcuwait
+    
+      The other architectures, and the guest side of the asynchronous page
+      fault work, will come next week"
+    
+    * tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm: (256 commits)
+      KVM: selftests: fix rdtsc() for vmx_tsc_adjust_test
+      KVM: check userspace_addr for all memslots
+      KVM: selftests: update hyperv_cpuid with SynDBG tests
+      x86/kvm/hyper-v: Add support for synthetic debugger via hypercalls
+      x86/kvm/hyper-v: enable hypercalls regardless of hypercall page
+      x86/kvm/hyper-v: Add support for synthetic debugger interface
+      x86/hyper-v: Add synthetic debugger definitions
+      KVM: selftests: VMX preemption timer migration test
+      KVM: nVMX: Fix VMX preemption timer migration
+      x86/kvm/hyper-v: Explicitly align hcall param for kvm_hyperv_exit
+      KVM: x86/pmu: Support full width counting
+      KVM: x86/pmu: Tweak kvm_pmu_get_msr to pass 'struct msr_data' in
+      KVM: x86: announce KVM_FEATURE_ASYNC_PF_INT
+      KVM: x86: acknowledgment mechanism for async pf page ready notifications
+      KVM: x86: interrupt based APF 'page ready' event delivery
+      KVM: introduce kvm_read_guest_offset_cached()
+      KVM: rename kvm_arch_can_inject_async_page_present() to kvm_arch_can_dequeue_async_page_present()
+      KVM: x86: extend struct kvm_vcpu_pv_apf_data with token info
+      Revert "KVM: async_pf: Fix #DF due to inject "Page not Present" and "Page Ready" exceptions simultaneously"
+      KVM: VMX: Replace zero-length array with flexible-array
+      ...
+
+diff --cc arch/arm64/kvm/reset.c
+index 70cd7bcca433,865c8aa670bc..d3b209023727
+--- a/arch/arm64/kvm/reset.c
++++ b/arch/arm64/kvm/reset.c
+@@@ -36,16 -36,20 +36,12 @@@ static u32 kvm_ipa_limit
+  /*
+   * ARMv8 Reset Values
+   */
+- static const struct kvm_regs default_regs_reset = {
+- 	.regs.pstate = (PSR_MODE_EL1h | PSR_A_BIT | PSR_I_BIT |
+- 			PSR_F_BIT | PSR_D_BIT),
+- };
++ #define VCPU_RESET_PSTATE_EL1	(PSR_MODE_EL1h | PSR_A_BIT | PSR_I_BIT | \
++ 				 PSR_F_BIT | PSR_D_BIT)
+  
+- static const struct kvm_regs default_regs_reset32 = {
+- 	.regs.pstate = (PSR_AA32_MODE_SVC | PSR_AA32_A_BIT |
+- 			PSR_AA32_I_BIT | PSR_AA32_F_BIT),
+- };
++ #define VCPU_RESET_PSTATE_SVC	(PSR_AA32_MODE_SVC | PSR_AA32_A_BIT | \
++ 				 PSR_AA32_I_BIT | PSR_AA32_F_BIT)
+  
+ -static bool cpu_has_32bit_el1(void)
+ -{
+ -	u64 pfr0;
+ -
+ -	pfr0 = read_sanitised_ftr_reg(SYS_ID_AA64PFR0_EL1);
+ -	return !!(pfr0 & 0x20);
+ -}
+ -
+  /**
+   * kvm_arch_vm_ioctl_check_extension
+   *
+@@@ -280,11 -284,11 +276,11 @@@ int kvm_reset_vcpu(struct kvm_vcpu *vcp
+  	switch (vcpu->arch.target) {
+  	default:
+  		if (test_bit(KVM_ARM_VCPU_EL1_32BIT, vcpu->arch.features)) {
+ -			if (!cpu_has_32bit_el1())
+ +			if (!cpus_have_const_cap(ARM64_HAS_32BIT_EL1))
+  				goto out;
+- 			cpu_reset = &default_regs_reset32;
++ 			pstate = VCPU_RESET_PSTATE_SVC;
+  		} else {
+- 			cpu_reset = &default_regs_reset;
++ 			pstate = VCPU_RESET_PSTATE_EL1;
+  		}
+  
+  		break;

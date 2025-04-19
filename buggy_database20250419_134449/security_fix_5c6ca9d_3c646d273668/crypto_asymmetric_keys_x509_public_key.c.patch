@@ -1,0 +1,113 @@
+commit 5c6ca9d936654a135b459c846885e08966e5e5bf
+Author: Lukas Wunner <lukas@wunner.de>
+Date:   Sun Apr 7 19:57:40 2024 +0200
+
+    X.509: Introduce scope-based x509_certificate allocation
+    
+    Add a DEFINE_FREE() clause for x509_certificate structs and use it in
+    x509_cert_parse() and x509_key_preparse().  These are the only functions
+    where scope-based x509_certificate allocation currently makes sense.
+    A third user will be introduced with the forthcoming SPDM library
+    (Security Protocol and Data Model) for PCI device authentication.
+    
+    Unlike most other DEFINE_FREE() clauses, this one checks for IS_ERR()
+    instead of NULL before calling x509_free_certificate() at end of scope.
+    That's because the "constructor" of x509_certificate structs,
+    x509_cert_parse(), returns a valid pointer or an ERR_PTR(), but never
+    NULL.
+    
+    Comparing the Assembler output before/after has shown they are identical,
+    save for the fact that gcc-12 always generates two return paths when
+    __cleanup() is used, one for the success case and one for the error case.
+    
+    In x509_cert_parse(), add a hint for the compiler that kzalloc() never
+    returns an ERR_PTR().  Otherwise the compiler adds a gratuitous IS_ERR()
+    check on return.  Introduce an assume() macro for this which can be
+    re-used elsewhere in the kernel to provide hints for the compiler.
+    
+    Suggested-by: Jonathan Cameron <Jonathan.Cameron@Huawei.com>
+    Link: https://lore.kernel.org/all/20231003153937.000034ca@Huawei.com/
+    Link: https://lwn.net/Articles/934679/
+    Signed-off-by: Lukas Wunner <lukas@wunner.de>
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+diff --git a/crypto/asymmetric_keys/x509_public_key.c b/crypto/asymmetric_keys/x509_public_key.c
+index 6a4f00be22fc..00ac7159fba2 100644
+--- a/crypto/asymmetric_keys/x509_public_key.c
++++ b/crypto/asymmetric_keys/x509_public_key.c
+@@ -161,12 +161,11 @@ int x509_check_for_self_signed(struct x509_certificate *cert)
+  */
+ static int x509_key_preparse(struct key_preparsed_payload *prep)
+ {
+-	struct asymmetric_key_ids *kids;
+-	struct x509_certificate *cert;
++	struct x509_certificate *cert __free(x509_free_certificate);
++	struct asymmetric_key_ids *kids __free(kfree) = NULL;
++	char *p, *desc __free(kfree) = NULL;
+ 	const char *q;
+ 	size_t srlen, sulen;
+-	char *desc = NULL, *p;
+-	int ret;
+ 
+ 	cert = x509_cert_parse(prep->data, prep->datalen);
+ 	if (IS_ERR(cert))
+@@ -188,9 +187,8 @@ static int x509_key_preparse(struct key_preparsed_payload *prep)
+ 	}
+ 
+ 	/* Don't permit addition of blacklisted keys */
+-	ret = -EKEYREJECTED;
+ 	if (cert->blacklisted)
+-		goto error_free_cert;
++		return -EKEYREJECTED;
+ 
+ 	/* Propose a description */
+ 	sulen = strlen(cert->subject);
+@@ -202,10 +200,9 @@ static int x509_key_preparse(struct key_preparsed_payload *prep)
+ 		q = cert->raw_serial;
+ 	}
+ 
+-	ret = -ENOMEM;
+ 	desc = kmalloc(sulen + 2 + srlen * 2 + 1, GFP_KERNEL);
+ 	if (!desc)
+-		goto error_free_cert;
++		return -ENOMEM;
+ 	p = memcpy(desc, cert->subject, sulen);
+ 	p += sulen;
+ 	*p++ = ':';
+@@ -215,16 +212,14 @@ static int x509_key_preparse(struct key_preparsed_payload *prep)
+ 
+ 	kids = kmalloc(sizeof(struct asymmetric_key_ids), GFP_KERNEL);
+ 	if (!kids)
+-		goto error_free_desc;
++		return -ENOMEM;
+ 	kids->id[0] = cert->id;
+ 	kids->id[1] = cert->skid;
+ 	kids->id[2] = asymmetric_key_generate_id(cert->raw_subject,
+ 						 cert->raw_subject_size,
+ 						 "", 0);
+-	if (IS_ERR(kids->id[2])) {
+-		ret = PTR_ERR(kids->id[2]);
+-		goto error_free_kids;
+-	}
++	if (IS_ERR(kids->id[2]))
++		return PTR_ERR(kids->id[2]);
+ 
+ 	/* We're pinning the module by being linked against it */
+ 	__module_get(public_key_subtype.owner);
+@@ -242,15 +237,7 @@ static int x509_key_preparse(struct key_preparsed_payload *prep)
+ 	cert->sig = NULL;
+ 	desc = NULL;
+ 	kids = NULL;
+-	ret = 0;
+-
+-error_free_kids:
+-	kfree(kids);
+-error_free_desc:
+-	kfree(desc);
+-error_free_cert:
+-	x509_free_certificate(cert);
+-	return ret;
++	return 0;
+ }
+ 
+ static struct asymmetric_key_parser x509_key_parser = {

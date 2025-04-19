@@ -1,0 +1,62 @@
+commit 61cd52d4e44d7d8c55dad939b1877fd39d7103a2
+Author: Matt Redfearn <matt.redfearn@mips.com>
+Date:   Thu Mar 31 10:05:38 2016 +0100
+
+    MIPS: bootmem: When relocatable, free memory below kernel
+    
+    The kernel reserves all memory before the _end symbol as bootmem,
+    however, once the kernel can be relocated elsewhere in memory this may
+    result in a large amount of wasted memory. The assumption is that the
+    memory between the link and relocated address of the kernel may be
+    released back to the available memory pool.
+    
+    Memory statistics for a Malta with the kernel relocating by
+    16Mb, without the patch:
+    Memory: 105952K/131072K available (4604K kernel code, 242K rwdata,
+    892K rodata, 1280K init, 183K bss, 25120K reserved, 0K cma-reserved)
+    And with the patch:
+    Memory: 122336K/131072K available (4604K kernel code, 242K rwdata,
+    892K rodata, 1280K init, 183K bss, 8736K reserved, 0K cma-reserved)
+    
+    The 16Mb offset is removed from the reserved region and added back to
+    the available region.
+    
+    Signed-off-by: Matt Redfearn <matt.redfearn@imgtec.com>
+    Cc: Aaro Koskinen <aaro.koskinen@nokia.com>
+    Cc: Masahiro Yamada <yamada.masahiro@socionext.com>
+    Cc: Alexander Sverdlin <alexander.sverdlin@gmail.com>
+    Cc: Jaedon Shin <jaedon.shin@gmail.com>
+    Cc: James Hogan <james.hogan@imgtec.com>
+    Cc: Jonas Gorski <jogo@openwrt.org>
+    Cc: Paul Burton <paul.burton@imgtec.com>
+    Cc: linux-mips@linux-mips.org
+    Cc: kernel-hardening@lists.openwall.com
+    Cc: linux-kernel@vger.kernel.org
+    Patchwork: https://patchwork.linux-mips.org/patch/12986/
+    Signed-off-by: Ralf Baechle <ralf@linux-mips.org>
+
+diff --git a/arch/mips/kernel/setup.c b/arch/mips/kernel/setup.c
+index d20caacfdbd3..3378fdaf4dd3 100644
+--- a/arch/mips/kernel/setup.c
++++ b/arch/mips/kernel/setup.c
+@@ -469,6 +469,20 @@ static void __init bootmem_init(void)
+ 	 */
+ 	reserve_bootmem(PFN_PHYS(mapstart), bootmap_size, BOOTMEM_DEFAULT);
+ 
++#ifdef CONFIG_RELOCATABLE
++	/*
++	 * The kernel reserves all memory below its _end symbol as bootmem,
++	 * but the kernel may now be at a much higher address. The memory
++	 * between the original and new locations may be returned to the system.
++	 */
++	if (__pa_symbol(_text) > __pa_symbol(VMLINUX_LOAD_ADDRESS)) {
++		unsigned long offset;
++
++		offset = __pa_symbol(_text) - __pa_symbol(VMLINUX_LOAD_ADDRESS);
++		free_bootmem(__pa_symbol(VMLINUX_LOAD_ADDRESS), offset);
++	}
++#endif
++
+ 	/*
+ 	 * Reserve initrd memory if needed.
+ 	 */

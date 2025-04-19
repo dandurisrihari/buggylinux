@@ -1,0 +1,56 @@
+commit 189af4657186da08a2e79fb8e906cfd82b2ccddc
+Author: Ard Biesheuvel <ardb@kernel.org>
+Date:   Thu Dec 6 09:32:57 2018 +0100
+
+    ARM: smp: add support for per-task stack canaries
+    
+    On ARM, we currently only change the value of the stack canary when
+    switching tasks if the kernel was built for UP. On SMP kernels, this
+    is impossible since the stack canary value is obtained via a global
+    symbol reference, which means
+    a) all running tasks on all CPUs must use the same value
+    b) we can only modify the value when no kernel stack frames are live
+       on any CPU, which is effectively never.
+    
+    So instead, use a GCC plugin to add a RTL pass that replaces each
+    reference to the address of the __stack_chk_guard symbol with an
+    expression that produces the address of the 'stack_canary' field
+    that is added to struct thread_info. This way, each task will use
+    its own randomized value.
+    
+    Cc: Russell King <linux@armlinux.org.uk>
+    Cc: Kees Cook <keescook@chromium.org>
+    Cc: Emese Revfy <re.emese@gmail.com>
+    Cc: Arnd Bergmann <arnd@arndb.de>
+    Cc: Laura Abbott <labbott@redhat.com>
+    Cc: kernel-hardening@lists.openwall.com
+    Acked-by: Nicolas Pitre <nico@linaro.org>
+    Signed-off-by: Ard Biesheuvel <ard.biesheuvel@linaro.org>
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+
+diff --git a/arch/arm/Kconfig b/arch/arm/Kconfig
+index 91be74d8df65..5c0305585a0a 100644
+--- a/arch/arm/Kconfig
++++ b/arch/arm/Kconfig
+@@ -1810,6 +1810,21 @@ config XEN
+ 	help
+ 	  Say Y if you want to run Linux in a Virtual Machine on Xen on ARM.
+ 
++config STACKPROTECTOR_PER_TASK
++	bool "Use a unique stack canary value for each task"
++	depends on GCC_PLUGINS && STACKPROTECTOR && SMP && !XIP_DEFLATED_DATA
++	select GCC_PLUGIN_ARM_SSP_PER_TASK
++	default y
++	help
++	  Due to the fact that GCC uses an ordinary symbol reference from
++	  which to load the value of the stack canary, this value can only
++	  change at reboot time on SMP systems, and all tasks running in the
++	  kernel's address space are forced to use the same canary value for
++	  the entire duration that the system is up.
++
++	  Enable this option to switch to a different method that uses a
++	  different canary value for each task.
++
+ endmenu
+ 
+ menu "Boot options"

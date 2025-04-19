@@ -1,0 +1,50 @@
+commit b3f2e67cc2dd59fffeffd35b1526a081bbec9490
+Author: James Smart <james.smart@broadcom.com>
+Date:   Sun Nov 15 11:26:37 2020 -0800
+
+    scsi: lpfc: Fix NPIV discovery and Fabric Node detection
+    
+    While testing NPIV and link bounces, the vport would not show a fabric node
+    for the F_Port, would not transition into NPR state during a link fault, or
+    leave the FDMI node untouched during error injection. Cause for this was
+    determined to be an inconsistent manner in which F_Port, Nameserver, and
+    FDMI controller nodes were created and linked. In some cases, the nodes
+    would never be unregistered from the transport, leaving references
+    active. In other cases, the fabric nodes may register with the transport
+    multiple times while still registered.
+    
+    The following changes were made:
+    
+     - Fix the FDISC issue routine, which starts vport (re)creation, to mark
+       the F_Port as a fabric node (NLP_FABRIC) and allow the F_Port node to
+       fully be created and show up in the node list.
+    
+     - When remote ports are cleaned up on vport termination, cleanup the
+       nameserver and FDMI controller nodes on the vport so they unregister
+       from the transport.
+    
+     - On link bounces, don't exclude the NPIV Fabric remote ports from
+       transitioning to the NPR state, allowing them to avoid re-registration
+       if already registered.
+    
+    Link: https://lore.kernel.org/r/20201115192646.12977-9-james.smart@broadcom.com
+    Co-developed-by: Dick Kennedy <dick.kennedy@broadcom.com>
+    Signed-off-by: Dick Kennedy <dick.kennedy@broadcom.com>
+    Signed-off-by: James Smart <james.smart@broadcom.com>
+    Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+
+diff --git a/drivers/scsi/lpfc/lpfc_els.c b/drivers/scsi/lpfc/lpfc_els.c
+index 3bcb02d0bc0f..6520dc4bf6ec 100644
+--- a/drivers/scsi/lpfc/lpfc_els.c
++++ b/drivers/scsi/lpfc/lpfc_els.c
+@@ -1508,6 +1508,10 @@ lpfc_initial_fdisc(struct lpfc_vport *vport)
+ 		ndlp = lpfc_nlp_init(vport, Fabric_DID);
+ 		if (!ndlp)
+ 			return 0;
++
++		/* NPIV is only supported in Fabrics. */
++		ndlp->nlp_type |= NLP_FABRIC;
++
+ 		/* Put ndlp onto node list */
+ 		lpfc_enqueue_node(vport, ndlp);
+ 	}

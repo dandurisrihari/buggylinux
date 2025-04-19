@@ -1,0 +1,56 @@
+commit 79741dd35713ff4f6fd0eafd59fa94e8a4ba922d
+Author: Martin Schwidefsky <schwidefsky@de.ibm.com>
+Date:   Wed Dec 31 15:11:38 2008 +0100
+
+    [PATCH] idle cputime accounting
+    
+    The cpu time spent by the idle process actually doing something is
+    currently accounted as idle time. This is plain wrong, the architectures
+    that support VIRT_CPU_ACCOUNTING=y can do better: distinguish between the
+    time spent doing nothing and the time spent by idle doing work. The first
+    is accounted with account_idle_time and the second with account_system_time.
+    The architectures that use the account_xxx_time interface directly and not
+    the account_xxx_ticks interface now need to do the check for the idle
+    process in their arch code. In particular to improve the system vs true
+    idle time accounting the arch code needs to measure the true idle time
+    instead of just testing for the idle process.
+    To improve the tick based accounting as well we would need an architecture
+    primitive that can tell us if the pt_regs of the interrupted context
+    points to the magic instruction that halts the cpu.
+    
+    In addition idle time is no more added to the stime of the idle process.
+    This field now contains the system time of the idle process as it should
+    be. On systems without VIRT_CPU_ACCOUNTING this will always be zero as
+    every tick that occurs while idle is running will be accounted as idle
+    time.
+    
+    This patch contains the necessary common code changes to be able to
+    distinguish idle system time and true idle time. The architectures with
+    support for VIRT_CPU_ACCOUNTING need some changes to exploit this.
+    
+    Signed-off-by: Martin Schwidefsky <schwidefsky@de.ibm.com>
+
+diff --git a/kernel/timer.c b/kernel/timer.c
+index b5efb528aa1d..dee3f641a7a7 100644
+--- a/kernel/timer.c
++++ b/kernel/timer.c
+@@ -1018,19 +1018,6 @@ unsigned long get_next_timer_interrupt(unsigned long now)
+ }
+ #endif
+ 
+-#ifndef CONFIG_VIRT_CPU_ACCOUNTING
+-void account_process_tick(struct task_struct *p, int user_tick)
+-{
+-	cputime_t one_jiffy = jiffies_to_cputime(1);
+-
+-	if (user_tick)
+-		account_user_time(p, one_jiffy, cputime_to_scaled(one_jiffy));
+-	else
+-		account_system_time(p, HARDIRQ_OFFSET, one_jiffy,
+-				    cputime_to_scaled(one_jiffy));
+-}
+-#endif
+-
+ /*
+  * Called from the timer interrupt handler to charge one tick to the current
+  * process.  user_tick is 1 if the tick is user time, 0 for system.

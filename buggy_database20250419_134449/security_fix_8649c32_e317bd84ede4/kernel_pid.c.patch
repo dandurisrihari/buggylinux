@@ -1,0 +1,131 @@
+commit 8649c322f75c96e7ced2fec201e123b2b073bf09
+Author: Sargun Dhillon <sargun@sargun.me>
+Date:   Tue Jan 7 09:59:25 2020 -0800
+
+    pid: Implement pidfd_getfd syscall
+    
+    This syscall allows for the retrieval of file descriptors from other
+    processes, based on their pidfd. This is possible using ptrace, and
+    injection of parasitic code to inject code which leverages SCM_RIGHTS
+    to move file descriptors between a tracee and a tracer. Unfortunately,
+    ptrace comes with a high cost of requiring the process to be stopped,
+    and breaks debuggers. This does not require stopping the process under
+    manipulation.
+    
+    One reason to use this is to allow sandboxers to take actions on file
+    descriptors on the behalf of another process. For example, this can be
+    combined with seccomp-bpf's user notification to do on-demand fd
+    extraction and take privileged actions. One such privileged action
+    is binding a socket to a privileged port.
+    
+    /* prototype */
+      /* flags is currently reserved and should be set to 0 */
+      int sys_pidfd_getfd(int pidfd, int fd, unsigned int flags);
+    
+    /* testing */
+    Ran self-test suite on x86_64
+    
+    Signed-off-by: Sargun Dhillon <sargun@sargun.me>
+    Acked-by: Christian Brauner <christian.brauner@ubuntu.com>
+    Reviewed-by: Arnd Bergmann <arnd@arndb.de>
+    Link: https://lore.kernel.org/r/20200107175927.4558-3-sargun@sargun.me
+    Signed-off-by: Christian Brauner <christian.brauner@ubuntu.com>
+
+diff --git a/kernel/pid.c b/kernel/pid.c
+index 2278e249141d..0f4ecb57214c 100644
+--- a/kernel/pid.c
++++ b/kernel/pid.c
+@@ -578,3 +578,93 @@ void __init pid_idr_init(void)
+ 	init_pid_ns.pid_cachep = KMEM_CACHE(pid,
+ 			SLAB_HWCACHE_ALIGN | SLAB_PANIC | SLAB_ACCOUNT);
+ }
++
++static struct file *__pidfd_fget(struct task_struct *task, int fd)
++{
++	struct file *file;
++	int ret;
++
++	ret = mutex_lock_killable(&task->signal->cred_guard_mutex);
++	if (ret)
++		return ERR_PTR(ret);
++
++	if (ptrace_may_access(task, PTRACE_MODE_ATTACH_REALCREDS))
++		file = fget_task(task, fd);
++	else
++		file = ERR_PTR(-EPERM);
++
++	mutex_unlock(&task->signal->cred_guard_mutex);
++
++	return file ?: ERR_PTR(-EBADF);
++}
++
++static int pidfd_getfd(struct pid *pid, int fd)
++{
++	struct task_struct *task;
++	struct file *file;
++	int ret;
++
++	task = get_pid_task(pid, PIDTYPE_PID);
++	if (!task)
++		return -ESRCH;
++
++	file = __pidfd_fget(task, fd);
++	put_task_struct(task);
++	if (IS_ERR(file))
++		return PTR_ERR(file);
++
++	ret = security_file_receive(file);
++	if (ret) {
++		fput(file);
++		return ret;
++	}
++
++	ret = get_unused_fd_flags(O_CLOEXEC);
++	if (ret < 0)
++		fput(file);
++	else
++		fd_install(ret, file);
++
++	return ret;
++}
++
++/**
++ * sys_pidfd_getfd() - Get a file descriptor from another process
++ *
++ * @pidfd:	the pidfd file descriptor of the process
++ * @fd:		the file descriptor number to get
++ * @flags:	flags on how to get the fd (reserved)
++ *
++ * This syscall gets a copy of a file descriptor from another process
++ * based on the pidfd, and file descriptor number. It requires that
++ * the calling process has the ability to ptrace the process represented
++ * by the pidfd. The process which is having its file descriptor copied
++ * is otherwise unaffected.
++ *
++ * Return: On success, a cloexec file descriptor is returned.
++ *         On error, a negative errno number will be returned.
++ */
++SYSCALL_DEFINE3(pidfd_getfd, int, pidfd, int, fd,
++		unsigned int, flags)
++{
++	struct pid *pid;
++	struct fd f;
++	int ret;
++
++	/* flags is currently unused - make sure it's unset */
++	if (flags)
++		return -EINVAL;
++
++	f = fdget(pidfd);
++	if (!f.file)
++		return -EBADF;
++
++	pid = pidfd_pid(f.file);
++	if (IS_ERR(pid))
++		ret = PTR_ERR(pid);
++	else
++		ret = pidfd_getfd(pid, fd);
++
++	fdput(f);
++	return ret;
++}

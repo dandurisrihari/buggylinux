@@ -1,0 +1,407 @@
+commit d1e879ec600f9b3bdd253167533959facfefb17b
+Author: Miri Korenblit <miriam.rachel.korenblit@intel.com>
+Date:   Sun Feb 16 11:42:40 2025 +0200
+
+    wifi: iwlwifi: add iwlmld sub-driver
+    
+    iwlwifi is the driver of all Intel wifi devices since 2008.
+    Since then, the hardware has changed a lot, but the firmware
+    API has changed even more. The need to keep one driver that
+    supports all those different APIs led us to introduce a new
+    architecture circa 2012 which allowed us to keep the same
+    interface to the hardware (DMAs, Tx queues, etc...) with a
+    new layer to implement the mid-layer between mac80211 and
+    the firmware. The first component is called the 'transport'
+    and the latter is called 'operation_mode' a.k.a  op_mode.
+    
+    In 2013 we took advantage of the new architecture to
+    introduce iwlmvm which allowed us to implement the, then,
+    new firmware API. This op_mode supports 7260 and up, those
+    devices supports support at least VHT.
+    
+    Since then, wifi evolved and so did the firmware. It became
+    much bigger and took a lot of functionality from the driver.
+    It became increasingly hard to keep the same op_mode for the
+    newest devices and we experienced frequent regressions on
+    older devices. In order to avoid those regressions and keep
+    the code maintainable, we decided it was about time to start
+    a new op_mode.
+    
+    iwlmld is a new op_mode that supports BE200 or newer if the
+    firmware being used is 97.ucode or newer. If the user has
+    an older devices or BE200 with .96.ucode, iwlmvm will be
+    loaded. Of course, this op_mode selection is seamless.
+    
+    All the features supported in iwlmvm are supported in
+    iwlmld besides a few seldom used use cases: injection and
+    Hotspot 2.0. Those are under work.
+    
+    A few points about the implementation:
+     * iwlmld doesn't have any mutexes, it relies on the
+       wiphy_lock
+     * iwlmld is more "resource oriented": stations, links and
+       interfaces are allocated and freed only after all the
+       relevant flows are completed.
+     * Firmware notifications' sizes are validated in a more
+       structured way.
+    
+    We would love to see this new op_mode merged in 6.15. The
+    firmware for this new driver (.97.ucode) is not yet publicly
+    available but it'll be sent very soon.
+    People eager to get an early version of this firmware can
+    contact Emmanuel at:
+    emmanuel.grumbach@intel.com
+    
+    I've listed the people who directly contributed
+    code, but many others from various teams have
+    contributed in other ways.
+    
+    Co-developed-by: Johannes Berg <johannes.berg@intel.com>
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+    Co-developed-by: Avraham Stern <avraham.stern@intel.com>
+    Signed-off-by: Avraham Stern <avraham.stern@intel.com>
+    Co-developed-by: Daniel Gabay <daniel.gabay@intel.com>
+    Signed-off-by: Daniel Gabay <daniel.gabay@intel.com>
+    Co-developed-by: Emmanuel Grumbach <emmanuel.grumbach@intel.com>
+    Signed-off-by: Emmanuel Grumbach <emmanuel.grumbach@intel.com>
+    Co-developed-by: Anjaneyulu <pagadala.yesu.anjaneyulu@intel.com>
+    Signed-off-by: Anjaneyulu <pagadala.yesu.anjaneyulu@intel.com>
+    Co-developed-by: Yedidya Benshimol <yedidya.ben.shimol@intel.com>
+    Signed-off-by: Yedidya Benshimol <yedidya.ben.shimol@intel.com>
+    Co-developed-by: Benjamin Berg <benjamin.berg@intel.com>
+    Signed-off-by: Benjamin Berg <benjamin.berg@intel.com>
+    Co-developed-by: Shaul Triebitz <shaul.triebitz@intel.com>
+    Signed-off-by: Shaul Triebitz <shaul.triebitz@intel.com>
+    Signed-off-by: Miri Korenblit <miriam.rachel.korenblit@intel.com>
+    Link: https://lore.kernel.org/linux-wireless/20250216094321.537988-1-miriam.rachel.korenblit@intel.com/
+    [fix Kconfig, fix api/phy.h includes, SPDX tag and coding
+     style issues, duplicated includes per 0-day robot]
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+diff --git a/drivers/net/wireless/intel/iwlwifi/mld/ptp.c b/drivers/net/wireless/intel/iwlwifi/mld/ptp.c
+new file mode 100644
+index 000000000000..d5c3f853d96c
+--- /dev/null
++++ b/drivers/net/wireless/intel/iwlwifi/mld/ptp.c
+@@ -0,0 +1,321 @@
++// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
++/*
++ * Copyright (C) 2025 Intel Corporation
++ */
++
++#include "mld.h"
++#include "iwl-debug.h"
++#include "hcmd.h"
++#include "ptp.h"
++#include <linux/timekeeping.h>
++
++/* The scaled_ppm parameter is ppm (parts per million) with a 16-bit fractional
++ * part, which means that a value of 1 in one of those fields actually means
++ * 2^-16 ppm, and 2^16=65536 is 1 ppm.
++ */
++#define PTP_SCALE_FACTOR	65536000000ULL
++
++#define IWL_PTP_GP2_WRAP	0x100000000ULL
++#define IWL_PTP_WRAP_TIME	(3600 * HZ)
++#define IWL_PTP_WRAP_THRESHOLD_USEC	(5000)
++
++static int iwl_mld_get_systime(struct iwl_mld *mld, u32 *gp2)
++{
++	*gp2 = iwl_read_prph(mld->trans, mld->trans->cfg->gp2_reg_addr);
++
++	if (*gp2 == 0x5a5a5a5a)
++		return -EINVAL;
++
++	return 0;
++}
++
++static void iwl_mld_ptp_update_new_read(struct iwl_mld *mld, u32 gp2)
++{
++	IWL_DEBUG_PTP(mld, "PTP: last_gp2=%u, new gp2 read=%u\n",
++		      mld->ptp_data.last_gp2, gp2);
++
++	/* If the difference is above the threshold, assume it's a wraparound.
++	 * Otherwise assume it's an old read and ignore it.
++	 */
++	if (gp2 < mld->ptp_data.last_gp2) {
++		if (mld->ptp_data.last_gp2 - gp2 <
++		    IWL_PTP_WRAP_THRESHOLD_USEC) {
++			IWL_DEBUG_PTP(mld,
++				      "PTP: ignore old read (gp2=%u, last_gp2=%u)\n",
++				      gp2, mld->ptp_data.last_gp2);
++			return;
++		}
++
++		mld->ptp_data.wrap_counter++;
++		IWL_DEBUG_PTP(mld,
++			      "PTP: wraparound detected (new counter=%u)\n",
++			      mld->ptp_data.wrap_counter);
++	}
++
++	mld->ptp_data.last_gp2 = gp2;
++	schedule_delayed_work(&mld->ptp_data.dwork, IWL_PTP_WRAP_TIME);
++}
++
++u64 iwl_mld_ptp_get_adj_time(struct iwl_mld *mld, u64 base_time_ns)
++{
++	struct ptp_data *data = &mld->ptp_data;
++	u64 scale_time_gp2_ns = mld->ptp_data.scale_update_gp2 * NSEC_PER_USEC;
++	u64 res;
++	u64 diff;
++	s64 scaled_diff;
++
++	lockdep_assert_held(&data->lock);
++
++	iwl_mld_ptp_update_new_read(mld,
++				    div64_u64(base_time_ns, NSEC_PER_USEC));
++
++	base_time_ns = base_time_ns +
++		(data->wrap_counter * IWL_PTP_GP2_WRAP * NSEC_PER_USEC);
++
++	/* It is possible that a GP2 timestamp was received from fw before the
++	 * last scale update.
++	 */
++	if (base_time_ns < scale_time_gp2_ns) {
++		diff = scale_time_gp2_ns - base_time_ns;
++		scaled_diff = -mul_u64_u64_div_u64(diff,
++						   data->scaled_freq,
++						   PTP_SCALE_FACTOR);
++	} else {
++		diff = base_time_ns - scale_time_gp2_ns;
++		scaled_diff = mul_u64_u64_div_u64(diff,
++						  data->scaled_freq,
++						  PTP_SCALE_FACTOR);
++	}
++
++	IWL_DEBUG_PTP(mld, "base_time=%llu diff ns=%llu scaled_diff_ns=%lld\n",
++		      (unsigned long long)base_time_ns,
++		      (unsigned long long)diff, (long long)scaled_diff);
++
++	res = data->scale_update_adj_time_ns + data->delta + scaled_diff;
++
++	IWL_DEBUG_PTP(mld, "scale_update_ns=%llu delta=%lld adj=%llu\n",
++		      (unsigned long long)data->scale_update_adj_time_ns,
++		      (long long)data->delta, (unsigned long long)res);
++	return res;
++}
++
++static int iwl_mld_ptp_gettime(struct ptp_clock_info *ptp,
++			       struct timespec64 *ts)
++{
++	struct iwl_mld *mld = container_of(ptp, struct iwl_mld,
++					   ptp_data.ptp_clock_info);
++	struct ptp_data *data = &mld->ptp_data;
++	u32 gp2;
++	u64 ns;
++
++	if (iwl_mld_get_systime(mld, &gp2)) {
++		IWL_DEBUG_PTP(mld, "PTP: gettime: failed to read systime\n");
++		return -EIO;
++	}
++
++	spin_lock_bh(&data->lock);
++	ns = iwl_mld_ptp_get_adj_time(mld, (u64)gp2 * NSEC_PER_USEC);
++	spin_unlock_bh(&data->lock);
++
++	*ts = ns_to_timespec64(ns);
++	return 0;
++}
++
++static int iwl_mld_ptp_adjtime(struct ptp_clock_info *ptp, s64 delta)
++{
++	struct iwl_mld *mld = container_of(ptp, struct iwl_mld,
++					   ptp_data.ptp_clock_info);
++	struct ptp_data *data = &mld->ptp_data;
++
++	spin_lock_bh(&data->lock);
++	data->delta += delta;
++	IWL_DEBUG_PTP(mld, "delta=%lld, new delta=%lld\n", (long long)delta,
++		      (long long)data->delta);
++	spin_unlock_bh(&data->lock);
++	return 0;
++}
++
++static int iwl_mld_ptp_adjfine(struct ptp_clock_info *ptp, long scaled_ppm)
++{
++	struct iwl_mld *mld = container_of(ptp, struct iwl_mld,
++					   ptp_data.ptp_clock_info);
++	struct ptp_data *data = &mld->ptp_data;
++	u32 gp2;
++
++	/* Must call iwl_mld_ptp_get_adj_time() before updating
++	 * data->scale_update_gp2 or data->scaled_freq since
++	 * scale_update_adj_time_ns should reflect the previous scaled_freq.
++	 */
++	if (iwl_mld_get_systime(mld, &gp2)) {
++		IWL_DEBUG_PTP(mld, "adjfine: failed to read systime\n");
++		return -EBUSY;
++	}
++
++	spin_lock_bh(&data->lock);
++	data->scale_update_adj_time_ns =
++		iwl_mld_ptp_get_adj_time(mld, gp2 * NSEC_PER_USEC);
++	data->scale_update_gp2 = gp2;
++
++	/* scale_update_adj_time_ns now relects the configured delta, the
++	 * wrap_counter and the previous scaled frequency. Thus delta and
++	 * wrap_counter should be reset, and the scale frequency is updated
++	 * to the new frequency.
++	 */
++	data->delta = 0;
++	data->wrap_counter = 0;
++	data->scaled_freq = PTP_SCALE_FACTOR + scaled_ppm;
++	IWL_DEBUG_PTP(mld, "adjfine: scaled_ppm=%ld new=%llu\n",
++		      scaled_ppm, (unsigned long long)data->scaled_freq);
++	spin_unlock_bh(&data->lock);
++	return 0;
++}
++
++static void iwl_mld_ptp_work(struct work_struct *wk)
++{
++	struct iwl_mld *mld = container_of(wk, struct iwl_mld,
++					   ptp_data.dwork.work);
++	struct ptp_data *data = &mld->ptp_data;
++	u32 gp2;
++
++	spin_lock_bh(&data->lock);
++	if (!iwl_mld_get_systime(mld, &gp2))
++		iwl_mld_ptp_update_new_read(mld, gp2);
++	else
++		IWL_DEBUG_PTP(mld, "PTP work: failed to read GP2\n");
++	spin_unlock_bh(&data->lock);
++}
++
++static int
++iwl_mld_get_crosstimestamp_fw(struct iwl_mld *mld, u32 *gp2, u64 *sys_time)
++{
++	struct iwl_synced_time_cmd synced_time_cmd = {
++		.operation = cpu_to_le32(IWL_SYNCED_TIME_OPERATION_READ_BOTH)
++	};
++	struct iwl_host_cmd cmd = {
++		.id = WIDE_ID(DATA_PATH_GROUP, WNM_PLATFORM_PTM_REQUEST_CMD),
++		.flags = CMD_WANT_SKB,
++		.data[0] = &synced_time_cmd,
++		.len[0] = sizeof(synced_time_cmd),
++	};
++	struct iwl_synced_time_rsp *resp;
++	struct iwl_rx_packet *pkt;
++	int ret;
++	u64 gp2_10ns;
++
++	wiphy_lock(mld->wiphy);
++	ret = iwl_mld_send_cmd(mld, &cmd);
++	wiphy_unlock(mld->wiphy);
++	if (ret)
++		return ret;
++
++	pkt = cmd.resp_pkt;
++
++	if (iwl_rx_packet_payload_len(pkt) != sizeof(*resp)) {
++		IWL_DEBUG_PTP(mld, "PTP: Invalid PTM command response\n");
++		iwl_free_resp(&cmd);
++		return -EIO;
++	}
++
++	resp = (void *)pkt->data;
++
++	gp2_10ns = (u64)le32_to_cpu(resp->gp2_timestamp_hi) << 32 |
++		le32_to_cpu(resp->gp2_timestamp_lo);
++	*gp2 = div_u64(gp2_10ns, 100);
++
++	*sys_time = (u64)le32_to_cpu(resp->platform_timestamp_hi) << 32 |
++		le32_to_cpu(resp->platform_timestamp_lo);
++
++	iwl_free_resp(&cmd);
++	return ret;
++}
++
++static int
++iwl_mld_phc_get_crosstimestamp(struct ptp_clock_info *ptp,
++			       struct system_device_crosststamp *xtstamp)
++{
++	struct iwl_mld *mld = container_of(ptp, struct iwl_mld,
++					   ptp_data.ptp_clock_info);
++	struct ptp_data *data = &mld->ptp_data;
++	int ret = 0;
++	/* Raw value read from GP2 register in usec */
++	u32 gp2;
++	/* GP2 value in ns*/
++	s64 gp2_ns;
++	/* System (wall) time */
++	ktime_t sys_time;
++
++	memset(xtstamp, 0, sizeof(struct system_device_crosststamp));
++
++	ret = iwl_mld_get_crosstimestamp_fw(mld, &gp2, &sys_time);
++	if (ret) {
++		IWL_DEBUG_PTP(mld,
++			      "PTP: fw get_crosstimestamp failed (ret=%d)\n",
++			      ret);
++		return ret;
++	}
++
++	spin_lock_bh(&data->lock);
++	gp2_ns = iwl_mld_ptp_get_adj_time(mld, (u64)gp2 * NSEC_PER_USEC);
++	spin_unlock_bh(&data->lock);
++
++	IWL_DEBUG_PTP(mld,
++		      "Got Sync Time: GP2:%u, last_GP2: %u, GP2_ns: %lld, sys_time: %lld\n",
++		      gp2, mld->ptp_data.last_gp2, gp2_ns, (s64)sys_time);
++
++	/* System monotonic raw time is not used */
++	xtstamp->device = ns_to_ktime(gp2_ns);
++	xtstamp->sys_realtime = sys_time;
++
++	return ret;
++}
++
++void iwl_mld_ptp_init(struct iwl_mld *mld)
++{
++	if (WARN_ON(mld->ptp_data.ptp_clock))
++		return;
++
++	spin_lock_init(&mld->ptp_data.lock);
++	INIT_DELAYED_WORK(&mld->ptp_data.dwork, iwl_mld_ptp_work);
++
++	mld->ptp_data.ptp_clock_info.owner = THIS_MODULE;
++	mld->ptp_data.ptp_clock_info.gettime64 = iwl_mld_ptp_gettime;
++	mld->ptp_data.ptp_clock_info.max_adj = 0x7fffffff;
++	mld->ptp_data.ptp_clock_info.adjtime = iwl_mld_ptp_adjtime;
++	mld->ptp_data.ptp_clock_info.adjfine = iwl_mld_ptp_adjfine;
++	mld->ptp_data.scaled_freq = PTP_SCALE_FACTOR;
++	mld->ptp_data.ptp_clock_info.getcrosststamp =
++					iwl_mld_phc_get_crosstimestamp;
++
++	/* Give a short 'friendly name' to identify the PHC clock */
++	snprintf(mld->ptp_data.ptp_clock_info.name,
++		 sizeof(mld->ptp_data.ptp_clock_info.name),
++		 "%s", "iwlwifi-PTP");
++
++	mld->ptp_data.ptp_clock =
++		ptp_clock_register(&mld->ptp_data.ptp_clock_info, mld->dev);
++
++	if (IS_ERR_OR_NULL(mld->ptp_data.ptp_clock)) {
++		IWL_ERR(mld, "Failed to register PHC clock (%ld)\n",
++			PTR_ERR(mld->ptp_data.ptp_clock));
++		mld->ptp_data.ptp_clock = NULL;
++	} else {
++		IWL_INFO(mld, "Registered PHC clock: %s, with index: %d\n",
++			 mld->ptp_data.ptp_clock_info.name,
++			 ptp_clock_index(mld->ptp_data.ptp_clock));
++	}
++}
++
++void iwl_mld_ptp_remove(struct iwl_mld *mld)
++{
++	if (mld->ptp_data.ptp_clock) {
++		IWL_INFO(mld, "Unregistering PHC clock: %s, with index: %d\n",
++			 mld->ptp_data.ptp_clock_info.name,
++			 ptp_clock_index(mld->ptp_data.ptp_clock));
++
++		ptp_clock_unregister(mld->ptp_data.ptp_clock);
++		mld->ptp_data.ptp_clock = NULL;
++		mld->ptp_data.last_gp2 = 0;
++		mld->ptp_data.wrap_counter = 0;
++		cancel_delayed_work_sync(&mld->ptp_data.dwork);
++	}
++}

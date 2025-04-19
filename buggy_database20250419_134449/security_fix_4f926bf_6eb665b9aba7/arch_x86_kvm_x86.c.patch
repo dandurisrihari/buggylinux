@@ -1,0 +1,58 @@
+commit 4f926bf291863c237188bd2e27222ed801f12094
+Author: Jan Kiszka <jan.kiszka@siemens.com>
+Date:   Fri Oct 30 12:46:59 2009 +0100
+
+    KVM: x86: Polish exception injection via KVM_SET_GUEST_DEBUG
+    
+    Decouple KVM_GUESTDBG_INJECT_DB and KVM_GUESTDBG_INJECT_BP from
+    KVM_GUESTDBG_ENABLE, their are actually orthogonal. At this chance,
+    avoid triggering the WARN_ON in kvm_queue_exception if there is already
+    an exception pending and reject such invalid requests.
+    
+    Signed-off-by: Jan Kiszka <jan.kiszka@siemens.com>
+    Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
+
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index cd6fe0a5797f..ba8958dca3c4 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -4656,10 +4656,20 @@ int kvm_arch_vcpu_ioctl_set_guest_debug(struct kvm_vcpu *vcpu,
+ 					struct kvm_guest_debug *dbg)
+ {
+ 	unsigned long rflags;
+-	int i;
++	int i, r;
+ 
+ 	vcpu_load(vcpu);
+ 
++	if (dbg->control & (KVM_GUESTDBG_INJECT_DB | KVM_GUESTDBG_INJECT_BP)) {
++		r = -EBUSY;
++		if (vcpu->arch.exception.pending)
++			goto unlock_out;
++		if (dbg->control & KVM_GUESTDBG_INJECT_DB)
++			kvm_queue_exception(vcpu, DB_VECTOR);
++		else
++			kvm_queue_exception(vcpu, BP_VECTOR);
++	}
++
+ 	/*
+ 	 * Read rflags as long as potentially injected trace flags are still
+ 	 * filtered out.
+@@ -4695,14 +4705,12 @@ int kvm_arch_vcpu_ioctl_set_guest_debug(struct kvm_vcpu *vcpu,
+ 
+ 	kvm_x86_ops->set_guest_debug(vcpu, dbg);
+ 
+-	if (vcpu->guest_debug & KVM_GUESTDBG_INJECT_DB)
+-		kvm_queue_exception(vcpu, DB_VECTOR);
+-	else if (vcpu->guest_debug & KVM_GUESTDBG_INJECT_BP)
+-		kvm_queue_exception(vcpu, BP_VECTOR);
++	r = 0;
+ 
++unlock_out:
+ 	vcpu_put(vcpu);
+ 
+-	return 0;
++	return r;
+ }
+ 
+ /*

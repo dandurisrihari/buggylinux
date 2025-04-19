@@ -1,0 +1,75 @@
+commit 372d12d191cb80720319e224d401fd82c602e9e4
+Author: David Howells <dhowells@redhat.com>
+Date:   Wed Dec 4 07:47:03 2024 +0000
+
+    rxrpc: Add a reason indicator to the tx_data tracepoint
+    
+    Add an indicator to the rxrpc_tx_data tracepoint to indicate what triggered
+    the transmission of a particular packet.  At this point, it's only normal
+    transmission and retransmission, plus the tracepoint is also used to record
+    loss injection, but in a future patch, TLP-induced (re-)transmission will
+    also be a thing.
+    
+    Signed-off-by: David Howells <dhowells@redhat.com>
+    cc: Marc Dionne <marc.dionne@auristor.com>
+    cc: linux-afs@lists.infradead.org
+    Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+diff --git a/net/rxrpc/call_event.c b/net/rxrpc/call_event.c
+index 39772459426b..99d9502564cc 100644
+--- a/net/rxrpc/call_event.c
++++ b/net/rxrpc/call_event.c
+@@ -101,6 +101,7 @@ void rxrpc_resend(struct rxrpc_call *call, rxrpc_serial_t ack_serial, bool ping_
+ {
+ 	struct rxrpc_send_data_req req = {
+ 		.now	= ktime_get_real(),
++		.trace	= rxrpc_txdata_retransmit,
+ 	};
+ 	struct rxrpc_txqueue *tq = call->tx_queue;
+ 	ktime_t lowest_xmit_ts = KTIME_MAX;
+@@ -269,7 +270,8 @@ static unsigned int rxrpc_tx_window_space(struct rxrpc_call *call)
+ /*
+  * Transmit some as-yet untransmitted data.
+  */
+-static void rxrpc_transmit_fresh_data(struct rxrpc_call *call)
++static void rxrpc_transmit_fresh_data(struct rxrpc_call *call,
++				      enum rxrpc_txdata_trace trace)
+ {
+ 	int space = rxrpc_tx_window_space(call);
+ 
+@@ -284,6 +286,7 @@ static void rxrpc_transmit_fresh_data(struct rxrpc_call *call)
+ 			.now	= ktime_get_real(),
+ 			.seq	= call->tx_transmitted + 1,
+ 			.n	= 0,
++			.trace	= trace,
+ 		};
+ 		struct rxrpc_txqueue *tq;
+ 		struct rxrpc_txbuf *txb;
+@@ -332,7 +335,8 @@ static void rxrpc_transmit_fresh_data(struct rxrpc_call *call)
+ 	}
+ }
+ 
+-static void rxrpc_transmit_some_data(struct rxrpc_call *call)
++static void rxrpc_transmit_some_data(struct rxrpc_call *call,
++				     enum rxrpc_txdata_trace trace)
+ {
+ 	switch (__rxrpc_call_state(call)) {
+ 	case RXRPC_CALL_SERVER_ACK_REQUEST:
+@@ -349,7 +353,7 @@ static void rxrpc_transmit_some_data(struct rxrpc_call *call)
+ 			rxrpc_inc_stat(call->rxnet, stat_tx_data_underflow);
+ 			return;
+ 		}
+-		rxrpc_transmit_fresh_data(call);
++		rxrpc_transmit_fresh_data(call, trace);
+ 		break;
+ 	default:
+ 		return;
+@@ -463,7 +467,7 @@ bool rxrpc_input_call_event(struct rxrpc_call *call)
+ 		resend = true;
+ 	}
+ 
+-	rxrpc_transmit_some_data(call);
++	rxrpc_transmit_some_data(call, rxrpc_txdata_new_data);
+ 
+ 	now = ktime_get_real();
+ 	t = ktime_sub(call->keepalive_at, now);

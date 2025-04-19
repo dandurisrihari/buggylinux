@@ -1,0 +1,227 @@
+commit 847d4287a0c6709fd1ce24002b96d404a6da8b5b
+Merge: 96685f866671 10e5afb3d260
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Fri Oct 16 12:36:38 2020 -0700
+
+    Merge tag 's390-5.10-1' of git://git.kernel.org/pub/scm/linux/kernel/git/s390/linux
+    
+    Pull s390 updates from Vasily Gorbik:
+    
+     - Remove address space overrides using set_fs()
+    
+     - Convert to generic vDSO
+    
+     - Convert to generic page table dumper
+    
+     - Add ARCH_HAS_DEBUG_WX support
+    
+     - Add leap seconds handling support
+    
+     - Add NVMe firmware-assisted kernel dump support
+    
+     - Extend NVMe boot support with memory clearing control and addition of
+       kernel parameters
+    
+     - AP bus and zcrypt api code rework. Add adapter configure/deconfigure
+       interface. Extend debug features. Add failure injection support
+    
+     - Add ECC secure private keys support
+    
+     - Add KASan support for running protected virtualization host with
+       4-level paging
+    
+     - Utilize destroy page ultravisor call to speed up secure guests
+       shutdown
+    
+     - Implement ioremap_wc() and ioremap_prot() with MIO in PCI code
+    
+     - Various checksum improvements
+    
+     - Other small various fixes and improvements all over the code
+    
+    * tag 's390-5.10-1' of git://git.kernel.org/pub/scm/linux/kernel/git/s390/linux: (85 commits)
+      s390/uaccess: fix indentation
+      s390/uaccess: add default cases for __put_user_fn()/__get_user_fn()
+      s390/zcrypt: fix wrong format specifications
+      s390/kprobes: move insn_page to text segment
+      s390/sie: fix typo in SIGP code description
+      s390/lib: fix kernel doc for memcmp()
+      s390/zcrypt: Introduce Failure Injection feature
+      s390/zcrypt: move ap_msg param one level up the call chain
+      s390/ap/zcrypt: revisit ap and zcrypt error handling
+      s390/ap: Support AP card SCLP config and deconfig operations
+      s390/sclp: Add support for SCLP AP adapter config/deconfig
+      s390/ap: add card/queue deconfig state
+      s390/ap: add error response code field for ap queue devices
+      s390/ap: split ap queue state machine state from device state
+      s390/zcrypt: New config switch CONFIG_ZCRYPT_DEBUG
+      s390/zcrypt: introduce msg tracking in zcrypt functions
+      s390/startup: correct early pgm check info formatting
+      s390: remove orphaned extern variables declarations
+      s390/kasan: make sure int handler always run with DAT on
+      s390/ipl: add support to control memory clearing for nvme re-IPL
+      ...
+
+diff --cc drivers/s390/crypto/zcrypt_ccamisc.c
+index c793dcabd551,b9d293ae228c..b1046811450f
+--- a/drivers/s390/crypto/zcrypt_ccamisc.c
++++ b/drivers/s390/crypto/zcrypt_ccamisc.c
+@@@ -1682,87 -1874,92 +1874,92 @@@ int cca_findcard(const u8 *key, u16 *pc
+  EXPORT_SYMBOL(cca_findcard);
+  
+  int cca_findcard2(u32 **apqns, u32 *nr_apqns, u16 cardnr, u16 domain,
+- 		  int minhwtype, u64 cur_mkvp, u64 old_mkvp, int verify)
++ 		  int minhwtype, int mktype, u64 cur_mkvp, u64 old_mkvp,
++ 		  int verify)
+  {
+  	struct zcrypt_device_status_ext *device_status;
+- 	int i, n, card, dom, curmatch, oldmatch, rc = 0;
++ 	u32 *_apqns = NULL, _nr_apqns = 0;
++ 	int i, card, dom, curmatch, oldmatch, rc = 0;
+  	struct cca_info ci;
+  
+- 	*apqns = NULL;
+- 	*nr_apqns = 0;
+- 
+  	/* fetch status of all crypto cards */
+ -	device_status = kmalloc_array(MAX_ZDEV_ENTRIES_EXT,
+ -				      sizeof(struct zcrypt_device_status_ext),
+ -				      GFP_KERNEL);
+ +	device_status = kvmalloc_array(MAX_ZDEV_ENTRIES_EXT,
+ +				       sizeof(struct zcrypt_device_status_ext),
+ +				       GFP_KERNEL);
+  	if (!device_status)
+  		return -ENOMEM;
+  	zcrypt_device_status_mask_ext(device_status);
+  
+- 	/* loop two times: first gather eligible apqns, then store them */
+- 	while (1) {
+- 		n = 0;
+- 		/* walk through all the crypto cards */
+- 		for (i = 0; i < MAX_ZDEV_ENTRIES_EXT; i++) {
+- 			card = AP_QID_CARD(device_status[i].qid);
+- 			dom = AP_QID_QUEUE(device_status[i].qid);
+- 			/* check online state */
+- 			if (!device_status[i].online)
+- 				continue;
+- 			/* check for cca functions */
+- 			if (!(device_status[i].functions & 0x04))
+- 				continue;
+- 			/* check cardnr */
+- 			if (cardnr != 0xFFFF && card != cardnr)
+- 				continue;
+- 			/* check domain */
+- 			if (domain != 0xFFFF && dom != domain)
+- 				continue;
+- 			/* get cca info on this apqn */
+- 			if (cca_get_info(card, dom, &ci, verify))
+- 				continue;
+- 			/* current master key needs to be valid */
+- 			if (ci.cur_mk_state != '2')
+- 				continue;
+- 			/* check min hardware type */
+- 			if (minhwtype > 0 && minhwtype > ci.hwtype)
+- 				continue;
+- 			if (cur_mkvp || old_mkvp) {
+- 				/* check mkvps */
+- 				curmatch = oldmatch = 0;
+- 				if (cur_mkvp && cur_mkvp == ci.cur_mkvp)
++ 	/* allocate 1k space for up to 256 apqns */
++ 	_apqns = kmalloc_array(256, sizeof(u32), GFP_KERNEL);
++ 	if (!_apqns) {
++ 		kvfree(device_status);
++ 		return -ENOMEM;
++ 	}
++ 
++ 	/* walk through all the crypto apqnss */
++ 	for (i = 0; i < MAX_ZDEV_ENTRIES_EXT; i++) {
++ 		card = AP_QID_CARD(device_status[i].qid);
++ 		dom = AP_QID_QUEUE(device_status[i].qid);
++ 		/* check online state */
++ 		if (!device_status[i].online)
++ 			continue;
++ 		/* check for cca functions */
++ 		if (!(device_status[i].functions & 0x04))
++ 			continue;
++ 		/* check cardnr */
++ 		if (cardnr != 0xFFFF && card != cardnr)
++ 			continue;
++ 		/* check domain */
++ 		if (domain != 0xFFFF && dom != domain)
++ 			continue;
++ 		/* get cca info on this apqn */
++ 		if (cca_get_info(card, dom, &ci, verify))
++ 			continue;
++ 		/* current master key needs to be valid */
++ 		if (mktype == AES_MK_SET && ci.cur_aes_mk_state != '2')
++ 			continue;
++ 		if (mktype == APKA_MK_SET && ci.cur_apka_mk_state != '2')
++ 			continue;
++ 		/* check min hardware type */
++ 		if (minhwtype > 0 && minhwtype > ci.hwtype)
++ 			continue;
++ 		if (cur_mkvp || old_mkvp) {
++ 			/* check mkvps */
++ 			curmatch = oldmatch = 0;
++ 			if (mktype == AES_MK_SET) {
++ 				if (cur_mkvp && cur_mkvp == ci.cur_aes_mkvp)
++ 					curmatch = 1;
++ 				if (old_mkvp && ci.old_aes_mk_state == '2' &&
++ 				    old_mkvp == ci.old_aes_mkvp)
++ 					oldmatch = 1;
++ 			} else {
++ 				if (cur_mkvp && cur_mkvp == ci.cur_apka_mkvp)
+  					curmatch = 1;
+- 				if (old_mkvp && ci.old_mk_state == '2' &&
+- 				    old_mkvp == ci.old_mkvp)
++ 				if (old_mkvp && ci.old_apka_mk_state == '2' &&
++ 				    old_mkvp == ci.old_apka_mkvp)
+  					oldmatch = 1;
+- 				if ((cur_mkvp || old_mkvp) &&
+- 				    (curmatch + oldmatch < 1))
+- 					continue;
+  			}
+- 			/* apqn passed all filtering criterons */
+- 			if (*apqns && n < *nr_apqns)
+- 				(*apqns)[n] = (((u16)card) << 16) | ((u16) dom);
+- 			n++;
+- 		}
+- 		/* loop 2nd time: array has been filled */
+- 		if (*apqns)
+- 			break;
+- 		/* loop 1st time: have # of eligible apqns in n */
+- 		if (!n) {
+- 			rc = -ENODEV; /* no eligible apqns found */
+- 			break;
+- 		}
+- 		*nr_apqns = n;
+- 		/* allocate array to store n apqns into */
+- 		*apqns = kmalloc_array(n, sizeof(u32), GFP_KERNEL);
+- 		if (!*apqns) {
+- 			rc = -ENOMEM;
+- 			break;
++ 			if (curmatch + oldmatch < 1)
++ 				continue;
+  		}
+- 		verify = 0;
++ 		/* apqn passed all filtering criterons, add to the array */
++ 		if (_nr_apqns < 256)
++ 			_apqns[_nr_apqns++] = (((u16)card) << 16) | ((u16) dom);
++ 	}
++ 
++ 	/* nothing found ? */
++ 	if (!_nr_apqns) {
++ 		kfree(_apqns);
++ 		rc = -ENODEV;
++ 	} else {
++ 		/* no re-allocation, simple return the _apqns array */
++ 		*apqns = _apqns;
++ 		*nr_apqns = _nr_apqns;
++ 		rc = 0;
+  	}
+  
+ -	kfree(device_status);
+ +	kvfree(device_status);
+  	return rc;
+  }
+  EXPORT_SYMBOL(cca_findcard2);

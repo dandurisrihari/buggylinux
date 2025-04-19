@@ -1,0 +1,43 @@
+commit b8730b403aee94db4631bfefb546a6ce8c287dc2
+Author: Johannes Berg <johannes.berg@intel.com>
+Date:   Wed Mar 27 20:49:58 2013 +0100
+
+    iwlwifi: dvm: fix the passive-no-RX workaround
+    
+    Alex Romosan reported that since the mac80211 changes in
+    "mac80211: start auth/assoc timeout on frame status" and
+    the subsequent fixes in "mac80211: fix auth/assoc timeout
+    handling" (commits 1672c0e31917 and 89afe614c0c) there's
+    sometimes an issue connecting to a 5 GHz network with the
+    iwlwifi DVM driver.
+    
+    The reason appears to be that since these commits any bad
+    TX status makes mac80211 immediately try again, causing
+    all of the authentication attempts to be quickly rejected
+    by the firmware as it hasn't heard a beacon yet. Before,
+    it would wait for the timeout regardless of status.
+    
+    To fix this, invoke the passive-no-RX workaround when not
+    associated yet as well. This will cause the first frame
+    to get lost, but then the driver will stop the queues and
+    the second attempt will only be transmitted after hearing
+    a beacon, thus delaying it appropriately to not make the
+    firmware reject it again.
+    
+    Reported-by: Alex Romosan <romosan@sycorax.lbl.gov>
+    Tested-by: Alex Romosan <romosan@sycorax.lbl.gov>
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+diff --git a/drivers/net/wireless/iwlwifi/dvm/tx.c b/drivers/net/wireless/iwlwifi/dvm/tx.c
+index 6aec2df3bb27..d1a670d7b10c 100644
+--- a/drivers/net/wireless/iwlwifi/dvm/tx.c
++++ b/drivers/net/wireless/iwlwifi/dvm/tx.c
+@@ -1192,7 +1192,7 @@ int iwlagn_rx_reply_tx(struct iwl_priv *priv, struct iwl_rx_cmd_buffer *rxb,
+ 			memset(&info->status, 0, sizeof(info->status));
+ 
+ 			if (status == TX_STATUS_FAIL_PASSIVE_NO_RX &&
+-			    iwl_is_associated_ctx(ctx) && ctx->vif &&
++			    ctx->vif &&
+ 			    ctx->vif->type == NL80211_IFTYPE_STATION) {
+ 				/* block and stop all queues */
+ 				priv->passive_no_rx = true;

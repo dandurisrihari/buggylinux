@@ -1,0 +1,158 @@
+diff --git a/arch/x86/include/asm/kprobes.h b/arch/x86/include/asm/kprobes.h
+index 36abb23a7a35..367d99cff426 100644
+--- a/arch/x86/include/asm/kprobes.h
++++ b/arch/x86/include/asm/kprobes.h
+@@ -67,9 +67,7 @@ extern const int kretprobe_blacklist_size;
+ void arch_remove_kprobe(struct kprobe *p);
+ asmlinkage void kretprobe_trampoline(void);
+ 
+-#ifdef CONFIG_KPROBES_ON_FTRACE
+-extern void arch_ftrace_kprobe_override_function(struct pt_regs *regs);
+-#endif
++extern void arch_kprobe_override_function(struct pt_regs *regs);
+ 
+ /* Architecture specific copy of original instruction*/
+ struct arch_specific_insn {
+diff --git a/arch/x86/kernel/kprobes/core.c b/arch/x86/kernel/kprobes/core.c
+index bd36f3c33cd0..b02a377d5905 100644
+--- a/arch/x86/kernel/kprobes/core.c
++++ b/arch/x86/kernel/kprobes/core.c
+@@ -1183,3 +1183,17 @@ int arch_trampoline_kprobe(struct kprobe *p)
+ {
+ 	return 0;
+ }
++
++asmlinkage void override_func(void);
++asm(
++	".type override_func, @function\n"
++	"override_func:\n"
++	"	ret\n"
++	".size override_func, .-override_func\n"
++);
++
++void arch_kprobe_override_function(struct pt_regs *regs)
++{
++	regs->ip = (unsigned long)&override_func;
++}
++NOKPROBE_SYMBOL(arch_kprobe_override_function);
+diff --git a/arch/x86/kernel/kprobes/ftrace.c b/arch/x86/kernel/kprobes/ftrace.c
+index 1ea748d682fd..8dc0161cec8f 100644
+--- a/arch/x86/kernel/kprobes/ftrace.c
++++ b/arch/x86/kernel/kprobes/ftrace.c
+@@ -97,17 +97,3 @@ int arch_prepare_kprobe_ftrace(struct kprobe *p)
+ 	p->ainsn.boostable = false;
+ 	return 0;
+ }
+-
+-asmlinkage void override_func(void);
+-asm(
+-	".type override_func, @function\n"
+-	"override_func:\n"
+-	"	ret\n"
+-	".size override_func, .-override_func\n"
+-);
+-
+-void arch_ftrace_kprobe_override_function(struct pt_regs *regs)
+-{
+-	regs->ip = (unsigned long)&override_func;
+-}
+-NOKPROBE_SYMBOL(arch_ftrace_kprobe_override_function);
+diff --git a/kernel/trace/Kconfig b/kernel/trace/Kconfig
+index ae3a2d519e50..6400e1bf97c5 100644
+--- a/kernel/trace/Kconfig
++++ b/kernel/trace/Kconfig
+@@ -533,9 +533,7 @@ config FUNCTION_PROFILER
+ config BPF_KPROBE_OVERRIDE
+ 	bool "Enable BPF programs to override a kprobed function"
+ 	depends on BPF_EVENTS
+-	depends on KPROBES_ON_FTRACE
+ 	depends on HAVE_KPROBE_OVERRIDE
+-	depends on DYNAMIC_FTRACE_WITH_REGS
+ 	default n
+ 	help
+ 	 Allows BPF to override the execution of a probed function and
+diff --git a/kernel/trace/bpf_trace.c b/kernel/trace/bpf_trace.c
+index f6d2327ecb59..1966ad3bf3e0 100644
+--- a/kernel/trace/bpf_trace.c
++++ b/kernel/trace/bpf_trace.c
+@@ -85,7 +85,7 @@ BPF_CALL_2(bpf_override_return, struct pt_regs *, regs, unsigned long, rc)
+ {
+ 	__this_cpu_write(bpf_kprobe_override, 1);
+ 	regs_set_return_value(regs, rc);
+-	arch_ftrace_kprobe_override_function(regs);
++	arch_kprobe_override_function(regs);
+ 	return 0;
+ }
+ 
+@@ -800,11 +800,11 @@ int perf_event_attach_bpf_prog(struct perf_event *event,
+ 	int ret = -EEXIST;
+ 
+ 	/*
+-	 * Kprobe override only works for ftrace based kprobes, and only if they
+-	 * are on the opt-in list.
++	 * Kprobe override only works if they are on the function entry,
++	 * and only if they are on the opt-in list.
+ 	 */
+ 	if (prog->kprobe_override &&
+-	    (!trace_kprobe_ftrace(event->tp_event) ||
++	    (!trace_kprobe_on_func_entry(event->tp_event) ||
+ 	     !trace_kprobe_error_injectable(event->tp_event)))
+ 		return -EINVAL;
+ 
+diff --git a/kernel/trace/trace_kprobe.c b/kernel/trace/trace_kprobe.c
+index 91f4b57dab82..3c8deb977a8b 100644
+--- a/kernel/trace/trace_kprobe.c
++++ b/kernel/trace/trace_kprobe.c
+@@ -88,13 +88,16 @@ static nokprobe_inline unsigned long trace_kprobe_nhit(struct trace_kprobe *tk)
+ 	return nhit;
+ }
+ 
+-int trace_kprobe_ftrace(struct trace_event_call *call)
++bool trace_kprobe_on_func_entry(struct trace_event_call *call)
+ {
+ 	struct trace_kprobe *tk = (struct trace_kprobe *)call->data;
+-	return kprobe_ftrace(&tk->rp.kp);
++
++	return kprobe_on_func_entry(tk->rp.kp.addr,
++			tk->rp.kp.addr ? NULL : tk->rp.kp.symbol_name,
++			tk->rp.kp.addr ? 0 : tk->rp.kp.offset);
+ }
+ 
+-int trace_kprobe_error_injectable(struct trace_event_call *call)
++bool trace_kprobe_error_injectable(struct trace_event_call *call)
+ {
+ 	struct trace_kprobe *tk = (struct trace_kprobe *)call->data;
+ 	unsigned long addr;
+diff --git a/kernel/trace/trace_probe.h b/kernel/trace/trace_probe.h
+index 5e54d748c84c..e101c5bb9eda 100644
+--- a/kernel/trace/trace_probe.h
++++ b/kernel/trace/trace_probe.h
+@@ -252,8 +252,8 @@ struct symbol_cache;
+ unsigned long update_symbol_cache(struct symbol_cache *sc);
+ void free_symbol_cache(struct symbol_cache *sc);
+ struct symbol_cache *alloc_symbol_cache(const char *sym, long offset);
+-int trace_kprobe_ftrace(struct trace_event_call *call);
+-int trace_kprobe_error_injectable(struct trace_event_call *call);
++bool trace_kprobe_on_func_entry(struct trace_event_call *call);
++bool trace_kprobe_error_injectable(struct trace_event_call *call);
+ #else
+ /* uprobes do not support symbol fetch methods */
+ #define fetch_symbol_u8			NULL
+@@ -280,14 +280,14 @@ alloc_symbol_cache(const char *sym, long offset)
+ 	return NULL;
+ }
+ 
+-static inline int trace_kprobe_ftrace(struct trace_event_call *call)
++static inline bool trace_kprobe_on_func_entry(struct trace_event_call *call)
+ {
+-	return 0;
++	return false;
+ }
+ 
+-static inline int trace_kprobe_error_injectable(struct trace_event_call *call)
++static inline bool trace_kprobe_error_injectable(struct trace_event_call *call)
+ {
+-	return 0;
++	return false;
+ }
+ #endif /* CONFIG_KPROBE_EVENTS */

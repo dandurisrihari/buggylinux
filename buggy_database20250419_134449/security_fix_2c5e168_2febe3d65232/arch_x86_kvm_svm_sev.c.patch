@@ -1,0 +1,56 @@
+commit 2c5e168e5ce154592667a8e384012117c917d790
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Wed Nov 27 17:34:06 2024 -0800
+
+    KVM: x86: Rename "governed features" helpers to use "guest_cpu_cap"
+    
+    As the first step toward replacing KVM's so-called "governed features"
+    framework with a more comprehensive, less poorly named implementation,
+    replace the "kvm_governed_feature" function prefix with "guest_cpu_cap"
+    and rename guest_can_use() to guest_cpu_cap_has().
+    
+    The "guest_cpu_cap" naming scheme mirrors that of "kvm_cpu_cap", and
+    provides a more clear distinction between guest capabilities, which are
+    KVM controlled (heh, or one might say "governed"), and guest CPUID, which
+    with few exceptions is fully userspace controlled.
+    
+    Opportunistically rewrite the comment about XSS passthrough for SEV-ES
+    guests to avoid referencing so many functions, as such comments are prone
+    to becoming stale (case in point...).
+    
+    No functional change intended.
+    
+    Reviewed-by: Maxim Levitsky <mlevitsk@redhat.com>
+    Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+    Link: https://lore.kernel.org/r/20241128013424.4096668-40-seanjc@google.com
+    Signed-off-by: Sean Christopherson <seanjc@google.com>
+
+diff --git a/arch/x86/kvm/svm/sev.c b/arch/x86/kvm/svm/sev.c
+index 943bd074a5d3..1dad4b50b31c 100644
+--- a/arch/x86/kvm/svm/sev.c
++++ b/arch/x86/kvm/svm/sev.c
+@@ -4445,16 +4445,15 @@ static void sev_es_vcpu_after_set_cpuid(struct vcpu_svm *svm)
+ 	 * For SEV-ES, accesses to MSR_IA32_XSS should not be intercepted if
+ 	 * the host/guest supports its use.
+ 	 *
+-	 * guest_can_use() checks a number of requirements on the host/guest to
+-	 * ensure that MSR_IA32_XSS is available, but it might report true even
+-	 * if X86_FEATURE_XSAVES isn't configured in the guest to ensure host
+-	 * MSR_IA32_XSS is always properly restored. For SEV-ES, it is better
+-	 * to further check that the guest CPUID actually supports
+-	 * X86_FEATURE_XSAVES so that accesses to MSR_IA32_XSS by misbehaved
+-	 * guests will still get intercepted and caught in the normal
+-	 * kvm_emulate_rdmsr()/kvm_emulated_wrmsr() paths.
++	 * KVM treats the guest as being capable of using XSAVES even if XSAVES
++	 * isn't enabled in guest CPUID as there is no intercept for XSAVES,
++	 * i.e. the guest can use XSAVES/XRSTOR to read/write XSS if XSAVE is
++	 * exposed to the guest and XSAVES is supported in hardware.  Condition
++	 * full XSS passthrough on the guest being able to use XSAVES *and*
++	 * XSAVES being exposed to the guest so that KVM can at least honor
++	 * guest CPUID for RDMSR and WRMSR.
+ 	 */
+-	if (guest_can_use(vcpu, X86_FEATURE_XSAVES) &&
++	if (guest_cpu_cap_has(vcpu, X86_FEATURE_XSAVES) &&
+ 	    guest_cpuid_has(vcpu, X86_FEATURE_XSAVES))
+ 		set_msr_interception(vcpu, svm->msrpm, MSR_IA32_XSS, 1, 1);
+ 	else

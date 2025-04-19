@@ -1,0 +1,111 @@
+commit 9651fcedf7b92d3f7f1ab179e8ab55b85ee10fc1
+Author: Jason A. Donenfeld <Jason@zx2c4.com>
+Date:   Thu Dec 8 17:55:04 2022 +0100
+
+    mm: add MAP_DROPPABLE for designating always lazily freeable mappings
+    
+    The vDSO getrandom() implementation works with a buffer allocated with a
+    new system call that has certain requirements:
+    
+    - It shouldn't be written to core dumps.
+      * Easy: VM_DONTDUMP.
+    - It should be zeroed on fork.
+      * Easy: VM_WIPEONFORK.
+    
+    - It shouldn't be written to swap.
+      * Uh-oh: mlock is rlimited.
+      * Uh-oh: mlock isn't inherited by forks.
+    
+    - It shouldn't reserve actual memory, but it also shouldn't crash when
+      page faulting in memory if none is available
+      * Uh-oh: VM_NORESERVE means segfaults.
+    
+    It turns out that the vDSO getrandom() function has three really nice
+    characteristics that we can exploit to solve this problem:
+    
+    1) Due to being wiped during fork(), the vDSO code is already robust to
+       having the contents of the pages it reads zeroed out midway through
+       the function's execution.
+    
+    2) In the absolute worst case of whatever contingency we're coding for,
+       we have the option to fallback to the getrandom() syscall, and
+       everything is fine.
+    
+    3) The buffers the function uses are only ever useful for a maximum of
+       60 seconds -- a sort of cache, rather than a long term allocation.
+    
+    These characteristics mean that we can introduce VM_DROPPABLE, which
+    has the following semantics:
+    
+    a) It never is written out to swap.
+    b) Under memory pressure, mm can just drop the pages (so that they're
+       zero when read back again).
+    c) It is inherited by fork.
+    d) It doesn't count against the mlock budget, since nothing is locked.
+    e) If there's not enough memory to service a page fault, it's not fatal,
+       and no signal is sent.
+    
+    This way, allocations used by vDSO getrandom() can use:
+    
+        VM_DROPPABLE | VM_DONTDUMP | VM_WIPEONFORK | VM_NORESERVE
+    
+    And there will be no problem with OOMing, crashing on overcommitment,
+    using memory when not in use, not wiping on fork(), coredumps, or
+    writing out to swap.
+    
+    In order to let vDSO getrandom() use this, expose these via mmap(2) as
+    MAP_DROPPABLE.
+    
+    Note that this involves removing the MADV_FREE special case from
+    sort_folio(), which according to Yu Zhao is unnecessary and will simply
+    result in an extra call to shrink_folio_list() in the worst case. The
+    chunk removed reenables the swapbacked flag, which we don't want for
+    VM_DROPPABLE, and we can't conditionalize it here because there isn't a
+    vma reference available.
+    
+    Finally, the provided self test ensures that this is working as desired.
+    
+    Cc: linux-mm@kvack.org
+    Acked-by: David Hildenbrand <david@redhat.com>
+    Signed-off-by: Jason A. Donenfeld <Jason@zx2c4.com>
+
+diff --git a/mm/memory.c b/mm/memory.c
+index d10e616d7389..98d9a4485d24 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -5660,6 +5660,7 @@ vm_fault_t handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
+ 	/* If the fault handler drops the mmap_lock, vma may be freed */
+ 	struct mm_struct *mm = vma->vm_mm;
+ 	vm_fault_t ret;
++	bool is_droppable;
+ 
+ 	__set_current_state(TASK_RUNNING);
+ 
+@@ -5674,6 +5675,8 @@ vm_fault_t handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
+ 		goto out;
+ 	}
+ 
++	is_droppable = !!(vma->vm_flags & VM_DROPPABLE);
++
+ 	/*
+ 	 * Enable the memcg OOM handling for faults triggered in user
+ 	 * space.  Kernel faults are handled more gracefully.
+@@ -5688,8 +5691,18 @@ vm_fault_t handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
+ 	else
+ 		ret = __handle_mm_fault(vma, address, flags);
+ 
++	/*
++	 * Warning: It is no longer safe to dereference vma-> after this point,
++	 * because mmap_lock might have been dropped by __handle_mm_fault(), so
++	 * vma might be destroyed from underneath us.
++	 */
++
+ 	lru_gen_exit_fault();
+ 
++	/* If the mapping is droppable, then errors due to OOM aren't fatal. */
++	if (is_droppable)
++		ret &= ~VM_FAULT_OOM;
++
+ 	if (flags & FAULT_FLAG_USER) {
+ 		mem_cgroup_exit_user_fault();
+ 		/*

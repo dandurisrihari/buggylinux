@@ -1,0 +1,47 @@
+commit 6ae15df16ef3dc3f5f043e94bb2cd4aa6c7f2aa8
+Author: Daniel Drake <dsd@gentoo.org>
+Date:   Thu Jun 1 15:37:22 2006 +0100
+
+    [PATCH] softmac: Fix handling of authentication failure
+    
+    My router blew up earlier, but exhibited some interesting behaviour during
+    its dying moments. It was broadcasting beacons but wouldn't respond to
+    any authentication requests.
+    
+    I noticed that softmac wasn't playing nice with this, as I couldn't make it try
+    to connect to other networks after it had timed out authenticating to my ill
+    router.
+    
+    To resolve this, I modified the softmac event/notify API to pass the event
+    code to the callback, so that callbacks being notified from
+    IEEE80211SOFTMAC_EVENT_ANY masks can make some judgement. In this case, the
+    ieee80211softmac_assoc callback needs to make a decision based upon whether
+    the association passed or failed.
+    
+    Signed-off-by: Daniel Drake <dsd@gentoo.org>
+    Acked-by: Johannes Berg <johannes@sipsolutions.net>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/ieee80211/softmac/ieee80211softmac_event.c b/net/ieee80211/softmac/ieee80211softmac_event.c
+index 4b153f7cc96c..f34fa2ef666b 100644
+--- a/net/ieee80211/softmac/ieee80211softmac_event.c
++++ b/net/ieee80211/softmac/ieee80211softmac_event.c
+@@ -78,7 +78,7 @@ ieee80211softmac_notify_callback(void *d)
+ 	struct ieee80211softmac_event event = *(struct ieee80211softmac_event*) d;
+ 	kfree(d);
+ 	
+-	event.fun(event.mac->dev, event.context);
++	event.fun(event.mac->dev, event.event_type, event.context);
+ }
+ 
+ int
+@@ -167,6 +167,9 @@ ieee80211softmac_call_events_locked(struct ieee80211softmac_device *mac, int eve
+ 			if ((eventptr->event_type == event || eventptr->event_type == -1)
+ 				&& (eventptr->event_context == NULL || eventptr->event_context == event_ctx)) {
+ 				list_del(&eventptr->list);
++				/* User may have subscribed to ANY event, so
++				 * we tell them which event triggered it. */
++				eventptr->event_type = event;
+ 				schedule_work(&eventptr->work);
+ 			}
+ 		}

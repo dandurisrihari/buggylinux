@@ -1,0 +1,158 @@
+commit acbc661032b8aa0e8359ac77074769ade34a176c
+Author: Srinivas Pandruvada <srinivas.pandruvada@linux.intel.com>
+Date:   Wed Feb 1 10:28:52 2023 -0800
+
+    powercap: idle_inject: Add update callback
+    
+    The powercap/idle_inject core uses play_idle_precise() to inject idle
+    time. But play_idle_precise() can't ensure that the CPU is fully idle
+    for the specified duration because of wakeups due to interrupts. To
+    compensate for the reduced idle time due to these wakes, the caller
+    can adjust requested idle time for the next cycle.
+    
+    The goal of idle injection is to keep system at some idle percent on
+    average, so this is fine to overshoot or undershoot instantaneous idle
+    times.
+    
+    The idle inject core provides an interface idle_inject_set_duration()
+    to set idle and runtime duration.
+    
+    Some architectures provide interface to get actual idle time observed
+    by the hardware. So, the effective idle percent can be adjusted using
+    the hardware feedback. For example, Intel CPUs provides package idle
+    counters, which is currently used by Intel powerclamp driver to
+    readjust runtime duration.
+    
+    When the caller's desired idle time over a period is less or greater
+    than the actual CPU idle time observed by the hardware, caller can
+    readjust idle and runtime duration for the next cycle.
+    
+    The only way this can be done currently is by monitoring hardware idle
+    time from a different software thread and readjust idle and runtime
+    duration using idle_inject_set_duration().
+    
+    This can be avoided by adding a callback which callers can register and
+    readjust from this callback function.
+    
+    Add a capability to register an optional update() callback, which can be
+    called from the idle inject core before waking up CPUs for idle injection.
+    This callback can be registered via a new interface:
+    idle_inject_register_full().
+    
+    During this process of constantly adjusting idle and runtime duration
+    there can be some cases where actual idle time is more than the desired.
+    In this case idle inject can be skipped for a cycle. If update() callback
+    returns false, then the idle inject core skips waking up CPUs for the
+    idle injection.
+    
+    Signed-off-by: Srinivas Pandruvada <srinivas.pandruvada@linux.intel.com>
+    Signed-off-by: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
+
+diff --git a/drivers/powercap/idle_inject.c b/drivers/powercap/idle_inject.c
+index dfa989182e71..6862e6c2e87d 100644
+--- a/drivers/powercap/idle_inject.c
++++ b/drivers/powercap/idle_inject.c
+@@ -63,13 +63,29 @@ struct idle_inject_thread {
+  * @idle_duration_us: duration of CPU idle time to inject
+  * @run_duration_us: duration of CPU run time to allow
+  * @latency_us: max allowed latency
++ * @update: Optional callback deciding whether or not to skip idle
++ *		injection in the given cycle.
+  * @cpumask: mask of CPUs affected by idle injection
++ *
++ * This structure is used to define per instance idle inject device data. Each
++ * instance has an idle duration, a run duration and mask of CPUs to inject
++ * idle.
++ *
++ * Actual CPU idle time is injected by calling kernel scheduler interface
++ * play_idle_precise(). There is one optional callback that can be registered
++ * by calling idle_inject_register_full():
++ *
++ * update() - This callback is invoked just before waking up CPUs to inject
++ * idle. If it returns false, CPUs are not woken up to inject idle in the given
++ * cycle. It also allows the caller to readjust the idle and run duration by
++ * calling idle_inject_set_duration() for the next cycle.
+  */
+ struct idle_inject_device {
+ 	struct hrtimer timer;
+ 	unsigned int idle_duration_us;
+ 	unsigned int run_duration_us;
+ 	unsigned int latency_us;
++	bool (*update)(void);
+ 	unsigned long cpumask[];
+ };
+ 
+@@ -111,11 +127,12 @@ static enum hrtimer_restart idle_inject_timer_fn(struct hrtimer *timer)
+ 	struct idle_inject_device *ii_dev =
+ 		container_of(timer, struct idle_inject_device, timer);
+ 
++	if (!ii_dev->update || (ii_dev->update && ii_dev->update()))
++		idle_inject_wakeup(ii_dev);
++
+ 	duration_us = READ_ONCE(ii_dev->run_duration_us);
+ 	duration_us += READ_ONCE(ii_dev->idle_duration_us);
+ 
+-	idle_inject_wakeup(ii_dev);
+-
+ 	hrtimer_forward_now(timer, ns_to_ktime(duration_us * NSEC_PER_USEC));
+ 
+ 	return HRTIMER_RESTART;
+@@ -295,17 +312,22 @@ static int idle_inject_should_run(unsigned int cpu)
+ }
+ 
+ /**
+- * idle_inject_register - initialize idle injection on a set of CPUs
++ * idle_inject_register_full - initialize idle injection on a set of CPUs
+  * @cpumask: CPUs to be affected by idle injection
++ * @update: This callback is called just before waking up CPUs to inject
++ * idle
+  *
+  * This function creates an idle injection control device structure for the
+- * given set of CPUs and initializes the timer associated with it.  It does not
+- * start any injection cycles.
++ * given set of CPUs and initializes the timer associated with it. This
++ * function also allows to register update()callback.
++ * It does not start any injection cycles.
+  *
+  * Return: NULL if memory allocation fails, idle injection control device
+  * pointer on success.
+  */
+-struct idle_inject_device *idle_inject_register(struct cpumask *cpumask)
++
++struct idle_inject_device *idle_inject_register_full(struct cpumask *cpumask,
++						     bool (*update)(void))
+ {
+ 	struct idle_inject_device *ii_dev;
+ 	int cpu, cpu_rb;
+@@ -318,6 +340,7 @@ struct idle_inject_device *idle_inject_register(struct cpumask *cpumask)
+ 	hrtimer_init(&ii_dev->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+ 	ii_dev->timer.function = idle_inject_timer_fn;
+ 	ii_dev->latency_us = UINT_MAX;
++	ii_dev->update = update;
+ 
+ 	for_each_cpu(cpu, to_cpumask(ii_dev->cpumask)) {
+ 
+@@ -342,6 +365,23 @@ struct idle_inject_device *idle_inject_register(struct cpumask *cpumask)
+ 
+ 	return NULL;
+ }
++EXPORT_SYMBOL_NS_GPL(idle_inject_register_full, IDLE_INJECT);
++
++/**
++ * idle_inject_register - initialize idle injection on a set of CPUs
++ * @cpumask: CPUs to be affected by idle injection
++ *
++ * This function creates an idle injection control device structure for the
++ * given set of CPUs and initializes the timer associated with it.  It does not
++ * start any injection cycles.
++ *
++ * Return: NULL if memory allocation fails, idle injection control device
++ * pointer on success.
++ */
++struct idle_inject_device *idle_inject_register(struct cpumask *cpumask)
++{
++	return idle_inject_register_full(cpumask, NULL);
++}
+ EXPORT_SYMBOL_NS_GPL(idle_inject_register, IDLE_INJECT);
+ 
+ /**

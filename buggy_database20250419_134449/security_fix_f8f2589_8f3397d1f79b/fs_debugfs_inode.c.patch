@@ -1,0 +1,64 @@
+commit f8f25893a477a4da4414c3e40ddd51d77fac9cfc
+Author: Johannes Berg <johannes.berg@intel.com>
+Date:   Fri Nov 29 13:15:37 2024 +0100
+
+    fs: debugfs: differentiate short fops with proxy ops
+    
+    Geert reported that my previous short fops debugfs changes
+    broke m68k, because it only has mandatory alignement of two,
+    so we can't stash the "is it short" information into the
+    pointer (as we already did with the "is it real" bit.)
+    
+    Instead, exploit the fact that debugfs_file_get() called on
+    an already open file will already find that the fsdata is
+    no longer the real fops but rather the allocated data that
+    already distinguishes full/short ops, so only open() needs
+    to be able to distinguish. We can achieve that by using two
+    different open functions.
+    
+    Unfortunately this requires another set of full file ops,
+    increasing the size by 536 bytes (x86-64), but that's still
+    a reasonable trade-off given that only converting some of
+    the wireless stack gained over 28k. This brings the total
+    cost of this to around 1k, for wins of 28k (all x86-64).
+    
+    Reported-and-tested-by: Geert Uytterhoeven <geert@linux-m68k.org>
+    Link: https://lore.kernel.org/CAMuHMdWu_9-L2Te101w8hU7H_2yobJFPXSwwUmGHSJfaPWDKiQ@mail.gmail.com
+    Fixes: 8dc6d81c6b2a ("debugfs: add small file operations for most files")
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+    Tested-by: Geert Uytterhoeven <geert@linux-m68k.org>
+    Link: https://lore.kernel.org/r/20241129121536.30989-2-johannes@sipsolutions.net
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/fs/debugfs/inode.c b/fs/debugfs/inode.c
+index 38a9c7eb97e6..65e46c7b6bf1 100644
+--- a/fs/debugfs/inode.c
++++ b/fs/debugfs/inode.c
+@@ -455,8 +455,7 @@ struct dentry *debugfs_create_file_full(const char *name, umode_t mode,
+ 					const struct file_operations *fops)
+ {
+ 	if (WARN_ON((unsigned long)fops &
+-		    (DEBUGFS_FSDATA_IS_SHORT_FOPS_BIT |
+-		     DEBUGFS_FSDATA_IS_REAL_FOPS_BIT)))
++		    DEBUGFS_FSDATA_IS_REAL_FOPS_BIT))
+ 		return ERR_PTR(-EINVAL);
+ 
+ 	return __debugfs_create_file(name, mode, parent, data,
+@@ -471,15 +470,13 @@ struct dentry *debugfs_create_file_short(const char *name, umode_t mode,
+ 					 const struct debugfs_short_fops *fops)
+ {
+ 	if (WARN_ON((unsigned long)fops &
+-		    (DEBUGFS_FSDATA_IS_SHORT_FOPS_BIT |
+-		     DEBUGFS_FSDATA_IS_REAL_FOPS_BIT)))
++		    DEBUGFS_FSDATA_IS_REAL_FOPS_BIT))
+ 		return ERR_PTR(-EINVAL);
+ 
+ 	return __debugfs_create_file(name, mode, parent, data,
+-				fops ? &debugfs_full_proxy_file_operations :
++				fops ? &debugfs_full_short_proxy_file_operations :
+ 					&debugfs_noop_file_operations,
+-				(const void *)((unsigned long)fops |
+-					       DEBUGFS_FSDATA_IS_SHORT_FOPS_BIT));
++				fops);
+ }
+ EXPORT_SYMBOL_GPL(debugfs_create_file_short);

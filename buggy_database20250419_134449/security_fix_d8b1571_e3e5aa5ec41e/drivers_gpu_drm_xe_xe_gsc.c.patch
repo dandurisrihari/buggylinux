@@ -1,0 +1,53 @@
+commit d8b1571312b7f77aeae2b2a7a138bb8edaa4f725
+Author: Daniele Ceraolo Spurio <daniele.ceraolospurio@intel.com>
+Date:   Tue Nov 28 17:17:19 2023 -0800
+
+    drm/xe/huc: HuC authentication via GSC
+    
+    HuC authentication via GSC is performed by submitting the appropriate
+    PXP packet to the GSC FW. This packet can trigger a "pending" reply from
+    the FW, so we need to handle that and resubmit. Note that the auth via
+    GSC can only be performed if the HuC has already been authenticated by
+    the GuC.
+    
+    Signed-off-by: Daniele Ceraolo Spurio <daniele.ceraolospurio@intel.com>
+    Cc: Alan Previn <alan.previn.teres.alexis@intel.com>
+    Cc: John Harrison <John.C.Harrison@Intel.com>
+    Cc: Vivaik Balasubrawmanian <vivaik.balasubrawmanian@intel.com>
+    Reviewed-by: Vivaik Balasubrawmanian <vivaik.balasubrawmanian@intel.com>
+    Signed-off-by: Rodrigo Vivi <rodrigo.vivi@intel.com>
+
+diff --git a/drivers/gpu/drm/xe/xe_gsc.c b/drivers/gpu/drm/xe/xe_gsc.c
+index d8ec04e3c006..a8a895cf4b44 100644
+--- a/drivers/gpu/drm/xe/xe_gsc.c
++++ b/drivers/gpu/drm/xe/xe_gsc.c
+@@ -16,6 +16,7 @@
+ #include "xe_gsc_submit.h"
+ #include "xe_gt.h"
+ #include "xe_gt_printk.h"
++#include "xe_huc.h"
+ #include "xe_map.h"
+ #include "xe_mmio.h"
+ #include "xe_sched_job.h"
+@@ -257,11 +258,18 @@ static void gsc_work(struct work_struct *work)
+ 	xe_force_wake_get(gt_to_fw(gt), XE_FW_GSC);
+ 
+ 	ret = gsc_upload(gsc);
+-	if (ret && ret != -EEXIST)
++	if (ret && ret != -EEXIST) {
+ 		xe_uc_fw_change_status(&gsc->fw, XE_UC_FIRMWARE_LOAD_FAIL);
+-	else
+-		xe_uc_fw_change_status(&gsc->fw, XE_UC_FIRMWARE_TRANSFERRED);
++		goto out;
++	}
+ 
++	xe_uc_fw_change_status(&gsc->fw, XE_UC_FIRMWARE_TRANSFERRED);
++
++	/* HuC auth failure is not fatal */
++	if (xe_huc_is_authenticated(&gt->uc.huc, XE_HUC_AUTH_VIA_GUC))
++		xe_huc_auth(&gt->uc.huc, XE_HUC_AUTH_VIA_GSC);
++
++out:
+ 	xe_force_wake_put(gt_to_fw(gt), XE_FW_GSC);
+ 	xe_device_mem_access_put(xe);
+ }

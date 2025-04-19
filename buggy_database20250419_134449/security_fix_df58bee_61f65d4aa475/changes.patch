@@ -1,0 +1,110 @@
+diff --cc Documentation/feature-removal-schedule.txt
+index 503d21216d58,edb2f0b07616..fa75220f8d34
+--- a/Documentation/feature-removal-schedule.txt
++++ b/Documentation/feature-removal-schedule.txt
+@@@ -425,47 -444,3 +425,37 @@@ What:	CONFIG_RFKILL_INPU
+  When:	2.6.33
+  Why:	Should be implemented in userspace, policy daemon.
+  Who:	Johannes Berg <johannes@sipsolutions.net>
+ +
+ +----------------------------
+ +
+- What:	CONFIG_X86_OLD_MCE
+- When:	2.6.32
+- Why:	Remove the old legacy 32bit machine check code. This has been
+- 	superseded by the newer machine check code from the 64bit port,
+- 	but the old version has been kept around for easier testing. Note this
+- 	doesn't impact the old P5 and WinChip machine check handlers.
+- Who:	Andi Kleen <andi@firstfloor.org>
+- 
+- ----------------------------
+- 
+ +What:	lock_policy_rwsem_* and unlock_policy_rwsem_* will not be
+ +	exported interface anymore.
+ +When:	2.6.33
+ +Why:	cpu_policy_rwsem has a new cleaner definition making it local to
+ +	cpufreq core and contained inside cpufreq.c. Other dependent
+ +	drivers should not use it in order to safely avoid lockdep issues.
+ +Who:	Venkatesh Pallipadi <venkatesh.pallipadi@intel.com>
+ +
+ +----------------------------
+ +
+ +What:	sound-slot/service-* module aliases and related clutters in
+ +	sound/sound_core.c
+ +When:	August 2010
+ +Why:	OSS sound_core grabs all legacy minors (0-255) of SOUND_MAJOR
+ +	(14) and requests modules using custom sound-slot/service-*
+ +	module aliases.  The only benefit of doing this is allowing
+ +	use of custom module aliases which might as well be considered
+ +	a bug at this point.  This preemptive claiming prevents
+ +	alternative OSS implementations.
+ +
+ +	Till the feature is removed, the kernel will be requesting
+ +	both sound-slot/service-* and the standard char-major-* module
+ +	aliases and allow turning off the pre-claiming selectively via
+ +	CONFIG_SOUND_OSS_CORE_PRECLAIM and soundcore.preclaim_oss
+ +	kernel parameter.
+ +
+ +	After the transition phase is complete, both the custom module
+ +	aliases and switches to disable it will go away.  This removal
+ +	will also allow making ALSA OSS emulation independent of
+ +	sound_core.  The dependency will be broken then too.
+ +Who:	Tejun Heo <tj@kernel.org>
+diff --cc arch/x86/kernel/cpu/mcheck/mce.c
+index fdd51b554355,325559d1aa58..2f5aab26320e
+--- a/arch/x86/kernel/cpu/mcheck/mce.c
++++ b/arch/x86/kernel/cpu/mcheck/mce.c
+@@@ -1236,13 -1235,8 +1245,13 @@@ static void mce_init(void
+  }
+  
+  /* Add per CPU specific workarounds here */
+- static int mce_cpu_quirks(struct cpuinfo_x86 *c)
+ -static void __cpuinit mce_cpu_quirks(struct cpuinfo_x86 *c)
+++static int __cpuinit mce_cpu_quirks(struct cpuinfo_x86 *c)
+  {
+ +	if (c->x86_vendor == X86_VENDOR_UNKNOWN) {
+ +		pr_info("MCE: unknown CPU type - not enabling MCE support.\n");
+ +		return -EOPNOTSUPP;
+ +	}
+ +
+  	/* This should be disabled by the BIOS, but isn't always */
+  	if (c->x86_vendor == X86_VENDOR_AMD) {
+  		if (c->x86 == 15 && banks > 4) {
+@@@ -1345,9 -1334,20 +1354,20 @@@ static void mce_init_timer(void
+  		return;
+  	setup_timer(t, mcheck_timer, smp_processor_id());
+  	t->expires = round_jiffies(jiffies + *n);
+ -	add_timer(t);
+ +	add_timer_on(t, smp_processor_id());
+  }
+  
++ /* Handle unconfigured int18 (should never happen) */
++ static void unexpected_machine_check(struct pt_regs *regs, long error_code)
++ {
++ 	printk(KERN_ERR "CPU#%d: Unexpected int18 (Machine Check).\n",
++ 	       smp_processor_id());
++ }
++ 
++ /* Call the installed machine check handler for this CPU setup. */
++ void (*machine_check_vector)(struct pt_regs *, long error_code) =
++ 						unexpected_machine_check;
++ 
+  /*
+   * Called for each booted CPU to set up machine checks.
+   * Must be called with preempt off:
+diff --cc arch/x86/kernel/irqinit.c
+index 92b7703d3d58,8a194ad357ed..ccf8ab54f31a
+--- a/arch/x86/kernel/irqinit.c
++++ b/arch/x86/kernel/irqinit.c
+@@@ -187,10 -187,10 +187,10 @@@ static void __init apic_intr_init(void
+  #ifdef CONFIG_X86_THERMAL_VECTOR
+  	alloc_intr_gate(THERMAL_APIC_VECTOR, thermal_interrupt);
+  #endif
+ -#ifdef CONFIG_X86_THRESHOLD
+ +#ifdef CONFIG_X86_MCE_THRESHOLD
+  	alloc_intr_gate(THRESHOLD_APIC_VECTOR, threshold_interrupt);
+  #endif
+- #if defined(CONFIG_X86_NEW_MCE) && defined(CONFIG_X86_LOCAL_APIC)
++ #if defined(CONFIG_X86_MCE) && defined(CONFIG_X86_LOCAL_APIC)
+  	alloc_intr_gate(MCE_SELF_VECTOR, mce_self_interrupt);
+  #endif

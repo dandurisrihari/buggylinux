@@ -1,0 +1,157 @@
+diff --git a/arch/x86/mm/extable.c b/arch/x86/mm/extable.c
+index 856fa409c536..6521134057e8 100644
+--- a/arch/x86/mm/extable.c
++++ b/arch/x86/mm/extable.c
+@@ -117,11 +117,67 @@ __visible bool ex_handler_fprestore(const struct exception_table_entry *fixup,
+ }
+ EXPORT_SYMBOL_GPL(ex_handler_fprestore);
+ 
++/* Helper to check whether a uaccess fault indicates a kernel bug. */
++static bool bogus_uaccess(struct pt_regs *regs, int trapnr,
++			  unsigned long fault_addr)
++{
++	/* This is the normal case: #PF with a fault address in userspace. */
++	if (trapnr == X86_TRAP_PF && fault_addr < TASK_SIZE_MAX)
++		return false;
++
++	/*
++	 * This code can be reached for machine checks, but only if the #MC
++	 * handler has already decided that it looks like a candidate for fixup.
++	 * This e.g. happens when attempting to access userspace memory which
++	 * the CPU can't access because of uncorrectable bad memory.
++	 */
++	if (trapnr == X86_TRAP_MC)
++		return false;
++
++	/*
++	 * There are two remaining exception types we might encounter here:
++	 *  - #PF for faulting accesses to kernel addresses
++	 *  - #GP for faulting accesses to noncanonical addresses
++	 * Complain about anything else.
++	 */
++	if (trapnr != X86_TRAP_PF && trapnr != X86_TRAP_GP) {
++		WARN(1, "unexpected trap %d in uaccess\n", trapnr);
++		return false;
++	}
++
++	/*
++	 * This is a faulting memory access in kernel space, on a kernel
++	 * address, in a usercopy function. This can e.g. be caused by improper
++	 * use of helpers like __put_user and by improper attempts to access
++	 * userspace addresses in KERNEL_DS regions.
++	 * The one (semi-)legitimate exception are probe_kernel_{read,write}(),
++	 * which can be invoked from places like kgdb, /dev/mem (for reading)
++	 * and privileged BPF code (for reading).
++	 * The probe_kernel_*() functions set the kernel_uaccess_faults_ok flag
++	 * to tell us that faulting on kernel addresses, and even noncanonical
++	 * addresses, in a userspace accessor does not necessarily imply a
++	 * kernel bug, root might just be doing weird stuff.
++	 */
++	if (current->kernel_uaccess_faults_ok)
++		return false;
++
++	/* This is bad. Refuse the fixup so that we go into die(). */
++	if (trapnr == X86_TRAP_PF) {
++		pr_emerg("BUG: pagefault on kernel address 0x%lx in non-whitelisted uaccess\n",
++			 fault_addr);
++	} else {
++		pr_emerg("BUG: GPF in non-whitelisted uaccess (non-canonical address?)\n");
++	}
++	return true;
++}
++
+ __visible bool ex_handler_uaccess(const struct exception_table_entry *fixup,
+ 				  struct pt_regs *regs, int trapnr,
+ 				  unsigned long error_code,
+ 				  unsigned long fault_addr)
+ {
++	if (bogus_uaccess(regs, trapnr, fault_addr))
++		return false;
+ 	regs->ip = ex_fixup_addr(fixup);
+ 	return true;
+ }
+@@ -132,6 +188,8 @@ __visible bool ex_handler_ext(const struct exception_table_entry *fixup,
+ 			      unsigned long error_code,
+ 			      unsigned long fault_addr)
+ {
++	if (bogus_uaccess(regs, trapnr, fault_addr))
++		return false;
+ 	/* Special hack for uaccess_err */
+ 	current->thread.uaccess_err = 1;
+ 	regs->ip = ex_fixup_addr(fixup);
+diff --git a/fs/namespace.c b/fs/namespace.c
+index 99186556f8d3..d86830c86ce8 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -2642,6 +2642,7 @@ static long exact_copy_from_user(void *to, const void __user * from,
+ 	if (!access_ok(VERIFY_READ, from, n))
+ 		return n;
+ 
++	current->kernel_uaccess_faults_ok++;
+ 	while (n) {
+ 		if (__get_user(c, f)) {
+ 			memset(t, 0, n);
+@@ -2651,6 +2652,7 @@ static long exact_copy_from_user(void *to, const void __user * from,
+ 		f++;
+ 		n--;
+ 	}
++	current->kernel_uaccess_faults_ok--;
+ 	return n;
+ }
+ 
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index 977cb57d7bc9..56dd65f1be4f 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -739,6 +739,12 @@ struct task_struct {
+ 	unsigned			use_memdelay:1;
+ #endif
+ 
++	/*
++	 * May usercopy functions fault on kernel addresses?
++	 * This is not just a single bit because this can potentially nest.
++	 */
++	unsigned int			kernel_uaccess_faults_ok;
++
+ 	unsigned long			atomic_flags; /* Flags requiring atomic access. */
+ 
+ 	struct restart_block		restart_block;
+diff --git a/mm/maccess.c b/mm/maccess.c
+index ec00be51a24f..f3416632e5a4 100644
+--- a/mm/maccess.c
++++ b/mm/maccess.c
+@@ -30,8 +30,10 @@ long __probe_kernel_read(void *dst, const void *src, size_t size)
+ 
+ 	set_fs(KERNEL_DS);
+ 	pagefault_disable();
++	current->kernel_uaccess_faults_ok++;
+ 	ret = __copy_from_user_inatomic(dst,
+ 			(__force const void __user *)src, size);
++	current->kernel_uaccess_faults_ok--;
+ 	pagefault_enable();
+ 	set_fs(old_fs);
+ 
+@@ -58,7 +60,9 @@ long __probe_kernel_write(void *dst, const void *src, size_t size)
+ 
+ 	set_fs(KERNEL_DS);
+ 	pagefault_disable();
++	current->kernel_uaccess_faults_ok++;
+ 	ret = __copy_to_user_inatomic((__force void __user *)dst, src, size);
++	current->kernel_uaccess_faults_ok--;
+ 	pagefault_enable();
+ 	set_fs(old_fs);
+ 
+@@ -94,11 +98,13 @@ long strncpy_from_unsafe(char *dst, const void *unsafe_addr, long count)
+ 
+ 	set_fs(KERNEL_DS);
+ 	pagefault_disable();
++	current->kernel_uaccess_faults_ok++;
+ 
+ 	do {
+ 		ret = __get_user(*dst++, (const char __user __force *)src++);
+ 	} while (dst[-1] && ret == 0 && src - unsafe_addr < count);
+ 
++	current->kernel_uaccess_faults_ok--;
+ 	dst[-1] = '\0';
+ 	pagefault_enable();
+ 	set_fs(old_fs);

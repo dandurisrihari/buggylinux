@@ -1,0 +1,132 @@
+commit 3e7819886281e077e82006fe4804b0d6b0f5643b
+Merge: 3a56e2417329 3c1743a685b1
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Mon Jul 15 14:20:22 2024 -0700
+
+    Merge tag 'for-6.11/block-20240710' of git://git.kernel.dk/linux
+    
+    Pull block updates from Jens Axboe:
+    
+     - NVMe updates via Keith:
+         - Device initialization memory leak fixes (Keith)
+         - More constants defined (Weiwen)
+         - Target debugfs support (Hannes)
+         - PCIe subsystem reset enhancements (Keith)
+         - Queue-depth multipath policy (Redhat and PureStorage)
+         - Implement get_unique_id (Christoph)
+         - Authentication error fixes (Gaosheng)
+    
+     - MD updates via Song
+         - sync_action fix and refactoring (Yu Kuai)
+         - Various small fixes (Christoph Hellwig, Li Nan, and Ofir Gal, Yu
+           Kuai, Benjamin Marzinski, Christophe JAILLET, Yang Li)
+    
+     - Fix loop detach/open race (Gulam)
+    
+     - Fix lower control limit for blk-throttle (Yu)
+    
+     - Add module descriptions to various drivers (Jeff)
+    
+     - Add support for atomic writes for block devices, and statx reporting
+       for same. Includes SCSI and NVMe (John, Prasad, Alan)
+    
+     - Add IO priority information to block trace points (Dongliang)
+    
+     - Various zone improvements and tweaks (Damien)
+    
+     - mq-deadline tag reservation improvements (Bart)
+    
+     - Ignore direct reclaim swap writes in writeback throttling (Baokun)
+    
+     - Block integrity improvements and fixes (Anuj)
+    
+     - Add basic support for rust based block drivers. Has a dummy null_blk
+       variant for now (Andreas)
+    
+     - Series converting driver settings to queue limits, and cleanups and
+       fixes related to that (Christoph)
+    
+     - Cleanup for poking too deeply into the bvec internals, in preparation
+       for DMA mapping API changes (Christoph)
+    
+     - Various minor tweaks and fixes (Jiapeng, John, Kanchan, Mikulas,
+       Ming, Zhu, Damien, Christophe, Chaitanya)
+    
+    * tag 'for-6.11/block-20240710' of git://git.kernel.dk/linux: (206 commits)
+      floppy: add missing MODULE_DESCRIPTION() macro
+      loop: add missing MODULE_DESCRIPTION() macro
+      ublk_drv: add missing MODULE_DESCRIPTION() macro
+      xen/blkback: add missing MODULE_DESCRIPTION() macro
+      block/rnbd: Constify struct kobj_type
+      block: take offset into account in blk_bvec_map_sg again
+      block: fix get_max_segment_size() warning
+      loop: Don't bother validating blocksize
+      virtio_blk: Don't bother validating blocksize
+      null_blk: Don't bother validating blocksize
+      block: Validate logical block size in blk_validate_limits()
+      virtio_blk: Fix default logical block size fallback
+      nvmet-auth: fix nvmet_auth hash error handling
+      nvme: implement ->get_unique_id
+      block: pass a phys_addr_t to get_max_segment_size
+      block: add a bvec_phys helper
+      blk-lib: check for kill signal in ioctl BLKZEROOUT
+      block: limit the Write Zeroes to manually writing zeroes fallback
+      block: refacto blkdev_issue_zeroout
+      block: move read-only and supported checks into (__)blkdev_issue_zeroout
+      ...
+
+diff --cc fs/stat.c
+index 6f65b3456cad,bd0698dfd7b3..89ce1be56310
+--- a/fs/stat.c
++++ b/fs/stat.c
+@@@ -214,43 -245,6 +245,43 @@@ int getname_statx_lookup_flags(int flag
+  	return lookup_flags;
+  }
+  
+ +static int vfs_statx_path(struct path *path, int flags, struct kstat *stat,
+ +			  u32 request_mask)
+ +{
+ +	int error = vfs_getattr(path, stat, request_mask, flags);
+ +
+ +	if (request_mask & STATX_MNT_ID_UNIQUE) {
+ +		stat->mnt_id = real_mount(path->mnt)->mnt_id_unique;
+ +		stat->result_mask |= STATX_MNT_ID_UNIQUE;
+ +	} else {
+ +		stat->mnt_id = real_mount(path->mnt)->mnt_id;
+ +		stat->result_mask |= STATX_MNT_ID;
+ +	}
+ +
+ +	if (path_mounted(path))
+ +		stat->attributes |= STATX_ATTR_MOUNT_ROOT;
+ +	stat->attributes_mask |= STATX_ATTR_MOUNT_ROOT;
+ +
+- 	/* Handle STATX_DIOALIGN for block devices. */
+- 	if (request_mask & STATX_DIOALIGN) {
+- 		struct inode *inode = d_backing_inode(path->dentry);
+- 
+- 		if (S_ISBLK(inode->i_mode))
+- 			bdev_statx_dioalign(inode, stat);
+- 	}
+++	/*
+++	 * If this is a block device inode, override the filesystem
+++	 * attributes with the block device specific parameters that need to be
+++	 * obtained from the bdev backing inode.
+++	 */
+++	if (S_ISBLK(stat->mode))
+++		bdev_statx(path, stat, request_mask);
+ +
+ +	return error;
+ +}
+ +
+ +static int vfs_statx_fd(int fd, int flags, struct kstat *stat,
+ +			  u32 request_mask)
+ +{
+ +	CLASS(fd_raw, f)(fd);
+ +	if (!f.file)
+ +		return -EBADF;
+ +	return vfs_statx_path(&f.file->f_path, flags, stat, request_mask);
+ +}
+ +
+  /**
+   * vfs_statx - Get basic and extra attributes by filename
+   * @dfd: A file descriptor representing the base dir for a relative filename

@@ -1,0 +1,167 @@
+commit ccb6ed426f10ac4f742efa7d897c266aa10ac64a
+Author: Vladimir Oltean <vladimir.oltean@nxp.com>
+Date:   Wed Mar 16 22:41:40 2022 +0200
+
+    net: mscc: ocelot: add port mirroring support using tc-matchall
+    
+    Ocelot switches perform port-based ingress mirroring if
+    ANA:PORT:PORT_CFG field SRC_MIRROR_ENA is set, and egress mirroring if
+    the port is in ANA:ANA:EMIRRORPORTS.
+    
+    Both ingress-mirrored and egress-mirrored frames are copied to the port
+    mask from ANA:ANA:MIRRORPORTS.
+    
+    So the choice of limiting to a single mirror port via ocelot_mirror_get()
+    and ocelot_mirror_put() may seem bizarre, but the hardware model doesn't
+    map very well to the user space model. If the user wants to mirror the
+    ingress of swp1 towards swp2 and the ingress of swp3 towards swp4, we'd
+    have to program ANA:ANA:MIRRORPORTS with BIT(2) | BIT(4), and that would
+    make swp1 be mirrored towards swp4 too, and swp3 towards swp2. But there
+    are no tc-matchall rules to describe those actions.
+    
+    Now, we could offload a matchall rule with multiple mirred actions, one
+    per desired mirror port, and force the user to stick to the multi-action
+    rule format for subsequent matchall filters. But both DSA and ocelot
+    have the flow_offload_has_one_action() check for the matchall offload,
+    plus the fact that it will get cumbersome to cross-check matchall
+    mirrors with flower mirrors (which will be added in the next patch).
+    
+    As a result, we limit the configuration to a single mirror port, with
+    the possibility of lifting the restriction in the future.
+    
+    Frames injected from the CPU don't get egress-mirrored, since they are
+    sent with the BYPASS bit in the injection frame header, and this
+    bypasses the analyzer module (effectively also the mirroring logic).
+    I don't know what to do/say about this.
+    
+    Functionality was tested with:
+    
+    tc qdisc add dev swp3 clsact
+    tc filter add dev swp3 ingress \
+            matchall skip_sw \
+            action mirred egress mirror dev swp1
+    
+    and pinging through swp3, while seeing that the ICMP replies are
+    mirrored towards swp1.
+    
+    Signed-off-by: Vladimir Oltean <vladimir.oltean@nxp.com>
+    Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+diff --git a/drivers/net/ethernet/mscc/ocelot_net.c b/drivers/net/ethernet/mscc/ocelot_net.c
+index a95e2fbbb975..247bc105bdd2 100644
+--- a/drivers/net/ethernet/mscc/ocelot_net.c
++++ b/drivers/net/ethernet/mscc/ocelot_net.c
+@@ -20,6 +20,8 @@
+ 
+ #define OCELOT_MAC_QUIRKS	OCELOT_QUIRK_QSGMII_PORTS_MUST_BE_UP
+ 
++static bool ocelot_netdevice_dev_check(const struct net_device *dev);
++
+ static struct ocelot *devlink_port_to_ocelot(struct devlink_port *dlp)
+ {
+ 	return devlink_priv(dlp->devlink);
+@@ -257,6 +259,49 @@ static int ocelot_setup_tc_cls_matchall_police(struct ocelot_port_private *priv,
+ 	return 0;
+ }
+ 
++static int ocelot_setup_tc_cls_matchall_mirred(struct ocelot_port_private *priv,
++					       struct tc_cls_matchall_offload *f,
++					       bool ingress,
++					       struct netlink_ext_ack *extack)
++{
++	struct flow_action *action = &f->rule->action;
++	struct ocelot *ocelot = priv->port.ocelot;
++	struct ocelot_port_private *other_priv;
++	const struct flow_action_entry *a;
++	int err;
++
++	if (f->common.protocol != htons(ETH_P_ALL))
++		return -EOPNOTSUPP;
++
++	if (!flow_action_basic_hw_stats_check(action, extack))
++		return -EOPNOTSUPP;
++
++	a = &action->entries[0];
++	if (!a->dev)
++		return -EINVAL;
++
++	if (!ocelot_netdevice_dev_check(a->dev)) {
++		NL_SET_ERR_MSG_MOD(extack,
++				   "Destination not an ocelot port");
++		return -EOPNOTSUPP;
++	}
++
++	other_priv = netdev_priv(a->dev);
++
++	err = ocelot_port_mirror_add(ocelot, priv->chip_port,
++				     other_priv->chip_port, ingress, extack);
++	if (err)
++		return err;
++
++	if (ingress)
++		priv->tc.ingress_mirred_id = f->cookie;
++	else
++		priv->tc.egress_mirred_id = f->cookie;
++	priv->tc.offload_cnt++;
++
++	return 0;
++}
++
+ static int ocelot_del_tc_cls_matchall_police(struct ocelot_port_private *priv,
+ 					     struct netlink_ext_ack *extack)
+ {
+@@ -277,6 +322,24 @@ static int ocelot_del_tc_cls_matchall_police(struct ocelot_port_private *priv,
+ 	return 0;
+ }
+ 
++static int ocelot_del_tc_cls_matchall_mirred(struct ocelot_port_private *priv,
++					     bool ingress,
++					     struct netlink_ext_ack *extack)
++{
++	struct ocelot *ocelot = priv->port.ocelot;
++	int port = priv->chip_port;
++
++	ocelot_port_mirror_del(ocelot, port, ingress);
++
++	if (ingress)
++		priv->tc.ingress_mirred_id = 0;
++	else
++		priv->tc.egress_mirred_id = 0;
++	priv->tc.offload_cnt--;
++
++	return 0;
++}
++
+ static int ocelot_setup_tc_cls_matchall(struct ocelot_port_private *priv,
+ 					struct tc_cls_matchall_offload *f,
+ 					bool ingress)
+@@ -294,7 +357,7 @@ static int ocelot_setup_tc_cls_matchall(struct ocelot_port_private *priv,
+ 
+ 		if (priv->tc.block_shared) {
+ 			NL_SET_ERR_MSG_MOD(extack,
+-					   "Rate limit is not supported on shared blocks");
++					   "Matchall offloads not supported on shared blocks");
+ 			return -EOPNOTSUPP;
+ 		}
+ 
+@@ -306,6 +369,10 @@ static int ocelot_setup_tc_cls_matchall(struct ocelot_port_private *priv,
+ 								   ingress,
+ 								   extack);
+ 			break;
++		case FLOW_ACTION_MIRRED:
++			return ocelot_setup_tc_cls_matchall_mirred(priv, f,
++								   ingress,
++								   extack);
+ 		default:
+ 			NL_SET_ERR_MSG_MOD(extack, "Unsupported action");
+ 			return -EOPNOTSUPP;
+@@ -317,6 +384,10 @@ static int ocelot_setup_tc_cls_matchall(struct ocelot_port_private *priv,
+ 
+ 		if (f->cookie == priv->tc.police_id)
+ 			return ocelot_del_tc_cls_matchall_police(priv, extack);
++		else if (f->cookie == priv->tc.ingress_mirred_id ||
++			 f->cookie == priv->tc.egress_mirred_id)
++			return ocelot_del_tc_cls_matchall_mirred(priv, ingress,
++								 extack);
+ 		else
+ 			return -ENOENT;

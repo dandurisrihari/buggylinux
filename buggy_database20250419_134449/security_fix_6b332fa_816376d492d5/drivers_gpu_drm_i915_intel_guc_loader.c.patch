@@ -1,0 +1,96 @@
+commit 6b332fa20f671265638d1d62496f9607c5f6e92f
+Author: Arun Siluvery <arun.siluvery@linux.intel.com>
+Date:   Mon Apr 4 18:50:56 2016 +0100
+
+    drm/i915/guc: reset GuC and retry on firmware load failure
+    
+    Due to timing issues in the HW, some of the status bits required for GuC
+    authentication occasionally don't get set; when that happens, the GuC
+    cannot be initialized and we will be left with a wedged GPU. The W/A
+    suggested is to perform a soft reset of the GuC and attempt to reload
+    the F/W again for few times before giving up.
+    
+    As the failure is dependent on timing, tests performed by triggering
+    manual full gpu reset (i915_wedged) showed that we could sometimes hit
+    this after several thousand iterations, but sometimes tests ran even
+    longer without any issues. Reset and reload mechanism proved helpful
+    when we indeed hit f/w load failure, so it is better to include this
+    to improve driver stability.
+    
+    This change implements the following WAs,
+    
+            WaEnableuKernelHeaderValidFix:skl,bxt
+            WaEnableGuCBootHashCheckNotSet:skl,bxt
+    
+    Signed-off-by: Arun Siluvery <arun.siluvery@linux.intel.com>
+    Signed-off-by: Dave Gordon <david.s.gordon@intel.com>
+    Reviewed-by: Alex Dai <yu.dai@intel.com>
+    Signed-off-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+
+diff --git a/drivers/gpu/drm/i915/intel_guc_loader.c b/drivers/gpu/drm/i915/intel_guc_loader.c
+index b4976f985369..d84c5608f068 100644
+--- a/drivers/gpu/drm/i915/intel_guc_loader.c
++++ b/drivers/gpu/drm/i915/intel_guc_loader.c
+@@ -353,6 +353,24 @@ static int guc_ucode_xfer(struct drm_i915_private *dev_priv)
+ 	return ret;
+ }
+ 
++static int i915_reset_guc(struct drm_i915_private *dev_priv)
++{
++	int ret;
++	u32 guc_status;
++
++	ret = intel_guc_reset(dev_priv);
++	if (ret) {
++		DRM_ERROR("GuC reset failed, ret = %d\n", ret);
++		return ret;
++	}
++
++	guc_status = I915_READ(GUC_STATUS);
++	WARN(!(guc_status & GS_MIA_IN_RESET),
++	     "GuC status: 0x%x, MIA core expected to be in reset\n", guc_status);
++
++	return ret;
++}
++
+ /**
+  * intel_guc_ucode_load() - load GuC uCode into the device
+  * @dev:	drm device
+@@ -417,9 +435,36 @@ int intel_guc_ucode_load(struct drm_device *dev)
+ 	if (err)
+ 		goto fail;
+ 
++	/*
++	 * WaEnableuKernelHeaderValidFix:skl,bxt
++	 * For BXT, this is only upto B0 but below WA is required for later
++	 * steppings also so this is extended as well.
++	 */
++	/* WaEnableGuCBootHashCheckNotSet:skl,bxt */
+ 	err = guc_ucode_xfer(dev_priv);
+-	if (err)
+-		goto fail;
++	if (err) {
++		int retries = 3;
++
++		DRM_ERROR("GuC fw load failed, err=%d, attempting reset and retry\n", err);
++
++		while (retries--) {
++			err = i915_reset_guc(dev_priv);
++			if (err)
++				break;
++
++			err = guc_ucode_xfer(dev_priv);
++			if (!err) {
++				DRM_DEBUG_DRIVER("GuC fw reload succeeded after reset\n");
++				break;
++			}
++			DRM_DEBUG_DRIVER("GuC fw reload retries left: %d\n", retries);
++		}
++
++		if (err) {
++			DRM_ERROR("GuC fw reload attempt failed, ret=%d\n", err);
++			goto fail;
++		}
++	}
+ 
+ 	guc_fw->guc_fw_load_status = GUC_FIRMWARE_SUCCESS;

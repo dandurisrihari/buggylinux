@@ -1,0 +1,389 @@
+diff --git a/Documentation/core-api/kernel-api.rst b/Documentation/core-api/kernel-api.rst
+index 06f4ab122697..0d0c4f87057c 100644
+--- a/Documentation/core-api/kernel-api.rst
++++ b/Documentation/core-api/kernel-api.rst
+@@ -36,6 +36,9 @@ String Conversions
+ String Manipulation
+ -------------------
+ 
++.. kernel-doc:: include/linux/fortify-string.h
++   :internal:
++
+ .. kernel-doc:: lib/string.c
+    :export:
+ 
+diff --git a/include/linux/fortify-string.h b/include/linux/fortify-string.h
+index 0f00a551939a..e5b39b1cc2fc 100644
+--- a/include/linux/fortify-string.h
++++ b/include/linux/fortify-string.h
+@@ -106,13 +106,13 @@ extern char *__underlying_strncpy(char *p, const char *q, __kernel_size_t size)
+  * Instead, please choose an alternative, so that the expectation
+  * of @p's contents is unambiguous:
+  *
+- * +--------------------+-----------------+------------+
+- * | @p needs to be:    | padded to @size | not padded |
+- * +====================+=================+============+
+- * |     NUL-terminated | strscpy_pad()   | strscpy()  |
+- * +--------------------+-----------------+------------+
+- * | not NUL-terminated | strtomem_pad()  | strtomem() |
+- * +--------------------+-----------------+------------+
++ * +--------------------+--------------------+------------+
++ * | **p** needs to be: | padded to **size** | not padded |
++ * +====================+====================+============+
++ * |     NUL-terminated | strscpy_pad()      | strscpy()  |
++ * +--------------------+--------------------+------------+
++ * | not NUL-terminated | strtomem_pad()     | strtomem() |
++ * +--------------------+--------------------+------------+
+  *
+  * Note strscpy*()'s differing return values for detecting truncation,
+  * and strtomem*()'s expectation that the destination is marked with
+@@ -131,6 +131,21 @@ char *strncpy(char * const POS p, const char *q, __kernel_size_t size)
+ 	return __underlying_strncpy(p, q, size);
+ }
+ 
++/**
++ * strcat - Append a string to an existing string
++ *
++ * @p: pointer to NUL-terminated string to append to
++ * @q: pointer to NUL-terminated source string to append from
++ *
++ * Do not use this function. While FORTIFY_SOURCE tries to avoid
++ * read and write overflows, this is only possible when the
++ * destination buffer size is known to the compiler. Prefer
++ * building the string with formatting, via scnprintf() or similar.
++ * At the very least, use strncat().
++ *
++ * Returns @p.
++ *
++ */
+ __FORTIFY_INLINE __diagnose_as(__builtin_strcat, 1, 2)
+ char *strcat(char * const POS p, const char *q)
+ {
+@@ -144,6 +159,16 @@ char *strcat(char * const POS p, const char *q)
+ }
+ 
+ extern __kernel_size_t __real_strnlen(const char *, __kernel_size_t) __RENAME(strnlen);
++/**
++ * strnlen - Return bounded count of characters in a NUL-terminated string
++ *
++ * @p: pointer to NUL-terminated string to count.
++ * @maxlen: maximum number of characters to count.
++ *
++ * Returns number of characters in @p (NOT including the final NUL), or
++ * @maxlen, if no NUL has been found up to there.
++ *
++ */
+ __FORTIFY_INLINE __kernel_size_t strnlen(const char * const POS p, __kernel_size_t maxlen)
+ {
+ 	size_t p_size = __member_size(p);
+@@ -169,6 +194,19 @@ __FORTIFY_INLINE __kernel_size_t strnlen(const char * const POS p, __kernel_size
+  * possible for strlen() to be used on compile-time strings for use in
+  * static initializers (i.e. as a constant expression).
+  */
++/**
++ * strlen - Return count of characters in a NUL-terminated string
++ *
++ * @p: pointer to NUL-terminated string to count.
++ *
++ * Do not use this function unless the string length is known at
++ * compile-time. When @p is unterminated, this function may crash
++ * or return unexpected counts that could lead to memory content
++ * exposures. Prefer strnlen().
++ *
++ * Returns number of characters in @p (NOT including the final NUL).
++ *
++ */
+ #define strlen(p)							\
+ 	__builtin_choose_expr(__is_constexpr(__builtin_strlen(p)),	\
+ 		__builtin_strlen(p), __fortify_strlen(p))
+@@ -187,8 +225,26 @@ __kernel_size_t __fortify_strlen(const char * const POS p)
+ 	return ret;
+ }
+ 
+-/* defined after fortified strlen to reuse it */
++/* Defined after fortified strlen() to reuse it. */
+ extern size_t __real_strlcpy(char *, const char *, size_t) __RENAME(strlcpy);
++/**
++ * strlcpy - Copy a string into another string buffer
++ *
++ * @p: pointer to destination of copy
++ * @q: pointer to NUL-terminated source string to copy
++ * @size: maximum number of bytes to write at @p
++ *
++ * If strlen(@q) >= @size, the copy of @q will be truncated at
++ * @size - 1 bytes. @p will always be NUL-terminated.
++ *
++ * Do not use this function. While FORTIFY_SOURCE tries to avoid
++ * over-reads when calculating strlen(@q), it is still possible.
++ * Prefer strscpy(), though note its different return values for
++ * detecting truncation.
++ *
++ * Returns total number of bytes written to @p, including terminating NUL.
++ *
++ */
+ __FORTIFY_INLINE size_t strlcpy(char * const POS p, const char * const POS q, size_t size)
+ {
+ 	size_t p_size = __member_size(p);
+@@ -214,8 +270,32 @@ __FORTIFY_INLINE size_t strlcpy(char * const POS p, const char * const POS q, si
+ 	return q_len;
+ }
+ 
+-/* defined after fortified strnlen to reuse it */
++/* Defined after fortified strnlen() to reuse it. */
+ extern ssize_t __real_strscpy(char *, const char *, size_t) __RENAME(strscpy);
++/**
++ * strscpy - Copy a C-string into a sized buffer
++ *
++ * @p: Where to copy the string to
++ * @q: Where to copy the string from
++ * @size: Size of destination buffer
++ *
++ * Copy the source string @p, or as much of it as fits, into the destination
++ * @q buffer. The behavior is undefined if the string buffers overlap. The
++ * destination @p buffer is always NUL terminated, unless it's zero-sized.
++ *
++ * Preferred to strlcpy() since the API doesn't require reading memory
++ * from the source @q string beyond the specified @size bytes, and since
++ * the return value is easier to error-check than strlcpy()'s.
++ * In addition, the implementation is robust to the string changing out
++ * from underneath it, unlike the current strlcpy() implementation.
++ *
++ * Preferred to strncpy() since it always returns a valid string, and
++ * doesn't unnecessarily force the tail of the destination buffer to be
++ * zero padded. If padding is desired please use strscpy_pad().
++ *
++ * Returns the number of characters copied in @p (not including the
++ * trailing %NUL) or -E2BIG if @size is 0 or the copy of @q was truncated.
++ */
+ __FORTIFY_INLINE ssize_t strscpy(char * const POS p, const char * const POS q, size_t size)
+ {
+ 	size_t len;
+@@ -261,7 +341,26 @@ __FORTIFY_INLINE ssize_t strscpy(char * const POS p, const char * const POS q, s
+ 	return __real_strscpy(p, q, len);
+ }
+ 
+-/* defined after fortified strlen and strnlen to reuse them */
++/**
++ * strncat - Append a string to an existing string
++ *
++ * @p: pointer to NUL-terminated string to append to
++ * @q: pointer to source string to append from
++ * @count: Maximum bytes to read from @q
++ *
++ * Appends at most @count bytes from @q (stopping at the first
++ * NUL byte) after the NUL-terminated string at @p. @p will be
++ * NUL-terminated.
++ *
++ * Do not use this function. While FORTIFY_SOURCE tries to avoid
++ * read and write overflows, this is only possible when the sizes
++ * of @p and @q are known to the compiler. Prefer building the
++ * string with formatting, via scnprintf() or similar.
++ *
++ * Returns @p.
++ *
++ */
++/* Defined after fortified strlen() and strnlen() to reuse them. */
+ __FORTIFY_INLINE __diagnose_as(__builtin_strncat, 1, 2, 3)
+ char *strncat(char * const POS p, const char * const POS q, __kernel_size_t count)
+ {
+@@ -572,6 +671,20 @@ __FORTIFY_INLINE void *kmemdup(const void * const POS0 p, size_t size, gfp_t gfp
+ 	return __real_kmemdup(p, size, gfp);
+ }
+ 
++/**
++ * strcpy - Copy a string into another string buffer
++ *
++ * @p: pointer to destination of copy
++ * @q: pointer to NUL-terminated source string to copy
++ *
++ * Do not use this function. While FORTIFY_SOURCE tries to avoid
++ * overflows, this is only possible when the sizes of @q and @p are
++ * known to the compiler. Prefer strscpy(), though note its different
++ * return values for detecting truncation.
++ *
++ * Returns @p.
++ *
++ */
+ /* Defined after fortified strlen to reuse it. */
+ __FORTIFY_INLINE __diagnose_as(__builtin_strcpy, 1, 2)
+ char *strcpy(char * const POS p, const char * const POS q)
+diff --git a/lib/string.c b/lib/string.c
+index 3371d26a0e39..4fb566ea610f 100644
+--- a/lib/string.c
++++ b/lib/string.c
+@@ -76,11 +76,6 @@ EXPORT_SYMBOL(strcasecmp);
+ #endif
+ 
+ #ifndef __HAVE_ARCH_STRCPY
+-/**
+- * strcpy - Copy a %NUL terminated string
+- * @dest: Where to copy the string to
+- * @src: Where to copy the string from
+- */
+ char *strcpy(char *dest, const char *src)
+ {
+ 	char *tmp = dest;
+@@ -93,19 +88,6 @@ EXPORT_SYMBOL(strcpy);
+ #endif
+ 
+ #ifndef __HAVE_ARCH_STRNCPY
+-/**
+- * strncpy - Copy a length-limited, C-string
+- * @dest: Where to copy the string to
+- * @src: Where to copy the string from
+- * @count: The maximum number of bytes to copy
+- *
+- * The result is not %NUL-terminated if the source exceeds
+- * @count bytes.
+- *
+- * In the case where the length of @src is less than  that  of
+- * count, the remainder of @dest will be padded with %NUL.
+- *
+- */
+ char *strncpy(char *dest, const char *src, size_t count)
+ {
+ 	char *tmp = dest;
+@@ -122,17 +104,6 @@ EXPORT_SYMBOL(strncpy);
+ #endif
+ 
+ #ifndef __HAVE_ARCH_STRLCPY
+-/**
+- * strlcpy - Copy a C-string into a sized buffer
+- * @dest: Where to copy the string to
+- * @src: Where to copy the string from
+- * @size: size of destination buffer
+- *
+- * Compatible with ``*BSD``: the result is always a valid
+- * NUL-terminated string that fits in the buffer (unless,
+- * of course, the buffer size is zero). It does not pad
+- * out the result like strncpy() does.
+- */
+ size_t strlcpy(char *dest, const char *src, size_t size)
+ {
+ 	size_t ret = strlen(src);
+@@ -148,30 +119,6 @@ EXPORT_SYMBOL(strlcpy);
+ #endif
+ 
+ #ifndef __HAVE_ARCH_STRSCPY
+-/**
+- * strscpy - Copy a C-string into a sized buffer
+- * @dest: Where to copy the string to
+- * @src: Where to copy the string from
+- * @count: Size of destination buffer
+- *
+- * Copy the string, or as much of it as fits, into the dest buffer.  The
+- * behavior is undefined if the string buffers overlap.  The destination
+- * buffer is always NUL terminated, unless it's zero-sized.
+- *
+- * Preferred to strlcpy() since the API doesn't require reading memory
+- * from the src string beyond the specified "count" bytes, and since
+- * the return value is easier to error-check than strlcpy()'s.
+- * In addition, the implementation is robust to the string changing out
+- * from underneath it, unlike the current strlcpy() implementation.
+- *
+- * Preferred to strncpy() since it always returns a valid string, and
+- * doesn't unnecessarily force the tail of the destination buffer to be
+- * zeroed.  If zeroing is desired please use strscpy_pad().
+- *
+- * Returns:
+- * * The number of characters copied (not including the trailing %NUL)
+- * * -E2BIG if count is 0 or @src was truncated.
+- */
+ ssize_t strscpy(char *dest, const char *src, size_t count)
+ {
+ 	const struct word_at_a_time constants = WORD_AT_A_TIME_CONSTANTS;
+@@ -266,11 +213,6 @@ char *stpcpy(char *__restrict__ dest, const char *__restrict__ src)
+ EXPORT_SYMBOL(stpcpy);
+ 
+ #ifndef __HAVE_ARCH_STRCAT
+-/**
+- * strcat - Append one %NUL-terminated string to another
+- * @dest: The string to be appended to
+- * @src: The string to append to it
+- */
+ char *strcat(char *dest, const char *src)
+ {
+ 	char *tmp = dest;
+@@ -285,15 +227,6 @@ EXPORT_SYMBOL(strcat);
+ #endif
+ 
+ #ifndef __HAVE_ARCH_STRNCAT
+-/**
+- * strncat - Append a length-limited, C-string to another
+- * @dest: The string to be appended to
+- * @src: The string to append to it
+- * @count: The maximum numbers of bytes to copy
+- *
+- * Note that in contrast to strncpy(), strncat() ensures the result is
+- * terminated.
+- */
+ char *strncat(char *dest, const char *src, size_t count)
+ {
+ 	char *tmp = dest;
+@@ -314,12 +247,6 @@ EXPORT_SYMBOL(strncat);
+ #endif
+ 
+ #ifndef __HAVE_ARCH_STRLCAT
+-/**
+- * strlcat - Append a length-limited, C-string to another
+- * @dest: The string to be appended to
+- * @src: The string to append to it
+- * @count: The size of the destination buffer.
+- */
+ size_t strlcat(char *dest, const char *src, size_t count)
+ {
+ 	size_t dsize = strlen(dest);
+@@ -484,10 +411,6 @@ EXPORT_SYMBOL(strnchr);
+ #endif
+ 
+ #ifndef __HAVE_ARCH_STRLEN
+-/**
+- * strlen - Find the length of a string
+- * @s: The string to be sized
+- */
+ size_t strlen(const char *s)
+ {
+ 	const char *sc;
+@@ -500,11 +423,6 @@ EXPORT_SYMBOL(strlen);
+ #endif
+ 
+ #ifndef __HAVE_ARCH_STRNLEN
+-/**
+- * strnlen - Find the length of a length-limited string
+- * @s: The string to be sized
+- * @count: The maximum number of bytes to search
+- */
+ size_t strnlen(const char *s, size_t count)
+ {
+ 	const char *sc;
+diff --git a/scripts/kernel-doc b/scripts/kernel-doc
+index aea04365bc69..adbc4d307770 100755
+--- a/scripts/kernel-doc
++++ b/scripts/kernel-doc
+@@ -1448,6 +1448,8 @@ sub create_parameterlist($$$$) {
+     foreach my $arg (split($splitter, $args)) {
+ 	# strip comments
+ 	$arg =~ s/\/\*.*\*\///;
++	# ignore argument attributes
++	$arg =~ s/\sPOS0?\s/ /;
+ 	# strip leading/trailing spaces
+ 	$arg =~ s/^\s*//;
+ 	$arg =~ s/\s*$//;
+@@ -1657,6 +1659,7 @@ sub dump_function($$) {
+     $prototype =~ s/^__inline +//;
+     $prototype =~ s/^__always_inline +//;
+     $prototype =~ s/^noinline +//;
++    $prototype =~ s/^__FORTIFY_INLINE +//;
+     $prototype =~ s/__init +//;
+     $prototype =~ s/__init_or_module +//;
+     $prototype =~ s/__deprecated +//;
+@@ -1666,7 +1669,8 @@ sub dump_function($$) {
+     $prototype =~ s/__weak +//;
+     $prototype =~ s/__sched +//;
+     $prototype =~ s/__printf\s*\(\s*\d*\s*,\s*\d*\s*\) +//;
+-    $prototype =~ s/__alloc_size\s*\(\s*\d+\s*(?:,\s*\d+\s*)?\) +//;
++    $prototype =~ s/__(?:re)?alloc_size\s*\(\s*\d+\s*(?:,\s*\d+\s*)?\) +//;
++    $prototype =~ s/__diagnose_as\s*\(\s*\S+\s*(?:,\s*\d+\s*)*\) +//;
+     my $define = $prototype =~ s/^#\s*define\s+//; #ak added
+     $prototype =~ s/__attribute_const__ +//;
+     $prototype =~ s/__attribute__\s*\(\(

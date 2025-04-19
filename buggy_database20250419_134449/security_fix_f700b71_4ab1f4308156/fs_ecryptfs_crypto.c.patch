@@ -1,0 +1,56 @@
+commit f700b71927017ca5697e8a24fd2ad5d3e06489d6
+Author: Justin Stitt <justinstitt@google.com>
+Date:   Thu Mar 21 00:38:54 2024 +0000
+
+    fs: ecryptfs: replace deprecated strncpy with strscpy
+    
+    strncpy() is deprecated for use on NUL-terminated destination strings
+    [1] and as such we should prefer more robust and less ambiguous string
+    interfaces. A good alternative is strscpy() as it guarantees
+    NUL-termination on the destination buffer.
+    
+    In crypto.c:
+    We expect cipher_name to be NUL-terminated based on its use with
+    the C-string format specifier %s and with other string apis like
+    strlen():
+    |       printk(KERN_ERR "Error attempting to initialize key TFM "
+    |               "cipher with name = [%s]; rc = [%d]\n",
+    |               tmp_tfm->cipher_name, rc);
+    and
+    |       int cipher_name_len = strlen(cipher_name);
+    
+    In main.c:
+    We can remove the manual NUL-byte assignments as well as the pointers to
+    destinations (which I assume only existed to trim down on line length?)
+    in favor of directly using the destination buffer which allows the
+    compiler to get size information -- enabling the usage of the new
+    2-argument strscpy().
+    
+    Note that this patch relies on the _new_ 2-argument versions of
+    strscpy() and strscpy_pad() introduced in Commit e6584c3964f2f ("string:
+    Allow 2-argument strscpy()").
+    
+    Link: https://www.kernel.org/doc/html/latest/process/deprecated.html#strncpy-on-nul-terminated-strings [1]
+    Link: https://manpages.debian.org/testing/linux-manual-4.8/strscpy.9.en.html [2]
+    Link: https://github.com/KSPP/linux/issues/90
+    Cc:  <linux-hardening@vger.kernel.org>
+    Signed-off-by: Justin Stitt <justinstitt@google.com>
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Link: https://lore.kernel.org/r/20240321-strncpy-fs-ecryptfs-crypto-c-v1-1-d78b74c214ac@google.com
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+
+diff --git a/fs/ecryptfs/crypto.c b/fs/ecryptfs/crypto.c
+index 2fe0f3af1a08..d39a1a69fecc 100644
+--- a/fs/ecryptfs/crypto.c
++++ b/fs/ecryptfs/crypto.c
+@@ -1606,9 +1606,7 @@ ecryptfs_add_new_key_tfm(struct ecryptfs_key_tfm **key_tfm, char *cipher_name,
+ 		goto out;
+ 	}
+ 	mutex_init(&tmp_tfm->key_tfm_mutex);
+-	strncpy(tmp_tfm->cipher_name, cipher_name,
+-		ECRYPTFS_MAX_CIPHER_NAME_SIZE);
+-	tmp_tfm->cipher_name[ECRYPTFS_MAX_CIPHER_NAME_SIZE] = '\0';
++	strscpy(tmp_tfm->cipher_name, cipher_name);
+ 	tmp_tfm->key_size = key_size;
+ 	rc = ecryptfs_process_key_cipher(&tmp_tfm->key_tfm,
+ 					 tmp_tfm->cipher_name,

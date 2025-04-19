@@ -1,0 +1,58 @@
+commit dea0d5a2fde62237ff14c41cb05dd151cebf84c0
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Fri Sep 30 23:00:08 2022 +0000
+
+    KVM: x86: Exempt pending triple fault from event injection sanity check
+    
+    Exempt pending triple faults, a.k.a. KVM_REQ_TRIPLE_FAULT, when asserting
+    that KVM didn't attempt to queue a new exception during event injection.
+    KVM needs to emulate the injection itself when emulating Real Mode due to
+    lack of unrestricted guest support (VMX) and will queue a triple fault if
+    that emulation fails.
+    
+    Ideally the assertion would more precisely filter out the emulated Real
+    Mode triple fault case, but rmode.vm86_active is buried in vcpu_vmx and
+    can't be queried without a new kvm_x86_ops.  And unlike "regular"
+    exceptions, triple fault cannot put the vCPU into an infinite loop; the
+    triple fault will force either an exit to userspace or a nested VM-Exit,
+    and triple fault after nested VM-Exit will force an exit to userspace.
+    I.e. there is no functional issue, so just suppress the warning for
+    triple faults.
+    
+    Opportunistically convert the warning to a one-time thing, when it
+    fires, it fires _a lot_, and is usually user triggerable, i.e. can be
+    used to spam the kernel log.
+    
+    Fixes: 7055fb113116 ("KVM: x86: Treat pending TRIPLE_FAULT requests as pending exceptions")
+    Reported-by: kernel test robot <yujie.liu@intel.com>
+    Link: https://lore.kernel.org/r/202209301338.aca913c3-yujie.liu@intel.com
+    Signed-off-by: Sean Christopherson <seanjc@google.com>
+    Message-Id: <20220930230008.1636044-1-seanjc@google.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 9cf1ba865562..104b72df33d6 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -10044,7 +10044,20 @@ static int kvm_check_and_inject_events(struct kvm_vcpu *vcpu,
+ 	    kvm_x86_ops.nested_ops->has_events(vcpu))
+ 		*req_immediate_exit = true;
+ 
+-	WARN_ON(kvm_is_exception_pending(vcpu));
++	/*
++	 * KVM must never queue a new exception while injecting an event; KVM
++	 * is done emulating and should only propagate the to-be-injected event
++	 * to the VMCS/VMCB.  Queueing a new exception can put the vCPU into an
++	 * infinite loop as KVM will bail from VM-Enter to inject the pending
++	 * exception and start the cycle all over.
++	 *
++	 * Exempt triple faults as they have special handling and won't put the
++	 * vCPU into an infinite loop.  Triple fault can be queued when running
++	 * VMX without unrestricted guest, as that requires KVM to emulate Real
++	 * Mode events (see kvm_inject_realmode_interrupt()).
++	 */
++	WARN_ON_ONCE(vcpu->arch.exception.pending ||
++		     vcpu->arch.exception_vmexit.pending);
+ 	return 0;
+ 
+ out:

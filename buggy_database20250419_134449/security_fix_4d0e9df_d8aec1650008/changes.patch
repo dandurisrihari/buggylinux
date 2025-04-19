@@ -1,0 +1,137 @@
+diff --git a/include/linux/uaccess.h b/include/linux/uaccess.h
+index ef084eacaa7c..1b8c9d6162bc 100644
+--- a/include/linux/uaccess.h
++++ b/include/linux/uaccess.h
+@@ -2,6 +2,7 @@
+ #ifndef __LINUX_UACCESS_H__
+ #define __LINUX_UACCESS_H__
+ 
++#include <linux/fault-inject-usercopy.h>
+ #include <linux/instrumented.h>
+ #include <linux/minmax.h>
+ #include <linux/sched.h>
+@@ -84,6 +85,8 @@ static __always_inline __must_check unsigned long
+ __copy_from_user(void *to, const void __user *from, unsigned long n)
+ {
+ 	might_fault();
++	if (should_fail_usercopy())
++		return n;
+ 	instrument_copy_from_user(to, from, n);
+ 	check_object_size(to, n, false);
+ 	return raw_copy_from_user(to, from, n);
+@@ -105,6 +108,8 @@ __copy_from_user(void *to, const void __user *from, unsigned long n)
+ static __always_inline __must_check unsigned long
+ __copy_to_user_inatomic(void __user *to, const void *from, unsigned long n)
+ {
++	if (should_fail_usercopy())
++		return n;
+ 	instrument_copy_to_user(to, from, n);
+ 	check_object_size(from, n, true);
+ 	return raw_copy_to_user(to, from, n);
+@@ -114,6 +119,8 @@ static __always_inline __must_check unsigned long
+ __copy_to_user(void __user *to, const void *from, unsigned long n)
+ {
+ 	might_fault();
++	if (should_fail_usercopy())
++		return n;
+ 	instrument_copy_to_user(to, from, n);
+ 	check_object_size(from, n, true);
+ 	return raw_copy_to_user(to, from, n);
+@@ -125,7 +132,7 @@ _copy_from_user(void *to, const void __user *from, unsigned long n)
+ {
+ 	unsigned long res = n;
+ 	might_fault();
+-	if (likely(access_ok(from, n))) {
++	if (!should_fail_usercopy() && likely(access_ok(from, n))) {
+ 		instrument_copy_from_user(to, from, n);
+ 		res = raw_copy_from_user(to, from, n);
+ 	}
+@@ -143,6 +150,8 @@ static inline __must_check unsigned long
+ _copy_to_user(void __user *to, const void *from, unsigned long n)
+ {
+ 	might_fault();
++	if (should_fail_usercopy())
++		return n;
+ 	if (access_ok(to, n)) {
+ 		instrument_copy_to_user(to, from, n);
+ 		n = raw_copy_to_user(to, from, n);
+diff --git a/lib/iov_iter.c b/lib/iov_iter.c
+index 14cae2584db4..1635111c5bd2 100644
+--- a/lib/iov_iter.c
++++ b/lib/iov_iter.c
+@@ -2,6 +2,7 @@
+ #include <crypto/hash.h>
+ #include <linux/export.h>
+ #include <linux/bvec.h>
++#include <linux/fault-inject-usercopy.h>
+ #include <linux/uio.h>
+ #include <linux/pagemap.h>
+ #include <linux/slab.h>
+@@ -140,6 +141,8 @@
+ 
+ static int copyout(void __user *to, const void *from, size_t n)
+ {
++	if (should_fail_usercopy())
++		return n;
+ 	if (access_ok(to, n)) {
+ 		instrument_copy_to_user(to, from, n);
+ 		n = raw_copy_to_user(to, from, n);
+@@ -149,6 +152,8 @@ static int copyout(void __user *to, const void *from, size_t n)
+ 
+ static int copyin(void *to, const void __user *from, size_t n)
+ {
++	if (should_fail_usercopy())
++		return n;
+ 	if (access_ok(from, n)) {
+ 		instrument_copy_from_user(to, from, n);
+ 		n = raw_copy_from_user(to, from, n);
+diff --git a/lib/strncpy_from_user.c b/lib/strncpy_from_user.c
+index 34696a348864..e6d5fcc2cdf3 100644
+--- a/lib/strncpy_from_user.c
++++ b/lib/strncpy_from_user.c
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: GPL-2.0
+ #include <linux/compiler.h>
+ #include <linux/export.h>
++#include <linux/fault-inject-usercopy.h>
+ #include <linux/kasan-checks.h>
+ #include <linux/thread_info.h>
+ #include <linux/uaccess.h>
+@@ -99,6 +100,8 @@ long strncpy_from_user(char *dst, const char __user *src, long count)
+ 	unsigned long max_addr, src_addr;
+ 
+ 	might_fault();
++	if (should_fail_usercopy())
++		return -EFAULT;
+ 	if (unlikely(count <= 0))
+ 		return 0;
+ 
+diff --git a/lib/usercopy.c b/lib/usercopy.c
+index b26509f112f9..7413dd300516 100644
+--- a/lib/usercopy.c
++++ b/lib/usercopy.c
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0
+ #include <linux/bitops.h>
++#include <linux/fault-inject-usercopy.h>
+ #include <linux/instrumented.h>
+ #include <linux/uaccess.h>
+ 
+@@ -10,7 +11,7 @@ unsigned long _copy_from_user(void *to, const void __user *from, unsigned long n
+ {
+ 	unsigned long res = n;
+ 	might_fault();
+-	if (likely(access_ok(from, n))) {
++	if (!should_fail_usercopy() && likely(access_ok(from, n))) {
+ 		instrument_copy_from_user(to, from, n);
+ 		res = raw_copy_from_user(to, from, n);
+ 	}
+@@ -25,6 +26,8 @@ EXPORT_SYMBOL(_copy_from_user);
+ unsigned long _copy_to_user(void __user *to, const void *from, unsigned long n)
+ {
+ 	might_fault();
++	if (should_fail_usercopy())
++		return n;
+ 	if (likely(access_ok(to, n))) {
+ 		instrument_copy_to_user(to, from, n);
+ 		n = raw_copy_to_user(to, from, n);

@@ -1,0 +1,82 @@
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index 498270cfc71d..67733eef184c 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -1556,8 +1556,7 @@ static void vmx_queue_exception(struct kvm_vcpu *vcpu)
+ 		int inc_eip = 0;
+ 		if (kvm_exception_is_soft(nr))
+ 			inc_eip = vcpu->arch.event_exit_inst_len;
+-		if (kvm_inject_realmode_interrupt(vcpu, nr, inc_eip) != EMULATE_DONE)
+-			kvm_make_request(KVM_REQ_TRIPLE_FAULT, vcpu);
++		kvm_inject_realmode_interrupt(vcpu, nr, inc_eip);
+ 		return;
+ 	}
+ 
+@@ -4306,8 +4305,7 @@ static void vmx_inject_irq(struct kvm_vcpu *vcpu)
+ 		int inc_eip = 0;
+ 		if (vcpu->arch.interrupt.soft)
+ 			inc_eip = vcpu->arch.event_exit_inst_len;
+-		if (kvm_inject_realmode_interrupt(vcpu, irq, inc_eip) != EMULATE_DONE)
+-			kvm_make_request(KVM_REQ_TRIPLE_FAULT, vcpu);
++		kvm_inject_realmode_interrupt(vcpu, irq, inc_eip);
+ 		return;
+ 	}
+ 	intr = irq | INTR_INFO_VALID_MASK;
+@@ -4343,8 +4341,7 @@ static void vmx_inject_nmi(struct kvm_vcpu *vcpu)
+ 	vmx->loaded_vmcs->nmi_known_unmasked = false;
+ 
+ 	if (vmx->rmode.vm86_active) {
+-		if (kvm_inject_realmode_interrupt(vcpu, NMI_VECTOR, 0) != EMULATE_DONE)
+-			kvm_make_request(KVM_REQ_TRIPLE_FAULT, vcpu);
++		kvm_inject_realmode_interrupt(vcpu, NMI_VECTOR, 0);
+ 		return;
+ 	}
+ 
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index bdee7e39accb..92b6690d0512 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -6273,7 +6273,7 @@ static void init_emulate_ctxt(struct kvm_vcpu *vcpu)
+ 	vcpu->arch.emulate_regs_need_sync_from_vcpu = false;
+ }
+ 
+-int kvm_inject_realmode_interrupt(struct kvm_vcpu *vcpu, int irq, int inc_eip)
++void kvm_inject_realmode_interrupt(struct kvm_vcpu *vcpu, int irq, int inc_eip)
+ {
+ 	struct x86_emulate_ctxt *ctxt = &vcpu->arch.emulate_ctxt;
+ 	int ret;
+@@ -6285,14 +6285,13 @@ int kvm_inject_realmode_interrupt(struct kvm_vcpu *vcpu, int irq, int inc_eip)
+ 	ctxt->_eip = ctxt->eip + inc_eip;
+ 	ret = emulate_int_real(ctxt, irq);
+ 
+-	if (ret != X86EMUL_CONTINUE)
+-		return EMULATE_FAIL;
+-
+-	ctxt->eip = ctxt->_eip;
+-	kvm_rip_write(vcpu, ctxt->eip);
+-	kvm_set_rflags(vcpu, ctxt->eflags);
+-
+-	return EMULATE_DONE;
++	if (ret != X86EMUL_CONTINUE) {
++		kvm_make_request(KVM_REQ_TRIPLE_FAULT, vcpu);
++	} else {
++		ctxt->eip = ctxt->_eip;
++		kvm_rip_write(vcpu, ctxt->eip);
++		kvm_set_rflags(vcpu, ctxt->eflags);
++	}
+ }
+ EXPORT_SYMBOL_GPL(kvm_inject_realmode_interrupt);
+ 
+diff --git a/arch/x86/kvm/x86.h b/arch/x86/kvm/x86.h
+index b5274e2a53cf..dbf7442a822b 100644
+--- a/arch/x86/kvm/x86.h
++++ b/arch/x86/kvm/x86.h
+@@ -261,7 +261,7 @@ static inline bool kvm_check_has_quirk(struct kvm *kvm, u64 quirk)
+ }
+ 
+ void kvm_set_pending_timer(struct kvm_vcpu *vcpu);
+-int kvm_inject_realmode_interrupt(struct kvm_vcpu *vcpu, int irq, int inc_eip);
++void kvm_inject_realmode_interrupt(struct kvm_vcpu *vcpu, int irq, int inc_eip);
+ 
+ void kvm_write_tsc(struct kvm_vcpu *vcpu, struct msr_data *msr);
+ u64 get_kvmclock_ns(struct kvm *kvm);

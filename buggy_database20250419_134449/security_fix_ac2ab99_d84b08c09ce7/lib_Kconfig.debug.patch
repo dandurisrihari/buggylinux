@@ -1,0 +1,175 @@
+commit ac2ab99072cce553c78f326ea22d72856f570d88
+Merge: eadb2f47a3ce 1ce6c8d68f8a
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Tue May 24 11:58:10 2022 -0700
+
+    Merge tag 'random-5.19-rc1-for-linus' of git://git.kernel.org/pub/scm/linux/kernel/git/crng/random
+    
+    Pull random number generator updates from Jason Donenfeld:
+     "These updates continue to refine the work began in 5.17 and 5.18 of
+      modernizing the RNG's crypto and streamlining and documenting its
+      code.
+    
+      New for 5.19, the updates aim to improve entropy collection methods
+      and make some initial decisions regarding the "premature next" problem
+      and our threat model. The cloc utility now reports that random.c is
+      931 lines of code and 466 lines of comments, not that basic metrics
+      like that mean all that much, but at the very least it tells you that
+      this is very much a manageable driver now.
+    
+      Here's a summary of the various updates:
+    
+       - The random_get_entropy() function now always returns something at
+         least minimally useful. This is the primary entropy source in most
+         collectors, which in the best case expands to something like RDTSC,
+         but prior to this change, in the worst case it would just return 0,
+         contributing nothing. For 5.19, additional architectures are wired
+         up, and architectures that are entirely missing a cycle counter now
+         have a generic fallback path, which uses the highest resolution
+         clock available from the timekeeping subsystem.
+    
+         Some of those clocks can actually be quite good, despite the CPU
+         not having a cycle counter of its own, and going off-core for a
+         stamp is generally thought to increase jitter, something positive
+         from the perspective of entropy gathering. Done very early on in
+         the development cycle, this has been sitting in next getting some
+         testing for a while now and has relevant acks from the archs, so it
+         should be pretty well tested and fine, but is nonetheless the thing
+         I'll be keeping my eye on most closely.
+    
+       - Of particular note with the random_get_entropy() improvements is
+         MIPS, which, on CPUs that lack the c0 count register, will now
+         combine the high-speed but short-cycle c0 random register with the
+         lower-speed but long-cycle generic fallback path.
+    
+       - With random_get_entropy() now always returning something useful,
+         the interrupt handler now collects entropy in a consistent
+         construction.
+    
+       - Rather than comparing two samples of random_get_entropy() for the
+         jitter dance, the algorithm now tests many samples, and uses the
+         amount of differing ones to determine whether or not jitter entropy
+         is usable and how laborious it must be. The problem with comparing
+         only two samples was that if the cycle counter was extremely slow,
+         but just so happened to be on the cusp of a change, the slowness
+         wouldn't be detected. Taking many samples fixes that to some
+         degree.
+    
+         This, combined with the other improvements to random_get_entropy(),
+         should make future unification of /dev/random and /dev/urandom
+         maybe more possible. At the very least, were we to attempt it again
+         today (we're not), it wouldn't break any of Guenter's test rigs
+         that broke when we tried it with 5.18. So, not today, but perhaps
+         down the road, that's something we can revisit.
+    
+       - We attempt to reseed the RNG immediately upon waking up from system
+         suspend or hibernation, making use of the various timestamps about
+         suspend time and such available, as well as the usual inputs such
+         as RDRAND when available.
+    
+       - Batched randomness now falls back to ordinary randomness before the
+         RNG is initialized. This provides more consistent guarantees to the
+         types of random numbers being returned by the various accessors.
+    
+       - The "pre-init injection" code is now gone for good. I suspect you
+         in particular will be happy to read that, as I recall you
+         expressing your distaste for it a few months ago. Instead, to avoid
+         a "premature first" issue, while still allowing for maximal amount
+         of entropy availability during system boot, the first 128 bits of
+         estimated entropy are used immediately as it arrives, with the next
+         128 bits being buffered. And, as before, after the RNG has been
+         fully initialized, it winds up reseeding anyway a few seconds later
+         in most cases. This resulted in a pretty big simplification of the
+         initialization code and let us remove various ad-hoc mechanisms
+         like the ugly crng_pre_init_inject().
+    
+       - The RNG no longer pretends to handle the "premature next" security
+         model, something that various academics and other RNG designs have
+         tried to care about in the past. After an interesting mailing list
+         thread, these issues are thought to be a) mainly academic and not
+         practical at all, and b) actively harming the real security of the
+         RNG by delaying new entropy additions after a potential compromise,
+         making a potentially bad situation even worse. As well, in the
+         first place, our RNG never even properly handled the premature next
+         issue, so removing an incomplete solution to a fake problem was
+         particularly nice.
+    
+         This allowed for numerous other simplifications in the code, which
+         is a lot cleaner as a consequence. If you didn't see it before,
+         https://lore.kernel.org/lkml/YmlMGx6+uigkGiZ0@zx2c4.com/ may be a
+         thread worth skimming through.
+    
+       - While the interrupt handler received a separate code path years ago
+         that avoids locks by using per-cpu data structures and a faster
+         mixing algorithm, in order to reduce interrupt latency, input and
+         disk events that are triggered in hardirq handlers were still
+         hitting locks and more expensive algorithms. Those are now
+         redirected to use the faster per-cpu data structures.
+    
+       - Rather than having the fake-crypto almost-siphash-based random32
+         implementation be used right and left, and in many places where
+         cryptographically secure randomness is desirable, the batched
+         entropy code is now fast enough to replace that.
+    
+       - As usual, numerous code quality and documentation cleanups. For
+         example, the initialization state machine now uses enum symbolic
+         constants instead of just hard coding numbers everywhere.
+    
+       - Since the RNG initializes once, and then is always initialized
+         thereafter, a pretty heavy amount of code used during that
+         initialization is never used again. It is now completely cordoned
+         off using static branches and it winds up in the .text.unlikely
+         section so that it doesn't reduce cache compactness after the RNG
+         is ready.
+    
+       - A variety of functions meant for waiting on the RNG to be
+         initialized were only used by vsprintf, and in not a particularly
+         optimal way. Replacing that usage with a more ordinary setup made
+         it possible to remove those functions.
+    
+       - A cleanup of how we warn userspace about the use of uninitialized
+         /dev/urandom and uninitialized get_random_bytes() usage.
+         Interestingly, with the change you merged for 5.18 that attempts to
+         use jitter (but does not block if it can't), the majority of users
+         should never see those warnings for /dev/urandom at all now, and
+         the one for in-kernel usage is mainly a debug thing.
+    
+       - The file_operations struct for /dev/[u]random now implements
+         .read_iter and .write_iter instead of .read and .write, allowing it
+         to also implement .splice_read and .splice_write, which makes
+         splice(2) work again after it was broken here (and in many other
+         places in the tree) during the set_fs() removal. This was a bit of
+         a last minute arrival from Jens that hasn't had as much time to
+         bake, so I'll be keeping my eye on this as well, but it seems
+         fairly ordinary. Unfortunately, read_iter() is around 3% slower
+         than read() in my tests, which I'm not thrilled about. But Jens and
+         Al, spurred by this observation, seem to be making progress in
+         removing the bottlenecks on the iter paths in the VFS layer in
+         general, which should remove the performance gap for all drivers.
+    
+       - Assorted other bug fixes, cleanups, and optimizations.
+    
+       - A small SipHash cleanup"
+    
+    * tag 'random-5.19-rc1-for-linus' of git://git.kernel.org/pub/scm/linux/kernel/git/crng/random: (49 commits)
+      random: check for signals after page of pool writes
+      random: wire up fops->splice_{read,write}_iter()
+      random: convert to using fops->write_iter()
+      random: convert to using fops->read_iter()
+      random: unify batched entropy implementations
+      random: move randomize_page() into mm where it belongs
+      random: remove mostly unused async readiness notifier
+      random: remove get_random_bytes_arch() and add rng_has_arch_random()
+      random: move initialization functions out of hot pages
+      random: make consistent use of buf and len
+      random: use proper return types on get_random_{int,long}_wait()
+      random: remove extern from functions in header
+      random: use static branch for crng_ready()
+      random: credit architectural init the exact amount
+      random: handle latent entropy and command line from random_init()
+      random: use proper jiffies comparison macro
+      random: remove ratelimiting for in-kernel unseeded randomness
+      random: move initialization out of reseeding hot path
+      random: avoid initializing twice in credit race
+      random: use symbolic constants for crng_init states
+      ...

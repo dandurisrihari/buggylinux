@@ -1,0 +1,50 @@
+commit ef7c67257c9a0765bd1a53f83fd63d55a0f7b224
+Author: Johannes Berg <johannes.berg@intel.com>
+Date:   Sun Mar 1 09:10:06 2015 +0200
+
+    mac80211: don't do driver suspend with auth/assoc in progress
+    
+    Drivers can't really be expected to suspend properly while auth
+    or assoc is in progress since then they don't have any state
+    they could keep with WoWLAN, nor can they actually finish the
+    authentication or association. In fact, keeping this can cause
+    subtle issues with drivers like iwlwifi that refuse WoWLAN if
+    not associated, but have trouble figuring out what's going on
+    in the middle of association.
+    
+    In any case, regardless of possible driver issues in this area,
+    it doesn't make sense for mac80211 to try to WoWLAN-suspend in
+    the middle of such operations, so stop them before.
+    
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+diff --git a/net/mac80211/pm.c b/net/mac80211/pm.c
+index ca405b6b686d..bd185f38def1 100644
+--- a/net/mac80211/pm.c
++++ b/net/mac80211/pm.c
+@@ -61,7 +61,24 @@ int __ieee80211_suspend(struct ieee80211_hw *hw, struct cfg80211_wowlan *wowlan)
+ 
+ 	local->wowlan = wowlan && local->open_count;
+ 	if (local->wowlan) {
+-		int err = drv_suspend(local, wowlan);
++		int err;
++
++		/* Drivers don't expect to suspend while some operations like
++		 * authenticating or associating are in progress. It doesn't
++		 * make sense anyway to accept that, since the authentication
++		 * or association would never finish since the driver can't do
++		 * that on its own.
++		 * Thus, clean up in-progress auth/assoc first.
++		 */
++		list_for_each_entry(sdata, &local->interfaces, list) {
++			if (!ieee80211_sdata_running(sdata))
++				continue;
++			if (sdata->vif.type != NL80211_IFTYPE_STATION)
++				continue;
++			ieee80211_mgd_quiesce(sdata);
++		}
++
++		err = drv_suspend(local, wowlan);
+ 		if (err < 0) {
+ 			local->quiescing = false;
+ 			local->wowlan = false;

@@ -1,0 +1,46 @@
+commit ed5cc702d311c14b653323d76062b0294effa66e
+Author: Jan Kara <jack@suse.cz>
+Date:   Wed Nov 1 18:43:08 2023 +0100
+
+    block: Add config option to not allow writing to mounted devices
+    
+    Writing to mounted devices is dangerous and can lead to filesystem
+    corruption as well as crashes. Furthermore syzbot comes with more and
+    more involved examples how to corrupt block device under a mounted
+    filesystem leading to kernel crashes and reports we can do nothing
+    about. Add tracking of writers to each block device and a kernel cmdline
+    argument which controls whether other writeable opens to block devices
+    open with BLK_OPEN_RESTRICT_WRITES flag are allowed. We will make
+    filesystems use this flag for used devices.
+    
+    Note that this effectively only prevents modification of the particular
+    block device's page cache by other writers. The actual device content
+    can still be modified by other means - e.g. by issuing direct scsi
+    commands, by doing writes through devices lower in the storage stack
+    (e.g. in case loop devices, DM, or MD are involved) etc. But blocking
+    direct modifications of the block device page cache is enough to give
+    filesystems a chance to perform data validation when loading data from
+    the underlying storage and thus prevent kernel crashes.
+    
+    Syzbot can use this cmdline argument option to avoid uninteresting
+    crashes. Also users whose userspace setup does not need writing to
+    mounted block devices can set this option for hardening.
+    
+    Link: https://lore.kernel.org/all/60788e5d-5c7c-1142-e554-c21d709acfd9@linaro.org
+    Signed-off-by: Jan Kara <jack@suse.cz>
+    Link: https://lore.kernel.org/r/20231101174325.10596-3-jack@suse.cz
+    Reviewed-by: Jens Axboe <axboe@kernel.dk>
+    Signed-off-by: Christian Brauner <brauner@kernel.org>
+
+diff --git a/include/linux/blk_types.h b/include/linux/blk_types.h
+index 749203277fee..52e264d5a830 100644
+--- a/include/linux/blk_types.h
++++ b/include/linux/blk_types.h
+@@ -66,6 +66,7 @@ struct block_device {
+ #ifdef CONFIG_FAIL_MAKE_REQUEST
+ 	bool			bd_make_it_fail;
+ #endif
++	int			bd_writers;
+ 	/*
+ 	 * keep this out-of-line as it's both big and not needed in the fast
+ 	 * path

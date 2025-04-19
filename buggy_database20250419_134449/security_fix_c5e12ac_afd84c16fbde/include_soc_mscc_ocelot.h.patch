@@ -1,0 +1,53 @@
+commit c5e12ac3beb0dd3a718296b2d8af5528e9ab728e
+Author: Vladimir Oltean <vladimir.oltean@nxp.com>
+Date:   Thu Aug 15 03:07:04 2024 +0300
+
+    net: mscc: ocelot: serialize access to the injection/extraction groups
+    
+    As explained by Horatiu Vultur in commit 603ead96582d ("net: sparx5: Add
+    spinlock for frame transmission from CPU") which is for a similar
+    hardware design, multiple CPUs can simultaneously perform injection
+    or extraction. There are only 2 register groups for injection and 2
+    for extraction, and the driver only uses one of each. So we'd better
+    serialize access using spin locks, otherwise frame corruption is
+    possible.
+    
+    Note that unlike in sparx5, FDMA in ocelot does not have this issue
+    because struct ocelot_fdma_tx_ring already contains an xmit_lock.
+    
+    I guess this is mostly a problem for NXP LS1028A, as that is dual core.
+    I don't think VSC7514 is. So I'm blaming the commit where LS1028A (aka
+    the felix DSA driver) started using register-based packet injection and
+    extraction.
+    
+    Fixes: 0a6f17c6ae21 ("net: dsa: tag_ocelot_8021q: add support for PTP timestamping")
+    Signed-off-by: Vladimir Oltean <vladimir.oltean@nxp.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/include/soc/mscc/ocelot.h b/include/soc/mscc/ocelot.h
+index ed18e6bafc8d..462c653e1017 100644
+--- a/include/soc/mscc/ocelot.h
++++ b/include/soc/mscc/ocelot.h
+@@ -813,6 +813,9 @@ struct ocelot {
+ 	const u32 *const		*map;
+ 	struct list_head		stats_regions;
+ 
++	spinlock_t			inj_lock;
++	spinlock_t			xtr_lock;
++
+ 	u32				pool_size[OCELOT_SB_NUM][OCELOT_SB_POOL_NUM];
+ 	int				packet_buffer_size;
+ 	int				num_frame_refs;
+@@ -966,6 +969,12 @@ void __ocelot_target_write_ix(struct ocelot *ocelot, enum ocelot_target target,
+ 			      u32 val, u32 reg, u32 offset);
+ 
+ /* Packet I/O */
++void ocelot_lock_inj_grp(struct ocelot *ocelot, int grp);
++void ocelot_unlock_inj_grp(struct ocelot *ocelot, int grp);
++void ocelot_lock_xtr_grp(struct ocelot *ocelot, int grp);
++void ocelot_unlock_xtr_grp(struct ocelot *ocelot, int grp);
++void ocelot_lock_xtr_grp_bh(struct ocelot *ocelot, int grp);
++void ocelot_unlock_xtr_grp_bh(struct ocelot *ocelot, int grp);
+ bool ocelot_can_inject(struct ocelot *ocelot, int grp);
+ void ocelot_port_inject_frame(struct ocelot *ocelot, int port, int grp,
+ 			      u32 rew_op, struct sk_buff *skb);

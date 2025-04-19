@@ -1,0 +1,98 @@
+commit fef8f2b90edbd7089a4278021314f11f056b0cbb
+Author: Dmytro Maluka <dmy@semihalf.com>
+Date:   Wed Mar 22 21:43:44 2023 +0100
+
+    KVM: x86/ioapic: Resample the pending state of an IRQ when unmasking
+    
+    KVM irqfd based emulation of level-triggered interrupts doesn't work
+    quite correctly in some cases, particularly in the case of interrupts
+    that are handled in a Linux guest as oneshot interrupts (IRQF_ONESHOT).
+    Such an interrupt is acked to the device in its threaded irq handler,
+    i.e. later than it is acked to the interrupt controller (EOI at the end
+    of hardirq), not earlier.
+    
+    Linux keeps such interrupt masked until its threaded handler finishes,
+    to prevent the EOI from re-asserting an unacknowledged interrupt.
+    However, with KVM + vfio (or whatever is listening on the resamplefd)
+    we always notify resamplefd at the EOI, so vfio prematurely unmasks the
+    host physical IRQ, thus a new physical interrupt is fired in the host.
+    This extra interrupt in the host is not a problem per se. The problem is
+    that it is unconditionally queued for injection into the guest, so the
+    guest sees an extra bogus interrupt. [*]
+    
+    There are observed at least 2 user-visible issues caused by those
+    extra erroneous interrupts for a oneshot irq in the guest:
+    
+    1. System suspend aborted due to a pending wakeup interrupt from
+       ChromeOS EC (drivers/platform/chrome/cros_ec.c).
+    2. Annoying "invalid report id data" errors from ELAN0000 touchpad
+       (drivers/input/mouse/elan_i2c_core.c), flooding the guest dmesg
+       every time the touchpad is touched.
+    
+    The core issue here is that by the time when the guest unmasks the IRQ,
+    the physical IRQ line is no longer asserted (since the guest has
+    acked the interrupt to the device in the meantime), yet we
+    unconditionally inject the interrupt queued into the guest by the
+    previous resampling. So to fix the issue, we need a way to detect that
+    the IRQ is no longer pending, and cancel the queued interrupt in this
+    case.
+    
+    With IOAPIC we are not able to probe the physical IRQ line state
+    directly (at least not if the underlying physical interrupt controller
+    is an IOAPIC too), so in this patch we use irqfd resampler for that.
+    Namely, instead of injecting the queued interrupt, we just notify the
+    resampler that this interrupt is done. If the IRQ line is actually
+    already deasserted, we are done. If it is still asserted, a new
+    interrupt will be shortly triggered through irqfd and injected into the
+    guest.
+    
+    In the case if there is no irqfd resampler registered for this IRQ, we
+    cannot fix the issue, so we keep the existing behavior: immediately
+    unconditionally inject the queued interrupt.
+    
+    This patch fixes the issue for x86 IOAPIC only. In the long run, we can
+    fix it for other irqchips and other architectures too, possibly taking
+    advantage of reading the physical state of the IRQ line, which is
+    possible with some other irqchips (e.g. with arm64 GIC, maybe even with
+    the legacy x86 PIC).
+    
+    [*] In this description we assume that the interrupt is a physical host
+        interrupt forwarded to the guest e.g. by vfio. Potentially the same
+        issue may occur also with a purely virtual interrupt from an
+        emulated device, e.g. if the guest handles this interrupt, again, as
+        a oneshot interrupt.
+    
+    Signed-off-by: Dmytro Maluka <dmy@semihalf.com>
+    Link: https://lore.kernel.org/kvm/31420943-8c5f-125c-a5ee-d2fde2700083@semihalf.com/
+    Link: https://lore.kernel.org/lkml/87o7wrug0w.wl-maz@kernel.org/
+    Message-Id: <20230322204344.50138-3-dmy@semihalf.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/include/linux/kvm_host.h b/include/linux/kvm_host.h
+index 9f508c8e66e1..a9adf75344be 100644
+--- a/include/linux/kvm_host.h
++++ b/include/linux/kvm_host.h
+@@ -1987,6 +1987,9 @@ int kvm_ioeventfd(struct kvm *kvm, struct kvm_ioeventfd *args);
+ #ifdef CONFIG_HAVE_KVM_IRQFD
+ int kvm_irqfd(struct kvm *kvm, struct kvm_irqfd *args);
+ void kvm_irqfd_release(struct kvm *kvm);
++bool kvm_notify_irqfd_resampler(struct kvm *kvm,
++				unsigned int irqchip,
++				unsigned int pin);
+ void kvm_irq_routing_update(struct kvm *);
+ #else
+ static inline int kvm_irqfd(struct kvm *kvm, struct kvm_irqfd *args)
+@@ -1995,6 +1998,13 @@ static inline int kvm_irqfd(struct kvm *kvm, struct kvm_irqfd *args)
+ }
+ 
+ static inline void kvm_irqfd_release(struct kvm *kvm) {}
++
++static inline bool kvm_notify_irqfd_resampler(struct kvm *kvm,
++					      unsigned int irqchip,
++					      unsigned int pin)
++{
++	return false;
++}
+ #endif
+ 
+ #else

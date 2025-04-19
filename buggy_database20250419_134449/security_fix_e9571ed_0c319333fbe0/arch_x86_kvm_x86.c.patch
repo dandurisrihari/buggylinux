@@ -1,0 +1,76 @@
+commit e9571ed54b2a290d61b98ad6f369f963159fe6da
+Author: Marcelo Tosatti <mtosatti@redhat.com>
+Date:   Fri Apr 11 15:01:22 2008 -0300
+
+    KVM: fix kvm_vcpu_kick vs __vcpu_run race
+    
+    There is a window open between testing of pending IRQ's
+    and assignment of guest_mode in __vcpu_run.
+    
+    Injection of IRQ's can race with __vcpu_run as follows:
+    
+    CPU0                                CPU1
+    kvm_x86_ops->run()
+    vcpu->guest_mode = 0                SET_IRQ_LINE ioctl
+    ..
+    kvm_x86_ops->inject_pending_irq
+    kvm_cpu_has_interrupt()
+    
+                                        apic_test_and_set_irr()
+                                        kvm_vcpu_kick
+                                        if (vcpu->guest_mode)
+                                            send_ipi()
+    
+    vcpu->guest_mode = 1
+    
+    So move guest_mode=1 assignment before ->inject_pending_irq, and make
+    sure that it won't reorder after it.
+    
+    Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
+    Signed-off-by: Avi Kivity <avi@qumranet.com>
+
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 5c3c9d38c780..0ce556372a4d 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -2802,6 +2802,13 @@ static int __vcpu_run(struct kvm_vcpu *vcpu, struct kvm_run *kvm_run)
+ 		goto out;
+ 	}
+ 
++	vcpu->guest_mode = 1;
++	/*
++	 * Make sure that guest_mode assignment won't happen after
++	 * testing the pending IRQ vector bitmap.
++	 */
++	smp_wmb();
++
+ 	if (vcpu->arch.exception.pending)
+ 		__queue_exception(vcpu);
+ 	else if (irqchip_in_kernel(vcpu->kvm))
+@@ -2813,7 +2820,6 @@ static int __vcpu_run(struct kvm_vcpu *vcpu, struct kvm_run *kvm_run)
+ 
+ 	up_read(&vcpu->kvm->slots_lock);
+ 
+-	vcpu->guest_mode = 1;
+ 	kvm_guest_enter();
+ 
+ 	if (vcpu->requests)
+@@ -3970,11 +3976,17 @@ static void vcpu_kick_intr(void *info)
+ void kvm_vcpu_kick(struct kvm_vcpu *vcpu)
+ {
+ 	int ipi_pcpu = vcpu->cpu;
++	int cpu = get_cpu();
+ 
+ 	if (waitqueue_active(&vcpu->wq)) {
+ 		wake_up_interruptible(&vcpu->wq);
+ 		++vcpu->stat.halt_wakeup;
+ 	}
+-	if (vcpu->guest_mode)
++	/*
++	 * We may be called synchronously with irqs disabled in guest mode,
++	 * So need not to call smp_call_function_single() in that case.
++	 */
++	if (vcpu->guest_mode && vcpu->cpu != cpu)
+ 		smp_call_function_single(ipi_pcpu, vcpu_kick_intr, vcpu, 0, 0);
++	put_cpu();
+ }

@@ -1,0 +1,104 @@
+commit ec9404e40e8f36421a2b66ecb76dc2209fe7f3ef
+Author: Pawan Gupta <pawan.kumar.gupta@linux.intel.com>
+Date:   Mon Mar 11 08:57:05 2024 -0700
+
+    x86/bhi: Add BHI mitigation knob
+    
+    Branch history clearing software sequences and hardware control
+    BHI_DIS_S were defined to mitigate Branch History Injection (BHI).
+    
+    Add cmdline spectre_bhi={on|off|auto} to control BHI mitigation:
+    
+     auto - Deploy the hardware mitigation BHI_DIS_S, if available.
+     on   - Deploy the hardware mitigation BHI_DIS_S, if available,
+            otherwise deploy the software sequence at syscall entry and
+            VMexit.
+     off  - Turn off BHI mitigation.
+    
+    The default is auto mode which does not deploy the software sequence
+    mitigation.  This is because of the hardening done in the syscall
+    dispatch path, which is the likely target of BHI.
+    
+    Signed-off-by: Pawan Gupta <pawan.kumar.gupta@linux.intel.com>
+    Signed-off-by: Daniel Sneddon <daniel.sneddon@linux.intel.com>
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Reviewed-by: Alexandre Chartre <alexandre.chartre@oracle.com>
+    Reviewed-by: Josh Poimboeuf <jpoimboe@kernel.org>
+
+diff --git a/Documentation/admin-guide/hw-vuln/spectre.rst b/Documentation/admin-guide/hw-vuln/spectre.rst
+index cce768afec6b..7cb99b09827c 100644
+--- a/Documentation/admin-guide/hw-vuln/spectre.rst
++++ b/Documentation/admin-guide/hw-vuln/spectre.rst
+@@ -138,11 +138,10 @@ associated with the source address of the indirect branch. Specifically,
+ the BHB might be shared across privilege levels even in the presence of
+ Enhanced IBRS.
+ 
+-Currently the only known real-world BHB attack vector is via
+-unprivileged eBPF. Therefore, it's highly recommended to not enable
+-unprivileged eBPF, especially when eIBRS is used (without retpolines).
+-For a full mitigation against BHB attacks, it's recommended to use
+-retpolines (or eIBRS combined with retpolines).
++Previously the only known real-world BHB attack vector was via unprivileged
++eBPF. Further research has found attacks that don't require unprivileged eBPF.
++For a full mitigation against BHB attacks it is recommended to set BHI_DIS_S or
++use the BHB clearing sequence.
+ 
+ Attack scenarios
+ ----------------
+@@ -430,6 +429,21 @@ The possible values in this file are:
+   'PBRSB-eIBRS: Not affected'  CPU is not affected by PBRSB
+   ===========================  =======================================================
+ 
++  - Branch History Injection (BHI) protection status:
++
++.. list-table::
++
++ * - BHI: Not affected
++   - System is not affected
++ * - BHI: Retpoline
++   - System is protected by retpoline
++ * - BHI: BHI_DIS_S
++   - System is protected by BHI_DIS_S
++ * - BHI: SW loop
++   - System is protected by software clearing sequence
++ * - BHI: Syscall hardening
++   - Syscalls are hardened against BHI
++
+ Full mitigation might require a microcode update from the CPU
+ vendor. When the necessary microcode is not available, the kernel will
+ report vulnerability.
+@@ -484,7 +498,11 @@ Spectre variant 2
+ 
+    Systems which support enhanced IBRS (eIBRS) enable IBRS protection once at
+    boot, by setting the IBRS bit, and they're automatically protected against
+-   Spectre v2 variant attacks.
++   some Spectre v2 variant attacks. The BHB can still influence the choice of
++   indirect branch predictor entry, and although branch predictor entries are
++   isolated between modes when eIBRS is enabled, the BHB itself is not isolated
++   between modes. Systems which support BHI_DIS_S will set it to protect against
++   BHI attacks.
+ 
+    On Intel's enhanced IBRS systems, this includes cross-thread branch target
+    injections on SMT systems (STIBP). In other words, Intel eIBRS enables
+@@ -638,6 +656,21 @@ kernel command line.
+ 		spectre_v2=off. Spectre variant 1 mitigations
+ 		cannot be disabled.
+ 
++	spectre_bhi=
++
++		[X86] Control mitigation of Branch History Injection
++		(BHI) vulnerability. Syscalls are hardened against BHI
++		regardless of this setting. This setting affects the deployment
++		of the HW BHI control and the SW BHB clearing sequence.
++
++		on
++			unconditionally enable.
++		off
++			unconditionally disable.
++		auto
++			enable if hardware mitigation
++			control(BHI_DIS_S) is available.
++
+ For spectre_v2_user see Documentation/admin-guide/kernel-parameters.txt
+ 
+ Mitigation selection guide

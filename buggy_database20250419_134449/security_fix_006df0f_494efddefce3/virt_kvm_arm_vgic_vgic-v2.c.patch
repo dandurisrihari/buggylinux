@@ -1,0 +1,49 @@
+commit 006df0f34930e18d0aa52f05705bdfe1fc565943
+Author: Christoffer Dall <cdall@linaro.org>
+Date:   Sun Oct 16 22:19:11 2016 +0200
+
+    KVM: arm/arm64: Support calling vgic_update_irq_pending from irq context
+    
+    We are about to optimize our timer handling logic which involves
+    injecting irqs to the vgic directly from the irq handler.
+    
+    Unfortunately, the injection path can take any AP list lock and irq lock
+    and we must therefore make sure to use spin_lock_irqsave where ever
+    interrupts are enabled and we are taking any of those locks, to avoid
+    deadlocking between process context and the ISR.
+    
+    This changes a lot of the VGIC code, but the good news are that the
+    changes are mostly mechanical.
+    
+    Acked-by: Marc Zyngier <marc,zyngier@arm.com>
+    Signed-off-by: Christoffer Dall <cdall@linaro.org>
+
+diff --git a/virt/kvm/arm/vgic/vgic-v2.c b/virt/kvm/arm/vgic/vgic-v2.c
+index e4187e52bb26..80897102da26 100644
+--- a/virt/kvm/arm/vgic/vgic-v2.c
++++ b/virt/kvm/arm/vgic/vgic-v2.c
+@@ -62,6 +62,7 @@ void vgic_v2_fold_lr_state(struct kvm_vcpu *vcpu)
+ 	struct vgic_cpu *vgic_cpu = &vcpu->arch.vgic_cpu;
+ 	struct vgic_v2_cpu_if *cpuif = &vgic_cpu->vgic_v2;
+ 	int lr;
++	unsigned long flags;
+ 
+ 	cpuif->vgic_hcr &= ~GICH_HCR_UIE;
+ 
+@@ -77,7 +78,7 @@ void vgic_v2_fold_lr_state(struct kvm_vcpu *vcpu)
+ 
+ 		irq = vgic_get_irq(vcpu->kvm, vcpu, intid);
+ 
+-		spin_lock(&irq->irq_lock);
++		spin_lock_irqsave(&irq->irq_lock, flags);
+ 
+ 		/* Always preserve the active bit */
+ 		irq->active = !!(val & GICH_LR_ACTIVE_BIT);
+@@ -104,7 +105,7 @@ void vgic_v2_fold_lr_state(struct kvm_vcpu *vcpu)
+ 				irq->pending_latch = false;
+ 		}
+ 
+-		spin_unlock(&irq->irq_lock);
++		spin_unlock_irqrestore(&irq->irq_lock, flags);
+ 		vgic_put_irq(vcpu->kvm, irq);
+ 	}

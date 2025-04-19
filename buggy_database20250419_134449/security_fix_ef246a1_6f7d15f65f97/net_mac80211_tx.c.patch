@@ -1,0 +1,60 @@
+commit ef246a1480cc484cd2aeda75737cb0848616ddf3
+Author: Johannes Berg <johannes.berg@intel.com>
+Date:   Wed Sep 20 21:25:26 2023 +0300
+
+    wifi: mac80211: support antenna control in injection
+    
+    Support antenna control for injection by parsing the antenna
+    radiotap field (which may be presented multiple times) and
+    telling the driver about the resulting antenna bitmap. Of
+    course there's no guarantee the driver will actually honour
+    this, just like any other injection control.
+    
+    If misconfigured, i.e. the injected HT/VHT MCS needs more
+    chains than antennas are configured, the bitmap is reset to
+    zero, indicating no selection.
+    
+    For now this is only set up for two anntenas so we keep more
+    free bits, but that can be trivially extended if any driver
+    implements support for it that can deal with hardware with
+    more antennas.
+    
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+    Signed-off-by: Gregory Greenman <gregory.greenman@intel.com>
+    Link: https://lore.kernel.org/r/20230920211508.f71001aa4da9.I00ccb762a806ea62bc3d728fa3a0d29f4f285eeb@changeid
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+diff --git a/net/mac80211/tx.c b/net/mac80211/tx.c
+index 932516f8cc13..a984fc54644e 100644
+--- a/net/mac80211/tx.c
++++ b/net/mac80211/tx.c
+@@ -2162,6 +2162,11 @@ bool ieee80211_parse_tx_radiotap(struct sk_buff *skb,
+ 			rate_found = true;
+ 			break;
+ 
++		case IEEE80211_RADIOTAP_ANTENNA:
++			/* this can appear multiple times, keep a bitmap */
++			info->control.antennas |= BIT(*iterator.this_arg);
++			break;
++
+ 		case IEEE80211_RADIOTAP_DATA_RETRIES:
+ 			rate_retries = *iterator.this_arg;
+ 			break;
+@@ -2256,8 +2261,17 @@ bool ieee80211_parse_tx_radiotap(struct sk_buff *skb,
+ 		}
+ 
+ 		if (rate_flags & IEEE80211_TX_RC_MCS) {
++			/* reset antennas if not enough */
++			if (IEEE80211_HT_MCS_CHAINS(rate) >
++					hweight8(info->control.antennas))
++				info->control.antennas = 0;
++
+ 			info->control.rates[0].idx = rate;
+ 		} else if (rate_flags & IEEE80211_TX_RC_VHT_MCS) {
++			/* reset antennas if not enough */
++			if (vht_nss > hweight8(info->control.antennas))
++				info->control.antennas = 0;
++
+ 			ieee80211_rate_set_vht(info->control.rates, vht_mcs,
+ 					       vht_nss);
+ 		} else if (sband) {

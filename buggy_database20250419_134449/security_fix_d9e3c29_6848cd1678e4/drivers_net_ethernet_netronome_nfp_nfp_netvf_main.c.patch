@@ -1,0 +1,55 @@
+commit d9e3c29918a80d2d18f0c3c059a578a368f6713c
+Author: Jakub Kicinski <kuba@kernel.org>
+Date:   Mon Mar 21 11:42:07 2022 +0100
+
+    nfp: choose data path based on version
+    
+    Prepare for choosing data path based on the firmware version field.
+    Exploit one bit from the reserved byte in the firmware version field
+    as the data path type.  We need the firmware version right after
+    vNIC is allocated, so it has to be read inside nfp_net_alloc(),
+    callers don't have to set it afterwards.
+    
+    Following patches will bring the implementation of the second data
+    path.
+    
+    Signed-off-by: Jakub Kicinski <jakub.kicinski@netronome.com>
+    Signed-off-by: Fei Qin <fei.qin@corigine.com>
+    Signed-off-by: Simon Horman <simon.horman@corigine.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/netronome/nfp/nfp_netvf_main.c b/drivers/net/ethernet/netronome/nfp/nfp_netvf_main.c
+index 9ef226c6706e..a51eb26dd977 100644
+--- a/drivers/net/ethernet/netronome/nfp/nfp_netvf_main.c
++++ b/drivers/net/ethernet/netronome/nfp/nfp_netvf_main.c
+@@ -122,9 +122,11 @@ static int nfp_netvf_pci_probe(struct pci_dev *pdev,
+ 	}
+ 
+ 	nfp_net_get_fw_version(&fw_ver, ctrl_bar);
+-	if (fw_ver.resv || fw_ver.class != NFP_NET_CFG_VERSION_CLASS_GENERIC) {
++	if (fw_ver.extend & NFP_NET_CFG_VERSION_RESERVED_MASK ||
++	    fw_ver.class != NFP_NET_CFG_VERSION_CLASS_GENERIC) {
+ 		dev_err(&pdev->dev, "Unknown Firmware ABI %d.%d.%d.%d\n",
+-			fw_ver.resv, fw_ver.class, fw_ver.major, fw_ver.minor);
++			fw_ver.extend, fw_ver.class,
++			fw_ver.major, fw_ver.minor);
+ 		err = -EINVAL;
+ 		goto err_ctrl_unmap;
+ 	}
+@@ -144,7 +146,7 @@ static int nfp_netvf_pci_probe(struct pci_dev *pdev,
+ 			break;
+ 		default:
+ 			dev_err(&pdev->dev, "Unsupported Firmware ABI %d.%d.%d.%d\n",
+-				fw_ver.resv, fw_ver.class,
++				fw_ver.extend, fw_ver.class,
+ 				fw_ver.major, fw_ver.minor);
+ 			err = -EINVAL;
+ 			goto err_ctrl_unmap;
+@@ -186,7 +188,6 @@ static int nfp_netvf_pci_probe(struct pci_dev *pdev,
+ 	}
+ 	vf->nn = nn;
+ 
+-	nn->fw_ver = fw_ver;
+ 	nn->dp.is_vf = 1;
+ 	nn->stride_tx = stride;
+ 	nn->stride_rx = stride;

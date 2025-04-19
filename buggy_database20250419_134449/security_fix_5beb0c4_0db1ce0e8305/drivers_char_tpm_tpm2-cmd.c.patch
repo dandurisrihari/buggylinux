@@ -1,0 +1,70 @@
+commit 5beb0c435bdde35a09376566b0e28f7df87c9f68
+Author: Jarkko Sakkinen <jarkko@kernel.org>
+Date:   Sat Oct 31 17:53:44 2015 +0200
+
+    keys, trusted: seal with a TPM2 authorization policy
+    
+    TPM2 supports authorization policies, which are essentially
+    combinational logic statements repsenting the conditions where the data
+    can be unsealed based on the TPM state. This patch enables to use
+    authorization policies to seal trusted keys.
+    
+    Two following new options have been added for trusted keys:
+    
+    * 'policydigest=': provide an auth policy digest for sealing.
+    * 'policyhandle=': provide a policy session handle for unsealing.
+    
+    If 'hash=' option is supplied after 'policydigest=' option, this
+    will result an error because the state of the option would become
+    mixed.
+    
+    Signed-off-by: Jarkko Sakkinen <jarkko.sakkinen@linux.intel.com>
+    Tested-by: Colin Ian King <colin.king@canonical.com>
+    Reviewed-by: Mimi Zohar <zohar@linux.vnet.ibm.com>
+    Acked-by: Peter Huewe <peterhuewe@gmx.de>
+
+diff --git a/drivers/char/tpm/tpm2-cmd.c b/drivers/char/tpm/tpm2-cmd.c
+index d9d082206f6e..45a634016f95 100644
+--- a/drivers/char/tpm/tpm2-cmd.c
++++ b/drivers/char/tpm/tpm2-cmd.c
+@@ -478,12 +478,26 @@ int tpm2_seal_trusted(struct tpm_chip *chip,
+ 	tpm_buf_append_u8(&buf, payload->migratable);
+ 
+ 	/* public */
+-	tpm_buf_append_u16(&buf, 14);
++	if (options->policydigest)
++		tpm_buf_append_u16(&buf, 14 + options->digest_len);
++	else
++		tpm_buf_append_u16(&buf, 14);
+ 
+ 	tpm_buf_append_u16(&buf, TPM2_ALG_KEYEDHASH);
+ 	tpm_buf_append_u16(&buf, hash);
+-	tpm_buf_append_u32(&buf, TPM2_ATTR_USER_WITH_AUTH);
+-	tpm_buf_append_u16(&buf, 0); /* policy digest size */
++
++	/* policy */
++	if (options->policydigest) {
++		tpm_buf_append_u32(&buf, 0);
++		tpm_buf_append_u16(&buf, options->digest_len);
++		tpm_buf_append(&buf, options->policydigest,
++			       options->digest_len);
++	} else {
++		tpm_buf_append_u32(&buf, TPM2_ATTR_USER_WITH_AUTH);
++		tpm_buf_append_u16(&buf, 0);
++	}
++
++	/* public parameters */
+ 	tpm_buf_append_u16(&buf, TPM2_ALG_NULL);
+ 	tpm_buf_append_u16(&buf, 0);
+ 
+@@ -613,7 +627,9 @@ static int tpm2_unseal(struct tpm_chip *chip,
+ 		return rc;
+ 
+ 	tpm_buf_append_u32(&buf, blob_handle);
+-	tpm2_buf_append_auth(&buf, TPM2_RS_PW,
++	tpm2_buf_append_auth(&buf,
++			     options->policyhandle ?
++			     options->policyhandle : TPM2_RS_PW,
+ 			     NULL /* nonce */, 0,
+ 			     0 /* session_attributes */,
+ 			     options->blobauth /* hmac */,

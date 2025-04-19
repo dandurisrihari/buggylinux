@@ -1,0 +1,86 @@
+diff --git a/fs/f2fs/Kconfig b/fs/f2fs/Kconfig
+index 1f8982a957f1..378c221d68a9 100644
+--- a/fs/f2fs/Kconfig
++++ b/fs/f2fs/Kconfig
+@@ -94,3 +94,11 @@ config F2FS_IO_TRACE
+ 	  information and block IO patterns in the filesystem level.
+ 
+ 	  If unsure, say N.
++
++config F2FS_FAULT_INJECTION
++	bool "F2FS fault injection facility"
++	depends on F2FS_FS
++	help
++	  Test F2FS to inject faults such as ENOMEM, ENOSPC, and so on.
++
++	  If unsure, say N.
+diff --git a/fs/f2fs/f2fs.h b/fs/f2fs/f2fs.h
+index 879e4d77a1bc..0cf2a26388e5 100644
+--- a/fs/f2fs/f2fs.h
++++ b/fs/f2fs/f2fs.h
+@@ -56,6 +56,7 @@
+ #define F2FS_MOUNT_EXTENT_CACHE		0x00002000
+ #define F2FS_MOUNT_FORCE_FG_GC		0x00004000
+ #define F2FS_MOUNT_DATA_FLUSH		0x00008000
++#define F2FS_MOUNT_FAULT_INJECTION	0x00010000
+ 
+ #define clear_opt(sbi, option)	(sbi->mount_opt.opt &= ~F2FS_MOUNT_##option)
+ #define set_opt(sbi, option)	(sbi->mount_opt.opt |= F2FS_MOUNT_##option)
+diff --git a/fs/f2fs/super.c b/fs/f2fs/super.c
+index 90d4b864590c..22348791700f 100644
+--- a/fs/f2fs/super.c
++++ b/fs/f2fs/super.c
+@@ -39,6 +39,10 @@ static struct proc_dir_entry *f2fs_proc_root;
+ static struct kmem_cache *f2fs_inode_cachep;
+ static struct kset *f2fs_kset;
+ 
++#ifdef CONFIG_F2FS_FAULT_INJECTION
++u32 f2fs_fault_rate = 0;
++#endif
++
+ /* f2fs-wide shrinker description */
+ static struct shrinker f2fs_shrinker_info = {
+ 	.scan_objects = f2fs_shrink_scan,
+@@ -68,6 +72,7 @@ enum {
+ 	Opt_noextent_cache,
+ 	Opt_noinline_data,
+ 	Opt_data_flush,
++	Opt_fault_injection,
+ 	Opt_err,
+ };
+ 
+@@ -93,6 +98,7 @@ static match_table_t f2fs_tokens = {
+ 	{Opt_noextent_cache, "noextent_cache"},
+ 	{Opt_noinline_data, "noinline_data"},
+ 	{Opt_data_flush, "data_flush"},
++	{Opt_fault_injection, "fault_injection=%u"},
+ 	{Opt_err, NULL},
+ };
+ 
+@@ -300,6 +306,9 @@ static int parse_options(struct super_block *sb, char *options)
+ 	char *p, *name;
+ 	int arg = 0;
+ 
++#ifdef CONFIG_F2FS_FAULT_INJECTION
++	f2fs_fault_rate = 0;
++#endif
+ 	if (!options)
+ 		return 0;
+ 
+@@ -433,6 +442,16 @@ static int parse_options(struct super_block *sb, char *options)
+ 		case Opt_data_flush:
+ 			set_opt(sbi, DATA_FLUSH);
+ 			break;
++		case Opt_fault_injection:
++			if (args->from && match_int(args, &arg))
++				return -EINVAL;
++#ifdef CONFIG_F2FS_FAULT_INJECTION
++			f2fs_fault_rate = arg;
++#else
++			f2fs_msg(sb, KERN_INFO,
++				"FAULT_INJECTION was not selected");
++#endif
++			break;
+ 		default:
+ 			f2fs_msg(sb, KERN_ERR,
+ 				"Unrecognized mount option \"%s\" or missing value",

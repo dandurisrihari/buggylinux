@@ -1,0 +1,92 @@
+diff --git a/Documentation/driver-api/tty/tty_buffer.rst b/Documentation/driver-api/tty/tty_buffer.rst
+index 774dc119c312..4b5ca1776d4f 100644
+--- a/Documentation/driver-api/tty/tty_buffer.rst
++++ b/Documentation/driver-api/tty/tty_buffer.rst
+@@ -15,11 +15,12 @@ Flip Buffer Management
+ ======================
+ 
+ .. kernel-doc:: drivers/tty/tty_buffer.c
+-   :identifiers: tty_prepare_flip_string __tty_insert_flip_char
++   :identifiers: tty_prepare_flip_string
+            tty_flip_buffer_push tty_ldisc_receive_buf
+ 
+ .. kernel-doc:: include/linux/tty_flip.h
+    :identifiers: tty_insert_flip_string_fixed_flag tty_insert_flip_string_flags
++           tty_insert_flip_char
+ 
+ ----
+ 
+diff --git a/drivers/tty/tty_buffer.c b/drivers/tty/tty_buffer.c
+index 4f84466498f7..e162318d6c31 100644
+--- a/drivers/tty/tty_buffer.c
++++ b/drivers/tty/tty_buffer.c
+@@ -343,32 +343,6 @@ size_t __tty_insert_flip_string_flags(struct tty_port *port, const u8 *chars,
+ }
+ EXPORT_SYMBOL(__tty_insert_flip_string_flags);
+ 
+-/**
+- * __tty_insert_flip_char   -	add one character to the tty buffer
+- * @port: tty port
+- * @ch: character
+- * @flag: flag byte
+- *
+- * Queue a single byte @ch to the tty buffering, with an optional flag. This is
+- * the slow path of tty_insert_flip_char().
+- */
+-int __tty_insert_flip_char(struct tty_port *port, u8 ch, u8 flag)
+-{
+-	struct tty_buffer *tb;
+-	bool flags = flag != TTY_NORMAL;
+-
+-	if (!__tty_buffer_request_room(port, 1, flags))
+-		return 0;
+-
+-	tb = port->buf.tail;
+-	if (tb->flags)
+-		*flag_buf_ptr(tb, tb->used) = flag;
+-	*char_buf_ptr(tb, tb->used++) = ch;
+-
+-	return 1;
+-}
+-EXPORT_SYMBOL(__tty_insert_flip_char);
+-
+ /**
+  * tty_prepare_flip_string	-	make room for characters
+  * @port: tty port
+diff --git a/include/linux/tty_flip.h b/include/linux/tty_flip.h
+index efd03d9c11f8..af4fce98f64e 100644
+--- a/include/linux/tty_flip.h
++++ b/include/linux/tty_flip.h
+@@ -15,7 +15,6 @@ size_t __tty_insert_flip_string_flags(struct tty_port *port, const u8 *chars,
+ 				      size_t size);
+ size_t tty_prepare_flip_string(struct tty_port *port, u8 **chars, size_t size);
+ void tty_flip_buffer_push(struct tty_port *port);
+-int __tty_insert_flip_char(struct tty_port *port, u8 ch, u8 flag);
+ 
+ /**
+  * tty_insert_flip_string_fixed_flag - add characters to the tty buffer
+@@ -55,7 +54,14 @@ static inline size_t tty_insert_flip_string_flags(struct tty_port *port,
+ 	return __tty_insert_flip_string_flags(port, chars, flags, true, size);
+ }
+ 
+-
++/**
++ * tty_insert_flip_char - add one character to the tty buffer
++ * @port: tty port
++ * @ch: character
++ * @flag: flag byte
++ *
++ * Queue a single byte @ch to the tty buffering, with an optional flag.
++ */
+ static inline size_t tty_insert_flip_char(struct tty_port *port, u8 ch, u8 flag)
+ {
+ 	struct tty_buffer *tb = port->buf.tail;
+@@ -68,7 +74,7 @@ static inline size_t tty_insert_flip_char(struct tty_port *port, u8 ch, u8 flag)
+ 		*char_buf_ptr(tb, tb->used++) = ch;
+ 		return 1;
+ 	}
+-	return __tty_insert_flip_char(port, ch, flag);
++	return __tty_insert_flip_string_flags(port, &ch, &flag, false, 1);
+ }
+ 
+ static inline size_t tty_insert_flip_string(struct tty_port *port,

@@ -1,0 +1,46 @@
+commit 1fc44d9b1afb0afe46acd99bdfdf793805a850e1
+Author: Chris Wilson <chris@chris-wilson.co.uk>
+Date:   Thu May 17 22:26:32 2018 +0100
+
+    drm/i915: Store a pointer to intel_context in i915_request
+    
+    To ease the frequent and ugly pointer dance of
+    &request->gem_context->engine[request->engine->id] during request
+    submission, store that pointer as request->hw_context. One major
+    advantage that we will exploit later is that this decouples the logical
+    context state from the engine itself.
+    
+    v2: Set mock_context->ops so we don't crash and burn in selftests.
+        Cleanups from Tvrtko.
+    
+    Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+    Acked-by: Zhenyu Wang <zhenyuw@linux.intel.com>
+    Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+    Link: https://patchwork.freedesktop.org/patch/msgid/20180517212633.24934-3-chris@chris-wilson.co.uk
+
+diff --git a/drivers/gpu/drm/i915/gvt/mmio_context.c b/drivers/gpu/drm/i915/gvt/mmio_context.c
+index 0f949554d118..708170e61625 100644
+--- a/drivers/gpu/drm/i915/gvt/mmio_context.c
++++ b/drivers/gpu/drm/i915/gvt/mmio_context.c
+@@ -446,9 +446,9 @@ static void switch_mocs(struct intel_vgpu *pre, struct intel_vgpu *next,
+ 
+ #define CTX_CONTEXT_CONTROL_VAL	0x03
+ 
+-bool is_inhibit_context(struct i915_gem_context *ctx, int ring_id)
++bool is_inhibit_context(struct intel_context *ce)
+ {
+-	u32 *reg_state = ctx->__engine[ring_id].lrc_reg_state;
++	const u32 *reg_state = ce->lrc_reg_state;
+ 	u32 inhibit_mask =
+ 		_MASKED_BIT_ENABLE(CTX_CTRL_ENGINE_CTX_RESTORE_INHIBIT);
+ 
+@@ -501,7 +501,7 @@ static void switch_mmio(struct intel_vgpu *pre,
+ 			 * itself.
+ 			 */
+ 			if (mmio->in_context &&
+-			    !is_inhibit_context(s->shadow_ctx, ring_id))
++			    !is_inhibit_context(&s->shadow_ctx->__engine[ring_id]))
+ 				continue;
+ 
+ 			if (mmio->mask)

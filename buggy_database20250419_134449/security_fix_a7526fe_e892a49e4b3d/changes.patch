@@ -1,0 +1,102 @@
+diff --git a/include/linux/fault-inject.h b/include/linux/fault-inject.h
+index 6d5edef09d45..be6d0bc111ad 100644
+--- a/include/linux/fault-inject.h
++++ b/include/linux/fault-inject.h
+@@ -102,11 +102,10 @@ static inline bool __should_fail_alloc_page(gfp_t gfp_mask, unsigned int order)
+ }
+ #endif /* CONFIG_FAIL_PAGE_ALLOC */
+ 
+-int should_failslab(struct kmem_cache *s, gfp_t gfpflags);
+ #ifdef CONFIG_FAILSLAB
+-extern bool __should_failslab(struct kmem_cache *s, gfp_t gfpflags);
++int should_failslab(struct kmem_cache *s, gfp_t gfpflags);
+ #else
+-static inline bool __should_failslab(struct kmem_cache *s, gfp_t gfpflags)
++static inline int should_failslab(struct kmem_cache *s, gfp_t gfpflags)
+ {
+ 	return false;
+ }
+diff --git a/kernel/bpf/verifier.c b/kernel/bpf/verifier.c
+index 214a9fa8c6fb..e455654f3b91 100644
+--- a/kernel/bpf/verifier.c
++++ b/kernel/bpf/verifier.c
+@@ -21123,7 +21123,9 @@ BTF_SET_START(btf_non_sleepable_error_inject)
+  */
+ BTF_ID(func, __filemap_add_folio)
+ BTF_ID(func, should_fail_alloc_page)
++#ifdef CONFIG_FAILSLAB
+ BTF_ID(func, should_failslab)
++#endif
+ BTF_SET_END(btf_non_sleepable_error_inject)
+ 
+ static int check_non_sleepable_error_inject(u32 btf_id)
+diff --git a/mm/failslab.c b/mm/failslab.c
+index ffc420c0e767..af16c2ed578f 100644
+--- a/mm/failslab.c
++++ b/mm/failslab.c
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0
+ #include <linux/fault-inject.h>
++#include <linux/error-injection.h>
+ #include <linux/slab.h>
+ #include <linux/mm.h>
+ #include "slab.h"
+@@ -14,23 +15,23 @@ static struct {
+ 	.cache_filter = false,
+ };
+ 
+-bool __should_failslab(struct kmem_cache *s, gfp_t gfpflags)
++int should_failslab(struct kmem_cache *s, gfp_t gfpflags)
+ {
+ 	int flags = 0;
+ 
+ 	/* No fault-injection for bootstrap cache */
+ 	if (unlikely(s == kmem_cache))
+-		return false;
++		return 0;
+ 
+ 	if (gfpflags & __GFP_NOFAIL)
+-		return false;
++		return 0;
+ 
+ 	if (failslab.ignore_gfp_reclaim &&
+ 			(gfpflags & __GFP_DIRECT_RECLAIM))
+-		return false;
++		return 0;
+ 
+ 	if (failslab.cache_filter && !(s->flags & SLAB_FAILSLAB))
+-		return false;
++		return 0;
+ 
+ 	/*
+ 	 * In some cases, it expects to specify __GFP_NOWARN
+@@ -41,8 +42,9 @@ bool __should_failslab(struct kmem_cache *s, gfp_t gfpflags)
+ 	if (gfpflags & __GFP_NOWARN)
+ 		flags |= FAULT_NOWARN;
+ 
+-	return should_fail_ex(&failslab.attr, s->object_size, flags);
++	return should_fail_ex(&failslab.attr, s->object_size, flags) ? -ENOMEM : 0;
+ }
++ALLOW_ERROR_INJECTION(should_failslab, ERRNO);
+ 
+ static int __init setup_failslab(char *str)
+ {
+diff --git a/mm/slub.c b/mm/slub.c
+index cc11f3869cc6..b5aaaa3ca756 100644
+--- a/mm/slub.c
++++ b/mm/slub.c
+@@ -3892,14 +3892,6 @@ static __always_inline void maybe_wipe_obj_freeptr(struct kmem_cache *s,
+ 			0, sizeof(void *));
+ }
+ 
+-noinline int should_failslab(struct kmem_cache *s, gfp_t gfpflags)
+-{
+-	if (__should_failslab(s, gfpflags))
+-		return -ENOMEM;
+-	return 0;
+-}
+-ALLOW_ERROR_INJECTION(should_failslab, ERRNO);
+-
+ static __fastpath_inline
+ struct kmem_cache *slab_pre_alloc_hook(struct kmem_cache *s, gfp_t flags)
+ {

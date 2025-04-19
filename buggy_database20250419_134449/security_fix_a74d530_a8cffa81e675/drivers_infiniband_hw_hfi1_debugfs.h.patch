@@ -1,0 +1,207 @@
+commit a74d5307caba42fe9bbc180feb03003f14f9f45c
+Author: Mitko Haralanov <mitko.haralanov@intel.com>
+Date:   Wed May 2 06:43:24 2018 -0700
+
+    IB/hfi1: Rework fault injection machinery
+    
+    The packet fault injection code present in the HFI1 driver had some
+    issues which not only fragment the code but also created user
+    confusion. Furthermore, it suffered from the following issues:
+    
+      1. The fault_packet method only worked for received packets. This
+         meant that the only fault injection mode available for sent
+         packets is fault_opcode, which did not allow for random packet
+         drops on all egressing packets.
+      2. The mask available for the fault_opcode mode did not really work
+         due to the fact that the opcode values are not bits in a bitmask but
+         rather sequential integer values. Creating a opcode/mask pair that
+         would successfully capture a set of packets was nearly impossible.
+      3. The code was fragmented and used too many debugfs entries to
+         operate and control. This was confusing to users.
+      4. It did not allow filtering fault injection on a per direction basis -
+         egress vs. ingress.
+    
+    In order to improve or fix the above issues, the following changes have
+    been made:
+    
+       1. The fault injection methods have been combined into a single fault
+          injection facility. As such, the fault injection has been plugged
+          into both the send and receive code paths. Regardless of method used
+          the fault injection will operate on both egress and ingress packets.
+       2. The type of fault injection - by packet or by opcode - is now controlled
+          by changing the boolean value of the file "opcode_mode". When the value
+          is set to True, fault injection is done by opcode. Otherwise, by
+          packet.
+       2. The masking ability has been removed in favor of a bitmap that holds
+          opcodes of interest (one bit per opcode, a total of 256 bits). This
+          works in tandem with the "opcode_mode" value. When the value of
+          "opcode_mode" is False, this bitmap is ignored. When the value is
+          True, the bitmap lists all opcodes to be considered for fault injection.
+          By default, the bitmap is empty. When the user wants to filter by opcode,
+          the user sets the corresponding bit in the bitmap by echo'ing the bit
+          position into the 'opcodes' file. This gets around the issue that the set
+          of opcodes does not lend itself to effective masks and allow for extremely
+          fine-grained filtering by opcode.
+       4. fault_packet and fault_opcode methods have been combined. Hence, there
+          is only one debugfs directory controlling the entire operation of the
+          fault injection machinery. This reduces the number of debugfs entries
+          and provides a more unified user experience.
+       5. A new control files - "direction" - is provided to allow the user to
+          control the direction of packets, which are subject to fault injection.
+       6. A new control file - "skip_usec" - is added that would allow the user
+          to specify a "timeout" during which no fault injection will occur.
+    
+    In addition, the following bug fixes have been applied:
+    
+       1. The fault injection code has been split into its own header and source
+          files. This was done to better organize the code and support conditional
+          compilation without littering the code with #ifdef's.
+       2. The method by which the TX PIO packets were being marked for drop
+          conflicted with the way send contexts were being setup. As a result,
+          the send context was repeatedly being reset.
+       3. The fault injection only makes sense when the user can control it
+          through the debugfs entries. However, a kernel configuration can
+          enable fault injection but keep fault injection debugfs entries
+          disabled. Therefore, it makes sense that the HFI fault injection
+          code depends on both.
+       4. Error suppression did not take into account the method by which PIO
+          packets were being dropped. Therefore, even with error suppression
+          turned on, errors would still be displayed to the screen. A larger
+          enough packet drop percentage would case the kernel to crash because
+          the driver would be stuck printing errors.
+    
+    Reviewed-by: Dennis Dalessandro <dennis.dalessandro@intel.com>
+    Reviewed-by: Don Hiatt <don.hiatt@intel.com>
+    Reviewed-by: Mike Marciniszyn <mike.marciniszyn@intel.com>
+    Signed-off-by: Mitko Haralanov <mitko.haralanov@intel.com>
+    Signed-off-by: Dennis Dalessandro <dennis.dalessandro@intel.com>
+    Signed-off-by: Doug Ledford <dledford@redhat.com>
+
+diff --git a/drivers/infiniband/hw/hfi1/debugfs.h b/drivers/infiniband/hw/hfi1/debugfs.h
+index 38c38a98156d..1c91461b108f 100644
+--- a/drivers/infiniband/hw/hfi1/debugfs.h
++++ b/drivers/infiniband/hw/hfi1/debugfs.h
+@@ -1,7 +1,7 @@
+ #ifndef _HFI1_DEBUGFS_H
+ #define _HFI1_DEBUGFS_H
+ /*
+- * Copyright(c) 2015, 2016 Intel Corporation.
++ * Copyright(c) 2015, 2016, 2018 Intel Corporation.
+  *
+  * This file is provided under a dual BSD/GPLv2 license.  When using or
+  * redistributing this file, you may do so under either license.
+@@ -48,51 +48,59 @@
+  */
+ 
+ struct hfi1_ibdev;
+-#ifdef CONFIG_DEBUG_FS
+-void hfi1_dbg_ibdev_init(struct hfi1_ibdev *ibd);
+-void hfi1_dbg_ibdev_exit(struct hfi1_ibdev *ibd);
+-void hfi1_dbg_init(void);
+-void hfi1_dbg_exit(void);
+ 
+-#ifdef CONFIG_FAULT_INJECTION
+-#include <linux/fault-inject.h>
+-struct fault_opcode {
+-	struct fault_attr attr;
+-	struct dentry *dir;
+-	bool fault_by_opcode;
+-	u64 n_rxfaults[256];
+-	u64 n_txfaults[256];
+-	u8 opcode;
+-	u8 mask;
+-};
+-
+-struct fault_packet {
+-	struct fault_attr attr;
+-	struct dentry *dir;
+-	bool fault_by_packet;
+-	u64 n_faults;
+-};
+-
+-bool hfi1_dbg_fault_opcode(struct rvt_qp *qp, u32 opcode, bool rx);
+-bool hfi1_dbg_fault_packet(struct hfi1_packet *packet);
+-bool hfi1_dbg_fault_suppress_err(struct hfi1_ibdev *ibd);
+-#else
+-static inline bool hfi1_dbg_fault_packet(struct hfi1_packet *packet)
+-{
+-	return false;
++#define DEBUGFS_FILE_CREATE(name, parent, data, ops, mode)	\
++do { \
++	struct dentry *ent; \
++	const char *__name = name; \
++	ent = debugfs_create_file(__name, mode, parent, \
++		data, ops); \
++	if (!ent) \
++		pr_warn("create of %s failed\n", __name); \
++} while (0)
++
++#define DEBUGFS_SEQ_FILE_OPS(name) \
++static const struct seq_operations _##name##_seq_ops = { \
++	.start = _##name##_seq_start, \
++	.next  = _##name##_seq_next, \
++	.stop  = _##name##_seq_stop, \
++	.show  = _##name##_seq_show \
+ }
+ 
+-static inline bool hfi1_dbg_fault_opcode(struct rvt_qp *qp,
+-					 u32 opcode, bool rx)
+-{
+-	return false;
++#define DEBUGFS_SEQ_FILE_OPEN(name) \
++static int _##name##_open(struct inode *inode, struct file *s) \
++{ \
++	struct seq_file *seq; \
++	int ret; \
++	ret =  seq_open(s, &_##name##_seq_ops); \
++	if (ret) \
++		return ret; \
++	seq = s->private_data; \
++	seq->private = inode->i_private; \
++	return 0; \
+ }
+ 
+-static inline bool hfi1_dbg_fault_suppress_err(struct hfi1_ibdev *ibd)
+-{
+-	return false;
++#define DEBUGFS_FILE_OPS(name) \
++static const struct file_operations _##name##_file_ops = { \
++	.owner   = THIS_MODULE, \
++	.open    = _##name##_open, \
++	.read    = hfi1_seq_read, \
++	.llseek  = hfi1_seq_lseek, \
++	.release = seq_release \
+ }
+-#endif
++
++#define DEBUGFS_SEQ_FILE_CREATE(name, parent, data) \
++	DEBUGFS_FILE_CREATE(#name, parent, data, &_##name##_file_ops, 0444)
++
++ssize_t hfi1_seq_read(struct file *file, char __user *buf, size_t size,
++		      loff_t *ppos);
++loff_t hfi1_seq_lseek(struct file *file, loff_t offset, int whence);
++
++#ifdef CONFIG_DEBUG_FS
++void hfi1_dbg_ibdev_init(struct hfi1_ibdev *ibd);
++void hfi1_dbg_ibdev_exit(struct hfi1_ibdev *ibd);
++void hfi1_dbg_init(void);
++void hfi1_dbg_exit(void);
+ 
+ #else
+ static inline void hfi1_dbg_ibdev_init(struct hfi1_ibdev *ibd)
+@@ -111,13 +119,12 @@ static inline void hfi1_dbg_exit(void)
+ {
+ }
+ 
+-static inline bool hfi1_dbg_fault_packet(struct hfi1_packet *packet)
++static inline bool hfi1_dbg_should_fault_rx(struct hfi1_packet *packet)
+ {
+ 	return false;
+ }
+ 
+-static inline bool hfi1_dbg_fault_opcode(struct rvt_qp *qp,
+-					 u32 opcode, bool rx)
++static inline bool hfi1_dbg_should_fault_tx(struct rvt_qp *qp, u32 opcode)
+ {
+ 	return false;
+ }

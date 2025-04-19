@@ -1,0 +1,103 @@
+commit 5b0eea835d4e9cb5229e696c5763929fc2394f39
+Author: Ondrej Mosnacek <omosnace@redhat.com>
+Date:   Tue Jun 20 15:12:22 2023 +0200
+
+    selinux: introduce an initial SID for early boot processes
+    
+    Currently, SELinux doesn't allow distinguishing between kernel threads
+    and userspace processes that are started before the policy is first
+    loaded - both get the label corresponding to the kernel SID. The only
+    way a process that persists from early boot can get a meaningful label
+    is by doing a voluntary dyntransition or re-executing itself.
+    
+    Reusing the kernel label for userspace processes is problematic for
+    several reasons:
+    1. The kernel is considered to be a privileged domain and generally
+       needs to have a wide range of permissions allowed to work correctly,
+       which prevents the policy writer from effectively hardening against
+       early boot processes that might remain running unintentionally after
+       the policy is loaded (they represent a potential extra attack surface
+       that should be mitigated).
+    2. Despite the kernel being treated as a privileged domain, the policy
+       writer may want to impose certain special limitations on kernel
+       threads that may conflict with the requirements of intentional early
+       boot processes. For example, it is a good hardening practice to limit
+       what executables the kernel can execute as usermode helpers and to
+       confine the resulting usermode helper processes. However, a
+       (legitimate) process surviving from early boot may need to execute a
+       different set of executables.
+    3. As currently implemented, overlayfs remembers the security context of
+       the process that created an overlayfs mount and uses it to bound
+       subsequent operations on files using this context. If an overlayfs
+       mount is created before the SELinux policy is loaded, these "mounter"
+       checks are made against the kernel context, which may clash with
+       restrictions on the kernel domain (see 2.).
+    
+    To resolve this, introduce a new initial SID (reusing the slot of the
+    former "init" initial SID) that will be assigned to any userspace
+    process started before the policy is first loaded. This is easy to do,
+    as we can simply label any process that goes through the
+    bprm_creds_for_exec LSM hook with the new init-SID instead of
+    propagating the kernel SID from the parent.
+    
+    To provide backwards compatibility for existing policies that are
+    unaware of this new semantic of the "init" initial SID, introduce a new
+    policy capability "userspace_initial_context" and set the "init" SID to
+    the same context as the "kernel" SID unless this capability is set by
+    the policy.
+    
+    Signed-off-by: Ondrej Mosnacek <omosnace@redhat.com>
+    Signed-off-by: Paul Moore <paul@paul-moore.com>
+
+diff --git a/security/selinux/ss/policydb.c b/security/selinux/ss/policydb.c
+index 31b08b34c722..cfe77ef24ee2 100644
+--- a/security/selinux/ss/policydb.c
++++ b/security/selinux/ss/policydb.c
+@@ -863,6 +863,8 @@ void policydb_destroy(struct policydb *p)
+ int policydb_load_isids(struct policydb *p, struct sidtab *s)
+ {
+ 	struct ocontext *head, *c;
++	bool isid_init_supported = ebitmap_get_bit(&p->policycaps,
++						   POLICYDB_CAP_USERSPACE_INITIAL_CONTEXT);
+ 	int rc;
+ 
+ 	rc = sidtab_init(s);
+@@ -886,6 +888,13 @@ int policydb_load_isids(struct policydb *p, struct sidtab *s)
+ 		if (!name)
+ 			continue;
+ 
++		/*
++		 * Also ignore SECINITSID_INIT if the policy doesn't declare
++		 * support for it
++		 */
++		if (sid == SECINITSID_INIT && !isid_init_supported)
++			continue;
++
+ 		rc = sidtab_set_initial(s, sid, &c->context[0]);
+ 		if (rc) {
+ 			pr_err("SELinux:  unable to load initial SID %s.\n",
+@@ -893,6 +902,24 @@ int policydb_load_isids(struct policydb *p, struct sidtab *s)
+ 			sidtab_destroy(s);
+ 			return rc;
+ 		}
++
++		/*
++		 * If the policy doesn't support the "userspace_initial_context"
++		 * capability, set SECINITSID_INIT to the same context as
++		 * SECINITSID_KERNEL. This ensures the same behavior as before
++		 * the reintroduction of SECINITSID_INIT, where all tasks
++		 * started before policy load would initially get the context
++		 * corresponding to SECINITSID_KERNEL.
++		 */
++		if (sid == SECINITSID_KERNEL && !isid_init_supported) {
++			rc = sidtab_set_initial(s, SECINITSID_INIT, &c->context[0]);
++			if (rc) {
++				pr_err("SELinux:  unable to load initial SID %s.\n",
++				       name);
++				sidtab_destroy(s);
++				return rc;
++			}
++		}
+ 	}
+ 	return 0;
+ }

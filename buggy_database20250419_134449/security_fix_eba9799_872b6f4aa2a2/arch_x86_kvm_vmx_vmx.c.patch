@@ -1,0 +1,45 @@
+commit eba9799b5a6efe2993cf92529608e4aa8163d73b
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Tue Aug 30 23:15:49 2022 +0000
+
+    KVM: VMX: Drop bits 31:16 when shoving exception error code into VMCS
+    
+    Deliberately truncate the exception error code when shoving it into the
+    VMCS (VM-Entry field for vmcs01 and vmcs02, VM-Exit field for vmcs12).
+    Intel CPUs are incapable of handling 32-bit error codes and will never
+    generate an error code with bits 31:16, but userspace can provide an
+    arbitrary error code via KVM_SET_VCPU_EVENTS.  Failure to drop the bits
+    on exception injection results in failed VM-Entry, as VMX disallows
+    setting bits 31:16.  Setting the bits on VM-Exit would at best confuse
+    L1, and at worse induce a nested VM-Entry failure, e.g. if L1 decided to
+    reinject the exception back into L2.
+    
+    Cc: stable@vger.kernel.org
+    Signed-off-by: Sean Christopherson <seanjc@google.com>
+    Reviewed-by: Jim Mattson <jmattson@google.com>
+    Reviewed-by: Maxim Levitsky <mlevitsk@redhat.com>
+    Link: https://lore.kernel.org/r/20220830231614.3580124-3-seanjc@google.com
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index e624f4c53021..497d14e515ed 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -1695,7 +1695,17 @@ static void vmx_queue_exception(struct kvm_vcpu *vcpu)
+ 	kvm_deliver_exception_payload(vcpu);
+ 
+ 	if (has_error_code) {
+-		vmcs_write32(VM_ENTRY_EXCEPTION_ERROR_CODE, error_code);
++		/*
++		 * Despite the error code being architecturally defined as 32
++		 * bits, and the VMCS field being 32 bits, Intel CPUs and thus
++		 * VMX don't actually supporting setting bits 31:16.  Hardware
++		 * will (should) never provide a bogus error code, but AMD CPUs
++		 * do generate error codes with bits 31:16 set, and so KVM's
++		 * ABI lets userspace shove in arbitrary 32-bit values.  Drop
++		 * the upper bits to avoid VM-Fail, losing information that
++		 * does't really exist is preferable to killing the VM.
++		 */
++		vmcs_write32(VM_ENTRY_EXCEPTION_ERROR_CODE, (u16)error_code);
+ 		intr_info |= INTR_INFO_DELIVER_CODE_MASK;
+ 	}

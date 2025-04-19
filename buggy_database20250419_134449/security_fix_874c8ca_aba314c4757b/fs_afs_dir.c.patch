@@ -1,0 +1,223 @@
+commit 874c8ca1e60b2c564a48f7e7acc40d328d5c8733
+Author: David Howells <dhowells@redhat.com>
+Date:   Thu Jun 9 21:46:04 2022 +0100
+
+    netfs: Fix gcc-12 warning by embedding vfs inode in netfs_i_context
+    
+    While randstruct was satisfied with using an open-coded "void *" offset
+    cast for the netfs_i_context <-> inode casting, __builtin_object_size() as
+    used by FORTIFY_SOURCE was not as easily fooled.  This was causing the
+    following complaint[1] from gcc v12:
+    
+      In file included from include/linux/string.h:253,
+                       from include/linux/ceph/ceph_debug.h:7,
+                       from fs/ceph/inode.c:2:
+      In function 'fortify_memset_chk',
+          inlined from 'netfs_i_context_init' at include/linux/netfs.h:326:2,
+          inlined from 'ceph_alloc_inode' at fs/ceph/inode.c:463:2:
+      include/linux/fortify-string.h:242:25: warning: call to '__write_overflow_field' declared with attribute warning: detected write beyond size of field (1st parameter); maybe use struct_group()? [-Wattribute-warning]
+        242 |                         __write_overflow_field(p_size_field, size);
+            |                         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    
+    Fix this by embedding a struct inode into struct netfs_i_context (which
+    should perhaps be renamed to struct netfs_inode).  The struct inode
+    vfs_inode fields are then removed from the 9p, afs, ceph and cifs inode
+    structs and vfs_inode is then simply changed to "netfs.inode" in those
+    filesystems.
+    
+    Further, rename netfs_i_context to netfs_inode, get rid of the
+    netfs_inode() function that converted a netfs_i_context pointer to an
+    inode pointer (that can now be done with &ctx->inode) and rename the
+    netfs_i_context() function to netfs_inode() (which is now a wrapper
+    around container_of()).
+    
+    Most of the changes were done with:
+    
+      perl -p -i -e 's/vfs_inode/netfs.inode/'g \
+            `git grep -l 'vfs_inode' -- fs/{9p,afs,ceph,cifs}/*.[ch]`
+    
+    Kees suggested doing it with a pair structure[2] and a special
+    declarator to insert that into the network filesystem's inode
+    wrapper[3], but I think it's cleaner to embed it - and then it doesn't
+    matter if struct randomisation reorders things.
+    
+    Dave Chinner suggested using a filesystem-specific VFS_I() function in
+    each filesystem to convert that filesystem's own inode wrapper struct
+    into the VFS inode struct[4].
+    
+    Version #2:
+     - Fix a couple of missed name changes due to a disabled cifs option.
+     - Rename nfs_i_context to nfs_inode
+     - Use "netfs" instead of "nic" as the member name in per-fs inode wrapper
+       structs.
+    
+    [ This also undoes commit 507160f46c55 ("netfs: gcc-12: temporarily
+      disable '-Wattribute-warning' for now") that is no longer needed ]
+    
+    Fixes: bc899ee1c898 ("netfs: Add a netfs inode context")
+    Reported-by: Jeff Layton <jlayton@kernel.org>
+    Signed-off-by: David Howells <dhowells@redhat.com>
+    Reviewed-by: Jeff Layton <jlayton@kernel.org>
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Reviewed-by: Xiubo Li <xiubli@redhat.com>
+    cc: Jonathan Corbet <corbet@lwn.net>
+    cc: Eric Van Hensbergen <ericvh@gmail.com>
+    cc: Latchesar Ionkov <lucho@ionkov.net>
+    cc: Dominique Martinet <asmadeus@codewreck.org>
+    cc: Christian Schoenebeck <linux_oss@crudebyte.com>
+    cc: Marc Dionne <marc.dionne@auristor.com>
+    cc: Ilya Dryomov <idryomov@gmail.com>
+    cc: Steve French <smfrench@gmail.com>
+    cc: William Kucharski <william.kucharski@oracle.com>
+    cc: "Matthew Wilcox (Oracle)" <willy@infradead.org>
+    cc: Dave Chinner <david@fromorbit.com>
+    cc: linux-doc@vger.kernel.org
+    cc: v9fs-developer@lists.sourceforge.net
+    cc: linux-afs@lists.infradead.org
+    cc: ceph-devel@vger.kernel.org
+    cc: linux-cifs@vger.kernel.org
+    cc: samba-technical@lists.samba.org
+    cc: linux-fsdevel@vger.kernel.org
+    cc: linux-hardening@vger.kernel.org
+    Link: https://lore.kernel.org/r/d2ad3a3d7bdd794c6efb562d2f2b655fb67756b9.camel@kernel.org/ [1]
+    Link: https://lore.kernel.org/r/20220517210230.864239-1-keescook@chromium.org/ [2]
+    Link: https://lore.kernel.org/r/20220518202212.2322058-1-keescook@chromium.org/ [3]
+    Link: https://lore.kernel.org/r/20220524101205.GI2306852@dread.disaster.area/ [4]
+    Link: https://lore.kernel.org/r/165296786831.3591209.12111293034669289733.stgit@warthog.procyon.org.uk/ # v1
+    Link: https://lore.kernel.org/r/165305805651.4094995.7763502506786714216.stgit@warthog.procyon.org.uk # v2
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/fs/afs/dir.c b/fs/afs/dir.c
+index 79f6b74336d2..56ae5cd5184f 100644
+--- a/fs/afs/dir.c
++++ b/fs/afs/dir.c
+@@ -109,7 +109,7 @@ struct afs_lookup_cookie {
+  */
+ static void afs_dir_read_cleanup(struct afs_read *req)
+ {
+-	struct address_space *mapping = req->vnode->vfs_inode.i_mapping;
++	struct address_space *mapping = req->vnode->netfs.inode.i_mapping;
+ 	struct folio *folio;
+ 	pgoff_t last = req->nr_pages - 1;
+ 
+@@ -153,7 +153,7 @@ static bool afs_dir_check_folio(struct afs_vnode *dvnode, struct folio *folio,
+ 		block = kmap_local_folio(folio, offset);
+ 		if (block->hdr.magic != AFS_DIR_MAGIC) {
+ 			printk("kAFS: %s(%lx): [%llx] bad magic %zx/%zx is %04hx\n",
+-			       __func__, dvnode->vfs_inode.i_ino,
++			       __func__, dvnode->netfs.inode.i_ino,
+ 			       pos, offset, size, ntohs(block->hdr.magic));
+ 			trace_afs_dir_check_failed(dvnode, pos + offset, i_size);
+ 			kunmap_local(block);
+@@ -183,7 +183,7 @@ static bool afs_dir_check_folio(struct afs_vnode *dvnode, struct folio *folio,
+ static void afs_dir_dump(struct afs_vnode *dvnode, struct afs_read *req)
+ {
+ 	union afs_xdr_dir_block *block;
+-	struct address_space *mapping = dvnode->vfs_inode.i_mapping;
++	struct address_space *mapping = dvnode->netfs.inode.i_mapping;
+ 	struct folio *folio;
+ 	pgoff_t last = req->nr_pages - 1;
+ 	size_t offset, size;
+@@ -217,7 +217,7 @@ static void afs_dir_dump(struct afs_vnode *dvnode, struct afs_read *req)
+  */
+ static int afs_dir_check(struct afs_vnode *dvnode, struct afs_read *req)
+ {
+-	struct address_space *mapping = dvnode->vfs_inode.i_mapping;
++	struct address_space *mapping = dvnode->netfs.inode.i_mapping;
+ 	struct folio *folio;
+ 	pgoff_t last = req->nr_pages - 1;
+ 	int ret = 0;
+@@ -269,7 +269,7 @@ static int afs_dir_open(struct inode *inode, struct file *file)
+ static struct afs_read *afs_read_dir(struct afs_vnode *dvnode, struct key *key)
+ 	__acquires(&dvnode->validate_lock)
+ {
+-	struct address_space *mapping = dvnode->vfs_inode.i_mapping;
++	struct address_space *mapping = dvnode->netfs.inode.i_mapping;
+ 	struct afs_read *req;
+ 	loff_t i_size;
+ 	int nr_pages, i;
+@@ -287,7 +287,7 @@ static struct afs_read *afs_read_dir(struct afs_vnode *dvnode, struct key *key)
+ 	req->cleanup = afs_dir_read_cleanup;
+ 
+ expand:
+-	i_size = i_size_read(&dvnode->vfs_inode);
++	i_size = i_size_read(&dvnode->netfs.inode);
+ 	if (i_size < 2048) {
+ 		ret = afs_bad(dvnode, afs_file_error_dir_small);
+ 		goto error;
+@@ -305,7 +305,7 @@ static struct afs_read *afs_read_dir(struct afs_vnode *dvnode, struct key *key)
+ 	req->actual_len = i_size; /* May change */
+ 	req->len = nr_pages * PAGE_SIZE; /* We can ask for more than there is */
+ 	req->data_version = dvnode->status.data_version; /* May change */
+-	iov_iter_xarray(&req->def_iter, READ, &dvnode->vfs_inode.i_mapping->i_pages,
++	iov_iter_xarray(&req->def_iter, READ, &dvnode->netfs.inode.i_mapping->i_pages,
+ 			0, i_size);
+ 	req->iter = &req->def_iter;
+ 
+@@ -897,7 +897,7 @@ static struct inode *afs_do_lookup(struct inode *dir, struct dentry *dentry,
+ 
+ out_op:
+ 	if (op->error == 0) {
+-		inode = &op->file[1].vnode->vfs_inode;
++		inode = &op->file[1].vnode->netfs.inode;
+ 		op->file[1].vnode = NULL;
+ 	}
+ 
+@@ -1139,7 +1139,7 @@ static int afs_d_revalidate(struct dentry *dentry, unsigned int flags)
+ 	afs_stat_v(dir, n_reval);
+ 
+ 	/* search the directory for this vnode */
+-	ret = afs_do_lookup_one(&dir->vfs_inode, dentry, &fid, key, &dir_version);
++	ret = afs_do_lookup_one(&dir->netfs.inode, dentry, &fid, key, &dir_version);
+ 	switch (ret) {
+ 	case 0:
+ 		/* the filename maps to something */
+@@ -1170,7 +1170,7 @@ static int afs_d_revalidate(struct dentry *dentry, unsigned int flags)
+ 			_debug("%pd: file deleted (uq %u -> %u I:%u)",
+ 			       dentry, fid.unique,
+ 			       vnode->fid.unique,
+-			       vnode->vfs_inode.i_generation);
++			       vnode->netfs.inode.i_generation);
+ 			goto not_found;
+ 		}
+ 		goto out_valid;
+@@ -1368,7 +1368,7 @@ static void afs_dir_remove_subdir(struct dentry *dentry)
+ 	if (d_really_is_positive(dentry)) {
+ 		struct afs_vnode *vnode = AFS_FS_I(d_inode(dentry));
+ 
+-		clear_nlink(&vnode->vfs_inode);
++		clear_nlink(&vnode->netfs.inode);
+ 		set_bit(AFS_VNODE_DELETED, &vnode->flags);
+ 		clear_bit(AFS_VNODE_CB_PROMISED, &vnode->flags);
+ 		clear_bit(AFS_VNODE_DIR_VALID, &vnode->flags);
+@@ -1487,8 +1487,8 @@ static void afs_dir_remove_link(struct afs_operation *op)
+ 		/* Already done */
+ 	} else if (test_bit(AFS_VNODE_DIR_VALID, &dvnode->flags)) {
+ 		write_seqlock(&vnode->cb_lock);
+-		drop_nlink(&vnode->vfs_inode);
+-		if (vnode->vfs_inode.i_nlink == 0) {
++		drop_nlink(&vnode->netfs.inode);
++		if (vnode->netfs.inode.i_nlink == 0) {
+ 			set_bit(AFS_VNODE_DELETED, &vnode->flags);
+ 			__afs_break_callback(vnode, afs_cb_break_for_unlink);
+ 		}
+@@ -1504,7 +1504,7 @@ static void afs_dir_remove_link(struct afs_operation *op)
+ 			op->error = ret;
+ 	}
+ 
+-	_debug("nlink %d [val %d]", vnode->vfs_inode.i_nlink, op->error);
++	_debug("nlink %d [val %d]", vnode->netfs.inode.i_nlink, op->error);
+ }
+ 
+ static void afs_unlink_success(struct afs_operation *op)
+@@ -1680,8 +1680,8 @@ static void afs_link_success(struct afs_operation *op)
+ 	afs_update_dentry_version(op, dvp, op->dentry);
+ 	if (op->dentry_2->d_parent == op->dentry->d_parent)
+ 		afs_update_dentry_version(op, dvp, op->dentry_2);
+-	ihold(&vp->vnode->vfs_inode);
+-	d_instantiate(op->dentry, &vp->vnode->vfs_inode);
++	ihold(&vp->vnode->netfs.inode);
++	d_instantiate(op->dentry, &vp->vnode->netfs.inode);
+ }
+ 
+ static void afs_link_put(struct afs_operation *op)

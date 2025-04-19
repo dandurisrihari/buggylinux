@@ -1,0 +1,76 @@
+diff --git a/include/linux/string.h b/include/linux/string.h
+index 493ac4862c77..86d5d352068b 100644
+--- a/include/linux/string.h
++++ b/include/linux/string.h
+@@ -4,6 +4,7 @@
+ 
+ #include <linux/args.h>
+ #include <linux/array_size.h>
++#include <linux/cleanup.h>	/* for DEFINE_FREE() */
+ #include <linux/compiler.h>	/* for inline */
+ #include <linux/types.h>	/* for size_t */
+ #include <linux/stddef.h>	/* for NULL */
+@@ -312,6 +313,8 @@ extern void *kmemdup_array(const void *src, size_t count, size_t element_size, g
+ extern char **argv_split(gfp_t gfp, const char *str, int *argcp);
+ extern void argv_free(char **argv);
+ 
++DEFINE_FREE(argv_free, char **, if (!IS_ERR_OR_NULL(_T)) argv_free(_T))
++
+ /* lib/cmdline.c */
+ extern int get_option(char **str, int *pint);
+ extern char *get_options(const char *str, int nints, int *ints);
+diff --git a/kernel/trace/trace_dynevent.c b/kernel/trace/trace_dynevent.c
+index 4376887e0d8a..a322e4f249a5 100644
+--- a/kernel/trace/trace_dynevent.c
++++ b/kernel/trace/trace_dynevent.c
+@@ -74,24 +74,19 @@ int dyn_event_release(const char *raw_command, struct dyn_event_operations *type
+ 	struct dyn_event *pos, *n;
+ 	char *system = NULL, *event, *p;
+ 	int argc, ret = -ENOENT;
+-	char **argv;
++	char **argv __free(argv_free) = argv_split(GFP_KERNEL, raw_command, &argc);
+ 
+-	argv = argv_split(GFP_KERNEL, raw_command, &argc);
+ 	if (!argv)
+ 		return -ENOMEM;
+ 
+ 	if (argv[0][0] == '-') {
+-		if (argv[0][1] != ':') {
+-			ret = -EINVAL;
+-			goto out;
+-		}
++		if (argv[0][1] != ':')
++			return -EINVAL;
+ 		event = &argv[0][2];
+ 	} else {
+ 		event = strchr(argv[0], ':');
+-		if (!event) {
+-			ret = -EINVAL;
+-			goto out;
+-		}
++		if (!event)
++			return -EINVAL;
+ 		event++;
+ 	}
+ 
+@@ -101,10 +96,8 @@ int dyn_event_release(const char *raw_command, struct dyn_event_operations *type
+ 		event = p + 1;
+ 		*p = '\0';
+ 	}
+-	if (!system && event[0] == '\0') {
+-		ret = -EINVAL;
+-		goto out;
+-	}
++	if (!system && event[0] == '\0')
++		return -EINVAL;
+ 
+ 	mutex_lock(&event_mutex);
+ 	for_each_dyn_event_safe(pos, n) {
+@@ -120,8 +113,6 @@ int dyn_event_release(const char *raw_command, struct dyn_event_operations *type
+ 	}
+ 	tracing_reset_all_online_cpus();
+ 	mutex_unlock(&event_mutex);
+-out:
+-	argv_free(argv);
+ 	return ret;
+ }

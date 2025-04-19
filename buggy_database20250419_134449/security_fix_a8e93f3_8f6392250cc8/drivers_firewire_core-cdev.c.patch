@@ -1,0 +1,38 @@
+commit a8e93f3dccc066cd6dd1e9db1e35942914fc57d1
+Author: Clemens Ladisch <clemens@ladisch.de>
+Date:   Wed Jul 7 14:37:30 2010 +0200
+
+    firewire: cdev: check write quadlet request length to avoid buffer overflow
+    
+    Check that the data length of a write quadlet request actually is large
+    enough for a quadlet.  Otherwise, fw_fill_request could access the four
+    bytes after the end of the outbound_transaction_event structure.
+    
+    Signed-off-by: Clemens Ladisch <clemens@ladisch.de>
+    
+    Modification of Clemens' change:  Consolidate the check into
+    init_request() which is used by the affected ioctl_send_request() and
+    ioctl_send_broadcast_request() and the unaffected
+    ioctl_send_stream_packet(), to save a few lines of code.
+    
+    Note, since struct outbound_transaction_event *e is slab-allocated, such
+    an out-of-bounds access won't hit unallocated memory but may result in a
+    (virtually impossible to exploit) information disclosure.
+    
+    Signed-off-by: Stefan Richter <stefanr@s5r6.in-berlin.de>
+
+diff --git a/drivers/firewire/core-cdev.c b/drivers/firewire/core-cdev.c
+index d8ac0ce2d6bf..f7559bfeaba3 100644
+--- a/drivers/firewire/core-cdev.c
++++ b/drivers/firewire/core-cdev.c
+@@ -563,6 +563,10 @@ static int init_request(struct client *client,
+ 	    (request->length > 4096 || request->length > 512 << speed))
+ 		return -EIO;
+ 
++	if (request->tcode == TCODE_WRITE_QUADLET_REQUEST &&
++	    request->length < 4)
++		return -EINVAL;
++
+ 	e = kmalloc(sizeof(*e) + request->length, GFP_KERNEL);
+ 	if (e == NULL)
+ 		return -ENOMEM;

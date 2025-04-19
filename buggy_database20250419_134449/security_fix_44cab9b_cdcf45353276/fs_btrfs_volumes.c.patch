@@ -1,0 +1,54 @@
+commit 44cab9ba374a0341e12c024f43a83e12ec4978fd
+Author: Nikolay Borisov <nborisov@suse.com>
+Date:   Wed Jul 22 11:09:23 2020 +0300
+
+    btrfs: refactor locked condition in btrfs_init_new_device
+    
+    Invert unlocked to locked and exploit the fact it can only ever be
+    modified if we are adding a new device to a seed filesystem. This allows
+    to simplify the check in error: label. No semantics changes.
+    
+    Reviewed-by: Anand Jain <anand.jain@oracle.com>
+    Signed-off-by: Nikolay Borisov <nborisov@suse.com>
+    Reviewed-by: David Sterba <dsterba@suse.com>
+    Signed-off-by: David Sterba <dsterba@suse.com>
+
+diff --git a/fs/btrfs/volumes.c b/fs/btrfs/volumes.c
+index 5449e3899e67..3e3aacaedf47 100644
+--- a/fs/btrfs/volumes.c
++++ b/fs/btrfs/volumes.c
+@@ -2497,7 +2497,7 @@ int btrfs_init_new_device(struct btrfs_fs_info *fs_info, const char *device_path
+ 	u64 orig_super_num_devices;
+ 	int seeding_dev = 0;
+ 	int ret = 0;
+-	bool unlocked = false;
++	bool locked = false;
+ 
+ 	if (sb_rdonly(sb) && !fs_devices->seeding)
+ 		return -EROFS;
+@@ -2511,6 +2511,7 @@ int btrfs_init_new_device(struct btrfs_fs_info *fs_info, const char *device_path
+ 		seeding_dev = 1;
+ 		down_write(&sb->s_umount);
+ 		mutex_lock(&uuid_mutex);
++		locked = true;
+ 	}
+ 
+ 	filemap_write_and_wait(bdev->bd_inode->i_mapping);
+@@ -2645,7 +2646,7 @@ int btrfs_init_new_device(struct btrfs_fs_info *fs_info, const char *device_path
+ 	if (seeding_dev) {
+ 		mutex_unlock(&uuid_mutex);
+ 		up_write(&sb->s_umount);
+-		unlocked = true;
++		locked = false;
+ 
+ 		if (ret) /* transaction commit */
+ 			return ret;
+@@ -2706,7 +2707,7 @@ int btrfs_init_new_device(struct btrfs_fs_info *fs_info, const char *device_path
+ 	btrfs_free_device(device);
+ error:
+ 	blkdev_put(bdev, FMODE_EXCL);
+-	if (seeding_dev && !unlocked) {
++	if (locked) {
+ 		mutex_unlock(&uuid_mutex);
+ 		up_write(&sb->s_umount);
+ 	}

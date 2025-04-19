@@ -1,0 +1,159 @@
+commit b1c0ec3599f42ad372063b0235a3c33f65eb1e30
+Author: Eric Biggers <ebiggers@google.com>
+Date:   Sun Aug 4 19:35:46 2019 -0700
+
+    fscrypt: add FS_IOC_REMOVE_ENCRYPTION_KEY ioctl
+    
+    Add a new fscrypt ioctl, FS_IOC_REMOVE_ENCRYPTION_KEY.  This ioctl
+    removes an encryption key that was added by FS_IOC_ADD_ENCRYPTION_KEY.
+    It wipes the secret key itself, then "locks" the encrypted files and
+    directories that had been unlocked using that key -- implemented by
+    evicting the relevant dentries and inodes from the VFS caches.
+    
+    The problem this solves is that many fscrypt users want the ability to
+    remove encryption keys, causing the corresponding encrypted directories
+    to appear "locked" (presented in ciphertext form) again.  Moreover,
+    users want removing an encryption key to *really* remove it, in the
+    sense that the removed keys cannot be recovered even if kernel memory is
+    compromised, e.g. by the exploit of a kernel security vulnerability or
+    by a physical attack.  This is desirable after a user logs out of the
+    system, for example.  In many cases users even already assume this to be
+    the case and are surprised to hear when it's not.
+    
+    It is not sufficient to simply unlink the master key from the keyring
+    (or to revoke or invalidate it), since the actual encryption transform
+    objects are still pinned in memory by their inodes.  Therefore, to
+    really remove a key we must also evict the relevant inodes.
+    
+    Currently one workaround is to run 'sync && echo 2 >
+    /proc/sys/vm/drop_caches'.  But, that evicts all unused inodes in the
+    system rather than just the inodes associated with the key being
+    removed, causing severe performance problems.  Moreover, it requires
+    root privileges, so regular users can't "lock" their encrypted files.
+    
+    Another workaround, used in Chromium OS kernels, is to add a new
+    VFS-level ioctl FS_IOC_DROP_CACHE which is a more restricted version of
+    drop_caches that operates on a single super_block.  It does:
+    
+            shrink_dcache_sb(sb);
+            invalidate_inodes(sb, false);
+    
+    But it's still a hack.  Yet, the major users of filesystem encryption
+    want this feature badly enough that they are actually using these hacks.
+    
+    To properly solve the problem, start maintaining a list of the inodes
+    which have been "unlocked" using each master key.  Originally this
+    wasn't possible because the kernel didn't keep track of in-use master
+    keys at all.  But, with the ->s_master_keys keyring it is now possible.
+    
+    Then, add an ioctl FS_IOC_REMOVE_ENCRYPTION_KEY.  It finds the specified
+    master key in ->s_master_keys, then wipes the secret key itself, which
+    prevents any additional inodes from being unlocked with the key.  Then,
+    it syncs the filesystem and evicts the inodes in the key's list.  The
+    normal inode eviction code will free and wipe the per-file keys (in
+    ->i_crypt_info).  Note that freeing ->i_crypt_info without evicting the
+    inodes was also considered, but would have been racy.
+    
+    Some inodes may still be in use when a master key is removed, and we
+    can't simply revoke random file descriptors, mmap's, etc.  Thus, the
+    ioctl simply skips in-use inodes, and returns -EBUSY to indicate that
+    some inodes weren't evicted.  The master key *secret* is still removed,
+    but the fscrypt_master_key struct remains to keep track of the remaining
+    inodes.  Userspace can then retry the ioctl to evict the remaining
+    inodes.  Alternatively, if userspace adds the key again, the refreshed
+    secret will be associated with the existing list of inodes so they
+    remain correctly tracked for future key removals.
+    
+    The ioctl doesn't wipe pagecache pages.  Thus, we tolerate that after a
+    kernel compromise some portions of plaintext file contents may still be
+    recoverable from memory.  This can be solved by enabling page poisoning
+    system-wide, which security conscious users may choose to do.  But it's
+    very difficult to solve otherwise, e.g. note that plaintext file
+    contents may have been read in other places than pagecache pages.
+    
+    Like FS_IOC_ADD_ENCRYPTION_KEY, FS_IOC_REMOVE_ENCRYPTION_KEY is
+    initially restricted to privileged users only.  This is sufficient for
+    some use cases, but not all.  A later patch will relax this restriction,
+    but it will require introducing key hashes, among other changes.
+    
+    Reviewed-by: Theodore Ts'o <tytso@mit.edu>
+    Signed-off-by: Eric Biggers <ebiggers@google.com>
+
+diff --git a/fs/crypto/fscrypt_private.h b/fs/crypto/fscrypt_private.h
+index 0d9ebfd3bf3a..fc804f4a03fc 100644
+--- a/fs/crypto/fscrypt_private.h
++++ b/fs/crypto/fscrypt_private.h
+@@ -78,6 +78,19 @@ struct fscrypt_info {
+ 	/* Back-pointer to the inode */
+ 	struct inode *ci_inode;
+ 
++	/*
++	 * The master key with which this inode was unlocked (decrypted).  This
++	 * will be NULL if the master key was found in a process-subscribed
++	 * keyring rather than in the filesystem-level keyring.
++	 */
++	struct key *ci_master_key;
++
++	/*
++	 * Link in list of inodes that were unlocked with the master key.
++	 * Only used when ->ci_master_key is set.
++	 */
++	struct list_head ci_master_key_link;
++
+ 	/*
+ 	 * If non-NULL, then encryption is done using the master key directly
+ 	 * and ci_ctfm will equal ci_direct_key->dk_ctfm.
+@@ -183,14 +196,52 @@ struct fscrypt_master_key_secret {
+  */
+ struct fscrypt_master_key {
+ 
+-	/* The secret key material */
++	/*
++	 * The secret key material.  After FS_IOC_REMOVE_ENCRYPTION_KEY is
++	 * executed, this is wiped and no new inodes can be unlocked with this
++	 * key; however, there may still be inodes in ->mk_decrypted_inodes
++	 * which could not be evicted.  As long as some inodes still remain,
++	 * FS_IOC_REMOVE_ENCRYPTION_KEY can be retried, or
++	 * FS_IOC_ADD_ENCRYPTION_KEY can add the secret again.
++	 *
++	 * Locking: protected by key->sem.
++	 */
+ 	struct fscrypt_master_key_secret	mk_secret;
+ 
+ 	/* Arbitrary key descriptor which was assigned by userspace */
+ 	struct fscrypt_key_specifier		mk_spec;
+ 
++	/*
++	 * Length of ->mk_decrypted_inodes, plus one if mk_secret is present.
++	 * Once this goes to 0, the master key is removed from ->s_master_keys.
++	 * The 'struct fscrypt_master_key' will continue to live as long as the
++	 * 'struct key' whose payload it is, but we won't let this reference
++	 * count rise again.
++	 */
++	refcount_t		mk_refcount;
++
++	/*
++	 * List of inodes that were unlocked using this key.  This allows the
++	 * inodes to be evicted efficiently if the key is removed.
++	 */
++	struct list_head	mk_decrypted_inodes;
++	spinlock_t		mk_decrypted_inodes_lock;
++
+ } __randomize_layout;
+ 
++static inline bool
++is_master_key_secret_present(const struct fscrypt_master_key_secret *secret)
++{
++	/*
++	 * The READ_ONCE() is only necessary for fscrypt_drop_inode() and
++	 * fscrypt_key_describe().  These run in atomic context, so they can't
++	 * take key->sem and thus 'secret' can change concurrently which would
++	 * be a data race.  But they only need to know whether the secret *was*
++	 * present at the time of check, so READ_ONCE() suffices.
++	 */
++	return READ_ONCE(secret->size) != 0;
++}
++
+ static inline const char *master_key_spec_type(
+ 				const struct fscrypt_key_specifier *spec)
+ {

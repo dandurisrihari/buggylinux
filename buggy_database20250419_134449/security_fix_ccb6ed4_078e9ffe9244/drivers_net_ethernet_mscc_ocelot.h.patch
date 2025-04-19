@@ -1,0 +1,62 @@
+commit ccb6ed426f10ac4f742efa7d897c266aa10ac64a
+Author: Vladimir Oltean <vladimir.oltean@nxp.com>
+Date:   Wed Mar 16 22:41:40 2022 +0200
+
+    net: mscc: ocelot: add port mirroring support using tc-matchall
+    
+    Ocelot switches perform port-based ingress mirroring if
+    ANA:PORT:PORT_CFG field SRC_MIRROR_ENA is set, and egress mirroring if
+    the port is in ANA:ANA:EMIRRORPORTS.
+    
+    Both ingress-mirrored and egress-mirrored frames are copied to the port
+    mask from ANA:ANA:MIRRORPORTS.
+    
+    So the choice of limiting to a single mirror port via ocelot_mirror_get()
+    and ocelot_mirror_put() may seem bizarre, but the hardware model doesn't
+    map very well to the user space model. If the user wants to mirror the
+    ingress of swp1 towards swp2 and the ingress of swp3 towards swp4, we'd
+    have to program ANA:ANA:MIRRORPORTS with BIT(2) | BIT(4), and that would
+    make swp1 be mirrored towards swp4 too, and swp3 towards swp2. But there
+    are no tc-matchall rules to describe those actions.
+    
+    Now, we could offload a matchall rule with multiple mirred actions, one
+    per desired mirror port, and force the user to stick to the multi-action
+    rule format for subsequent matchall filters. But both DSA and ocelot
+    have the flow_offload_has_one_action() check for the matchall offload,
+    plus the fact that it will get cumbersome to cross-check matchall
+    mirrors with flower mirrors (which will be added in the next patch).
+    
+    As a result, we limit the configuration to a single mirror port, with
+    the possibility of lifting the restriction in the future.
+    
+    Frames injected from the CPU don't get egress-mirrored, since they are
+    sent with the BYPASS bit in the injection frame header, and this
+    bypasses the analyzer module (effectively also the mirroring logic).
+    I don't know what to do/say about this.
+    
+    Functionality was tested with:
+    
+    tc qdisc add dev swp3 clsact
+    tc filter add dev swp3 ingress \
+            matchall skip_sw \
+            action mirred egress mirror dev swp1
+    
+    and pinging through swp3, while seeing that the ICMP replies are
+    mirrored towards swp1.
+    
+    Signed-off-by: Vladimir Oltean <vladimir.oltean@nxp.com>
+    Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+diff --git a/drivers/net/ethernet/mscc/ocelot.h b/drivers/net/ethernet/mscc/ocelot.h
+index f8dc0d75eb5d..d5bd525e7ec2 100644
+--- a/drivers/net/ethernet/mscc/ocelot.h
++++ b/drivers/net/ethernet/mscc/ocelot.h
+@@ -38,7 +38,8 @@
+ struct ocelot_port_tc {
+ 	bool block_shared;
+ 	unsigned long offload_cnt;
+-
++	unsigned long ingress_mirred_id;
++	unsigned long egress_mirred_id;
+ 	unsigned long police_id;
+ };

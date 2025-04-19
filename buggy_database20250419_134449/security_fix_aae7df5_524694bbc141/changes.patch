@@ -1,0 +1,59 @@
+diff --git a/block/bio-integrity.c b/block/bio-integrity.c
+index 26aa901b961f..8e0548484dd3 100644
+--- a/block/bio-integrity.c
++++ b/block/bio-integrity.c
+@@ -297,6 +297,9 @@ int bio_integrity_prep(struct bio *bio)
+ 	bip->bip_iter.bi_size = len;
+ 	bip_set_seed(bip, bio->bi_iter.bi_sector);
+ 
++	if (bi->flags & BLK_INTEGRITY_IP_CHECKSUM)
++		bip->bip_flags |= BIP_IP_CHECKSUM;
++
+ 	/* Map it */
+ 	offset = offset_in_page(buf);
+ 	for (i = 0 ; i < nr_pages ; i++) {
+diff --git a/drivers/scsi/sd_dif.c b/drivers/scsi/sd_dif.c
+index 4ce636fdc15f..2198abee619e 100644
+--- a/drivers/scsi/sd_dif.c
++++ b/drivers/scsi/sd_dif.c
+@@ -255,12 +255,14 @@ void sd_dif_config_host(struct scsi_disk *sdkp)
+ 		return;
+ 
+ 	/* Enable DMA of protection information */
+-	if (scsi_host_get_guard(sdkp->device->host) & SHOST_DIX_GUARD_IP)
++	if (scsi_host_get_guard(sdkp->device->host) & SHOST_DIX_GUARD_IP) {
+ 		if (type == SD_DIF_TYPE3_PROTECTION)
+ 			blk_integrity_register(disk, &dif_type3_integrity_ip);
+ 		else
+ 			blk_integrity_register(disk, &dif_type1_integrity_ip);
+-	else
++
++		disk->integrity->flags |= BLK_INTEGRITY_IP_CHECKSUM;
++	} else
+ 		if (type == SD_DIF_TYPE3_PROTECTION)
+ 			blk_integrity_register(disk, &dif_type3_integrity_crc);
+ 		else
+diff --git a/include/linux/bio.h b/include/linux/bio.h
+index b508cf69206d..14bff3fe56d4 100644
+--- a/include/linux/bio.h
++++ b/include/linux/bio.h
+@@ -328,6 +328,7 @@ enum bip_flags {
+ 	BIP_MAPPED_INTEGRITY	= 1 << 1, /* ref tag has been remapped */
+ 	BIP_CTRL_NOCHECK	= 1 << 2, /* disable HBA integrity checking */
+ 	BIP_DISK_NOCHECK	= 1 << 3, /* disable disk integrity checking */
++	BIP_IP_CHECKSUM		= 1 << 4, /* IP checksum */
+ };
+ 
+ static inline sector_t bip_get_seed(struct bio_integrity_payload *bip)
+diff --git a/include/linux/blkdev.h b/include/linux/blkdev.h
+index 4600fc63e3fc..773df190a4ee 100644
+--- a/include/linux/blkdev.h
++++ b/include/linux/blkdev.h
+@@ -1462,6 +1462,7 @@ enum blk_integrity_flags {
+ 	BLK_INTEGRITY_VERIFY		= 1 << 0,
+ 	BLK_INTEGRITY_GENERATE		= 1 << 1,
+ 	BLK_INTEGRITY_DEVICE_CAPABLE	= 1 << 2,
++	BLK_INTEGRITY_IP_CHECKSUM	= 1 << 3,
+ };
+ 
+ struct blk_integrity_iter {

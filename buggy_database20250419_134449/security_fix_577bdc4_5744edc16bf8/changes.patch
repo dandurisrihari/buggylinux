@@ -1,0 +1,52 @@
+diff --git a/arch/x86/kvm/mmu.c b/arch/x86/kvm/mmu.c
+index d087d9c4f2d9..2fa231923cf7 100644
+--- a/arch/x86/kvm/mmu.c
++++ b/arch/x86/kvm/mmu.c
+@@ -1814,6 +1814,7 @@ int kvm_mmu_unprotect_page_virt(struct kvm_vcpu *vcpu, gva_t gva)
+ 	spin_unlock(&vcpu->kvm->mmu_lock);
+ 	return r;
+ }
++EXPORT_SYMBOL_GPL(kvm_mmu_unprotect_page_virt);
+ 
+ void __kvm_mmu_free_some_pages(struct kvm_vcpu *vcpu)
+ {
+diff --git a/arch/x86/kvm/svm.c b/arch/x86/kvm/svm.c
+index 951b789cc913..e2ee264740c7 100644
+--- a/arch/x86/kvm/svm.c
++++ b/arch/x86/kvm/svm.c
+@@ -1008,10 +1008,13 @@ static int pf_interception(struct vcpu_svm *svm, struct kvm_run *kvm_run)
+ 	struct kvm *kvm = svm->vcpu.kvm;
+ 	u64 fault_address;
+ 	u32 error_code;
++	bool event_injection = false;
+ 
+ 	if (!irqchip_in_kernel(kvm) &&
+-		is_external_interrupt(exit_int_info))
++	    is_external_interrupt(exit_int_info)) {
++		event_injection = true;
+ 		push_irq(&svm->vcpu, exit_int_info & SVM_EVTINJ_VEC_MASK);
++	}
+ 
+ 	fault_address  = svm->vmcb->control.exit_info_2;
+ 	error_code = svm->vmcb->control.exit_info_1;
+@@ -1025,6 +1028,8 @@ static int pf_interception(struct vcpu_svm *svm, struct kvm_run *kvm_run)
+ 			    (u32)fault_address, (u32)(fault_address >> 32),
+ 			    handler);
+ 
++	if (event_injection)
++		kvm_mmu_unprotect_page_virt(&svm->vcpu, fault_address);
+ 	return kvm_mmu_page_fault(&svm->vcpu, fault_address, error_code);
+ }
+ 
+diff --git a/arch/x86/kvm/vmx.c b/arch/x86/kvm/vmx.c
+index 0cac63701719..b918fc83435c 100644
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -2298,6 +2298,8 @@ static int handle_exception(struct kvm_vcpu *vcpu, struct kvm_run *kvm_run)
+ 		cr2 = vmcs_readl(EXIT_QUALIFICATION);
+ 		KVMTRACE_3D(PAGE_FAULT, vcpu, error_code, (u32)cr2,
+ 			    (u32)((u64)cr2 >> 32), handler);
++		if (vect_info & VECTORING_INFO_VALID_MASK)
++			kvm_mmu_unprotect_page_virt(vcpu, cr2);
+ 		return kvm_mmu_page_fault(vcpu, cr2, error_code);
+ 	}

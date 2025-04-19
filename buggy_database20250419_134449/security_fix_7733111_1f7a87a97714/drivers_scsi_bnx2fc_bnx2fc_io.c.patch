@@ -1,0 +1,116 @@
+commit 77331115e220925af1f52e18ac99e37a0b0c10ad
+Author: Javed Hasan <jhasan@marvell.com>
+Date:   Thu Mar 26 22:48:47 2020 -0700
+
+    scsi: bnx2fc: Process the RQE with CQE in interrupt context
+    
+    Filesystem goes to read-only after continuous error injection because RQE
+    was handled in deferred context, leading to mismatch between CQE and RQE.
+    
+    Specifically, this patch makes the following changes:
+    
+     - Process the RQE with CQE in interrupt context, before putting it into
+       the work queue.
+    
+     - Producer and consumer indices are also updated in the interrupt context
+       to guarantee the the order of processing.
+    
+    [mkp: fixed bad indentation]
+    
+    Link: https://lore.kernel.org/r/20200327054849.15947-2-skashyap@marvell.com
+    Signed-off-by: Javed Hasan <jhasan@marvell.com>
+    Signed-off-by: Saurav Kashyap <skashyap@marvell.com>
+    Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+
+diff --git a/drivers/scsi/bnx2fc/bnx2fc_io.c b/drivers/scsi/bnx2fc/bnx2fc_io.c
+index 4c8122a82322..9ab915240a2a 100644
+--- a/drivers/scsi/bnx2fc/bnx2fc_io.c
++++ b/drivers/scsi/bnx2fc/bnx2fc_io.c
+@@ -24,7 +24,7 @@ static void bnx2fc_unmap_sg_list(struct bnx2fc_cmd *io_req);
+ static void bnx2fc_free_mp_resc(struct bnx2fc_cmd *io_req);
+ static void bnx2fc_parse_fcp_rsp(struct bnx2fc_cmd *io_req,
+ 				 struct fcoe_fcp_rsp_payload *fcp_rsp,
+-				 u8 num_rq);
++				 u8 num_rq, unsigned char *rq_data);
+ 
+ void bnx2fc_cmd_timer_set(struct bnx2fc_cmd *io_req,
+ 			  unsigned int timer_msec)
+@@ -1518,7 +1518,8 @@ static void bnx2fc_tgt_reset_cmpl(struct bnx2fc_cmd *io_req)
+ }
+ 
+ void bnx2fc_process_tm_compl(struct bnx2fc_cmd *io_req,
+-			     struct fcoe_task_ctx_entry *task, u8 num_rq)
++			     struct fcoe_task_ctx_entry *task, u8 num_rq,
++				  unsigned char *rq_data)
+ {
+ 	struct bnx2fc_mp_req *tm_req;
+ 	struct fc_frame_header *fc_hdr;
+@@ -1557,7 +1558,7 @@ void bnx2fc_process_tm_compl(struct bnx2fc_cmd *io_req,
+ 	if (fc_hdr->fh_r_ctl == FC_RCTL_DD_CMD_STATUS) {
+ 		bnx2fc_parse_fcp_rsp(io_req,
+ 				     (struct fcoe_fcp_rsp_payload *)
+-				     rsp_buf, num_rq);
++				     rsp_buf, num_rq, rq_data);
+ 		if (io_req->fcp_rsp_code == 0) {
+ 			/* TM successful */
+ 			if (tm_req->tm_flags & FCP_TMF_LUN_RESET)
+@@ -1755,15 +1756,11 @@ void bnx2fc_build_fcp_cmnd(struct bnx2fc_cmd *io_req,
+ 
+ static void bnx2fc_parse_fcp_rsp(struct bnx2fc_cmd *io_req,
+ 				 struct fcoe_fcp_rsp_payload *fcp_rsp,
+-				 u8 num_rq)
++				 u8 num_rq, unsigned char *rq_data)
+ {
+ 	struct scsi_cmnd *sc_cmd = io_req->sc_cmd;
+-	struct bnx2fc_rport *tgt = io_req->tgt;
+ 	u8 rsp_flags = fcp_rsp->fcp_flags.flags;
+ 	u32 rq_buff_len = 0;
+-	int i;
+-	unsigned char *rq_data;
+-	unsigned char *dummy;
+ 	int fcp_sns_len = 0;
+ 	int fcp_rsp_len = 0;
+ 
+@@ -1809,14 +1806,6 @@ static void bnx2fc_parse_fcp_rsp(struct bnx2fc_cmd *io_req,
+ 			rq_buff_len =  num_rq * BNX2FC_RQ_BUF_SZ;
+ 		}
+ 
+-		rq_data = bnx2fc_get_next_rqe(tgt, 1);
+-
+-		if (num_rq > 1) {
+-			/* We do not need extra sense data */
+-			for (i = 1; i < num_rq; i++)
+-				dummy = bnx2fc_get_next_rqe(tgt, 1);
+-		}
+-
+ 		/* fetch fcp_rsp_code */
+ 		if ((fcp_rsp_len == 4) || (fcp_rsp_len == 8)) {
+ 			/* Only for task management function */
+@@ -1837,9 +1826,6 @@ static void bnx2fc_parse_fcp_rsp(struct bnx2fc_cmd *io_req,
+ 		if (fcp_sns_len)
+ 			memcpy(sc_cmd->sense_buffer, rq_data, fcp_sns_len);
+ 
+-		/* return RQ entries */
+-		for (i = 0; i < num_rq; i++)
+-			bnx2fc_return_rqe(tgt, 1);
+ 	}
+ }
+ 
+@@ -1918,7 +1904,7 @@ int bnx2fc_queuecommand(struct Scsi_Host *host,
+ 
+ void bnx2fc_process_scsi_cmd_compl(struct bnx2fc_cmd *io_req,
+ 				   struct fcoe_task_ctx_entry *task,
+-				   u8 num_rq)
++				   u8 num_rq, unsigned char *rq_data)
+ {
+ 	struct fcoe_fcp_rsp_payload *fcp_rsp;
+ 	struct bnx2fc_rport *tgt = io_req->tgt;
+@@ -1950,7 +1936,7 @@ void bnx2fc_process_scsi_cmd_compl(struct bnx2fc_cmd *io_req,
+ 		   &(task->rxwr_only.union_ctx.comp_info.fcp_rsp.payload);
+ 
+ 	/* parse fcp_rsp and obtain sense data from RQ if available */
+-	bnx2fc_parse_fcp_rsp(io_req, fcp_rsp, num_rq);
++	bnx2fc_parse_fcp_rsp(io_req, fcp_rsp, num_rq, rq_data);
+ 
+ 	if (!sc_cmd->SCp.ptr) {
+ 		printk(KERN_ERR PFX "SCp.ptr is NULL\n");

@@ -1,0 +1,46 @@
+commit 9cd641ed31f576d08f7b784850ba93eef050f32f
+Author: Takashi Iwai <tiwai@suse.de>
+Date:   Wed Jul 4 14:46:27 2018 +0200
+
+    ALSA: pcm: trace XRUN event at injection, too
+    
+    The PCM xrun injection triggers directly snd_pcm_stop() without the
+    standard xrun handler, hence it's not recorded on the event buffer.
+    Ditto for snd_pcm_stop_xrun() call and SNDRV_PCM_IOCTL_XRUN ioctl.
+    They are inconvenient from the debugging POV.
+    
+    Let's make them to trigger XRUN via the standard helper more
+    consistently.
+    
+    Signed-off-by: Takashi Iwai <tiwai@suse.de>
+
+diff --git a/sound/core/pcm_native.c b/sound/core/pcm_native.c
+index cecc79772c94..20174d0c0527 100644
+--- a/sound/core/pcm_native.c
++++ b/sound/core/pcm_native.c
+@@ -1337,13 +1337,12 @@ int snd_pcm_drain_done(struct snd_pcm_substream *substream)
+ int snd_pcm_stop_xrun(struct snd_pcm_substream *substream)
+ {
+ 	unsigned long flags;
+-	int ret = 0;
+ 
+ 	snd_pcm_stream_lock_irqsave(substream, flags);
+ 	if (snd_pcm_running(substream))
+-		ret = snd_pcm_stop(substream, SNDRV_PCM_STATE_XRUN);
++		__snd_pcm_xrun(substream);
+ 	snd_pcm_stream_unlock_irqrestore(substream, flags);
+-	return ret;
++	return 0;
+ }
+ EXPORT_SYMBOL_GPL(snd_pcm_stop_xrun);
+ 
+@@ -1591,7 +1590,8 @@ static int snd_pcm_xrun(struct snd_pcm_substream *substream)
+ 		result = 0;	/* already there */
+ 		break;
+ 	case SNDRV_PCM_STATE_RUNNING:
+-		result = snd_pcm_stop(substream, SNDRV_PCM_STATE_XRUN);
++		__snd_pcm_xrun(substream);
++		result = 0;
+ 		break;
+ 	default:
+ 		result = -EBADFD;

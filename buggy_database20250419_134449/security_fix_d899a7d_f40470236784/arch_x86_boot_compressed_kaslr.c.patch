@@ -1,0 +1,172 @@
+commit d899a7d146a2ed8a7e6c2f61bcd232908bcbaabc
+Author: Thomas Garnier <thgarnie@google.com>
+Date:   Tue Jun 21 17:46:58 2016 -0700
+
+    x86/mm: Refactor KASLR entropy functions
+    
+    Move the KASLR entropy functions into arch/x86/lib to be used in early
+    kernel boot for KASLR memory randomization.
+    
+    Signed-off-by: Thomas Garnier <thgarnie@google.com>
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+    Cc: Alexander Kuleshov <kuleshovmail@gmail.com>
+    Cc: Alexander Popov <alpopov@ptsecurity.com>
+    Cc: Andrew Morton <akpm@linux-foundation.org>
+    Cc: Andy Lutomirski <luto@kernel.org>
+    Cc: Aneesh Kumar K.V <aneesh.kumar@linux.vnet.ibm.com>
+    Cc: Baoquan He <bhe@redhat.com>
+    Cc: Boris Ostrovsky <boris.ostrovsky@oracle.com>
+    Cc: Borislav Petkov <bp@alien8.de>
+    Cc: Borislav Petkov <bp@suse.de>
+    Cc: Brian Gerst <brgerst@gmail.com>
+    Cc: Christian Borntraeger <borntraeger@de.ibm.com>
+    Cc: Dan Williams <dan.j.williams@intel.com>
+    Cc: Dave Hansen <dave.hansen@linux.intel.com>
+    Cc: Dave Young <dyoung@redhat.com>
+    Cc: Denys Vlasenko <dvlasenk@redhat.com>
+    Cc: Dmitry Vyukov <dvyukov@google.com>
+    Cc: H. Peter Anvin <hpa@zytor.com>
+    Cc: Jan Beulich <JBeulich@suse.com>
+    Cc: Joerg Roedel <jroedel@suse.de>
+    Cc: Jonathan Corbet <corbet@lwn.net>
+    Cc: Josh Poimboeuf <jpoimboe@redhat.com>
+    Cc: Juergen Gross <jgross@suse.com>
+    Cc: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Cc: Lv Zheng <lv.zheng@intel.com>
+    Cc: Mark Salter <msalter@redhat.com>
+    Cc: Martin Schwidefsky <schwidefsky@de.ibm.com>
+    Cc: Matt Fleming <matt@codeblueprint.co.uk>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Stephen Smalley <sds@tycho.nsa.gov>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Toshi Kani <toshi.kani@hpe.com>
+    Cc: Xiao Guangrong <guangrong.xiao@linux.intel.com>
+    Cc: Yinghai Lu <yinghai@kernel.org>
+    Cc: kernel-hardening@lists.openwall.com
+    Cc: linux-doc@vger.kernel.org
+    Link: http://lkml.kernel.org/r/1466556426-32664-2-git-send-email-keescook@chromium.org
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+diff --git a/arch/x86/boot/compressed/kaslr.c b/arch/x86/boot/compressed/kaslr.c
+index 010ea16e5f77..a66854d99ee1 100644
+--- a/arch/x86/boot/compressed/kaslr.c
++++ b/arch/x86/boot/compressed/kaslr.c
+@@ -12,10 +12,6 @@
+ #include "misc.h"
+ #include "error.h"
+ 
+-#include <asm/msr.h>
+-#include <asm/archrandom.h>
+-#include <asm/e820.h>
+-
+ #include <generated/compile.h>
+ #include <linux/module.h>
+ #include <linux/uts.h>
+@@ -26,26 +22,6 @@
+ static const char build_str[] = UTS_RELEASE " (" LINUX_COMPILE_BY "@"
+ 		LINUX_COMPILE_HOST ") (" LINUX_COMPILER ") " UTS_VERSION;
+ 
+-#define I8254_PORT_CONTROL	0x43
+-#define I8254_PORT_COUNTER0	0x40
+-#define I8254_CMD_READBACK	0xC0
+-#define I8254_SELECT_COUNTER0	0x02
+-#define I8254_STATUS_NOTREADY	0x40
+-static inline u16 i8254(void)
+-{
+-	u16 status, timer;
+-
+-	do {
+-		outb(I8254_PORT_CONTROL,
+-		     I8254_CMD_READBACK | I8254_SELECT_COUNTER0);
+-		status = inb(I8254_PORT_COUNTER0);
+-		timer  = inb(I8254_PORT_COUNTER0);
+-		timer |= inb(I8254_PORT_COUNTER0) << 8;
+-	} while (status & I8254_STATUS_NOTREADY);
+-
+-	return timer;
+-}
+-
+ static unsigned long rotate_xor(unsigned long hash, const void *area,
+ 				size_t size)
+ {
+@@ -62,7 +38,7 @@ static unsigned long rotate_xor(unsigned long hash, const void *area,
+ }
+ 
+ /* Attempt to create a simple but unpredictable starting entropy. */
+-static unsigned long get_random_boot(void)
++static unsigned long get_boot_seed(void)
+ {
+ 	unsigned long hash = 0;
+ 
+@@ -72,50 +48,8 @@ static unsigned long get_random_boot(void)
+ 	return hash;
+ }
+ 
+-static unsigned long get_random_long(const char *purpose)
+-{
+-#ifdef CONFIG_X86_64
+-	const unsigned long mix_const = 0x5d6008cbf3848dd3UL;
+-#else
+-	const unsigned long mix_const = 0x3f39e593UL;
+-#endif
+-	unsigned long raw, random = get_random_boot();
+-	bool use_i8254 = true;
+-
+-	debug_putstr(purpose);
+-	debug_putstr(" KASLR using");
+-
+-	if (has_cpuflag(X86_FEATURE_RDRAND)) {
+-		debug_putstr(" RDRAND");
+-		if (rdrand_long(&raw)) {
+-			random ^= raw;
+-			use_i8254 = false;
+-		}
+-	}
+-
+-	if (has_cpuflag(X86_FEATURE_TSC)) {
+-		debug_putstr(" RDTSC");
+-		raw = rdtsc();
+-
+-		random ^= raw;
+-		use_i8254 = false;
+-	}
+-
+-	if (use_i8254) {
+-		debug_putstr(" i8254");
+-		random ^= i8254();
+-	}
+-
+-	/* Circular multiply for better bit diffusion */
+-	asm("mul %3"
+-	    : "=a" (random), "=d" (raw)
+-	    : "a" (random), "rm" (mix_const));
+-	random += raw;
+-
+-	debug_putstr("...\n");
+-
+-	return random;
+-}
++#define KASLR_COMPRESSED_BOOT
++#include "../../lib/kaslr.c"
+ 
+ struct mem_vector {
+ 	unsigned long start;
+@@ -349,7 +283,7 @@ static unsigned long slots_fetch_random(void)
+ 	if (slot_max == 0)
+ 		return 0;
+ 
+-	slot = get_random_long("Physical") % slot_max;
++	slot = kaslr_get_random_long("Physical") % slot_max;
+ 
+ 	for (i = 0; i < slot_area_index; i++) {
+ 		if (slot >= slot_areas[i].num) {
+@@ -479,7 +413,7 @@ static unsigned long find_random_virt_addr(unsigned long minimum,
+ 	slots = (KERNEL_IMAGE_SIZE - minimum - image_size) /
+ 		 CONFIG_PHYSICAL_ALIGN + 1;
+ 
+-	random_addr = get_random_long("Virtual") % slots;
++	random_addr = kaslr_get_random_long("Virtual") % slots;
+ 
+ 	return random_addr * CONFIG_PHYSICAL_ALIGN + minimum;
+ }

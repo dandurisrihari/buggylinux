@@ -1,0 +1,67 @@
+commit 6a98bc4614de8fac8c6d520a6b20b194e23c9936
+Author: Sascha Hauer <s.hauer@pengutronix.de>
+Date:   Fri Sep 7 14:36:36 2018 +0200
+
+    ubifs: Add authentication nodes to journal
+    
+    Nodes that are written to flash can only be authenticated through the
+    index after the next commit. When a journal replay is necessary the
+    nodes are not yet referenced by the index and thus can't be
+    authenticated.
+    
+    This patch overcomes this situation by creating a hash over all nodes
+    beginning from the commit start node over the reference node(s) and
+    the buds themselves. From
+    time to time we insert authentication nodes. Authentication nodes
+    contain a HMAC from the current hash state, so that they can be
+    used to authenticate a journal replay up to the point where the
+    authentication node is. The hash is continued afterwards
+    so that theoretically we would only have to check the HMAC of
+    the last authentication node we find.
+    
+    Overall we get this picture:
+    
+    ,,,,,,,,
+    ,......,...........................................
+    ,. CS  ,               hash1.----.           hash2.----.
+    ,.  |  ,                    .    |hmac            .    |hmac
+    ,.  v  ,                    .    v                .    v
+    ,.REF#0,-> bud -> bud -> bud.-> auth -> bud -> bud.-> auth ...
+    ,..|...,...........................................
+    ,  |   ,
+    ,  |   ,,,,,,,,,,,,,,,
+    .  |            hash3,----.
+    ,  |                 ,    |hmac
+    ,  v                 ,    v
+    , REF#1 -> bud -> bud,-> auth ...
+    ,,,|,,,,,,,,,,,,,,,,,,
+       v
+      REF#2 -> ...
+       |
+       V
+      ...
+    
+    Note how hash3 covers CS, REF#0 and REF#1 so that it is not possible to
+    exchange or skip any reference nodes. Unlike the picture suggests the
+    auth nodes themselves are not hashed.
+    
+    With this it is possible for an offline attacker to cut each journal
+    head or to drop the last reference node(s), but not to skip any journal
+    heads or to reorder any operations.
+    
+    Signed-off-by: Sascha Hauer <s.hauer@pengutronix.de>
+    Signed-off-by: Richard Weinberger <richard@nod.at>
+
+diff --git a/fs/ubifs/replay.c b/fs/ubifs/replay.c
+index 1c6ceb6265aa..db489d93439c 100644
+--- a/fs/ubifs/replay.c
++++ b/fs/ubifs/replay.c
+@@ -666,6 +666,8 @@ static int replay_bud(struct ubifs_info *c, struct bud_entry *b)
+ 					  old_size, new_size);
+ 			break;
+ 		}
++		case UBIFS_AUTH_NODE:
++			break;
+ 		default:
+ 			ubifs_err(c, "unexpected node type %d in bud LEB %d:%d",
+ 				  snod->type, lnum, snod->offs);

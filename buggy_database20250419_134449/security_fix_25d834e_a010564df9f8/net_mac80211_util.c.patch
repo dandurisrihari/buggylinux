@@ -1,0 +1,120 @@
+commit 25d834e16294c8dfd923dae6bdb8a055391a99a5
+Author: Johannes Berg <johannes@sipsolutions.net>
+Date:   Fri Sep 12 22:52:47 2008 +0200
+
+    mac80211: fix virtual interfaces vs. injection
+    
+    Currently, virtual interface pointers passed to drivers might be
+    from monitor interfaces and as such completely uninitialised
+    because we do not tell the driver about monitor interfaces when
+    those are created. Instead of passing them, we should therefore
+    indicate to the driver that there is no information; do that by
+    passing a NULL value and adjust drivers to cope with it.
+    
+    As a result, some mac80211 API functions also need to cope with
+    a NULL vif pointer so drivers can still call them unconditionally.
+    
+    Also, when injecting frames we really don't want to pass NULL all
+    the time, if we know we are the source address of a frame and have
+    a local interface for that address, we can to use that interface.
+    This also helps with processing the frame correctly for that
+    interface which will help the 802.11w implementation. It's not
+    entirely correct for VLANs or WDS interfaces because there the MAC
+    address isn't unique, but it's already a lot better than what we
+    do now.
+    
+    Finally, when injecting without a matching local interface, don't
+    assign sequence numbers at all.
+    
+    Signed-off-by: Johannes Berg <johannes@sipsolutions.net>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/mac80211/util.c b/net/mac80211/util.c
+index 6eb222369bcb..f32561ec224c 100644
+--- a/net/mac80211/util.c
++++ b/net/mac80211/util.c
+@@ -231,16 +231,21 @@ __le16 ieee80211_generic_frame_duration(struct ieee80211_hw *hw,
+ 					struct ieee80211_rate *rate)
+ {
+ 	struct ieee80211_local *local = hw_to_local(hw);
+-	struct ieee80211_sub_if_data *sdata = vif_to_sdata(vif);
++	struct ieee80211_sub_if_data *sdata;
+ 	u16 dur;
+ 	int erp;
++	bool short_preamble = false;
+ 
+ 	erp = 0;
+-	if (sdata->flags & IEEE80211_SDATA_OPERATING_GMODE)
+-		erp = rate->flags & IEEE80211_RATE_ERP_G;
++	if (vif) {
++		sdata = vif_to_sdata(vif);
++		short_preamble = sdata->bss_conf.use_short_preamble;
++		if (sdata->flags & IEEE80211_SDATA_OPERATING_GMODE)
++			erp = rate->flags & IEEE80211_RATE_ERP_G;
++	}
+ 
+ 	dur = ieee80211_frame_duration(local, frame_len, rate->bitrate, erp,
+-				       sdata->bss_conf.use_short_preamble);
++				       short_preamble);
+ 
+ 	return cpu_to_le16(dur);
+ }
+@@ -252,7 +257,7 @@ __le16 ieee80211_rts_duration(struct ieee80211_hw *hw,
+ {
+ 	struct ieee80211_local *local = hw_to_local(hw);
+ 	struct ieee80211_rate *rate;
+-	struct ieee80211_sub_if_data *sdata = vif_to_sdata(vif);
++	struct ieee80211_sub_if_data *sdata;
+ 	bool short_preamble;
+ 	int erp;
+ 	u16 dur;
+@@ -260,13 +265,17 @@ __le16 ieee80211_rts_duration(struct ieee80211_hw *hw,
+ 
+ 	sband = local->hw.wiphy->bands[local->hw.conf.channel->band];
+ 
+-	short_preamble = sdata->bss_conf.use_short_preamble;
++	short_preamble = false;
+ 
+ 	rate = &sband->bitrates[frame_txctl->control.rts_cts_rate_idx];
+ 
+ 	erp = 0;
+-	if (sdata->flags & IEEE80211_SDATA_OPERATING_GMODE)
+-		erp = rate->flags & IEEE80211_RATE_ERP_G;
++	if (vif) {
++		sdata = vif_to_sdata(vif);
++		short_preamble = sdata->bss_conf.use_short_preamble;
++		if (sdata->flags & IEEE80211_SDATA_OPERATING_GMODE)
++			erp = rate->flags & IEEE80211_RATE_ERP_G;
++	}
+ 
+ 	/* CTS duration */
+ 	dur = ieee80211_frame_duration(local, 10, rate->bitrate,
+@@ -289,7 +298,7 @@ __le16 ieee80211_ctstoself_duration(struct ieee80211_hw *hw,
+ {
+ 	struct ieee80211_local *local = hw_to_local(hw);
+ 	struct ieee80211_rate *rate;
+-	struct ieee80211_sub_if_data *sdata = vif_to_sdata(vif);
++	struct ieee80211_sub_if_data *sdata;
+ 	bool short_preamble;
+ 	int erp;
+ 	u16 dur;
+@@ -297,12 +306,16 @@ __le16 ieee80211_ctstoself_duration(struct ieee80211_hw *hw,
+ 
+ 	sband = local->hw.wiphy->bands[local->hw.conf.channel->band];
+ 
+-	short_preamble = sdata->bss_conf.use_short_preamble;
++	short_preamble = false;
+ 
+ 	rate = &sband->bitrates[frame_txctl->control.rts_cts_rate_idx];
+ 	erp = 0;
+-	if (sdata->flags & IEEE80211_SDATA_OPERATING_GMODE)
+-		erp = rate->flags & IEEE80211_RATE_ERP_G;
++	if (vif) {
++		sdata = vif_to_sdata(vif);
++		short_preamble = sdata->bss_conf.use_short_preamble;
++		if (sdata->flags & IEEE80211_SDATA_OPERATING_GMODE)
++			erp = rate->flags & IEEE80211_RATE_ERP_G;
++	}
+ 
+ 	/* Data frame duration */
+ 	dur = ieee80211_frame_duration(local, frame_len, rate->bitrate,

@@ -1,0 +1,71 @@
+commit 79741dd35713ff4f6fd0eafd59fa94e8a4ba922d
+Author: Martin Schwidefsky <schwidefsky@de.ibm.com>
+Date:   Wed Dec 31 15:11:38 2008 +0100
+
+    [PATCH] idle cputime accounting
+    
+    The cpu time spent by the idle process actually doing something is
+    currently accounted as idle time. This is plain wrong, the architectures
+    that support VIRT_CPU_ACCOUNTING=y can do better: distinguish between the
+    time spent doing nothing and the time spent by idle doing work. The first
+    is accounted with account_idle_time and the second with account_system_time.
+    The architectures that use the account_xxx_time interface directly and not
+    the account_xxx_ticks interface now need to do the check for the idle
+    process in their arch code. In particular to improve the system vs true
+    idle time accounting the arch code needs to measure the true idle time
+    instead of just testing for the idle process.
+    To improve the tick based accounting as well we would need an architecture
+    primitive that can tell us if the pt_regs of the interrupted context
+    points to the magic instruction that halts the cpu.
+    
+    In addition idle time is no more added to the stime of the idle process.
+    This field now contains the system time of the idle process as it should
+    be. On systems without VIRT_CPU_ACCOUNTING this will always be zero as
+    every tick that occurs while idle is running will be accounted as idle
+    time.
+    
+    This patch contains the necessary common code changes to be able to
+    distinguish idle system time and true idle time. The architectures with
+    support for VIRT_CPU_ACCOUNTING need some changes to exploit this.
+    
+    Signed-off-by: Martin Schwidefsky <schwidefsky@de.ibm.com>
+
+diff --git a/kernel/time/tick-sched.c b/kernel/time/tick-sched.c
+index 1f2fce2479fe..611fa4c0baab 100644
+--- a/kernel/time/tick-sched.c
++++ b/kernel/time/tick-sched.c
+@@ -419,8 +419,9 @@ void tick_nohz_restart_sched_tick(void)
+ {
+ 	int cpu = smp_processor_id();
+ 	struct tick_sched *ts = &per_cpu(tick_cpu_sched, cpu);
++#ifndef CONFIG_VIRT_CPU_ACCOUNTING
+ 	unsigned long ticks;
+-	cputime_t cputime;
++#endif
+ 	ktime_t now;
+ 
+ 	local_irq_disable();
+@@ -442,6 +443,7 @@ void tick_nohz_restart_sched_tick(void)
+ 	tick_do_update_jiffies64(now);
+ 	cpu_clear(cpu, nohz_cpu_mask);
+ 
++#ifndef CONFIG_VIRT_CPU_ACCOUNTING
+ 	/*
+ 	 * We stopped the tick in idle. Update process times would miss the
+ 	 * time we slept as update_process_times does only a 1 tick
+@@ -451,12 +453,9 @@ void tick_nohz_restart_sched_tick(void)
+ 	/*
+ 	 * We might be one off. Do not randomly account a huge number of ticks!
+ 	 */
+-	if (ticks && ticks < LONG_MAX) {
+-		add_preempt_count(HARDIRQ_OFFSET);
+-		cputime = jiffies_to_cputime(ticks);
+-		account_system_time(current, HARDIRQ_OFFSET, cputime, cputime);
+-		sub_preempt_count(HARDIRQ_OFFSET);
+-	}
++	if (ticks && ticks < LONG_MAX)
++		account_idle_ticks(ticks);
++#endif
+ 
+ 	touch_softlockup_watchdog();
+ 	/*

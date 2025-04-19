@@ -1,0 +1,167 @@
+diff --cc arch/arm64/kvm/Kconfig
+index e9761d84f982,f1f8fc069a97..8a5fbbf084df
+--- a/arch/arm64/kvm/Kconfig
++++ b/arch/arm64/kvm/Kconfig
+@@@ -39,7 -39,7 +39,8 @@@ menuconfig KV
+  	select HAVE_KVM_IRQ_BYPASS
+  	select HAVE_KVM_VCPU_RUN_PID_CHANGE
+  	select SCHED_INFO
+ +	select GUEST_PERF_EVENTS if PERF_EVENTS
++ 	select INTERVAL_TREE
+  	help
+  	  Support hosting virtualized guest machines.
+  
+diff --cc arch/arm64/kvm/Makefile
+index 0bcc378b7961,39b11a4f9063..91861fd8b897
+--- a/arch/arm64/kvm/Makefile
++++ b/arch/arm64/kvm/Makefile
+@@@ -10,12 -10,10 +10,10 @@@ include $(srctree)/virt/kvm/Makefile.kv
+  obj-$(CONFIG_KVM) += kvm.o
+  obj-$(CONFIG_KVM) += hyp/
+  
+- kvm-y := $(KVM)/kvm_main.o $(KVM)/coalesced_mmio.o $(KVM)/eventfd.o \
+- 	 $(KVM)/vfio.o $(KVM)/irqchip.o $(KVM)/binary_stats.o \
+- 	 arm.o mmu.o mmio.o psci.o hypercalls.o pvtime.o \
+ -kvm-y += arm.o mmu.o mmio.o psci.o perf.o hypercalls.o pvtime.o \
+++kvm-y += arm.o mmu.o mmio.o psci.o hypercalls.o pvtime.o \
+  	 inject_fault.o va_layout.o handle_exit.o \
+  	 guest.o debug.o reset.o sys_regs.o \
+- 	 vgic-sys-reg-v3.o fpsimd.o pmu.o \
++ 	 vgic-sys-reg-v3.o fpsimd.o pmu.o pkvm.o \
+  	 arch_timer.o trng.o\
+  	 vgic/vgic.o vgic/vgic-init.o \
+  	 vgic/vgic-irqfd.o vgic/vgic-v2.o \
+diff --cc arch/arm64/kvm/reset.c
+index 27386f0d81e4,25e0041d840b..ecc40c8cd6f6
+--- a/arch/arm64/kvm/reset.c
++++ b/arch/arm64/kvm/reset.c
+@@@ -103,10 -105,11 +105,11 @@@ static int kvm_vcpu_finalize_sve(struc
+  	 * set_sve_vls().  Double-check here just to be sure:
+  	 */
+  	if (WARN_ON(!sve_vl_valid(vl) || vl > sve_max_virtualisable_vl() ||
+ -		    vl > SVE_VL_ARCH_MAX))
+ +		    vl > VL_ARCH_MAX))
+  		return -EIO;
+  
+- 	buf = kzalloc(SVE_SIG_REGS_SIZE(sve_vq_from_vl(vl)), GFP_KERNEL_ACCOUNT);
++ 	reg_sz = vcpu_sve_state_size(vcpu);
++ 	buf = kzalloc(reg_sz, GFP_KERNEL_ACCOUNT);
+  	if (!buf)
+  		return -ENOMEM;
+  
+diff --cc arch/x86/kvm/pmu.c
+index 0c2133eb4cf6,8abdadb7e22a..261b39cbef6e
+--- a/arch/x86/kvm/pmu.c
++++ b/arch/x86/kvm/pmu.c
+@@@ -55,43 -55,41 +55,41 @@@ static void kvm_pmi_trigger_fn(struct i
+  	kvm_pmu_deliver_pmi(vcpu);
+  }
+  
+- static void kvm_perf_overflow(struct perf_event *perf_event,
+- 			      struct perf_sample_data *data,
+- 			      struct pt_regs *regs)
++ static inline void __kvm_perf_overflow(struct kvm_pmc *pmc, bool in_pmi)
+  {
+- 	struct kvm_pmc *pmc = perf_event->overflow_handler_context;
+  	struct kvm_pmu *pmu = pmc_to_pmu(pmc);
+  
+- 	if (!test_and_set_bit(pmc->idx, pmu->reprogram_pmi)) {
+- 		__set_bit(pmc->idx, (unsigned long *)&pmu->global_status);
+- 		kvm_make_request(KVM_REQ_PMU, pmc->vcpu);
+- 	}
++ 	/* Ignore counters that have been reprogrammed already. */
++ 	if (test_and_set_bit(pmc->idx, pmu->reprogram_pmi))
++ 		return;
++ 
++ 	__set_bit(pmc->idx, (unsigned long *)&pmu->global_status);
++ 	kvm_make_request(KVM_REQ_PMU, pmc->vcpu);
++ 
++ 	if (!pmc->intr)
++ 		return;
++ 
++ 	/*
++ 	 * Inject PMI. If vcpu was in a guest mode during NMI PMI
++ 	 * can be ejected on a guest mode re-entry. Otherwise we can't
++ 	 * be sure that vcpu wasn't executing hlt instruction at the
++ 	 * time of vmexit and is not going to re-enter guest mode until
++ 	 * woken up. So we should wake it, but this is impossible from
++ 	 * NMI context. Do it from irq work instead.
++ 	 */
+ -	if (in_pmi && !kvm_is_in_guest())
+++	if (in_pmi && !kvm_handling_nmi_from_guest(pmc->vcpu))
++ 		irq_work_queue(&pmc_to_pmu(pmc)->irq_work);
++ 	else
++ 		kvm_make_request(KVM_REQ_PMI, pmc->vcpu);
+  }
+  
+- static void kvm_perf_overflow_intr(struct perf_event *perf_event,
+- 				   struct perf_sample_data *data,
+- 				   struct pt_regs *regs)
++ static void kvm_perf_overflow(struct perf_event *perf_event,
++ 			      struct perf_sample_data *data,
++ 			      struct pt_regs *regs)
+  {
+  	struct kvm_pmc *pmc = perf_event->overflow_handler_context;
+- 	struct kvm_pmu *pmu = pmc_to_pmu(pmc);
+- 
+- 	if (!test_and_set_bit(pmc->idx, pmu->reprogram_pmi)) {
+- 		__set_bit(pmc->idx, (unsigned long *)&pmu->global_status);
+- 		kvm_make_request(KVM_REQ_PMU, pmc->vcpu);
+  
+- 		/*
+- 		 * Inject PMI. If vcpu was in a guest mode during NMI PMI
+- 		 * can be ejected on a guest mode re-entry. Otherwise we can't
+- 		 * be sure that vcpu wasn't executing hlt instruction at the
+- 		 * time of vmexit and is not going to re-enter guest mode until
+- 		 * woken up. So we should wake it, but this is impossible from
+- 		 * NMI context. Do it from irq work instead.
+- 		 */
+- 		if (!kvm_handling_nmi_from_guest(pmc->vcpu))
+- 			irq_work_queue(&pmc_to_pmu(pmc)->irq_work);
+- 		else
+- 			kvm_make_request(KVM_REQ_PMI, pmc->vcpu);
+- 	}
++ 	__kvm_perf_overflow(pmc, true);
+  }
+  
+  static void pmc_reprogram_counter(struct kvm_pmc *pmc, u32 type,
+diff --cc arch/x86/kvm/svm/svm.c
+index 9079d2fdc12e,c3d9006478a4..46bcc706f257
+--- a/arch/x86/kvm/svm/svm.c
++++ b/arch/x86/kvm/svm/svm.c
+@@@ -3931,9 -3964,10 +3964,10 @@@ static __no_kcsan fastpath_t svm_vcpu_r
+  		vcpu->arch.regs[VCPU_REGS_RSP] = svm->vmcb->save.rsp;
+  		vcpu->arch.regs[VCPU_REGS_RIP] = svm->vmcb->save.rip;
+  	}
++ 	vcpu->arch.regs_dirty = 0;
+  
+  	if (unlikely(svm->vmcb->control.exit_code == SVM_EXIT_NMI))
+ -		kvm_before_interrupt(vcpu);
+ +		kvm_before_interrupt(vcpu, KVM_HANDLING_NMI);
+  
+  	kvm_load_host_xsave_state(vcpu);
+  	stgi();
+diff --cc arch/x86/kvm/vmx/vmx_ops.h
+index 35d9324c2f2a,67f745250e50..5e7f41225780
+--- a/arch/x86/kvm/vmx/vmx_ops.h
++++ b/arch/x86/kvm/vmx/vmx_ops.h
+@@@ -95,10 -118,16 +120,12 @@@ do_exception
+  		     "3:\n\t"
+  
+  		     /* VMREAD faulted.  As above, except push '1' for @fault. */
+ -		     ".pushsection .fixup, \"ax\"\n\t"
+ -		     "4: push $1\n\t"
+ -		     "push %2\n\t"
+ -		     "jmp 2b\n\t"
+ -		     ".popsection\n\t"
+ -		     _ASM_EXTABLE(1b, 4b)
+ -		     : ASM_CALL_CONSTRAINT, "=r"(value) : "r"(field) : "cc");
+ +		     _ASM_EXTABLE_TYPE_REG(1b, 2b, EX_TYPE_ONE_REG, %1)
+ +
+ +		     : ASM_CALL_CONSTRAINT, "=&r"(value) : "r"(field) : "cc");
+  	return value;
++ 
++ #endif /* CONFIG_CC_HAS_ASM_GOTO_OUTPUT */
+  }
+  
+  static __always_inline u16 vmcs_read16(unsigned long field)

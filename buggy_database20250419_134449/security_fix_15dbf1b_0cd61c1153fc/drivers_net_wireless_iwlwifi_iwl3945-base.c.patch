@@ -1,0 +1,49 @@
+commit 15dbf1b7b7b6ba6e5159dde60e111f617b2c54ea
+Author: Bill Moss <bmoss@CLEMSON.EDU>
+Date:   Tue May 6 11:05:15 2008 +0800
+
+    iwl3945: do not delay hardware scan if it is a direct scan
+    
+    iwl3945 <---> mac80211 <----> wpa_supplicant <---> NetworkManager
+    
+    When a hardware scan is completed and another scan is requested in less
+    than two seconds, iwlwifi will not do the second scan and will pass the
+    error code -EAGAIN back to mac80211 where it quickly dies. The error
+    code is not passed along to the calling program wpa_supplicant. After a
+    timeout, wpa_supplicant will just give up but it will not know why the
+    scan failed. This is a weakness in the design.
+    
+    I ran into this issue when I was trying to figure out why it takes more
+    an a minute for NetworkManager to connect after Networking has been
+    disabled and then re-enabled. I found a good deal of unnecessary work
+    being done because mac80211 requests authentication when the interface
+    is not configured, the ANY mode. I created an experimental passive
+    (NOTANY) mode for mac80211 to eliminate this case. Then NetworkManager
+    became so fast that I ran into the iwlwifi 2 second delay next scan
+    issue which we are discussing.
+    
+    The patch resolves the problem by bypassing the delay if the scan request
+    is a direct scan. It should do less harm to the hardware.
+    
+    Signed-off-by: Bill Moss <bmoss@CLEMSON.EDU>
+    Signed-off-by: Zhu Yi <yi.zhu@intel.com>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/drivers/net/wireless/iwlwifi/iwl3945-base.c b/drivers/net/wireless/iwlwifi/iwl3945-base.c
+index f021eba41e6a..4baa185ba500 100644
+--- a/drivers/net/wireless/iwlwifi/iwl3945-base.c
++++ b/drivers/net/wireless/iwlwifi/iwl3945-base.c
+@@ -7087,9 +7087,10 @@ static int iwl3945_mac_hw_scan(struct ieee80211_hw *hw, u8 *ssid, size_t len)
+ 		rc = -EAGAIN;
+ 		goto out_unlock;
+ 	}
+-	/* if we just finished scan ask for delay */
+-	if (priv->last_scan_jiffies && time_after(priv->last_scan_jiffies +
+-				IWL_DELAY_NEXT_SCAN, jiffies)) {
++	/* if we just finished scan ask for delay for a broadcast scan */
++	if ((len == 0) && priv->last_scan_jiffies &&
++	    time_after(priv->last_scan_jiffies + IWL_DELAY_NEXT_SCAN,
++		       jiffies)) {
+ 		rc = -EAGAIN;
+ 		goto out_unlock;
+ 	}

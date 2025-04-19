@@ -1,0 +1,48 @@
+commit 913a3aa07d16e5b302f408d497a4b829910de247
+Author: Eric Biggers <ebiggers@google.com>
+Date:   Wed Oct 17 21:37:59 2018 -0700
+
+    crypto: arm/aes - add some hardening against cache-timing attacks
+    
+    Make the ARM scalar AES implementation closer to constant-time by
+    disabling interrupts and prefetching the tables into L1 cache.  This is
+    feasible because due to ARM's "free" rotations, the main tables are only
+    1024 bytes instead of the usual 4096 used by most AES implementations.
+    
+    On ARM Cortex-A7, the speed loss is only about 5%.  The resulting code
+    is still over twice as fast as aes_ti.c.  Responsiveness is potentially
+    a concern, but interrupts are only disabled for a single AES block.
+    
+    Note that even after these changes, the implementation still isn't
+    necessarily guaranteed to be constant-time; see
+    https://cr.yp.to/antiforgery/cachetiming-20050414.pdf for a discussion
+    of the many difficulties involved in writing truly constant-time AES
+    software.  But it's valuable to make such attacks more difficult.
+    
+    Much of this patch is based on patches suggested by Ard Biesheuvel.
+    
+    Suggested-by: Ard Biesheuvel <ard.biesheuvel@linaro.org>
+    Signed-off-by: Eric Biggers <ebiggers@google.com>
+    Reviewed-by: Ard Biesheuvel <ard.biesheuvel@linaro.org>
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+diff --git a/arch/arm/crypto/Kconfig b/arch/arm/crypto/Kconfig
+index ef0c7feea6e2..0473a8f68389 100644
+--- a/arch/arm/crypto/Kconfig
++++ b/arch/arm/crypto/Kconfig
+@@ -69,6 +69,15 @@ config CRYPTO_AES_ARM
+ 	help
+ 	  Use optimized AES assembler routines for ARM platforms.
+ 
++	  On ARM processors without the Crypto Extensions, this is the
++	  fastest AES implementation for single blocks.  For multiple
++	  blocks, the NEON bit-sliced implementation is usually faster.
++
++	  This implementation may be vulnerable to cache timing attacks,
++	  since it uses lookup tables.  However, as countermeasures it
++	  disables IRQs and preloads the tables; it is hoped this makes
++	  such attacks very difficult.
++
+ config CRYPTO_AES_ARM_BS
+ 	tristate "Bit sliced AES using NEON instructions"
+ 	depends on KERNEL_MODE_NEON

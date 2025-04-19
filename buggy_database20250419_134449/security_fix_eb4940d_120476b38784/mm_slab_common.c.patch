@@ -1,0 +1,49 @@
+commit eb4940d4adf590590a9d0c47e38d2799c2ff9670
+Author: Vlastimil Babka <vbabka@suse.cz>
+Date:   Fri Nov 4 13:57:11 2022 +0100
+
+    mm/slab: remove !CONFIG_TRACING variants of kmalloc_[node_]trace()
+    
+    For !CONFIG_TRACING kernels, the kmalloc() implementation tries (in cases where
+    the allocation size is build-time constant) to save a function call, by
+    inlining kmalloc_trace() to a kmem_cache_alloc() call.
+    
+    However since commit 6edf2576a6cc ("mm/slub: enable debugging memory wasting of
+    kmalloc") this path now fails to pass the original request size to be
+    eventually recorded (for kmalloc caches with debugging enabled).
+    
+    We could adjust the code to call __kmem_cache_alloc_node() as the
+    CONFIG_TRACING variant, but that would as a result inline a call with 5
+    parameters, bloating the kmalloc() call sites. The cost of extra function
+    call (to kmalloc_trace()) seems like a lesser evil.
+    
+    It also appears that the !CONFIG_TRACING variant is incompatible with upcoming
+    hardening efforts [1] so it's easier if we just remove it now. Kernels with no
+    tracing are rare these days and the benefit is dubious anyway.
+    
+    [1] https://lore.kernel.org/linux-mm/20221101222520.never.109-kees@kernel.org/T/#m20ecf14390e406247bde0ea9cce368f469c539ed
+    
+    Link: https://lore.kernel.org/all/097d8fba-bd10-a312-24a3-a4068c4f424c@suse.cz/
+    Suggested-by: Hyeonggon Yoo <42.hyeyoo@gmail.com>
+    Signed-off-by: Vlastimil Babka <vbabka@suse.cz>
+
+diff --git a/mm/slab_common.c b/mm/slab_common.c
+index 74a991fd9d31..206e59051c1d 100644
+--- a/mm/slab_common.c
++++ b/mm/slab_common.c
+@@ -1040,7 +1040,6 @@ size_t __ksize(const void *object)
+ 	return slab_ksize(folio_slab(folio)->slab_cache);
+ }
+ 
+-#ifdef CONFIG_TRACING
+ void *kmalloc_trace(struct kmem_cache *s, gfp_t gfpflags, size_t size)
+ {
+ 	void *ret = __kmem_cache_alloc_node(s, gfpflags, NUMA_NO_NODE,
+@@ -1064,7 +1063,6 @@ void *kmalloc_node_trace(struct kmem_cache *s, gfp_t gfpflags,
+ 	return ret;
+ }
+ EXPORT_SYMBOL(kmalloc_node_trace);
+-#endif /* !CONFIG_TRACING */
+ #endif /* !CONFIG_SLOB */
+ 
+ gfp_t kmalloc_fix_flags(gfp_t flags)

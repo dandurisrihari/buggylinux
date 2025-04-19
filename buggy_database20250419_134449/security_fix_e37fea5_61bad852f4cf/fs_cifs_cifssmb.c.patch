@@ -1,0 +1,62 @@
+commit e37fea58f771c2674709099a09ddafd058fef634
+Author: Deepa Dinamani <deepa.kernel@gmail.com>
+Date:   Mon May 8 15:59:16 2017 -0700
+
+    fs: cifs: replace CURRENT_TIME by other appropriate apis
+    
+    CURRENT_TIME macro is not y2038 safe on 32 bit systems.
+    
+    The patch replaces all the uses of CURRENT_TIME by current_time() for
+    filesystem times, and ktime_get_* functions for authentication
+    timestamps and timezone calculations.
+    
+    This is also in preparation for the patch that transitions vfs
+    timestamps to use 64 bit time and hence make them y2038 safe.
+    
+    CURRENT_TIME macro will be deleted before merging the aforementioned
+    change.
+    
+    The inode timestamps read from the server are assumed to have correct
+    granularity and range.
+    
+    The patch also assumes that the difference between server and client
+    times lie in the range INT_MIN..INT_MAX.  This is valid because this is
+    the difference between current times between server and client, and the
+    largest timezone difference is in the range of one day.
+    
+    All cifs timestamps currently use timespec representation internally.
+    Authentication and timezone timestamps can also be transitioned into
+    using timespec64 when all other timestamps for cifs is transitioned to
+    use timespec64.
+    
+    Link: http://lkml.kernel.org/r/1491613030-11599-4-git-send-email-deepa.kernel@gmail.com
+    Signed-off-by: Deepa Dinamani <deepa.kernel@gmail.com>
+    Reviewed-by: Arnd Bergmann <arnd@arndb.de>
+    Cc: Steve French <sfrench@samba.org>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/fs/cifs/cifssmb.c b/fs/cifs/cifssmb.c
+index 205fd94f52fd..4c01b3f9abf0 100644
+--- a/fs/cifs/cifssmb.c
++++ b/fs/cifs/cifssmb.c
+@@ -478,14 +478,14 @@ decode_lanman_negprot_rsp(struct TCP_Server_Info *server, NEGOTIATE_RSP *pSMBr)
+ 		 * this requirement.
+ 		 */
+ 		int val, seconds, remain, result;
+-		struct timespec ts, utc;
+-		utc = CURRENT_TIME;
++		struct timespec ts;
++		unsigned long utc = ktime_get_real_seconds();
+ 		ts = cnvrtDosUnixTm(rsp->SrvTime.Date,
+ 				    rsp->SrvTime.Time, 0);
+ 		cifs_dbg(FYI, "SrvTime %d sec since 1970 (utc: %d) diff: %d\n",
+-			 (int)ts.tv_sec, (int)utc.tv_sec,
+-			 (int)(utc.tv_sec - ts.tv_sec));
+-		val = (int)(utc.tv_sec - ts.tv_sec);
++			 (int)ts.tv_sec, (int)utc,
++			 (int)(utc - ts.tv_sec));
++		val = (int)(utc - ts.tv_sec);
+ 		seconds = abs(val);
+ 		result = (seconds / MIN_TZ_ADJ) * MIN_TZ_ADJ;
+ 		remain = seconds % MIN_TZ_ADJ;

@@ -1,0 +1,53 @@
+commit 1e0ad70cc1957b9050368e433b1061a2cd1ce543
+Author: Radim Krčmář <rkrcmar@redhat.com>
+Date:   Fri Oct 10 19:15:09 2014 +0200
+
+    KVM: x86: fix deadline tsc interrupt injection
+    
+    The check in kvm_set_lapic_tscdeadline_msr() was trying to prevent a
+    situation where we lose a pending deadline timer in a MSR write.
+    Losing it is fine, because it effectively occurs before the timer fired,
+    so we should be able to cancel or postpone it.
+    
+    Another problem comes from interaction with QEMU, or other userspace
+    that can set deadline MSR without a good reason, when timer is already
+    pending:  one guest's deadline request results in more than one
+    interrupt because one is injected immediately on MSR write from
+    userspace and one through hrtimer later.
+    
+    The solution is to remove the injection when replacing a pending timer
+    and to improve the usual QEMU path, we inject without a hrtimer when the
+    deadline has already passed.
+    
+    Signed-off-by: Radim Krčmář <rkrcmar@redhat.com>
+    Reported-by: Nadav Amit <namit@cs.technion.ac.il>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/lapic.c b/arch/x86/kvm/lapic.c
+index 1ebd7ff33ac7..66dd1731ab99 100644
+--- a/arch/x86/kvm/lapic.c
++++ b/arch/x86/kvm/lapic.c
+@@ -1132,9 +1132,10 @@ static void start_apic_timer(struct kvm_lapic *apic)
+ 		if (likely(tscdeadline > guest_tsc)) {
+ 			ns = (tscdeadline - guest_tsc) * 1000000ULL;
+ 			do_div(ns, this_tsc_khz);
+-		}
+-		hrtimer_start(&apic->lapic_timer.timer,
+-			ktime_add_ns(now, ns), HRTIMER_MODE_ABS);
++			hrtimer_start(&apic->lapic_timer.timer,
++				ktime_add_ns(now, ns), HRTIMER_MODE_ABS);
++		} else
++			apic_timer_expired(apic);
+ 
+ 		local_irq_restore(flags);
+ 	}
+@@ -1391,9 +1392,6 @@ void kvm_set_lapic_tscdeadline_msr(struct kvm_vcpu *vcpu, u64 data)
+ 		return;
+ 
+ 	hrtimer_cancel(&apic->lapic_timer.timer);
+-	/* Inject here so clearing tscdeadline won't override new value */
+-	if (apic_has_pending_timer(vcpu))
+-		kvm_inject_apic_timer_irqs(vcpu);
+ 	apic->lapic_timer.tscdeadline = data;
+ 	start_apic_timer(apic);
+ }

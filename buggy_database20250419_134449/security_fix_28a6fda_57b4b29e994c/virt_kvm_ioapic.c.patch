@@ -1,0 +1,66 @@
+commit 28a6fdabb3ea775d3d707afd9d2728b3ced2c34d
+Author: Michael S. Tsirkin <mst@redhat.com>
+Date:   Tue Aug 14 19:20:28 2012 +0300
+
+    KVM: x86: drop parameter validation in ioapic/pic
+    
+    We validate irq pin number when routing is setup, so
+    code handling illegal irq # in pic and ioapic on each injection
+    is never called.
+    Drop it, replace with BUG_ON to catch out of bounds access bugs.
+    
+    Signed-off-by: Michael S. Tsirkin <mst@redhat.com>
+    Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
+
+diff --git a/virt/kvm/ioapic.c b/virt/kvm/ioapic.c
+index ef61d529a6c4..cfb7e4d52dc2 100644
+--- a/virt/kvm/ioapic.c
++++ b/virt/kvm/ioapic.c
+@@ -197,28 +197,29 @@ int kvm_ioapic_set_irq(struct kvm_ioapic *ioapic, int irq, int irq_source_id,
+ 	u32 old_irr;
+ 	u32 mask = 1 << irq;
+ 	union kvm_ioapic_redirect_entry entry;
+-	int ret = 1;
++	int ret, irq_level;
++
++	BUG_ON(irq < 0 || irq >= IOAPIC_NUM_PINS);
+ 
+ 	spin_lock(&ioapic->lock);
+ 	old_irr = ioapic->irr;
+-	if (irq >= 0 && irq < IOAPIC_NUM_PINS) {
+-		int irq_level = __kvm_irq_line_state(&ioapic->irq_states[irq],
+-						     irq_source_id, level);
+-		entry = ioapic->redirtbl[irq];
+-		irq_level ^= entry.fields.polarity;
+-		if (!irq_level)
+-			ioapic->irr &= ~mask;
+-		else {
+-			int edge = (entry.fields.trig_mode == IOAPIC_EDGE_TRIG);
+-			ioapic->irr |= mask;
+-			if ((edge && old_irr != ioapic->irr) ||
+-			    (!edge && !entry.fields.remote_irr))
+-				ret = ioapic_service(ioapic, irq);
+-			else
+-				ret = 0; /* report coalesced interrupt */
+-		}
+-		trace_kvm_ioapic_set_irq(entry.bits, irq, ret == 0);
++	irq_level = __kvm_irq_line_state(&ioapic->irq_states[irq],
++					 irq_source_id, level);
++	entry = ioapic->redirtbl[irq];
++	irq_level ^= entry.fields.polarity;
++	if (!irq_level) {
++		ioapic->irr &= ~mask;
++		ret = 1;
++	} else {
++		int edge = (entry.fields.trig_mode == IOAPIC_EDGE_TRIG);
++		ioapic->irr |= mask;
++		if ((edge && old_irr != ioapic->irr) ||
++		    (!edge && !entry.fields.remote_irr))
++			ret = ioapic_service(ioapic, irq);
++		else
++			ret = 0; /* report coalesced interrupt */
+ 	}
++	trace_kvm_ioapic_set_irq(entry.bits, irq, ret == 0);
+ 	spin_unlock(&ioapic->lock);
+ 
+ 	return ret;

@@ -1,0 +1,42 @@
+commit 49538d12380fa8970f35db1f063189e49e69399c
+Author: Jens Freimann <jfrei@linux.vnet.ibm.com>
+Date:   Thu Dec 18 15:48:14 2014 +0100
+
+    KVM: s390: fix bug in sigp emergency signal injection
+    
+    Currently we are always setting the wrong bit in the
+    bitmap for pending emergency signals. Instead of using
+    emerg.code from the passed in irq parameter, we use the
+    value in our per-vcpu local_int structure, which is always zero.
+    That means all emergency signals will have address 0 as parameter.
+    If two CPUs send a SIGP to the same target, one might be lost.
+    
+    Let's fix this by using the value from the parameter and
+    also trace the correct value.
+    
+    Reviewed-by: David Hildenbrand <dahi@linux.vnet.ibm.com>
+    Reviewed-by: Cornelia Huck <cornelia.huck@de.ibm.com>
+    Signed-off-by: Jens Freimann <jfrei@linux.vnet.ibm.com>
+    Signed-off-by: Christian Borntraeger <borntraeger@de.ibm.com>
+
+diff --git a/arch/s390/kvm/interrupt.c b/arch/s390/kvm/interrupt.c
+index 8ebae298a24d..eb5fb66380e3 100644
+--- a/arch/s390/kvm/interrupt.c
++++ b/arch/s390/kvm/interrupt.c
+@@ -1103,14 +1103,13 @@ static int __inject_sigp_emergency(struct kvm_vcpu *vcpu,
+ 				   struct kvm_s390_irq *irq)
+ {
+ 	struct kvm_s390_local_interrupt *li = &vcpu->arch.local_int;
+-	struct kvm_s390_emerg_info *emerg = &li->irq.emerg;
+ 
+ 	VCPU_EVENT(vcpu, 3, "inject: emergency %u\n",
+ 		   irq->u.emerg.code);
+ 	trace_kvm_s390_inject_vcpu(vcpu->vcpu_id, KVM_S390_INT_EMERGENCY,
+-				   emerg->code, 0, 2);
++				   irq->u.emerg.code, 0, 2);
+ 
+-	set_bit(emerg->code, li->sigp_emerg_pending);
++	set_bit(irq->u.emerg.code, li->sigp_emerg_pending);
+ 	set_bit(IRQ_PEND_EXT_EMERGENCY, &li->pending_irqs);
+ 	atomic_set_mask(CPUSTAT_EXT_INT, li->cpuflags);
+ 	return 0;

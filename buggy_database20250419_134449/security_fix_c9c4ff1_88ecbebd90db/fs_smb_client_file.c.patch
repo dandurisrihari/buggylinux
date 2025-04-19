@@ -1,0 +1,67 @@
+commit c9c4ff12df110feb1b91951010f673f4b16e49e8
+Author: David Howells <dhowells@redhat.com>
+Date:   Mon Nov 27 13:58:07 2023 +0000
+
+    netfs: Move pinning-for-writeback from fscache to netfs
+    
+    Move the resource pinning-for-writeback from fscache code to netfslib code.
+    This is used to keep a cache backing object pinned whilst we have dirty
+    pages on the netfs inode in the pagecache such that VM writeback will be
+    able to reach it.
+    
+    Whilst we're at it, switch the parameters of netfs_unpin_writeback() to
+    match ->write_inode() so that it can be used for that directly.
+    
+    Note that this mechanism could be more generically useful than that for
+    network filesystems.  Quite often they have to keep around other resources
+    (e.g. authentication tokens or network connections) until the writeback is
+    complete.
+    
+    Signed-off-by: David Howells <dhowells@redhat.com>
+    Reviewed-by: Jeff Layton <jlayton@kernel.org>
+    cc: linux-cachefs@redhat.com
+    cc: linux-fsdevel@vger.kernel.org
+    cc: linux-mm@kvack.org
+
+diff --git a/fs/smb/client/file.c b/fs/smb/client/file.c
+index 32a8525415d9..b02b7f0a47dc 100644
+--- a/fs/smb/client/file.c
++++ b/fs/smb/client/file.c
+@@ -5043,27 +5043,13 @@ static void cifs_swap_deactivate(struct file *file)
+ 	/* do we need to unpin (or unlock) the file */
+ }
+ 
+-/*
+- * Mark a page as having been made dirty and thus needing writeback.  We also
+- * need to pin the cache object to write back to.
+- */
+-#ifdef CONFIG_CIFS_FSCACHE
+-static bool cifs_dirty_folio(struct address_space *mapping, struct folio *folio)
+-{
+-	return fscache_dirty_folio(mapping, folio,
+-					cifs_inode_cookie(mapping->host));
+-}
+-#else
+-#define cifs_dirty_folio filemap_dirty_folio
+-#endif
+-
+ const struct address_space_operations cifs_addr_ops = {
+ 	.read_folio = cifs_read_folio,
+ 	.readahead = cifs_readahead,
+ 	.writepages = cifs_writepages,
+ 	.write_begin = cifs_write_begin,
+ 	.write_end = cifs_write_end,
+-	.dirty_folio = cifs_dirty_folio,
++	.dirty_folio = netfs_dirty_folio,
+ 	.release_folio = cifs_release_folio,
+ 	.direct_IO = cifs_direct_io,
+ 	.invalidate_folio = cifs_invalidate_folio,
+@@ -5087,7 +5073,7 @@ const struct address_space_operations cifs_addr_ops_smallbuf = {
+ 	.writepages = cifs_writepages,
+ 	.write_begin = cifs_write_begin,
+ 	.write_end = cifs_write_end,
+-	.dirty_folio = cifs_dirty_folio,
++	.dirty_folio = netfs_dirty_folio,
+ 	.release_folio = cifs_release_folio,
+ 	.invalidate_folio = cifs_invalidate_folio,
+ 	.launder_folio = cifs_launder_folio,

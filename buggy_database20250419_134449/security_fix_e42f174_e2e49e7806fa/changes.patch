@@ -1,0 +1,152 @@
+diff --git a/mm/slab.c b/mm/slab.c
+index af3d3887b9b8..390e249aaa8d 100644
+--- a/mm/slab.c
++++ b/mm/slab.c
+@@ -3678,14 +3678,6 @@ void *__kmalloc_track_caller(size_t size, gfp_t flags, unsigned long caller)
+ }
+ EXPORT_SYMBOL(__kmalloc_track_caller);
+ 
+-static inline struct kmem_cache *cache_from_obj(struct kmem_cache *s, void *x)
+-{
+-	if (memcg_kmem_enabled())
+-		return virt_to_cache(x);
+-	else
+-		return s;
+-}
+-
+ /**
+  * kmem_cache_free - Deallocate an object
+  * @cachep: The cache the allocation was from.
+diff --git a/mm/slab.h b/mm/slab.h
+index a21c78eccee7..fceb4341ba91 100644
+--- a/mm/slab.h
++++ b/mm/slab.h
+@@ -276,6 +276,34 @@ static inline int cache_vmstat_idx(struct kmem_cache *s)
+ 		NR_SLAB_RECLAIMABLE : NR_SLAB_UNRECLAIMABLE;
+ }
+ 
++#ifdef CONFIG_SLUB_DEBUG
++#ifdef CONFIG_SLUB_DEBUG_ON
++DECLARE_STATIC_KEY_TRUE(slub_debug_enabled);
++#else
++DECLARE_STATIC_KEY_FALSE(slub_debug_enabled);
++#endif
++extern void print_tracking(struct kmem_cache *s, void *object);
++#else
++static inline void print_tracking(struct kmem_cache *s, void *object)
++{
++}
++#endif
++
++/*
++ * Returns true if any of the specified slub_debug flags is enabled for the
++ * cache. Use only for flags parsed by setup_slub_debug() as it also enables
++ * the static key.
++ */
++static inline bool kmem_cache_debug_flags(struct kmem_cache *s, slab_flags_t flags)
++{
++#ifdef CONFIG_SLUB_DEBUG
++	VM_WARN_ON_ONCE(!(flags & SLAB_DEBUG_FLAGS));
++	if (static_branch_unlikely(&slub_debug_enabled))
++		return s->flags & flags;
++#endif
++	return false;
++}
++
+ #ifdef CONFIG_MEMCG_KMEM
+ 
+ /* List of all root caches. */
+@@ -504,6 +532,23 @@ static __always_inline void uncharge_slab_page(struct page *page, int order,
+ 	memcg_uncharge_slab(page, order, s);
+ }
+ 
++static inline struct kmem_cache *cache_from_obj(struct kmem_cache *s, void *x)
++{
++	struct kmem_cache *cachep;
++
++	if (!IS_ENABLED(CONFIG_SLAB_FREELIST_HARDENED) &&
++	    !memcg_kmem_enabled() &&
++	    !kmem_cache_debug_flags(s, SLAB_CONSISTENCY_CHECKS))
++		return s;
++
++	cachep = virt_to_cache(x);
++	if (WARN(cachep && !slab_equal_or_root(cachep, s),
++		  "%s: Wrong slab cache. %s but object is from %s\n",
++		  __func__, s->name, cachep->name))
++		print_tracking(cachep, x);
++	return cachep;
++}
++
+ static inline size_t slab_ksize(const struct kmem_cache *s)
+ {
+ #ifndef CONFIG_SLUB
+diff --git a/mm/slub.c b/mm/slub.c
+index 6a99a3c945cb..629a58b56728 100644
+--- a/mm/slub.c
++++ b/mm/slub.c
+@@ -122,21 +122,6 @@ DEFINE_STATIC_KEY_FALSE(slub_debug_enabled);
+ #endif
+ #endif
+ 
+-/*
+- * Returns true if any of the specified slub_debug flags is enabled for the
+- * cache. Use only for flags parsed by setup_slub_debug() as it also enables
+- * the static key.
+- */
+-static inline bool kmem_cache_debug_flags(struct kmem_cache *s, slab_flags_t flags)
+-{
+-	VM_WARN_ON_ONCE(!(flags & SLAB_DEBUG_FLAGS));
+-#ifdef CONFIG_SLUB_DEBUG
+-	if (static_branch_unlikely(&slub_debug_enabled))
+-		return s->flags & flags;
+-#endif
+-	return false;
+-}
+-
+ static inline bool kmem_cache_debug(struct kmem_cache *s)
+ {
+ 	return kmem_cache_debug_flags(s, SLAB_DEBUG_FLAGS);
+@@ -653,7 +638,7 @@ static void print_track(const char *s, struct track *t, unsigned long pr_time)
+ #endif
+ }
+ 
+-static void print_tracking(struct kmem_cache *s, void *object)
++void print_tracking(struct kmem_cache *s, void *object)
+ {
+ 	unsigned long pr_time = jiffies;
+ 	if (!(s->flags & SLAB_STORE_USER))
+@@ -1525,10 +1510,6 @@ static bool freelist_corrupted(struct kmem_cache *s, struct page *page,
+ {
+ 	return false;
+ }
+-
+-static void print_tracking(struct kmem_cache *s, void *object)
+-{
+-}
+ #endif /* CONFIG_SLUB_DEBUG */
+ 
+ /*
+@@ -3175,23 +3156,6 @@ void ___cache_free(struct kmem_cache *cache, void *x, unsigned long addr)
+ }
+ #endif
+ 
+-static inline struct kmem_cache *cache_from_obj(struct kmem_cache *s, void *x)
+-{
+-	struct kmem_cache *cachep;
+-
+-	if (!IS_ENABLED(CONFIG_SLAB_FREELIST_HARDENED) &&
+-	    !memcg_kmem_enabled() &&
+-	    !kmem_cache_debug_flags(s, SLAB_CONSISTENCY_CHECKS))
+-		return s;
+-
+-	cachep = virt_to_cache(x);
+-	if (WARN(cachep && !slab_equal_or_root(cachep, s),
+-		  "%s: Wrong slab cache. %s but object is from %s\n",
+-		  __func__, s->name, cachep->name))
+-		print_tracking(cachep, x);
+-	return cachep;
+-}
+-
+ void kmem_cache_free(struct kmem_cache *s, void *x)
+ {
+ 	s = cache_from_obj(s, x);

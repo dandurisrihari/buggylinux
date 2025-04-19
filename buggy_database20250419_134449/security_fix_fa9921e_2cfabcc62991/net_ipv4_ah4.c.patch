@@ -1,0 +1,75 @@
+commit fa9921e46fd52b78070dc67ce0d27ec301a90410
+Author: Nicolas Dichtel <nicolas.dichtel@6wind.com>
+Date:   Wed Feb 2 06:29:02 2011 +0000
+
+    ipsec: allow to align IPv4 AH on 32 bits
+    
+    The Linux IPv4 AH stack aligns the AH header on a 64 bit boundary
+    (like in IPv6). This is not RFC compliant (see RFC4302, Section
+    3.3.3.2.1), it should be aligned on 32 bits.
+    
+    For most of the authentication algorithms, the ICV size is 96 bits.
+    The AH header alignment on 32 or 64 bits gives the same results.
+    
+    However for SHA-256-128 for instance, the wrong 64 bit alignment results
+    in adding useless padding in IPv4 AH, which is forbidden by the RFC.
+    
+    To avoid breaking backward compatibility, we use a new flag
+    (XFRM_STATE_ALIGN4) do change original behavior.
+    
+    Initial patch from Dang Hongwu <hongwu.dang@6wind.com> and
+    Christophe Gouault <christophe.gouault@6wind.com>.
+    
+    Signed-off-by: Nicolas Dichtel <nicolas.dichtel@6wind.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/ipv4/ah4.c b/net/ipv4/ah4.c
+index 86961bec70ab..325053df6e70 100644
+--- a/net/ipv4/ah4.c
++++ b/net/ipv4/ah4.c
+@@ -201,7 +201,10 @@ static int ah_output(struct xfrm_state *x, struct sk_buff *skb)
+ 	top_iph->ttl = 0;
+ 	top_iph->check = 0;
+ 
+-	ah->hdrlen  = (XFRM_ALIGN8(sizeof(*ah) + ahp->icv_trunc_len) >> 2) - 2;
++	if (x->props.flags & XFRM_STATE_ALIGN4)
++		ah->hdrlen  = (XFRM_ALIGN4(sizeof(*ah) + ahp->icv_trunc_len) >> 2) - 2;
++	else
++		ah->hdrlen  = (XFRM_ALIGN8(sizeof(*ah) + ahp->icv_trunc_len) >> 2) - 2;
+ 
+ 	ah->reserved = 0;
+ 	ah->spi = x->id.spi;
+@@ -299,9 +302,15 @@ static int ah_input(struct xfrm_state *x, struct sk_buff *skb)
+ 	nexthdr = ah->nexthdr;
+ 	ah_hlen = (ah->hdrlen + 2) << 2;
+ 
+-	if (ah_hlen != XFRM_ALIGN8(sizeof(*ah) + ahp->icv_full_len) &&
+-	    ah_hlen != XFRM_ALIGN8(sizeof(*ah) + ahp->icv_trunc_len))
+-		goto out;
++	if (x->props.flags & XFRM_STATE_ALIGN4) {
++		if (ah_hlen != XFRM_ALIGN4(sizeof(*ah) + ahp->icv_full_len) &&
++		    ah_hlen != XFRM_ALIGN4(sizeof(*ah) + ahp->icv_trunc_len))
++			goto out;
++	} else {
++		if (ah_hlen != XFRM_ALIGN8(sizeof(*ah) + ahp->icv_full_len) &&
++		    ah_hlen != XFRM_ALIGN8(sizeof(*ah) + ahp->icv_trunc_len))
++			goto out;
++	}
+ 
+ 	if (!pskb_may_pull(skb, ah_hlen))
+ 		goto out;
+@@ -450,8 +459,12 @@ static int ah_init_state(struct xfrm_state *x)
+ 
+ 	BUG_ON(ahp->icv_trunc_len > MAX_AH_AUTH_LEN);
+ 
+-	x->props.header_len = XFRM_ALIGN8(sizeof(struct ip_auth_hdr) +
+-					  ahp->icv_trunc_len);
++	if (x->props.flags & XFRM_STATE_ALIGN4)
++		x->props.header_len = XFRM_ALIGN4(sizeof(struct ip_auth_hdr) +
++						  ahp->icv_trunc_len);
++	else
++		x->props.header_len = XFRM_ALIGN8(sizeof(struct ip_auth_hdr) +
++						  ahp->icv_trunc_len);
+ 	if (x->props.mode == XFRM_MODE_TUNNEL)
+ 		x->props.header_len += sizeof(struct iphdr);
+ 	x->data = ahp;

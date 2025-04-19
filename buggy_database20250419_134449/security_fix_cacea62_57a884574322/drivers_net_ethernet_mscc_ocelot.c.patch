@@ -1,0 +1,72 @@
+commit cacea62fcdda5656cb5b8104e73a00e043b61730
+Author: Vladimir Oltean <vladimir.oltean@nxp.com>
+Date:   Fri Jan 29 03:00:03 2021 +0200
+
+    net: mscc: ocelot: don't use NPI tag prefix for the CPU port module
+    
+    Context: Ocelot switches put the injection/extraction frame header in
+    front of the Ethernet header. When used in NPI mode, a DSA master would
+    see junk instead of the destination MAC address, and it would most
+    likely drop the packets. So the Ocelot frame header can have an optional
+    prefix, which is just "ff:ff:ff:ff:ff:fe > ff:ff:ff:ff:ff:ff" padding
+    put before the actual tag (still before the real Ethernet header) such
+    that the DSA master thinks it's looking at a broadcast frame with a
+    strange EtherType.
+    
+    Unfortunately, a lesson learned in commit 69df578c5f4b ("net: mscc:
+    ocelot: eliminate confusion between CPU and NPI port") seems to have
+    been forgotten in the meanwhile.
+    
+    The CPU port module and the NPI port have independent settings for the
+    length of the tag prefix. However, the driver is using the same variable
+    to program both of them.
+    
+    There is no reason really to use any tag prefix with the CPU port
+    module, since that is not connected to any Ethernet port. So this patch
+    makes the inj_prefix and xtr_prefix variables apply only to the NPI
+    port (which the switchdev ocelot_vsc7514 driver does not use).
+    
+    Signed-off-by: Vladimir Oltean <vladimir.oltean@nxp.com>
+    Reviewed-by: Florian Fainelli <f.fainelli@gmail.com>
+    Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+diff --git a/drivers/net/ethernet/mscc/ocelot.c b/drivers/net/ethernet/mscc/ocelot.c
+index 7352f58f9bc2..714165c2f85a 100644
+--- a/drivers/net/ethernet/mscc/ocelot.c
++++ b/drivers/net/ethernet/mscc/ocelot.c
+@@ -1359,9 +1359,9 @@ void ocelot_port_set_maxlen(struct ocelot *ocelot, int port, size_t sdu)
+ 	if (port == ocelot->npi) {
+ 		maxlen += OCELOT_TAG_LEN;
+ 
+-		if (ocelot->inj_prefix == OCELOT_TAG_PREFIX_SHORT)
++		if (ocelot->npi_inj_prefix == OCELOT_TAG_PREFIX_SHORT)
+ 			maxlen += OCELOT_SHORT_PREFIX_LEN;
+-		else if (ocelot->inj_prefix == OCELOT_TAG_PREFIX_LONG)
++		else if (ocelot->npi_inj_prefix == OCELOT_TAG_PREFIX_LONG)
+ 			maxlen += OCELOT_LONG_PREFIX_LEN;
+ 	}
+ 
+@@ -1391,9 +1391,9 @@ int ocelot_get_max_mtu(struct ocelot *ocelot, int port)
+ 	if (port == ocelot->npi) {
+ 		max_mtu -= OCELOT_TAG_LEN;
+ 
+-		if (ocelot->inj_prefix == OCELOT_TAG_PREFIX_SHORT)
++		if (ocelot->npi_inj_prefix == OCELOT_TAG_PREFIX_SHORT)
+ 			max_mtu -= OCELOT_SHORT_PREFIX_LEN;
+-		else if (ocelot->inj_prefix == OCELOT_TAG_PREFIX_LONG)
++		else if (ocelot->npi_inj_prefix == OCELOT_TAG_PREFIX_LONG)
+ 			max_mtu -= OCELOT_LONG_PREFIX_LEN;
+ 	}
+ 
+@@ -1478,9 +1478,9 @@ static void ocelot_cpu_port_init(struct ocelot *ocelot)
+ 	ocelot_fields_write(ocelot, cpu, QSYS_SWITCH_PORT_MODE_PORT_ENA, 1);
+ 	/* CPU port Injection/Extraction configuration */
+ 	ocelot_fields_write(ocelot, cpu, SYS_PORT_MODE_INCL_XTR_HDR,
+-			    ocelot->xtr_prefix);
++			    OCELOT_TAG_PREFIX_NONE);
+ 	ocelot_fields_write(ocelot, cpu, SYS_PORT_MODE_INCL_INJ_HDR,
+-			    ocelot->inj_prefix);
++			    OCELOT_TAG_PREFIX_NONE);
+ 
+ 	/* Configure the CPU port to be VLAN aware */
+ 	ocelot_write_gix(ocelot, ANA_PORT_VLAN_CFG_VLAN_VID(0) |

@@ -1,0 +1,76 @@
+commit 7e5b3c267d256822407a22fdce6afdf9cd13f9fb
+Author: Mark Gross <mgross@linux.intel.com>
+Date:   Thu Apr 16 17:54:04 2020 +0200
+
+    x86/speculation: Add Special Register Buffer Data Sampling (SRBDS) mitigation
+    
+    SRBDS is an MDS-like speculative side channel that can leak bits from the
+    random number generator (RNG) across cores and threads. New microcode
+    serializes the processor access during the execution of RDRAND and
+    RDSEED. This ensures that the shared buffer is overwritten before it is
+    released for reuse.
+    
+    While it is present on all affected CPU models, the microcode mitigation
+    is not needed on models that enumerate ARCH_CAPABILITIES[MDS_NO] in the
+    cases where TSX is not supported or has been disabled with TSX_CTRL.
+    
+    The mitigation is activated by default on affected processors and it
+    increases latency for RDRAND and RDSEED instructions. Among other
+    effects this will reduce throughput from /dev/urandom.
+    
+    * Enable administrator to configure the mitigation off when desired using
+      either mitigations=off or srbds=off.
+    
+    * Export vulnerability status via sysfs
+    
+    * Rename file-scoped macros to apply for non-whitelist table initializations.
+    
+     [ bp: Massage,
+       - s/VULNBL_INTEL_STEPPING/VULNBL_INTEL_STEPPINGS/g,
+       - do not read arch cap MSR a second time in tsx_fused_off() - just pass it in,
+       - flip check in cpu_set_bug_bits() to save an indentation level,
+       - reflow comments.
+       jpoimboe: s/Mitigated/Mitigation/ in user-visible strings
+       tglx: Dropped the fused off magic for now
+     ]
+    
+    Signed-off-by: Mark Gross <mgross@linux.intel.com>
+    Signed-off-by: Borislav Petkov <bp@suse.de>
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Reviewed-by: Tony Luck <tony.luck@intel.com>
+    Reviewed-by: Pawan Gupta <pawan.kumar.gupta@linux.intel.com>
+    Reviewed-by: Josh Poimboeuf <jpoimboe@redhat.com>
+    Tested-by: Neelima Krishnan <neelima.krishnan@intel.com>
+
+diff --git a/drivers/base/cpu.c b/drivers/base/cpu.c
+index 9a1c00fbbaef..d2136ab9b14a 100644
+--- a/drivers/base/cpu.c
++++ b/drivers/base/cpu.c
+@@ -562,6 +562,12 @@ ssize_t __weak cpu_show_itlb_multihit(struct device *dev,
+ 	return sprintf(buf, "Not affected\n");
+ }
+ 
++ssize_t __weak cpu_show_srbds(struct device *dev,
++			      struct device_attribute *attr, char *buf)
++{
++	return sprintf(buf, "Not affected\n");
++}
++
+ static DEVICE_ATTR(meltdown, 0444, cpu_show_meltdown, NULL);
+ static DEVICE_ATTR(spectre_v1, 0444, cpu_show_spectre_v1, NULL);
+ static DEVICE_ATTR(spectre_v2, 0444, cpu_show_spectre_v2, NULL);
+@@ -570,6 +576,7 @@ static DEVICE_ATTR(l1tf, 0444, cpu_show_l1tf, NULL);
+ static DEVICE_ATTR(mds, 0444, cpu_show_mds, NULL);
+ static DEVICE_ATTR(tsx_async_abort, 0444, cpu_show_tsx_async_abort, NULL);
+ static DEVICE_ATTR(itlb_multihit, 0444, cpu_show_itlb_multihit, NULL);
++static DEVICE_ATTR(srbds, 0444, cpu_show_srbds, NULL);
+ 
+ static struct attribute *cpu_root_vulnerabilities_attrs[] = {
+ 	&dev_attr_meltdown.attr,
+@@ -580,6 +587,7 @@ static struct attribute *cpu_root_vulnerabilities_attrs[] = {
+ 	&dev_attr_mds.attr,
+ 	&dev_attr_tsx_async_abort.attr,
+ 	&dev_attr_itlb_multihit.attr,
++	&dev_attr_srbds.attr,
+ 	NULL
+ };

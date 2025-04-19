@@ -1,0 +1,67 @@
+commit 0378daef0c6cf1c2ba525bde0b529f0d4ef5233b
+Merge: 05487215e6b9 16314874b12b
+Author: Paolo Bonzini <pbonzini@redhat.com>
+Date:   Sun Aug 9 12:58:23 2020 -0400
+
+    Merge tag 'kvmarm-5.9' of git://git.kernel.org/pub/scm/linux/kernel/git/kvmarm/kvmarm into kvm-next-5.6
+    
+    KVM/arm64 updates for Linux 5.9:
+    
+    - Split the VHE and nVHE hypervisor code bases, build the EL2 code
+      separately, allowing for the VHE code to now be built with instrumentation
+    
+    - Level-based TLB invalidation support
+    
+    - Restructure of the vcpu register storage to accomodate the NV code
+    
+    - Pointer Authentication available for guests on nVHE hosts
+    
+    - Simplification of the system register table parsing
+    
+    - MMU cleanups and fixes
+    
+    - A number of post-32bit cleanups and other fixes
+
+diff --cc arch/arm64/include/asm/kvm_host.h
+index f81151ad3d3c,e1a32c0707bb..65568b23868a
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@@ -369,24 -416,24 +405,29 @@@ struct kvm_vcpu_arch 
+  #define vcpu_has_sve(vcpu) (system_supports_sve() && \
+  			    ((vcpu)->arch.flags & KVM_ARM64_GUEST_HAS_SVE))
+  
+ -#define vcpu_has_ptrauth(vcpu)	((system_supports_address_auth() || \
+ -				  system_supports_generic_auth()) && \
+ -				 ((vcpu)->arch.flags & KVM_ARM64_GUEST_HAS_PTRAUTH))
+ +#ifdef CONFIG_ARM64_PTR_AUTH
+ +#define vcpu_has_ptrauth(vcpu)						\
+ +	((cpus_have_final_cap(ARM64_HAS_ADDRESS_AUTH) ||		\
+ +	  cpus_have_final_cap(ARM64_HAS_GENERIC_AUTH)) &&		\
+ +	 (vcpu)->arch.flags & KVM_ARM64_GUEST_HAS_PTRAUTH)
+ +#else
+ +#define vcpu_has_ptrauth(vcpu)		false
+ +#endif
+  
+- #define vcpu_gp_regs(v)		(&(v)->arch.ctxt.gp_regs)
++ #define vcpu_gp_regs(v)		(&(v)->arch.ctxt.regs)
+  
+  /*
+-  * Only use __vcpu_sys_reg if you know you want the memory backed version of a
+-  * register, and not the one most recently accessed by a running VCPU.  For
+-  * example, for userspace access or for system registers that are never context
+-  * switched, but only emulated.
++  * Only use __vcpu_sys_reg/ctxt_sys_reg if you know you want the
++  * memory backed version of a register, and not the one most recently
++  * accessed by a running VCPU.  For example, for userspace access or
++  * for system registers that are never context switched, but only
++  * emulated.
+   */
+- #define __vcpu_sys_reg(v,r)	((v)->arch.ctxt.sys_regs[(r)])
++ #define __ctxt_sys_reg(c,r)	(&(c)->sys_regs[(r)])
++ 
++ #define ctxt_sys_reg(c,r)	(*__ctxt_sys_reg(c,r))
++ 
++ #define __vcpu_sys_reg(v,r)	(ctxt_sys_reg(&(v)->arch.ctxt, (r)))
+  
+  u64 vcpu_read_sys_reg(const struct kvm_vcpu *vcpu, int reg);
+  void vcpu_write_sys_reg(struct kvm_vcpu *vcpu, u64 val, int reg);

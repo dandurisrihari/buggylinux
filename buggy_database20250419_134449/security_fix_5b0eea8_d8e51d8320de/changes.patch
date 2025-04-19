@@ -1,0 +1,154 @@
+diff --git a/security/selinux/hooks.c b/security/selinux/hooks.c
+index d06e350fedee..b8a8a4f0f2ad 100644
+--- a/security/selinux/hooks.c
++++ b/security/selinux/hooks.c
+@@ -2288,6 +2288,19 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
+ 	new_tsec->keycreate_sid = 0;
+ 	new_tsec->sockcreate_sid = 0;
+ 
++	/*
++	 * Before policy is loaded, label any task outside kernel space
++	 * as SECINITSID_INIT, so that any userspace tasks surviving from
++	 * early boot end up with a label different from SECINITSID_KERNEL
++	 * (if the policy chooses to set SECINITSID_INIT != SECINITSID_KERNEL).
++	 */
++	if (!selinux_initialized()) {
++		new_tsec->sid = SECINITSID_INIT;
++		/* also clear the exec_sid just in case */
++		new_tsec->exec_sid = 0;
++		return 0;
++	}
++
+ 	if (old_tsec->exec_sid) {
+ 		new_tsec->sid = old_tsec->exec_sid;
+ 		/* Reset exec SID on execve. */
+@@ -4504,6 +4517,21 @@ static int sock_has_perm(struct sock *sk, u32 perms)
+ 	if (sksec->sid == SECINITSID_KERNEL)
+ 		return 0;
+ 
++	/*
++	 * Before POLICYDB_CAP_USERSPACE_INITIAL_CONTEXT, sockets that
++	 * inherited the kernel context from early boot used to be skipped
++	 * here, so preserve that behavior unless the capability is set.
++	 *
++	 * By setting the capability the policy signals that it is ready
++	 * for this quirk to be fixed. Note that sockets created by a kernel
++	 * thread or a usermode helper executed without a transition will
++	 * still be skipped in this check regardless of the policycap
++	 * setting.
++	 */
++	if (!selinux_policycap_userspace_initial_context() &&
++	    sksec->sid == SECINITSID_INIT)
++		return 0;
++
+ 	ad.type = LSM_AUDIT_DATA_NET;
+ 	ad.u.net = &net;
+ 	ad.u.net->sk = sk;
+diff --git a/security/selinux/include/initial_sid_to_string.h b/security/selinux/include/initial_sid_to_string.h
+index ecc6e74fa09b..5e5f0993dac2 100644
+--- a/security/selinux/include/initial_sid_to_string.h
++++ b/security/selinux/include/initial_sid_to_string.h
+@@ -10,7 +10,7 @@ static const char *const initial_sid_to_string[] = {
+ 	NULL,
+ 	"file",
+ 	NULL,
+-	NULL,
++	"init",
+ 	"any_socket",
+ 	"port",
+ 	"netif",
+diff --git a/security/selinux/include/policycap.h b/security/selinux/include/policycap.h
+index f35d3458e71d..c7373e6effe5 100644
+--- a/security/selinux/include/policycap.h
++++ b/security/selinux/include/policycap.h
+@@ -12,6 +12,7 @@ enum {
+ 	POLICYDB_CAP_NNP_NOSUID_TRANSITION,
+ 	POLICYDB_CAP_GENFS_SECLABEL_SYMLINKS,
+ 	POLICYDB_CAP_IOCTL_SKIP_CLOEXEC,
++	POLICYDB_CAP_USERSPACE_INITIAL_CONTEXT,
+ 	__POLICYDB_CAP_MAX
+ };
+ #define POLICYDB_CAP_MAX (__POLICYDB_CAP_MAX - 1)
+diff --git a/security/selinux/include/policycap_names.h b/security/selinux/include/policycap_names.h
+index 2a87fc3702b8..28e4c9ee2399 100644
+--- a/security/selinux/include/policycap_names.h
++++ b/security/selinux/include/policycap_names.h
+@@ -13,7 +13,8 @@ const char *const selinux_policycap_names[__POLICYDB_CAP_MAX] = {
+ 	"cgroup_seclabel",
+ 	"nnp_nosuid_transition",
+ 	"genfs_seclabel_symlinks",
+-	"ioctl_skip_cloexec"
++	"ioctl_skip_cloexec",
++	"userspace_initial_context",
+ };
+ 
+ #endif /* _SELINUX_POLICYCAP_NAMES_H_ */
+diff --git a/security/selinux/include/security.h b/security/selinux/include/security.h
+index 60eb161a0e5a..665c4e5bae99 100644
+--- a/security/selinux/include/security.h
++++ b/security/selinux/include/security.h
+@@ -189,6 +189,12 @@ static inline bool selinux_policycap_ioctl_skip_cloexec(void)
+ 		selinux_state.policycap[POLICYDB_CAP_IOCTL_SKIP_CLOEXEC]);
+ }
+ 
++static inline bool selinux_policycap_userspace_initial_context(void)
++{
++	return READ_ONCE(
++		selinux_state.policycap[POLICYDB_CAP_USERSPACE_INITIAL_CONTEXT]);
++}
++
+ struct selinux_policy_convert_data;
+ 
+ struct selinux_load_state {
+diff --git a/security/selinux/ss/policydb.c b/security/selinux/ss/policydb.c
+index 31b08b34c722..cfe77ef24ee2 100644
+--- a/security/selinux/ss/policydb.c
++++ b/security/selinux/ss/policydb.c
+@@ -863,6 +863,8 @@ void policydb_destroy(struct policydb *p)
+ int policydb_load_isids(struct policydb *p, struct sidtab *s)
+ {
+ 	struct ocontext *head, *c;
++	bool isid_init_supported = ebitmap_get_bit(&p->policycaps,
++						   POLICYDB_CAP_USERSPACE_INITIAL_CONTEXT);
+ 	int rc;
+ 
+ 	rc = sidtab_init(s);
+@@ -886,6 +888,13 @@ int policydb_load_isids(struct policydb *p, struct sidtab *s)
+ 		if (!name)
+ 			continue;
+ 
++		/*
++		 * Also ignore SECINITSID_INIT if the policy doesn't declare
++		 * support for it
++		 */
++		if (sid == SECINITSID_INIT && !isid_init_supported)
++			continue;
++
+ 		rc = sidtab_set_initial(s, sid, &c->context[0]);
+ 		if (rc) {
+ 			pr_err("SELinux:  unable to load initial SID %s.\n",
+@@ -893,6 +902,24 @@ int policydb_load_isids(struct policydb *p, struct sidtab *s)
+ 			sidtab_destroy(s);
+ 			return rc;
+ 		}
++
++		/*
++		 * If the policy doesn't support the "userspace_initial_context"
++		 * capability, set SECINITSID_INIT to the same context as
++		 * SECINITSID_KERNEL. This ensures the same behavior as before
++		 * the reintroduction of SECINITSID_INIT, where all tasks
++		 * started before policy load would initially get the context
++		 * corresponding to SECINITSID_KERNEL.
++		 */
++		if (sid == SECINITSID_KERNEL && !isid_init_supported) {
++			rc = sidtab_set_initial(s, SECINITSID_INIT, &c->context[0]);
++			if (rc) {
++				pr_err("SELinux:  unable to load initial SID %s.\n",
++				       name);
++				sidtab_destroy(s);
++				return rc;
++			}
++		}
+ 	}
+ 	return 0;
+ }

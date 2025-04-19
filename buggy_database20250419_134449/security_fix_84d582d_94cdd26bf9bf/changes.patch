@@ -1,0 +1,201 @@
+diff --git a/arch/x86/include/asm/xen/events.h b/arch/x86/include/asm/xen/events.h
+index 608a79d5a466..e6911caf5bbf 100644
+--- a/arch/x86/include/asm/xen/events.h
++++ b/arch/x86/include/asm/xen/events.h
+@@ -20,4 +20,15 @@ static inline int xen_irqs_disabled(struct pt_regs *regs)
+ /* No need for a barrier -- XCHG is a barrier on x86. */
+ #define xchg_xen_ulong(ptr, val) xchg((ptr), (val))
+ 
++extern int xen_have_vector_callback;
++
++/*
++ * Events delivered via platform PCI interrupts are always
++ * routed to vcpu 0 and hence cannot be rebound.
++ */
++static inline bool xen_support_evtchn_rebind(void)
++{
++	return (!xen_hvm_domain() || xen_have_vector_callback);
++}
++
+ #endif /* _ASM_X86_XEN_EVENTS_H */
+diff --git a/arch/x86/pci/xen.c b/arch/x86/pci/xen.c
+index 292ab0364a89..c4b3646bd04c 100644
+--- a/arch/x86/pci/xen.c
++++ b/arch/x86/pci/xen.c
+@@ -447,7 +447,7 @@ void __init xen_msi_init(void)
+ 
+ int __init pci_xen_hvm_init(void)
+ {
+-	if (!xen_feature(XENFEAT_hvm_pirqs))
++	if (!xen_have_vector_callback || !xen_feature(XENFEAT_hvm_pirqs))
+ 		return 0;
+ 
+ #ifdef CONFIG_ACPI
+diff --git a/arch/x86/xen/enlighten_hvm.c b/arch/x86/xen/enlighten_hvm.c
+index 72df54a481d6..078c512b8720 100644
+--- a/arch/x86/xen/enlighten_hvm.c
++++ b/arch/x86/xen/enlighten_hvm.c
+@@ -18,6 +18,9 @@
+ #include "mmu.h"
+ #include "smp.h"
+ 
++__read_mostly int xen_have_vector_callback;
++EXPORT_SYMBOL_GPL(xen_have_vector_callback);
++
+ void __ref xen_hvm_init_shared_info(void)
+ {
+ 	int cpu;
+@@ -123,7 +126,7 @@ static int xen_cpu_up_prepare_hvm(unsigned int cpu)
+ 		per_cpu(xen_vcpu_id, cpu) = cpu;
+ 	xen_vcpu_setup(cpu);
+ 
+-	if (xen_feature(XENFEAT_hvm_safe_pvclock))
++	if (xen_have_vector_callback && xen_feature(XENFEAT_hvm_safe_pvclock))
+ 		xen_setup_timer(cpu);
+ 
+ 	rc = xen_smp_intr_init(cpu);
+@@ -139,7 +142,7 @@ static int xen_cpu_dead_hvm(unsigned int cpu)
+ {
+ 	xen_smp_intr_free(cpu);
+ 
+-	if (xen_feature(XENFEAT_hvm_safe_pvclock))
++	if (xen_have_vector_callback && xen_feature(XENFEAT_hvm_safe_pvclock))
+ 		xen_teardown_timer(cpu);
+ 
+        return 0;
+@@ -156,7 +159,8 @@ static void __init xen_hvm_guest_init(void)
+ 
+ 	xen_panic_handler_init();
+ 
+-	BUG_ON(!xen_feature(XENFEAT_hvm_callback_vector));
++	if (xen_feature(XENFEAT_hvm_callback_vector))
++		xen_have_vector_callback = 1;
+ 
+ 	xen_hvm_smp_init();
+ 	WARN_ON(xen_cpuhp_setup(xen_cpu_up_prepare_hvm, xen_cpu_dead_hvm));
+@@ -189,7 +193,7 @@ bool xen_hvm_need_lapic(void)
+ 		return false;
+ 	if (!xen_hvm_domain())
+ 		return false;
+-	if (xen_feature(XENFEAT_hvm_pirqs))
++	if (xen_feature(XENFEAT_hvm_pirqs) && xen_have_vector_callback)
+ 		return false;
+ 	return true;
+ }
+diff --git a/arch/x86/xen/smp_hvm.c b/arch/x86/xen/smp_hvm.c
+index 8bed434cd7d7..f18561bbf5c9 100644
+--- a/arch/x86/xen/smp_hvm.c
++++ b/arch/x86/xen/smp_hvm.c
+@@ -1,5 +1,7 @@
+ #include <asm/smp.h>
+ 
++#include <xen/events.h>
++
+ #include "xen-ops.h"
+ #include "smp.h"
+ 
+@@ -49,6 +51,9 @@ static void xen_hvm_cpu_die(unsigned int cpu)
+ 
+ void __init xen_hvm_smp_init(void)
+ {
++	if (!xen_have_vector_callback)
++		return;
++
+ 	smp_ops.smp_prepare_cpus = xen_hvm_smp_prepare_cpus;
+ 	smp_ops.smp_send_reschedule = xen_smp_send_reschedule;
+ 	smp_ops.cpu_die = xen_hvm_cpu_die;
+diff --git a/arch/x86/xen/time.c b/arch/x86/xen/time.c
+index 7a3089285c59..090c7eb4dca9 100644
+--- a/arch/x86/xen/time.c
++++ b/arch/x86/xen/time.c
+@@ -436,6 +436,14 @@ static void xen_hvm_setup_cpu_clockevents(void)
+ 
+ void __init xen_hvm_init_time_ops(void)
+ {
++	/*
++	 * vector callback is needed otherwise we cannot receive interrupts
++	 * on cpu > 0 and at this point we don't know how many cpus are
++	 * available.
++	 */
++	if (!xen_have_vector_callback)
++		return;
++
+ 	if (!xen_feature(XENFEAT_hvm_safe_pvclock)) {
+ 		printk(KERN_INFO "Xen doesn't support pvclock on HVM,"
+ 				"disable pv timer\n");
+diff --git a/drivers/xen/events/events_base.c b/drivers/xen/events/events_base.c
+index 6a53577772c9..b52852f38cff 100644
+--- a/drivers/xen/events/events_base.c
++++ b/drivers/xen/events/events_base.c
+@@ -1312,6 +1312,9 @@ static int rebind_irq_to_cpu(unsigned irq, unsigned tcpu)
+ 	if (!VALID_EVTCHN(evtchn))
+ 		return -1;
+ 
++	if (!xen_support_evtchn_rebind())
++		return -1;
++
+ 	/* Send future instances of this interrupt to other vcpu. */
+ 	bind_vcpu.port = evtchn;
+ 	bind_vcpu.vcpu = xen_vcpu_nr(tcpu);
+@@ -1646,14 +1649,20 @@ void xen_callback_vector(void)
+ 	int rc;
+ 	uint64_t callback_via;
+ 
+-	callback_via = HVM_CALLBACK_VECTOR(HYPERVISOR_CALLBACK_VECTOR);
+-	rc = xen_set_callback_via(callback_via);
+-	BUG_ON(rc);
+-	pr_info("Xen HVM callback vector for event delivery is enabled\n");
+-	/* in the restore case the vector has already been allocated */
+-	if (!test_bit(HYPERVISOR_CALLBACK_VECTOR, used_vectors))
+-		alloc_intr_gate(HYPERVISOR_CALLBACK_VECTOR,
+-				xen_hvm_callback_vector);
++	if (xen_have_vector_callback) {
++		callback_via = HVM_CALLBACK_VECTOR(HYPERVISOR_CALLBACK_VECTOR);
++		rc = xen_set_callback_via(callback_via);
++		if (rc) {
++			pr_err("Request for Xen HVM callback vector failed\n");
++			xen_have_vector_callback = 0;
++			return;
++		}
++		pr_info("Xen HVM callback vector for event delivery is enabled\n");
++		/* in the restore case the vector has already been allocated */
++		if (!test_bit(HYPERVISOR_CALLBACK_VECTOR, used_vectors))
++			alloc_intr_gate(HYPERVISOR_CALLBACK_VECTOR,
++					xen_hvm_callback_vector);
++	}
+ }
+ #else
+ void xen_callback_vector(void) {}
+diff --git a/drivers/xen/platform-pci.c b/drivers/xen/platform-pci.c
+index 2a165cc8a43c..1275df83070f 100644
+--- a/drivers/xen/platform-pci.c
++++ b/drivers/xen/platform-pci.c
+@@ -90,8 +90,10 @@ static int xen_allocate_irq(struct pci_dev *pdev)
+ static int platform_pci_resume(struct pci_dev *pdev)
+ {
+ 	int err;
+-	if (!xen_pv_domain())
++
++	if (xen_have_vector_callback)
+ 		return 0;
++
+ 	err = xen_set_callback_via(callback_via);
+ 	if (err) {
+ 		dev_err(&pdev->dev, "platform_pci_resume failure!\n");
+@@ -137,15 +139,7 @@ static int platform_pci_probe(struct pci_dev *pdev,
+ 
+ 	platform_mmio = mmio_addr;
+ 	platform_mmiolen = mmio_len;
+-
+-	/* 
+-	 * Xen HVM guests always use the vector callback mechanism.
+-	 * L1 Dom0 in a nested Xen environment is a PV guest inside in an
+-	 * HVM environment. It needs the platform-pci driver to get
+-	 * notifications from L0 Xen, but it cannot use the vector callback
+-	 * as it is not exported by L1 Xen.
+-	 */
+-	if (xen_pv_domain()) {
++	if (!xen_have_vector_callback) {
+ 		ret = xen_allocate_irq(pdev);
+ 		if (ret) {
+ 			dev_warn(&pdev->dev, "request_irq failed err=%d\n", ret);

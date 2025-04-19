@@ -1,0 +1,90 @@
+commit 59d8d4434f429b4fa8a346fd889058bda427a837
+Author: Xin Long <lucien.xin@gmail.com>
+Date:   Sat May 5 14:59:47 2018 +0800
+
+    sctp: delay the authentication for the duplicated cookie-echo chunk
+    
+    Now sctp only delays the authentication for the normal cookie-echo
+    chunk by setting chunk->auth_chunk in sctp_endpoint_bh_rcv(). But
+    for the duplicated one with auth, in sctp_assoc_bh_rcv(), it does
+    authentication first based on the old asoc, which will definitely
+    fail due to the different auth info in the old asoc.
+    
+    The duplicated cookie-echo chunk will create a new asoc with the
+    auth info from this chunk, and the authentication should also be
+    done with the new asoc's auth info for all of the collision 'A',
+    'B' and 'D'. Otherwise, the duplicated cookie-echo chunk with auth
+    will never pass the authentication and create the new connection.
+    
+    This issue exists since very beginning, and this fix is to make
+    sctp_assoc_bh_rcv() follow the way sctp_endpoint_bh_rcv() does
+    for the normal cookie-echo chunk to delay the authentication.
+    
+    While at it, remove the unused params from sctp_sf_authenticate()
+    and define sctp_auth_chunk_verify() used for all the places that
+    do the delayed authentication.
+    
+    v1->v2:
+      fix the typo in changelog as Marcelo noticed.
+    
+    Acked-by: Marcelo Ricardo Leitner <marcelo.leitner@gmail.com>
+    Signed-off-by: Xin Long <lucien.xin@gmail.com>
+    Acked-by: Neil Horman <nhorman@tuxdriver.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/sctp/associola.c b/net/sctp/associola.c
+index 837806dd5799..a47179da24e6 100644
+--- a/net/sctp/associola.c
++++ b/net/sctp/associola.c
+@@ -1024,8 +1024,9 @@ static void sctp_assoc_bh_rcv(struct work_struct *work)
+ 	struct sctp_endpoint *ep;
+ 	struct sctp_chunk *chunk;
+ 	struct sctp_inq *inqueue;
+-	int state;
++	int first_time = 1;	/* is this the first time through the loop */
+ 	int error = 0;
++	int state;
+ 
+ 	/* The association should be held so we should be safe. */
+ 	ep = asoc->ep;
+@@ -1036,6 +1037,30 @@ static void sctp_assoc_bh_rcv(struct work_struct *work)
+ 		state = asoc->state;
+ 		subtype = SCTP_ST_CHUNK(chunk->chunk_hdr->type);
+ 
++		/* If the first chunk in the packet is AUTH, do special
++		 * processing specified in Section 6.3 of SCTP-AUTH spec
++		 */
++		if (first_time && subtype.chunk == SCTP_CID_AUTH) {
++			struct sctp_chunkhdr *next_hdr;
++
++			next_hdr = sctp_inq_peek(inqueue);
++			if (!next_hdr)
++				goto normal;
++
++			/* If the next chunk is COOKIE-ECHO, skip the AUTH
++			 * chunk while saving a pointer to it so we can do
++			 * Authentication later (during cookie-echo
++			 * processing).
++			 */
++			if (next_hdr->type == SCTP_CID_COOKIE_ECHO) {
++				chunk->auth_chunk = skb_clone(chunk->skb,
++							      GFP_ATOMIC);
++				chunk->auth = 1;
++				continue;
++			}
++		}
++
++normal:
+ 		/* SCTP-AUTH, Section 6.3:
+ 		 *    The receiver has a list of chunk types which it expects
+ 		 *    to be received only after an AUTH-chunk.  This list has
+@@ -1074,6 +1099,9 @@ static void sctp_assoc_bh_rcv(struct work_struct *work)
+ 		/* If there is an error on chunk, discard this packet. */
+ 		if (error && chunk)
+ 			chunk->pdiscard = 1;
++
++		if (first_time)
++			first_time = 0;
+ 	}
+ 	sctp_association_put(asoc);
+ }

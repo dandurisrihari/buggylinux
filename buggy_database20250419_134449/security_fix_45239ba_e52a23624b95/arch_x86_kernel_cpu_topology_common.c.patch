@@ -1,0 +1,96 @@
+commit 45239ba39a5279e9efc671774e2eef29df4d2484
+Author: Pawan Gupta <pawan.kumar.gupta@linux.intel.com>
+Date:   Fri Oct 25 12:14:58 2024 -0500
+
+    x86/cpu: Add CPU type to struct cpuinfo_topology
+    
+    Sometimes it is required to take actions based on if a CPU is a performance or
+    efficiency core. As an example, intel_pstate driver uses the Intel core-type
+    to determine CPU scaling. Also, some CPU vulnerabilities only affect
+    a specific CPU type, like RFDS only affects Intel Atom. Hybrid systems that
+    have variants P+E, P-only(Core) and E-only(Atom), it is not straightforward to
+    identify which variant is affected by a type specific vulnerability.
+    
+    Such processors do have CPUID field that can uniquely identify them. Like,
+    P+E, P-only and E-only enumerates CPUID.1A.CORE_TYPE identification, while P+E
+    additionally enumerates CPUID.7.HYBRID. Based on this information, it is
+    possible for boot CPU to identify if a system has mixed CPU types.
+    
+    Add a new field hw_cpu_type to struct cpuinfo_topology that stores the
+    hardware specific CPU type. This saves the overhead of IPIs to get the CPU
+    type of a different CPU. CPU type is populated early in the boot process,
+    before vulnerabilities are enumerated.
+    
+    Signed-off-by: Pawan Gupta <pawan.kumar.gupta@linux.intel.com>
+    Co-developed-by: Mario Limonciello <mario.limonciello@amd.com>
+    Signed-off-by: Mario Limonciello <mario.limonciello@amd.com>
+    Signed-off-by: Borislav Petkov (AMD) <bp@alien8.de>
+    Acked-by: Dave Hansen <dave.hansen@linux.intel.com>
+    Link: https://lore.kernel.org/r/20241025171459.1093-5-mario.limonciello@amd.com
+
+diff --git a/arch/x86/kernel/cpu/topology_common.c b/arch/x86/kernel/cpu/topology_common.c
+index 9a6069e7133c..8277c64f88db 100644
+--- a/arch/x86/kernel/cpu/topology_common.c
++++ b/arch/x86/kernel/cpu/topology_common.c
+@@ -3,6 +3,7 @@
+ 
+ #include <xen/xen.h>
+ 
++#include <asm/intel-family.h>
+ #include <asm/apic.h>
+ #include <asm/processor.h>
+ #include <asm/smp.h>
+@@ -27,6 +28,36 @@ void topology_set_dom(struct topo_scan *tscan, enum x86_topology_domains dom,
+ 	}
+ }
+ 
++enum x86_topology_cpu_type get_topology_cpu_type(struct cpuinfo_x86 *c)
++{
++	if (c->x86_vendor == X86_VENDOR_INTEL) {
++		switch (c->topo.intel_type) {
++		case INTEL_CPU_TYPE_ATOM: return TOPO_CPU_TYPE_EFFICIENCY;
++		case INTEL_CPU_TYPE_CORE: return TOPO_CPU_TYPE_PERFORMANCE;
++		}
++	}
++	if (c->x86_vendor == X86_VENDOR_AMD) {
++		switch (c->topo.amd_type) {
++		case 0:	return TOPO_CPU_TYPE_PERFORMANCE;
++		case 1:	return TOPO_CPU_TYPE_EFFICIENCY;
++		}
++	}
++
++	return TOPO_CPU_TYPE_UNKNOWN;
++}
++
++const char *get_topology_cpu_type_name(struct cpuinfo_x86 *c)
++{
++	switch (get_topology_cpu_type(c)) {
++	case TOPO_CPU_TYPE_PERFORMANCE:
++		return "performance";
++	case TOPO_CPU_TYPE_EFFICIENCY:
++		return "efficiency";
++	default:
++		return "unknown";
++	}
++}
++
+ static unsigned int __maybe_unused parse_num_cores_legacy(struct cpuinfo_x86 *c)
+ {
+ 	struct {
+@@ -87,6 +118,7 @@ static void parse_topology(struct topo_scan *tscan, bool early)
+ 		.cu_id			= 0xff,
+ 		.llc_id			= BAD_APICID,
+ 		.l2c_id			= BAD_APICID,
++		.cpu_type		= TOPO_CPU_TYPE_UNKNOWN,
+ 	};
+ 	struct cpuinfo_x86 *c = tscan->c;
+ 	struct {
+@@ -132,6 +164,8 @@ static void parse_topology(struct topo_scan *tscan, bool early)
+ 	case X86_VENDOR_INTEL:
+ 		if (!IS_ENABLED(CONFIG_CPU_SUP_INTEL) || !cpu_parse_topology_ext(tscan))
+ 			parse_legacy(tscan);
++		if (c->cpuid_level >= 0x1a)
++			c->topo.cpu_type = cpuid_eax(0x1a);
+ 		break;
+ 	case X86_VENDOR_HYGON:
+ 		if (IS_ENABLED(CONFIG_CPU_SUP_HYGON))

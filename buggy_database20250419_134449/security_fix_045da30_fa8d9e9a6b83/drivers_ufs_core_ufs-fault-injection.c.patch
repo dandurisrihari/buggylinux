@@ -1,0 +1,66 @@
+commit 045da3077bc57e587d0ab4cfc8945b76af03d72d
+Author: Akinobu Mita <akinobu.mita@gmail.com>
+Date:   Sat Nov 18 21:44:43 2023 +0900
+
+    scsi: ufs: core: Make fault injection dynamically configurable per HBA
+    
+    The UFS driver has two driver-specific fault injection mechanisms
+    (trigger_eh and timeout). Each fault injection configuration can only be
+    specified by a module parameter and cannot be reconfigured without
+    reloading the driver. Also, each configuration is common to all HBAs.
+    
+    This change adds the following subdirectories for each UFS HBA when
+    debugfs is enabled:
+    
+      /sys/kernel/debug/ufshcd/<HBA>/timeout_inject
+      /sys/kernel/debug/ufshcd/<HBA>/trigger_eh_inject
+    
+    Each fault injection attribute can be dynamically set per HBA by a
+    corresponding file in these directories.
+    
+    This is tested with QEMU UFS devices.
+    
+    Signed-off-by: Akinobu Mita <akinobu.mita@gmail.com>
+    Link: https://lore.kernel.org/r/20231118124443.1007116-1-akinobu.mita@gmail.com
+    Reviewed-by: Bart Van Assche <bvanassche@acm.org>
+    Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+
+diff --git a/drivers/ufs/core/ufs-fault-injection.c b/drivers/ufs/core/ufs-fault-injection.c
+index 5b1184aac585..169540417079 100644
+--- a/drivers/ufs/core/ufs-fault-injection.c
++++ b/drivers/ufs/core/ufs-fault-injection.c
+@@ -4,6 +4,7 @@
+ #include <linux/types.h>
+ #include <linux/fault-inject.h>
+ #include <linux/module.h>
++#include <ufs/ufshcd.h>
+ #include "ufs-fault-injection.h"
+ 
+ static int ufs_fault_get(char *buffer, const struct kernel_param *kp);
+@@ -59,12 +60,22 @@ static int ufs_fault_set(const char *val, const struct kernel_param *kp)
+ 	return 0;
+ }
+ 
+-bool ufs_trigger_eh(void)
++void ufs_fault_inject_hba_init(struct ufs_hba *hba)
+ {
+-	return should_fail(&ufs_trigger_eh_attr, 1);
++	hba->trigger_eh_attr = ufs_trigger_eh_attr;
++	hba->timeout_attr = ufs_timeout_attr;
++#ifdef CONFIG_FAULT_INJECTION_DEBUG_FS
++	fault_create_debugfs_attr("trigger_eh_inject", hba->debugfs_root, &hba->trigger_eh_attr);
++	fault_create_debugfs_attr("timeout_inject", hba->debugfs_root, &hba->timeout_attr);
++#endif
+ }
+ 
+-bool ufs_fail_completion(void)
++bool ufs_trigger_eh(struct ufs_hba *hba)
+ {
+-	return should_fail(&ufs_timeout_attr, 1);
++	return should_fail(&hba->trigger_eh_attr, 1);
++}
++
++bool ufs_fail_completion(struct ufs_hba *hba)
++{
++	return should_fail(&hba->timeout_attr, 1);
+ }

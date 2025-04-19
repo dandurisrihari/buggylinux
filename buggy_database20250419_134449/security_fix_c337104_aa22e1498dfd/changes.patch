@@ -1,0 +1,183 @@
+diff --git a/sound/pci/hda/Kconfig b/sound/pci/hda/Kconfig
+index 4235907b7858..0d38c006e182 100644
+--- a/sound/pci/hda/Kconfig
++++ b/sound/pci/hda/Kconfig
+@@ -226,6 +226,68 @@ config SND_HDA_POWER_SAVE_DEFAULT
+ 	  The default time-out value in seconds for HD-audio automatic
+ 	  power-save mode.  0 means to disable the power-save mode.
+ 
++if SND_HDA_INTEL
++
++# The options below should not be enabled by distributions or
++# users. They are selected by Intel/Skylake or SOF drivers when they
++# register for a PCI ID which is also handled by the HDAudio legacy
++# driver. When this option is selected and the DSP is detected based on
++# the PCI class/subclass/prog-if, the probe of the HDAudio legacy
++# aborts. This mechanism removes the need for distributions to use
++# blacklists. It can be bypassed with module parameters should the
++# Intel/Skylake or SOF drivers fail to handle a specific platform.
++
++config SND_HDA_INTEL_DSP_DETECTION_SKL
++	bool
++	help
++	  This option is selected by SOF or SST drivers, not users or distros.
++	  It enables DSP detection based on PCI class information for
++	  Skylake machines.
++
++config SND_HDA_INTEL_DSP_DETECTION_APL
++	bool
++	help
++	  This option is selected by SOF or SST drivers, not users or distros.
++	  It enables DSP detection based on PCI class information for
++	  Broxton/ApolloLake machines
++
++config SND_HDA_INTEL_DSP_DETECTION_KBL
++	bool
++	help
++	  This option is selected by SOF or SST drivers, not users or distros.
++	  It enables DSP detection based on PCI class information for
++	  KabyLake machines
++
++config SND_HDA_INTEL_DSP_DETECTION_GLK
++	bool
++	help
++	  This option is selected by SOF or SST drivers, not users or distros.
++	  It enables DSP detection based on PCI class information for
++	  GeminiLake machines
++
++config SND_HDA_INTEL_DSP_DETECTION_CNL
++	bool
++	help
++	  This option is selected by SOF or SST drivers, not users or distros.
++	  It enables DSP detection based on PCI class information for
++	  CannonLake machines
++
++config SND_HDA_INTEL_DSP_DETECTION_CFL
++	bool
++	help
++	  This option is selected by SOF or SST drivers, not users or distros.
++	  It enables DSP detection based on PCI class information for
++	  CoffeeLake machines
++
++config SND_HDA_INTEL_DSP_DETECTION_ICL
++	bool
++	help
++	  This option is selected by SOF or SST drivers, not users or distros.
++	  It enables DSP detection based on PCI class information for
++	  IceLake machines
++
++endif ## SND_HDA_INTEL
++
+ endif
+ 
+ endmenu
+diff --git a/sound/pci/hda/hda_controller.h b/sound/pci/hda/hda_controller.h
+index 7185ed574b41..e0c3fcbaa028 100644
+--- a/sound/pci/hda/hda_controller.h
++++ b/sound/pci/hda/hda_controller.h
+@@ -37,7 +37,7 @@
+ #else
+ #define AZX_DCAPS_I915_COMPONENT 0		/* NOP */
+ #endif
+-/* 14 unused */
++#define AZX_DCAPS_INTEL_SHARED	(1 << 14)	/* shared with ASoC */
+ #define AZX_DCAPS_CTX_WORKAROUND (1 << 15)	/* X-Fi workaround */
+ #define AZX_DCAPS_POSFIX_LPIB	(1 << 16)	/* Use LPIB as default */
+ /* 17 unused */
+diff --git a/sound/pci/hda/hda_intel.c b/sound/pci/hda/hda_intel.c
+index e784130ea4e0..2ec9c896ebc0 100644
+--- a/sound/pci/hda/hda_intel.c
++++ b/sound/pci/hda/hda_intel.c
+@@ -357,6 +357,7 @@ enum {
+ 	 AZX_DCAPS_NO_64BIT |\
+ 	 AZX_DCAPS_4K_BDLE_BOUNDARY | AZX_DCAPS_SNOOP_OFF)
+ 
++#define AZX_DCAPS_INTEL_DSP_DETECTION(conf) (IS_ENABLED(CONFIG_SND_HDA_INTEL_DSP_DETECTION_##conf) ? AZX_DCAPS_INTEL_SHARED : 0)
+ /*
+  * vga_switcheroo support
+  */
+@@ -2048,6 +2049,11 @@ static int azx_probe(struct pci_dev *pci,
+ 	bool schedule_probe;
+ 	int err;
+ 
++	/* check if this driver can be used on SKL+ Intel platforms */
++	if ((pci_id->driver_data & AZX_DCAPS_INTEL_SHARED) &&
++	    pci->class != 0x040300)
++		return -ENODEV;
++
+ 	if (dev >= SNDRV_CARDS)
+ 		return -ENODEV;
+ 	if (!enable[dev]) {
+@@ -2354,34 +2360,48 @@ static const struct pci_device_id azx_ids[] = {
+ 	  .driver_data = AZX_DRIVER_SKL | AZX_DCAPS_INTEL_SKYLAKE },
+ 	/* Sunrise Point-LP */
+ 	{ PCI_DEVICE(0x8086, 0x9d70),
+-	  .driver_data = AZX_DRIVER_SKL | AZX_DCAPS_INTEL_SKYLAKE },
++	  .driver_data = AZX_DRIVER_SKL | AZX_DCAPS_INTEL_SKYLAKE |
++	  AZX_DCAPS_INTEL_DSP_DETECTION(SKL)
++	},
+ 	/* Kabylake */
+ 	{ PCI_DEVICE(0x8086, 0xa171),
+ 	  .driver_data = AZX_DRIVER_SKL | AZX_DCAPS_INTEL_SKYLAKE },
+ 	/* Kabylake-LP */
+ 	{ PCI_DEVICE(0x8086, 0x9d71),
+-	  .driver_data = AZX_DRIVER_SKL | AZX_DCAPS_INTEL_SKYLAKE },
++	  .driver_data = AZX_DRIVER_SKL | AZX_DCAPS_INTEL_SKYLAKE |
++	  AZX_DCAPS_INTEL_DSP_DETECTION(KBL)
++	},
+ 	/* Kabylake-H */
+ 	{ PCI_DEVICE(0x8086, 0xa2f0),
+ 	  .driver_data = AZX_DRIVER_SKL | AZX_DCAPS_INTEL_SKYLAKE },
+ 	/* Coffelake */
+ 	{ PCI_DEVICE(0x8086, 0xa348),
+-	  .driver_data = AZX_DRIVER_SKL | AZX_DCAPS_INTEL_SKYLAKE},
++	  .driver_data = AZX_DRIVER_SKL | AZX_DCAPS_INTEL_SKYLAKE |
++	  AZX_DCAPS_INTEL_DSP_DETECTION(CFL)
++	},
+ 	/* Cannonlake */
+ 	{ PCI_DEVICE(0x8086, 0x9dc8),
+-	  .driver_data = AZX_DRIVER_SKL | AZX_DCAPS_INTEL_SKYLAKE},
++	  .driver_data = AZX_DRIVER_SKL | AZX_DCAPS_INTEL_SKYLAKE |
++	  AZX_DCAPS_INTEL_DSP_DETECTION(CNL)
++	},
+ 	/* Icelake */
+ 	{ PCI_DEVICE(0x8086, 0x34c8),
+-	  .driver_data = AZX_DRIVER_SKL | AZX_DCAPS_INTEL_SKYLAKE},
++	  .driver_data = AZX_DRIVER_SKL | AZX_DCAPS_INTEL_SKYLAKE |
++	  AZX_DCAPS_INTEL_DSP_DETECTION(ICL)
++	},
+ 	/* Broxton-P(Apollolake) */
+ 	{ PCI_DEVICE(0x8086, 0x5a98),
+-	  .driver_data = AZX_DRIVER_SKL | AZX_DCAPS_INTEL_BROXTON },
++	  .driver_data = AZX_DRIVER_SKL | AZX_DCAPS_INTEL_BROXTON |
++	  AZX_DCAPS_INTEL_DSP_DETECTION(APL)
++	},
+ 	/* Broxton-T */
+ 	{ PCI_DEVICE(0x8086, 0x1a98),
+ 	  .driver_data = AZX_DRIVER_SKL | AZX_DCAPS_INTEL_BROXTON },
+ 	/* Gemini-Lake */
+ 	{ PCI_DEVICE(0x8086, 0x3198),
+-	  .driver_data = AZX_DRIVER_SKL | AZX_DCAPS_INTEL_BROXTON },
++	  .driver_data = AZX_DRIVER_SKL | AZX_DCAPS_INTEL_BROXTON |
++	  AZX_DCAPS_INTEL_DSP_DETECTION(GLK)
++	},
+ 	/* Haswell */
+ 	{ PCI_DEVICE(0x8086, 0x0a0c),
+ 	  .driver_data = AZX_DRIVER_HDMI | AZX_DCAPS_INTEL_HASWELL },
+diff --git a/sound/soc/intel/Kconfig b/sound/soc/intel/Kconfig
+index 99a62ba409df..2fd1b61e8331 100644
+--- a/sound/soc/intel/Kconfig
++++ b/sound/soc/intel/Kconfig
+@@ -188,6 +188,12 @@ config SND_SOC_INTEL_SKYLAKE_COMMON
+ 	select SND_SOC_TOPOLOGY
+ 	select SND_SOC_INTEL_SST
+ 	select SND_SOC_HDAC_HDA if SND_SOC_INTEL_SKYLAKE_HDAUDIO_CODEC
++	select SND_HDA_INTEL_DSP_DETECTION_SKL if SND_SOC_INTEL_SKL
++	select SND_HDA_INTEL_DSP_DETECTION_APL if SND_SOC_INTEL_APL
++	select SND_HDA_INTEL_DSP_DETECTION_KBL if SND_SOC_INTEL_KBL
++	select SND_HDA_INTEL_DSP_DETECTION_GLK if SND_SOC_INTEL_GLK
++	select SND_HDA_INTEL_DSP_DETECTION_CNL if SND_SOC_INTEL_CNL
++	select SND_HDA_INTEL_DSP_DETECTION_CFL if SND_SOC_INTEL_CFL
+ 	select SND_SOC_ACPI_INTEL_MATCH
+ 	help
+ 	  If you have a Intel Skylake/Broxton/ApolloLake/KabyLake/

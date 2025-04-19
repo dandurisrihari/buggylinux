@@ -1,0 +1,72 @@
+commit 50e3ed0f93f4f62ed2aa83de5db6cb84ecdd5707
+Author: Ard Biesheuvel <ardb@kernel.org>
+Date:   Wed Feb 14 13:29:29 2024 +0100
+
+    arm64: mm: add support for WXN memory translation attribute
+    
+    The AArch64 virtual memory system supports a global WXN control, which
+    can be enabled to make all writable mappings implicitly no-exec. This is
+    a useful hardening feature, as it prevents mistakes in managing page
+    table permissions from being exploited to attack the system.
+    
+    When enabled at EL1, the restrictions apply to both EL1 and EL0. EL1 is
+    completely under our control, and has been cleaned up to allow WXN to be
+    enabled from boot onwards. EL0 is not under our control, but given that
+    widely deployed security features such as selinux or PaX already limit
+    the ability of user space to create mappings that are writable and
+    executable at the same time, the impact of enabling this for EL0 is
+    expected to be limited. (For this reason, common user space libraries
+    that have a legitimate need for manipulating executable code already
+    carry fallbacks such as [0].)
+    
+    If enabled at compile time, the feature can still be disabled at boot if
+    needed, by passing arm64.nowxn on the kernel command line.
+    
+    [0] https://github.com/libffi/libffi/blob/master/src/closures.c#L440
+    
+    Signed-off-by: Ard Biesheuvel <ardb@kernel.org>
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Link: https://lore.kernel.org/r/20240214122845.2033971-88-ardb+git@google.com
+    Signed-off-by: Catalin Marinas <catalin.marinas@arm.com>
+
+diff --git a/arch/arm64/kernel/pi/map_kernel.c b/arch/arm64/kernel/pi/map_kernel.c
+index 5fa08e13e17e..cac1e1f63c44 100644
+--- a/arch/arm64/kernel/pi/map_kernel.c
++++ b/arch/arm64/kernel/pi/map_kernel.c
+@@ -132,6 +132,25 @@ static void __init map_kernel(u64 kaslr_offset, u64 va_offset, int root_level)
+ 	idmap_cpu_replace_ttbr1(swapper_pg_dir);
+ }
+ 
++static void noinline __section(".idmap.text") disable_wxn(void)
++{
++	u64 sctlr = read_sysreg(sctlr_el1) & ~SCTLR_ELx_WXN;
++
++	/*
++	 * We cannot safely clear the WXN bit while the MMU and caches are on,
++	 * so turn the MMU off, flush the TLBs and turn it on again but with
++	 * the WXN bit cleared this time.
++	 */
++	asm("	msr	sctlr_el1, %0		;"
++	    "	isb				;"
++	    "	tlbi    vmalle1			;"
++	    "	dsb     nsh			;"
++	    "	isb				;"
++	    "	msr     sctlr_el1, %1		;"
++	    "	isb				;"
++	    ::	"r"(sctlr & ~SCTLR_ELx_M), "r"(sctlr));
++}
++
+ static void noinline __section(".idmap.text") set_ttbr0_for_lpa2(u64 ttbr)
+ {
+ 	u64 sctlr = read_sysreg(sctlr_el1);
+@@ -229,6 +248,10 @@ asmlinkage void __init early_map_kernel(u64 boot_status, void *fdt)
+ 	if (va_bits > VA_BITS_MIN)
+ 		sysreg_clear_set(tcr_el1, TCR_T1SZ_MASK, TCR_T1SZ(va_bits));
+ 
++	if (IS_ENABLED(CONFIG_ARM64_WXN) &&
++	    arm64_test_sw_feature_override(ARM64_SW_FEATURE_OVERRIDE_NOWXN))
++		disable_wxn();
++
+ 	/*
+ 	 * The virtual KASLR displacement modulo 2MiB is decided by the
+ 	 * physical placement of the image, as otherwise, we might not be able

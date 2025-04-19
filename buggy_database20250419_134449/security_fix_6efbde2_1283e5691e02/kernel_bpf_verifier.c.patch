@@ -1,0 +1,147 @@
+commit 6efbde200bf3cf2dbf6e7181893fed13a79c789b
+Author: Eduard Zingerman <eddyz87@gmail.com>
+Date:   Sat Jan 27 19:52:36 2024 +0200
+
+    bpf: Handle scalar spill vs all MISC in stacksafe()
+    
+    When check_stack_read_fixed_off() reads value from an spi
+    all stack slots of which are set to STACK_{MISC,INVALID},
+    the destination register is set to unbound SCALAR_VALUE.
+    
+    Exploit this fact by allowing stacksafe() to use a fake
+    unbound scalar register to compare 'mmmm mmmm' stack value
+    in old state vs spilled 64-bit scalar in current state
+    and vice versa.
+    
+    Veristat results after this patch show some gains:
+    
+    ./veristat -C -e file,prog,states -f 'states_pct>10'  not-opt after
+    File                     Program                States   (DIFF)
+    -----------------------  ---------------------  ---------------
+    bpf_overlay.o            tail_rev_nodeport_lb4    -45 (-15.85%)
+    bpf_xdp.o                tail_lb_ipv4            -541 (-19.57%)
+    pyperf100.bpf.o          on_event                -680 (-10.42%)
+    pyperf180.bpf.o          on_event               -2164 (-19.62%)
+    pyperf600.bpf.o          on_event               -9799 (-24.84%)
+    strobemeta.bpf.o         on_event               -9157 (-65.28%)
+    xdp_synproxy_kern.bpf.o  syncookie_tc             -54 (-19.29%)
+    xdp_synproxy_kern.bpf.o  syncookie_xdp            -74 (-24.50%)
+    
+    Signed-off-by: Eduard Zingerman <eddyz87@gmail.com>
+    Signed-off-by: Andrii Nakryiko <andrii@kernel.org>
+    Link: https://lore.kernel.org/bpf/20240127175237.526726-6-maxtram95@gmail.com
+
+diff --git a/kernel/bpf/verifier.c b/kernel/bpf/verifier.c
+index 82af971926ac..a0b8e400b3df 100644
+--- a/kernel/bpf/verifier.c
++++ b/kernel/bpf/verifier.c
+@@ -1155,6 +1155,12 @@ static bool is_spilled_scalar_reg(const struct bpf_stack_state *stack)
+ 	       stack->spilled_ptr.type == SCALAR_VALUE;
+ }
+ 
++static bool is_spilled_scalar_reg64(const struct bpf_stack_state *stack)
++{
++	return stack->slot_type[0] == STACK_SPILL &&
++	       stack->spilled_ptr.type == SCALAR_VALUE;
++}
++
+ /* Mark stack slot as STACK_MISC, unless it is already STACK_INVALID, in which
+  * case they are equivalent, or it's STACK_ZERO, in which case we preserve
+  * more precise STACK_ZERO.
+@@ -2264,8 +2270,7 @@ static void __reg_assign_32_into_64(struct bpf_reg_state *reg)
+ }
+ 
+ /* Mark a register as having a completely unknown (scalar) value. */
+-static void __mark_reg_unknown(const struct bpf_verifier_env *env,
+-			       struct bpf_reg_state *reg)
++static void __mark_reg_unknown_imprecise(struct bpf_reg_state *reg)
+ {
+ 	/*
+ 	 * Clear type, off, and union(map_ptr, range) and
+@@ -2277,10 +2282,20 @@ static void __mark_reg_unknown(const struct bpf_verifier_env *env,
+ 	reg->ref_obj_id = 0;
+ 	reg->var_off = tnum_unknown;
+ 	reg->frameno = 0;
+-	reg->precise = !env->bpf_capable;
++	reg->precise = false;
+ 	__mark_reg_unbounded(reg);
+ }
+ 
++/* Mark a register as having a completely unknown (scalar) value,
++ * initialize .precise as true when not bpf capable.
++ */
++static void __mark_reg_unknown(const struct bpf_verifier_env *env,
++			       struct bpf_reg_state *reg)
++{
++	__mark_reg_unknown_imprecise(reg);
++	reg->precise = !env->bpf_capable;
++}
++
+ static void mark_reg_unknown(struct bpf_verifier_env *env,
+ 			     struct bpf_reg_state *regs, u32 regno)
+ {
+@@ -16486,6 +16501,43 @@ static bool regsafe(struct bpf_verifier_env *env, struct bpf_reg_state *rold,
+ 	}
+ }
+ 
++static struct bpf_reg_state unbound_reg;
++
++static __init int unbound_reg_init(void)
++{
++	__mark_reg_unknown_imprecise(&unbound_reg);
++	unbound_reg.live |= REG_LIVE_READ;
++	return 0;
++}
++late_initcall(unbound_reg_init);
++
++static bool is_stack_all_misc(struct bpf_verifier_env *env,
++			      struct bpf_stack_state *stack)
++{
++	u32 i;
++
++	for (i = 0; i < ARRAY_SIZE(stack->slot_type); ++i) {
++		if ((stack->slot_type[i] == STACK_MISC) ||
++		    (stack->slot_type[i] == STACK_INVALID && env->allow_uninit_stack))
++			continue;
++		return false;
++	}
++
++	return true;
++}
++
++static struct bpf_reg_state *scalar_reg_for_stack(struct bpf_verifier_env *env,
++						  struct bpf_stack_state *stack)
++{
++	if (is_spilled_scalar_reg64(stack))
++		return &stack->spilled_ptr;
++
++	if (is_stack_all_misc(env, stack))
++		return &unbound_reg;
++
++	return NULL;
++}
++
+ static bool stacksafe(struct bpf_verifier_env *env, struct bpf_func_state *old,
+ 		      struct bpf_func_state *cur, struct bpf_idmap *idmap, bool exact)
+ {
+@@ -16524,6 +16576,20 @@ static bool stacksafe(struct bpf_verifier_env *env, struct bpf_func_state *old,
+ 		if (i >= cur->allocated_stack)
+ 			return false;
+ 
++		/* 64-bit scalar spill vs all slots MISC and vice versa.
++		 * Load from all slots MISC produces unbound scalar.
++		 * Construct a fake register for such stack and call
++		 * regsafe() to ensure scalar ids are compared.
++		 */
++		old_reg = scalar_reg_for_stack(env, &old->stack[spi]);
++		cur_reg = scalar_reg_for_stack(env, &cur->stack[spi]);
++		if (old_reg && cur_reg) {
++			if (!regsafe(env, old_reg, cur_reg, idmap, exact))
++				return false;
++			i += BPF_REG_SIZE - 1;
++			continue;
++		}
++
+ 		/* if old state was safe with misc data in the stack
+ 		 * it will be safe with zero-initialized stack.
+ 		 * The opposite is not true

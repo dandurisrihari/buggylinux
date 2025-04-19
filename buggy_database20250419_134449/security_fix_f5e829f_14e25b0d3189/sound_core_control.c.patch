@@ -1,0 +1,144 @@
+commit f5e829f92a494a0b66d309497bab4e9d10d4ce3e
+Author: Takashi Iwai <tiwai@suse.de>
+Date:   Thu Jun 9 14:02:19 2022 +0200
+
+    ALSA: control: Add input validation
+    
+    This patch adds a new feature to enable the validation of input data
+    to control elements in the ALSA core side.  When
+    CONFIG_SND_CTL_INPUT_VALIDATION is set, ALSA core verifies whether the
+    each input value via control API is in the defined ranges, also checks
+    whether it's aligned to the defined steps.  If an invalid value is
+    detected, ALSA core returns -EINVAL error immediately without passing
+    further to the driver's callback.  So this is a kind of hardening for
+    (badly written) drivers that have no proper error checks, at the cost
+    of a slight performance overhead.
+    
+    Technically seen, this reuses a part of the existing validation code
+    for CONFIG_SND_CTL_DEBUG case with a slight modification to suppress
+    error prints for the input validation.
+    
+    Link: https://lore.kernel.org/r/20220609120219.3937-5-tiwai@suse.de
+    Signed-off-by: Takashi Iwai <tiwai@suse.de>
+
+diff --git a/sound/core/control.c b/sound/core/control.c
+index 559398891eb9..fa04a9233155 100644
+--- a/sound/core/control.c
++++ b/sound/core/control.c
+@@ -982,7 +982,7 @@ static void fill_remaining_elem_value(struct snd_ctl_elem_value *control,
+ static int sanity_check_int_value(struct snd_card *card,
+ 				  const struct snd_ctl_elem_value *control,
+ 				  const struct snd_ctl_elem_info *info,
+-				  int i)
++				  int i, bool print_error)
+ {
+ 	long long lval, lmin, lmax, lstep;
+ 	u64 rem;
+@@ -1016,21 +1016,23 @@ static int sanity_check_int_value(struct snd_card *card,
+ 	}
+ 
+ 	if (lval < lmin || lval > lmax) {
+-		dev_err(card->dev,
+-			"control %i:%i:%i:%s:%i: value out of range %lld (%lld/%lld) at count %i\n",
+-			control->id.iface, control->id.device,
+-			control->id.subdevice, control->id.name,
+-			control->id.index, lval, lmin, lmax, i);
++		if (print_error)
++			dev_err(card->dev,
++				"control %i:%i:%i:%s:%i: value out of range %lld (%lld/%lld) at count %i\n",
++				control->id.iface, control->id.device,
++				control->id.subdevice, control->id.name,
++				control->id.index, lval, lmin, lmax, i);
+ 		return -EINVAL;
+ 	}
+ 	if (lstep) {
+ 		div64_u64_rem(lval, lstep, &rem);
+ 		if (rem) {
+-			dev_err(card->dev,
+-				"control %i:%i:%i:%s:%i: unaligned value %lld (step %lld) at count %i\n",
+-				control->id.iface, control->id.device,
+-				control->id.subdevice, control->id.name,
+-				control->id.index, lval, lstep, i);
++			if (print_error)
++				dev_err(card->dev,
++					"control %i:%i:%i:%s:%i: unaligned value %lld (step %lld) at count %i\n",
++					control->id.iface, control->id.device,
++					control->id.subdevice, control->id.name,
++					control->id.index, lval, lstep, i);
+ 			return -EINVAL;
+ 		}
+ 	}
+@@ -1038,15 +1040,13 @@ static int sanity_check_int_value(struct snd_card *card,
+ 	return 0;
+ }
+ 
+-/* perform sanity checks to the given snd_ctl_elem_value object */
+-static int sanity_check_elem_value(struct snd_card *card,
+-				   const struct snd_ctl_elem_value *control,
+-				   const struct snd_ctl_elem_info *info,
+-				   u32 pattern)
++/* check whether the all input values are valid for the given elem value */
++static int sanity_check_input_values(struct snd_card *card,
++				     const struct snd_ctl_elem_value *control,
++				     const struct snd_ctl_elem_info *info,
++				     bool print_error)
+ {
+-	size_t offset;
+-	int i, ret = 0;
+-	u32 *p;
++	int i, ret;
+ 
+ 	switch (info->type) {
+ 	case SNDRV_CTL_ELEM_TYPE_BOOLEAN:
+@@ -1054,7 +1054,8 @@ static int sanity_check_elem_value(struct snd_card *card,
+ 	case SNDRV_CTL_ELEM_TYPE_INTEGER64:
+ 	case SNDRV_CTL_ELEM_TYPE_ENUMERATED:
+ 		for (i = 0; i < info->count; i++) {
+-			ret = sanity_check_int_value(card, control, info, i);
++			ret = sanity_check_int_value(card, control, info, i,
++						     print_error);
+ 			if (ret < 0)
+ 				return ret;
+ 		}
+@@ -1063,6 +1064,23 @@ static int sanity_check_elem_value(struct snd_card *card,
+ 		break;
+ 	}
+ 
++	return 0;
++}
++
++/* perform sanity checks to the given snd_ctl_elem_value object */
++static int sanity_check_elem_value(struct snd_card *card,
++				   const struct snd_ctl_elem_value *control,
++				   const struct snd_ctl_elem_info *info,
++				   u32 pattern)
++{
++	size_t offset;
++	int ret;
++	u32 *p;
++
++	ret = sanity_check_input_values(card, control, info, true);
++	if (ret < 0)
++		return ret;
++
+ 	/* check whether the remaining area kept untouched */
+ 	offset = value_sizes[info->type] * info->count;
+ 	offset = DIV_ROUND_UP(offset, sizeof(u32));
+@@ -1249,6 +1267,17 @@ static int snd_ctl_elem_write(struct snd_card *card, struct snd_ctl_file *file,
+ 
+ 	snd_ctl_build_ioff(&control->id, kctl, index_offset);
+ 	result = snd_power_ref_and_wait(card);
++	/* validate input values */
++	if (IS_ENABLED(CONFIG_SND_CTL_INPUT_VALIDATION) && !result) {
++		struct snd_ctl_elem_info info;
++
++		memset(&info, 0, sizeof(info));
++		info.id = control->id;
++		result = __snd_ctl_elem_info(card, kctl, &info, NULL);
++		if (!result)
++			result = sanity_check_input_values(card, control, &info,
++							   false);
++	}
+ 	if (!result)
+ 		result = kctl->put(kctl, control);
+ 	snd_power_unref(card);

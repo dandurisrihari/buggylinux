@@ -1,0 +1,77 @@
+commit e4e7e3af73694380f0d9a742d13b80598a3393e9
+Author: Vinayak Yadawad <vinayak.yadawad@broadcom.com>
+Date:   Tue Sep 26 16:02:22 2023 +0530
+
+    wifi: cfg80211: Allow AP/P2PGO to indicate port authorization to peer STA/P2PClient
+    
+    In 4way handshake offload, cfg80211_port_authorized enables driver
+    to indicate successful 4way handshake to cfg80211 layer. Currently
+    this path of port authorization is restricted to interface type
+    NL80211_IFTYPE_STATION and NL80211_IFTYPE_P2P_CLIENT. This patch
+    extends the support for NL80211_IFTYPE_AP and NL80211_IFTYPE_P2P_GO
+    interfaces to authorize peer STA/P2P_CLIENT, whenever authentication
+    is offloaded on the AP/P2P_GO interface.
+    
+    Signed-off-by: Vinayak Yadawad <vinayak.yadawad@broadcom.com>
+    Link: https://lore.kernel.org/r/dee3b0a2b4f617e932c90bff4504a89389273632.1695721435.git.vinayak.yadawad@broadcom.com
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+diff --git a/net/wireless/sme.c b/net/wireless/sme.c
+index 50fcb27e6dab..acfe66da7109 100644
+--- a/net/wireless/sme.c
++++ b/net/wireless/sme.c
+@@ -1281,24 +1281,29 @@ void cfg80211_roamed(struct net_device *dev, struct cfg80211_roam_info *info,
+ }
+ EXPORT_SYMBOL(cfg80211_roamed);
+ 
+-void __cfg80211_port_authorized(struct wireless_dev *wdev, const u8 *bssid,
++void __cfg80211_port_authorized(struct wireless_dev *wdev, const u8 *peer_addr,
+ 					const u8 *td_bitmap, u8 td_bitmap_len)
+ {
+ 	lockdep_assert_wiphy(wdev->wiphy);
+ 
+ 	if (WARN_ON(wdev->iftype != NL80211_IFTYPE_STATION &&
+-		    wdev->iftype != NL80211_IFTYPE_P2P_CLIENT))
++		wdev->iftype != NL80211_IFTYPE_P2P_CLIENT &&
++		wdev->iftype != NL80211_IFTYPE_AP &&
++		wdev->iftype != NL80211_IFTYPE_P2P_GO))
+ 		return;
+ 
+-	if (WARN_ON(!wdev->connected) ||
+-	    WARN_ON(!ether_addr_equal(wdev->u.client.connected_addr, bssid)))
+-		return;
++	if (wdev->iftype == NL80211_IFTYPE_STATION ||
++		wdev->iftype == NL80211_IFTYPE_P2P_CLIENT) {
++		if (WARN_ON(!wdev->connected) ||
++			WARN_ON(!ether_addr_equal(wdev->u.client.connected_addr, peer_addr)))
++			return;
++	}
+ 
+ 	nl80211_send_port_authorized(wiphy_to_rdev(wdev->wiphy), wdev->netdev,
+-				     bssid, td_bitmap, td_bitmap_len);
++				     peer_addr, td_bitmap, td_bitmap_len);
+ }
+ 
+-void cfg80211_port_authorized(struct net_device *dev, const u8 *bssid,
++void cfg80211_port_authorized(struct net_device *dev, const u8 *peer_addr,
+ 			      const u8 *td_bitmap, u8 td_bitmap_len, gfp_t gfp)
+ {
+ 	struct wireless_dev *wdev = dev->ieee80211_ptr;
+@@ -1306,7 +1311,7 @@ void cfg80211_port_authorized(struct net_device *dev, const u8 *bssid,
+ 	struct cfg80211_event *ev;
+ 	unsigned long flags;
+ 
+-	if (WARN_ON(!bssid))
++	if (WARN_ON(!peer_addr))
+ 		return;
+ 
+ 	ev = kzalloc(sizeof(*ev) + td_bitmap_len, gfp);
+@@ -1314,7 +1319,7 @@ void cfg80211_port_authorized(struct net_device *dev, const u8 *bssid,
+ 		return;
+ 
+ 	ev->type = EVENT_PORT_AUTHORIZED;
+-	memcpy(ev->pa.bssid, bssid, ETH_ALEN);
++	memcpy(ev->pa.peer_addr, peer_addr, ETH_ALEN);
+ 	ev->pa.td_bitmap = ((u8 *)ev) + sizeof(*ev);
+ 	ev->pa.td_bitmap_len = td_bitmap_len;
+ 	memcpy((void *)ev->pa.td_bitmap, td_bitmap, td_bitmap_len);

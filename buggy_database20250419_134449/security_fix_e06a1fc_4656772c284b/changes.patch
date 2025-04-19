@@ -1,0 +1,100 @@
+diff --git a/fs/btrfs/ctree.h b/fs/btrfs/ctree.h
+index edcbca9cd813..9a0e4e1c59ea 100644
+--- a/fs/btrfs/ctree.h
++++ b/fs/btrfs/ctree.h
+@@ -3150,6 +3150,8 @@ int btrfs_create_subvol_root(struct btrfs_trans_handle *trans,
+ 			     struct btrfs_root *new_root,
+ 			     struct btrfs_root *parent_root,
+ 			     u64 new_dirid);
++void btrfs_set_delalloc_extent(struct inode *inode, struct extent_state *state,
++			       unsigned *bits);
+ int btrfs_merge_bio_hook(struct page *page, unsigned long offset,
+ 			 size_t size, struct bio *bio,
+ 			 unsigned long bio_flags);
+diff --git a/fs/btrfs/extent_io.c b/fs/btrfs/extent_io.c
+index c63334c6b008..1678adae7963 100644
+--- a/fs/btrfs/extent_io.c
++++ b/fs/btrfs/extent_io.c
+@@ -404,13 +404,6 @@ static void merge_state(struct extent_io_tree *tree,
+ 	}
+ }
+ 
+-static void set_state_cb(struct extent_io_tree *tree,
+-			 struct extent_state *state, unsigned *bits)
+-{
+-	if (tree->ops && tree->ops->set_bit_hook)
+-		tree->ops->set_bit_hook(tree->private_data, state, bits);
+-}
+-
+ static void clear_state_cb(struct extent_io_tree *tree,
+ 			   struct extent_state *state, unsigned *bits)
+ {
+@@ -809,7 +802,9 @@ static void set_state_bits(struct extent_io_tree *tree,
+ 	unsigned bits_to_set = *bits & ~EXTENT_CTLBITS;
+ 	int ret;
+ 
+-	set_state_cb(tree, state, bits);
++	if (tree->private_data && is_data_inode(tree->private_data))
++		btrfs_set_delalloc_extent(tree->private_data, state, bits);
++
+ 	if ((bits_to_set & EXTENT_DIRTY) && !(state->state & EXTENT_DIRTY)) {
+ 		u64 range = state->end - state->start + 1;
+ 		tree->dirty_bytes += range;
+diff --git a/fs/btrfs/extent_io.h b/fs/btrfs/extent_io.h
+index 3cb84a0fbaab..b3235d46b5c3 100644
+--- a/fs/btrfs/extent_io.h
++++ b/fs/btrfs/extent_io.h
+@@ -106,8 +106,6 @@ struct extent_io_ops {
+ 	/*
+ 	 * Optional hooks, called if the pointer is not NULL
+ 	 */
+-	void (*set_bit_hook)(void *private_data, struct extent_state *state,
+-			     unsigned *bits);
+ 	void (*clear_bit_hook)(void *private_data,
+ 			struct extent_state *state,
+ 			unsigned *bits);
+diff --git a/fs/btrfs/inode.c b/fs/btrfs/inode.c
+index 175ef341b8ae..f95733fc9704 100644
+--- a/fs/btrfs/inode.c
++++ b/fs/btrfs/inode.c
+@@ -1755,15 +1755,12 @@ static void btrfs_del_delalloc_inode(struct btrfs_root *root,
+ }
+ 
+ /*
+- * extent_io.c set_bit_hook, used to track delayed allocation
+- * bytes in this file, and to maintain the list of inodes that
+- * have pending delalloc work to be done.
++ * Properly track delayed allocation bytes in the inode and to maintain the
++ * list of inodes that have pending delalloc work to be done.
+  */
+-static void btrfs_set_bit_hook(void *private_data,
+-			       struct extent_state *state, unsigned *bits)
++void btrfs_set_delalloc_extent(struct inode *inode, struct extent_state *state,
++			       unsigned *bits)
+ {
+-	struct inode *inode = private_data;
+-
+ 	struct btrfs_fs_info *fs_info = btrfs_sb(inode->i_sb);
+ 
+ 	if ((*bits & EXTENT_DEFRAG) && !(*bits & EXTENT_DELALLOC))
+@@ -10512,7 +10509,6 @@ static const struct extent_io_ops btrfs_extent_io_ops = {
+ 	.readpage_io_failed_hook = btrfs_readpage_io_failed_hook,
+ 
+ 	/* optional callbacks */
+-	.set_bit_hook = btrfs_set_bit_hook,
+ 	.clear_bit_hook = btrfs_clear_bit_hook,
+ 	.merge_extent_hook = btrfs_merge_extent_hook,
+ 	.split_extent_hook = btrfs_split_extent_hook,
+diff --git a/fs/btrfs/tests/extent-io-tests.c b/fs/btrfs/tests/extent-io-tests.c
+index 9e0f4a01be14..ac8b5e35797d 100644
+--- a/fs/btrfs/tests/extent-io-tests.c
++++ b/fs/btrfs/tests/extent-io-tests.c
+@@ -76,7 +76,7 @@ static int test_find_delalloc(u32 sectorsize)
+ 		return -ENOMEM;
+ 	}
+ 
+-	extent_io_tree_init(&tmp, inode);
++	extent_io_tree_init(&tmp, NULL);
+ 
+ 	/*
+ 	 * First go through and create and mark all of our pages dirty, we pin

@@ -1,0 +1,32 @@
+commit 4286a3ec2595697f398ce1dc895a2f5b006dae99
+Merge: e335300095c3 0dab791f05ce
+Author: Paolo Bonzini <pbonzini@redhat.com>
+Date:   Wed Mar 19 09:04:33 2025 -0400
+
+    Merge tag 'kvm-x86-mmu-6.15' of https://github.com/kvm-x86/linux into HEAD
+    
+    KVM x86/mmu changes for 6.15
+    
+    Add support for "fast" aging of SPTEs in both the TDP MMU and Shadow MMU, where
+    "fast" means "without holding mmu_lock".  Not taking mmu_lock allows multiple
+    aging actions to run in parallel, and more importantly avoids stalling vCPUs,
+    e.g. due to holding mmu_lock for an extended duration while a vCPU is faulting
+    in memory.
+    
+    For the TDP MMU, protect aging via RCU; the page tables are RCU-protected and
+    KVM doesn't need to access any metadata to age SPTEs.
+    
+    For the Shadow MMU, use bit 1 of rmap pointers (bit 0 is used to terminate a
+    list of rmaps) to implement a per-rmap single-bit spinlock.  When aging a gfn,
+    acquire the rmap's spinlock with read-only permissions, which allows hardening
+    and optimizing the locking and aging, e.g. locking an rmap for write requires
+    mmu_lock to also be held.  The lock is NOT a true R/W spinlock, i.e. multiple
+    concurrent readers aren't supported.
+    
+    To avoid forcing all SPTE updates to use atomic operations (clearing the
+    Accessed bit out of mmu_lock makes it inherently volatile), rework and rename
+    spte_has_volatile_bits() to spte_needs_atomic_update() and deliberately exclude
+    the Accessed bit.  KVM (and mm/) already tolerates false positives/negatives
+    for Accessed information, and all testing has shown that reducing the latency
+    of aging is far more beneficial to overall system performance than providing
+    "perfect" young/old information.

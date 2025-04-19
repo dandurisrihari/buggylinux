@@ -1,0 +1,50 @@
+commit d2131b33c7e07c2905ee2f2321cc4dae1928c483
+Author: Brian King <brking@linux.vnet.ibm.com>
+Date:   Thu Dec 18 09:26:51 2008 -0600
+
+    [SCSI] ibmvfc: Improve async event handling
+    
+    While doing various error injection testing, such as cable
+    pulls and target moves, some issues were observed in handling
+    these events. This patch improves the way these events are handled
+    by increasing the delay waiting for the fabric to settle and also
+    changes the behavior of Link Up to break the CRQ to ensure everything
+    gets cleaned up properly on the VIOS.
+    
+    Signed-off-by: Brian King <brking@linux.vnet.ibm.com>
+    Signed-off-by: James Bottomley <James.Bottomley@HansenPartnership.com>
+
+diff --git a/drivers/scsi/ibmvscsi/ibmvfc.c b/drivers/scsi/ibmvscsi/ibmvfc.c
+index a401e938a87a..44f202f33101 100644
+--- a/drivers/scsi/ibmvscsi/ibmvfc.c
++++ b/drivers/scsi/ibmvscsi/ibmvfc.c
+@@ -2156,15 +2156,17 @@ static void ibmvfc_handle_async(struct ibmvfc_async_crq *crq,
+ 	case IBMVFC_AE_LINK_UP:
+ 	case IBMVFC_AE_RESUME:
+ 		vhost->events_to_log |= IBMVFC_AE_LINKUP;
+-		ibmvfc_init_host(vhost, 1);
++		vhost->delay_init = 1;
++		__ibmvfc_reset_host(vhost);
+ 		break;
+ 	case IBMVFC_AE_SCN_FABRIC:
++	case IBMVFC_AE_SCN_DOMAIN:
+ 		vhost->events_to_log |= IBMVFC_AE_RSCN;
+-		ibmvfc_init_host(vhost, 1);
++		vhost->delay_init = 1;
++		__ibmvfc_reset_host(vhost);
+ 		break;
+ 	case IBMVFC_AE_SCN_NPORT:
+ 	case IBMVFC_AE_SCN_GROUP:
+-	case IBMVFC_AE_SCN_DOMAIN:
+ 		vhost->events_to_log |= IBMVFC_AE_RSCN;
+ 	case IBMVFC_AE_ELS_LOGO:
+ 	case IBMVFC_AE_ELS_PRLO:
+@@ -3619,7 +3621,7 @@ static void ibmvfc_do_work(struct ibmvfc_host *vhost)
+ 		if (vhost->delay_init) {
+ 			vhost->delay_init = 0;
+ 			spin_unlock_irqrestore(vhost->host->host_lock, flags);
+-			ssleep(5);
++			ssleep(15);
+ 			return;
+ 		} else
+ 			vhost->job_step(vhost);

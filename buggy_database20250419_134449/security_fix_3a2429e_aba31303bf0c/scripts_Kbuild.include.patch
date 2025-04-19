@@ -1,0 +1,97 @@
+commit 3a2429e1faf40b2aaa481aa4b001a74d222c7e8b
+Author: Masahiro Yamada <yamada.masahiro@socionext.com>
+Date:   Fri Nov 30 10:05:27 2018 +0900
+
+    kbuild: change if_changed_rule for multi-line recipe
+    
+    The 'define' ... 'endef' directive is useful to confine a series of
+    shell commands into a single macro:
+    
+      define foo
+              [action1]
+              [action2]
+              [action3]
+      endif
+    
+    Each action is executed in a separate subshell.
+    
+    However, rule_cc_o_c and rule_as_o_S in scripts/Makefile.build are
+    written as follows (with a trailing semicolon in each cmd_*):
+    
+      define rule_cc_o_c
+              [action1] ; \
+              [action2] ; \
+              [action3] ;
+      endef
+    
+    All shell commands are concatenated with '; \' so that it looks like
+    a single command from the Makefile point of view. This does not
+    exploit the benefits of 'define' ... 'endef' form because a single
+    shell command can be more simply written, like this:
+    
+      rule_cc_o_c = \
+              [action1] ; \
+              [action2] ; \
+              [action3] ;
+    
+    I guess the intention for the command concatenation was to let the
+    '@set -e' in if_changed_rule cover all the commands.
+    
+    We can improve the readability by moving '@set -e' to the 'cmd' macro.
+    The combo of $(call echo-cmd,*) $(cmd_*) in rule_cc_o_c and rule_as_o_S
+    have been replaced with $(call cmd,*). The trailing back-slashes have
+    been removed.
+    
+    Here is a note about the performance: the commands in rule_cc_o_c and
+    rule_as_o_S were previously executed all together in a single subshell,
+    but now each line in a separate subshell. This means Make will spawn
+    extra subshells [1]. I measured the build performance for
+      x86_64_defconfig + CONFIG_MODVERSIONS + CONFIG_TRIM_UNUSED_KSYMS
+    and I saw slight performance regression, but I believe code readability
+    and maintainability wins.
+    
+    [1] Precisely, GNU Make may optimize this by executing the command
+        directly instead of forking a subshell, if no shell special
+        characters are found in the command line and omitting the subshell
+        will not change the behavior.
+    
+    Signed-off-by: Masahiro Yamada <yamada.masahiro@socionext.com>
+
+diff --git a/scripts/Kbuild.include b/scripts/Kbuild.include
+index 4b943f4d2226..6bbbe7533d6f 100644
+--- a/scripts/Kbuild.include
++++ b/scripts/Kbuild.include
+@@ -215,7 +215,7 @@ echo-cmd = $(if $($(quiet)cmd_$(1)),\
+ 	echo '  $(call escsq,$($(quiet)cmd_$(1)))$(echo-why)';)
+ 
+ # printing commands
+-cmd = @$(echo-cmd) $(cmd_$(1))
++cmd = @set -e; $(echo-cmd) $(cmd_$(1))
+ 
+ # Add $(obj)/ for paths that are not absolute
+ objectify = $(foreach o,$(1),$(if $(filter /%,$(o)),$(o),$(obj)/$(o)))
+@@ -256,21 +256,17 @@ if_changed = $(if $(strip $(any-prereq) $(arg-check)),                       \
+ 	printf '%s\n' 'cmd_$@ := $(make-cmd)' > $(dot-target).cmd, @:)
+ 
+ # Execute the command and also postprocess generated .d dependencies file.
+-if_changed_dep = $(if $(strip $(any-prereq) $(arg-check) ),                  \
+-	@set -e;                                                             \
+-	$(cmd_and_fixdep), @:)
++if_changed_dep = $(if $(strip $(any-prereq) $(arg-check)),$(cmd_and_fixdep),@:)
+ 
+ cmd_and_fixdep =                                                             \
+-	$(echo-cmd) $(cmd_$(1));                                             \
++	$(cmd);                                                              \
+ 	scripts/basic/fixdep $(depfile) $@ '$(make-cmd)' > $(dot-target).cmd;\
+ 	rm -f $(depfile);
+ 
+ # Usage: $(call if_changed_rule,foo)
+ # Will check if $(cmd_foo) or any of the prerequisites changed,
+ # and if so will execute $(rule_foo).
+-if_changed_rule = $(if $(strip $(any-prereq) $(arg-check) ),                 \
+-	@set -e;                                                             \
+-	$(rule_$(1)), @:)
++if_changed_rule = $(if $(strip $(any-prereq) $(arg-check)),$(rule_$(1)),@:)
+ 
+ ###
+ # why - tell why a target got built

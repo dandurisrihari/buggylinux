@@ -1,0 +1,115 @@
+commit 8719a1c30d3a1b4f347afca8e78be201d66d5c49
+Author: Gustavo A. R. Silva <gustavoars@kernel.org>
+Date:   Wed Nov 16 10:59:44 2022 -0600
+
+    bna: Avoid clashing function prototypes
+    
+    When built with Control Flow Integrity, function prototypes between
+    caller and function declaration must match. These mismatches are visible
+    at compile time with the new -Wcast-function-type-strict in Clang[1].
+    
+    Fix a total of 227 warnings like these:
+    
+    drivers/net/ethernet/brocade/bna/bna_enet.c:519:3: warning: cast from 'void (*)(struct bna_ethport *, enum bna_ethport_event)' to 'bfa_fsm_t' (aka 'void (*)(void *, int)') converts to incompatible function type [-Wcast-function-type-strict]
+                    bfa_fsm_set_state(ethport, bna_ethport_sm_down);
+                    ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    
+    The bna state machine code heavily overloads its state machine functions,
+    so these have been separated into their own sets of structs, enums,
+    typedefs, and helper functions. There are almost zero binary code changes,
+    all seem to be related to header file line numbers changing, or the
+    addition of the new stats helper.
+    
+    Important to mention is that while I was manually implementing this changes
+    I was staring at this[2] patch from Kees Cook. Thanks, Kees. :)
+    
+    Link: https://github.com/KSPP/linux/issues/240
+    [1] https://reviews.llvm.org/D134831
+    [2] https://lore.kernel.org/linux-hardening/20220929230334.2109344-1-keescook@chromium.org/
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Signed-off-by: Gustavo A. R. Silva <gustavoars@kernel.org>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/brocade/bna/bfa_cs.h b/drivers/net/ethernet/brocade/bna/bfa_cs.h
+index 8f0ac7b99973..858c92129451 100644
+--- a/drivers/net/ethernet/brocade/bna/bfa_cs.h
++++ b/drivers/net/ethernet/brocade/bna/bfa_cs.h
+@@ -18,15 +18,43 @@
+ 
+ /* BFA state machine interfaces */
+ 
+-typedef void (*bfa_sm_t)(void *sm, int event);
+-
+ /* For converting from state machine function to state encoding. */
+-struct bfa_sm_table {
+-	bfa_sm_t	sm;	/*!< state machine function	*/
+-	int		state;	/*!< state machine encoding	*/
+-	char		*name;	/*!< state name for display	*/
+-};
+-#define BFA_SM(_sm)		((bfa_sm_t)(_sm))
++#define BFA_SM_TABLE(n, s, e, t)				\
++struct s;							\
++enum e;								\
++typedef void (*t)(struct s *, enum e);				\
++								\
++struct n ## _sm_table_s {					\
++	t		sm;	/* state machine function */	\
++	int		state;	/* state machine encoding */	\
++	char		*name;	/* state name for display */	\
++};								\
++								\
++static inline int						\
++n ## _sm_to_state(struct n ## _sm_table_s *smt, t sm)		\
++{								\
++	int	i = 0;						\
++								\
++	while (smt[i].sm && smt[i].sm != sm)			\
++		i++;						\
++	return smt[i].state;					\
++}
++
++BFA_SM_TABLE(iocpf,	bfa_iocpf,	iocpf_event,	bfa_fsm_iocpf_t)
++BFA_SM_TABLE(ioc,	bfa_ioc,	ioc_event,	bfa_fsm_ioc_t)
++BFA_SM_TABLE(cmdq,	bfa_msgq_cmdq,	cmdq_event,	bfa_fsm_msgq_cmdq_t)
++BFA_SM_TABLE(rspq,	bfa_msgq_rspq,	rspq_event,	bfa_fsm_msgq_rspq_t)
++
++BFA_SM_TABLE(ioceth,	bna_ioceth,	bna_ioceth_event, bna_fsm_ioceth_t)
++BFA_SM_TABLE(enet,	bna_enet,	bna_enet_event, bna_fsm_enet_t)
++BFA_SM_TABLE(ethport,	bna_ethport,	bna_ethport_event, bna_fsm_ethport_t)
++BFA_SM_TABLE(tx,	bna_tx,		bna_tx_event,	bna_fsm_tx_t)
++BFA_SM_TABLE(rxf,	bna_rxf,	bna_rxf_event, bna_fsm_rxf_t)
++BFA_SM_TABLE(rx,	bna_rx,		bna_rx_event,	bna_fsm_rx_t)
++
++#undef BFA_SM_TABLE
++
++#define BFA_SM(_sm)	(_sm)
+ 
+ /* State machine with entry actions. */
+ typedef void (*bfa_fsm_t)(void *fsm, int event);
+@@ -41,24 +69,12 @@ typedef void (*bfa_fsm_t)(void *fsm, int event);
+ 	static void oc ## _sm_ ## st ## _entry(otype * fsm)
+ 
+ #define bfa_fsm_set_state(_fsm, _state) do {				\
+-	(_fsm)->fsm = (bfa_fsm_t)(_state);				\
++	(_fsm)->fsm = (_state);						\
+ 	_state ## _entry(_fsm);						\
+ } while (0)
+ 
+ #define bfa_fsm_send_event(_fsm, _event)	((_fsm)->fsm((_fsm), (_event)))
+-#define bfa_fsm_cmp_state(_fsm, _state)					\
+-	((_fsm)->fsm == (bfa_fsm_t)(_state))
+-
+-static inline int
+-bfa_sm_to_state(const struct bfa_sm_table *smt, bfa_sm_t sm)
+-{
+-	int	i = 0;
+-
+-	while (smt[i].sm && smt[i].sm != sm)
+-		i++;
+-	return smt[i].state;
+-}
+-
++#define bfa_fsm_cmp_state(_fsm, _state)		((_fsm)->fsm == (_state))
+ /* Generic wait counter. */
+ 
+ typedef void (*bfa_wc_resume_t) (void *cbarg);

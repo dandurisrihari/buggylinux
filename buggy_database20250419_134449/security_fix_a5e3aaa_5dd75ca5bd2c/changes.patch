@@ -1,0 +1,103 @@
+diff --git a/arch/microblaze/Kconfig b/arch/microblaze/Kconfig
+index 996132a5ef35..4ebb56d6d959 100644
+--- a/arch/microblaze/Kconfig
++++ b/arch/microblaze/Kconfig
+@@ -204,6 +204,16 @@ config TASK_SIZE
+ 	hex "Size of user task space" if TASK_SIZE_BOOL
+ 	default "0x80000000"
+ 
++config MB_MANAGER
++	bool "Support for Microblaze Manager"
++	depends on ADVANCED_OPTIONS
++	help
++	  This option enables API for configuring the MicroBlaze manager
++	  control register, which is consumed by the break handler to
++	  block the break.
++
++	  Say N here unless you know what you are doing.
++
+ endmenu
+ 
+ menu "Bus Options"
+diff --git a/arch/microblaze/include/asm/xilinx_mb_manager.h b/arch/microblaze/include/asm/xilinx_mb_manager.h
+new file mode 100644
+index 000000000000..392c3aa278dc
+--- /dev/null
++++ b/arch/microblaze/include/asm/xilinx_mb_manager.h
+@@ -0,0 +1,21 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Copyright (C) 2022 Xilinx, Inc.
++ */
++#ifndef _XILINX_MB_MANAGER_H
++#define _XILINX_MB_MANAGER_H
++
++#include <linux/of_address.h>
++
++/*
++ * When the break vector gets asserted because of error injection, the break
++ * signal must be blocked before exiting from the break handler, Below api
++ * updates the manager address and control register and error counter callback
++ * arguments, which will be used by the break handler to block the break and
++ * call the callback function.
++ */
++void xmb_manager_register(uintptr_t phys_baseaddr, u32 cr_val,
++			  void (*callback)(void *data),
++			  void *priv, void (*reset_callback)(void *data));
++
++#endif /* _XILINX_MB_MANAGER_H */
+diff --git a/arch/microblaze/kernel/entry.S b/arch/microblaze/kernel/entry.S
+index d875a0c01032..4b254fcd6961 100644
+--- a/arch/microblaze/kernel/entry.S
++++ b/arch/microblaze/kernel/entry.S
+@@ -957,6 +957,50 @@ ENTRY(_switch_to)
+ 	rtsd	r15, 8
+ 	nop
+ 
++#ifdef CONFIG_MB_MANAGER
++.section .data
++.global xmb_manager_dev
++.global xmb_manager_baseaddr
++.global xmb_manager_crval
++.global xmb_manager_callback
++.global xmb_manager_reset_callback
++.align 4
++xmb_manager_dev:
++	.long 0
++xmb_manager_baseaddr:
++	.long 0
++xmb_manager_crval:
++	.long 0
++xmb_manager_callback:
++	.long 0
++xmb_manager_reset_callback:
++	.long 0
++
++/*
++ * When the break vector gets asserted because of error injection,
++ * the break signal must be blocked before exiting from the
++ * break handler, Below api updates the manager address and
++ * control register and error count callback arguments,
++ * which will be used by the break handler to block the
++ * break and call the callback function.
++ */
++.global xmb_manager_register
++.section .text
++.align 2
++.ent xmb_manager_register
++.type xmb_manager_register, @function
++xmb_manager_register:
++	swi	r5, r0, xmb_manager_baseaddr
++	swi	r6, r0, xmb_manager_crval
++	swi	r7, r0, xmb_manager_callback
++	swi	r8, r0, xmb_manager_dev
++	swi	r9, r0, xmb_manager_reset_callback
++
++	rtsd	r15, 8;
++	nop;
++.end xmb_manager_register
++#endif
++
+ ENTRY(_reset)
+ 	VM_OFF
+ 	brai	0; /* Jump to reset vector */

@@ -1,0 +1,109 @@
+commit de734831224e74fcaf8917386e33644c4243db95
+Author: Chuck Lever <chuck.lever@oracle.com>
+Date:   Wed Jul 11 16:30:50 2012 -0400
+
+    NFS: Treat NFS4ERR_CLID_INUSE as a fatal error
+    
+    For NFSv4 minor version 0, currently the cl_id_uniquifier allows the
+    Linux client to generate a unique nfs_client_id4 string whenever a
+    server replies with NFS4ERR_CLID_INUSE.
+    
+    This implementation seems to be based on a flawed reading of RFC
+    3530.  NFS4ERR_CLID_INUSE actually means that the client has presented
+    this nfs_client_id4 string with a different principal at some time in
+    the past, and that lease is still in use on the server.
+    
+    For a Linux client this might be rather difficult to achieve: the
+    authentication flavor is named right in the nfs_client_id4.id
+    string.  If we change flavors, we change strings automatically.
+    
+    So, practically speaking, NFS4ERR_CLID_INUSE means there is some other
+    client using our string.  There is not much that can be done to
+    recover automatically.  Let's make it a permanent error.
+    
+    Remove the recovery logic in nfs4_proc_setclientid(), and remove the
+    cl_id_uniquifier field from the nfs_client data structure.  And,
+    remove the authentication flavor from the nfs_client_id4 string.
+    
+    Keeping the authentication flavor in the nfs_client_id4.id string
+    means that we could have a separate lease for each authentication
+    flavor used by mounts on the client.  But we want just one lease for
+    all the mounts on this client.
+    
+    Signed-off-by: Chuck Lever <chuck.lever@oracle.com>
+    Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+
+diff --git a/fs/nfs/nfs4proc.c b/fs/nfs/nfs4proc.c
+index 74dcd85f0a1d..1148081e1a53 100644
+--- a/fs/nfs/nfs4proc.c
++++ b/fs/nfs/nfs4proc.c
+@@ -4029,42 +4029,28 @@ int nfs4_proc_setclientid(struct nfs_client *clp, u32 program,
+ 		.rpc_resp = res,
+ 		.rpc_cred = cred,
+ 	};
+-	int loop = 0;
+-	int status;
+ 
++	/* nfs_client_id4 */
+ 	nfs4_init_boot_verifier(clp, &sc_verifier);
+-
+-	for(;;) {
+-		rcu_read_lock();
+-		setclientid.sc_name_len = scnprintf(setclientid.sc_name,
+-				sizeof(setclientid.sc_name), "%s/%s %s %s %u",
+-				clp->cl_ipaddr,
+-				rpc_peeraddr2str(clp->cl_rpcclient,
+-							RPC_DISPLAY_ADDR),
+-				rpc_peeraddr2str(clp->cl_rpcclient,
+-							RPC_DISPLAY_PROTO),
+-				clp->cl_rpcclient->cl_auth->au_ops->au_name,
+-				clp->cl_id_uniquifier);
+-		setclientid.sc_netid_len = scnprintf(setclientid.sc_netid,
++	rcu_read_lock();
++	setclientid.sc_name_len = scnprintf(setclientid.sc_name,
++			sizeof(setclientid.sc_name), "%s/%s %s",
++			clp->cl_ipaddr,
++			rpc_peeraddr2str(clp->cl_rpcclient,
++						RPC_DISPLAY_ADDR),
++			rpc_peeraddr2str(clp->cl_rpcclient,
++						RPC_DISPLAY_PROTO));
++	/* cb_client4 */
++	setclientid.sc_netid_len = scnprintf(setclientid.sc_netid,
+ 				sizeof(setclientid.sc_netid),
+ 				rpc_peeraddr2str(clp->cl_rpcclient,
+ 							RPC_DISPLAY_NETID));
+-		setclientid.sc_uaddr_len = scnprintf(setclientid.sc_uaddr,
++	rcu_read_unlock();
++	setclientid.sc_uaddr_len = scnprintf(setclientid.sc_uaddr,
+ 				sizeof(setclientid.sc_uaddr), "%s.%u.%u",
+ 				clp->cl_ipaddr, port >> 8, port & 255);
+-		rcu_read_unlock();
+ 
+-		status = rpc_call_sync(clp->cl_rpcclient, &msg, RPC_TASK_TIMEOUT);
+-		if (status != -NFS4ERR_CLID_INUSE)
+-			break;
+-		if (loop != 0) {
+-			++clp->cl_id_uniquifier;
+-			break;
+-		}
+-		++loop;
+-		ssleep(clp->cl_lease_time / HZ + 1);
+-	}
+-	return status;
++	return rpc_call_sync(clp->cl_rpcclient, &msg, RPC_TASK_TIMEOUT);
+ }
+ 
+ int nfs4_proc_setclientid_confirm(struct nfs_client *clp,
+@@ -5262,10 +5248,9 @@ int nfs4_proc_exchange_id(struct nfs_client *clp, struct rpc_cred *cred)
+ 	nfs4_init_boot_verifier(clp, &verifier);
+ 
+ 	args.id_len = scnprintf(args.id, sizeof(args.id),
+-				"%s/%s/%u",
++				"%s/%s",
+ 				clp->cl_ipaddr,
+-				clp->cl_rpcclient->cl_nodename,
+-				clp->cl_rpcclient->cl_auth->au_flavor);
++				clp->cl_rpcclient->cl_nodename);
+ 
+ 	res.server_owner = kzalloc(sizeof(struct nfs41_server_owner),
+ 					GFP_NOFS);

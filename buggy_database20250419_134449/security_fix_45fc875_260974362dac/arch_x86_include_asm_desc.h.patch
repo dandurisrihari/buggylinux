@@ -1,0 +1,200 @@
+commit 45fc8757d1d2128e342b4e7ef39adedf7752faac
+Author: Thomas Garnier <thgarnie@google.com>
+Date:   Tue Mar 14 10:05:08 2017 -0700
+
+    x86: Make the GDT remapping read-only on 64-bit
+    
+    This patch makes the GDT remapped pages read-only, to prevent accidental
+    (or intentional) corruption of this key data structure.
+    
+    This change is done only on 64-bit, because 32-bit needs it to be writable
+    for TSS switches.
+    
+    The native_load_tr_desc function was adapted to correctly handle a
+    read-only GDT. The LTR instruction always writes to the GDT TSS entry.
+    This generates a page fault if the GDT is read-only. This change checks
+    if the current GDT is a remap and swap GDTs as needed. This function was
+    tested by booting multiple machines and checking hibernation works
+    properly.
+    
+    KVM SVM and VMX were adapted to use the writeable GDT. On VMX, the
+    per-cpu variable was removed for functions to fetch the original GDT.
+    Instead of reloading the previous GDT, VMX will reload the fixmap GDT as
+    expected. For testing, VMs were started and restored on multiple
+    configurations.
+    
+    Signed-off-by: Thomas Garnier <thgarnie@google.com>
+    Cc: Alexander Potapenko <glider@google.com>
+    Cc: Andrew Morton <akpm@linux-foundation.org>
+    Cc: Andrey Ryabinin <aryabinin@virtuozzo.com>
+    Cc: Andy Lutomirski <luto@kernel.org>
+    Cc: Ard Biesheuvel <ard.biesheuvel@linaro.org>
+    Cc: Boris Ostrovsky <boris.ostrovsky@oracle.com>
+    Cc: Borislav Petkov <bp@suse.de>
+    Cc: Chris Wilson <chris@chris-wilson.co.uk>
+    Cc: Christian Borntraeger <borntraeger@de.ibm.com>
+    Cc: Dmitry Vyukov <dvyukov@google.com>
+    Cc: Frederic Weisbecker <fweisbec@gmail.com>
+    Cc: Jiri Kosina <jikos@kernel.org>
+    Cc: Joerg Roedel <joro@8bytes.org>
+    Cc: Jonathan Corbet <corbet@lwn.net>
+    Cc: Josh Poimboeuf <jpoimboe@redhat.com>
+    Cc: Juergen Gross <jgross@suse.com>
+    Cc: Kees Cook <keescook@chromium.org>
+    Cc: Len Brown <len.brown@intel.com>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Cc: Lorenzo Stoakes <lstoakes@gmail.com>
+    Cc: Luis R . Rodriguez <mcgrof@kernel.org>
+    Cc: Matt Fleming <matt@codeblueprint.co.uk>
+    Cc: Michal Hocko <mhocko@suse.com>
+    Cc: Paolo Bonzini <pbonzini@redhat.com>
+    Cc: Paul Gortmaker <paul.gortmaker@windriver.com>
+    Cc: Pavel Machek <pavel@ucw.cz>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Radim Krčmář <rkrcmar@redhat.com>
+    Cc: Rafael J . Wysocki <rjw@rjwysocki.net>
+    Cc: Rusty Russell <rusty@rustcorp.com.au>
+    Cc: Stanislaw Gruszka <sgruszka@redhat.com>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Tim Chen <tim.c.chen@linux.intel.com>
+    Cc: Vitaly Kuznetsov <vkuznets@redhat.com>
+    Cc: kasan-dev@googlegroups.com
+    Cc: kernel-hardening@lists.openwall.com
+    Cc: kvm@vger.kernel.org
+    Cc: lguest@lists.ozlabs.org
+    Cc: linux-doc@vger.kernel.org
+    Cc: linux-efi@vger.kernel.org
+    Cc: linux-mm@kvack.org
+    Cc: linux-pm@vger.kernel.org
+    Cc: xen-devel@lists.xenproject.org
+    Cc: zijun_hu <zijun_hu@htc.com>
+    Link: http://lkml.kernel.org/r/20170314170508.100882-3-thgarnie@google.com
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+diff --git a/arch/x86/include/asm/desc.h b/arch/x86/include/asm/desc.h
+index 4b5ef0c64291..ec05f9c1a62c 100644
+--- a/arch/x86/include/asm/desc.h
++++ b/arch/x86/include/asm/desc.h
+@@ -248,9 +248,77 @@ static inline void native_set_ldt(const void *addr, unsigned int entries)
+ 	}
+ }
+ 
++static inline void native_load_gdt(const struct desc_ptr *dtr)
++{
++	asm volatile("lgdt %0"::"m" (*dtr));
++}
++
++static inline void native_load_idt(const struct desc_ptr *dtr)
++{
++	asm volatile("lidt %0"::"m" (*dtr));
++}
++
++static inline void native_store_gdt(struct desc_ptr *dtr)
++{
++	asm volatile("sgdt %0":"=m" (*dtr));
++}
++
++static inline void native_store_idt(struct desc_ptr *dtr)
++{
++	asm volatile("sidt %0":"=m" (*dtr));
++}
++
++/*
++ * The LTR instruction marks the TSS GDT entry as busy. On 64-bit, the GDT is
++ * a read-only remapping. To prevent a page fault, the GDT is switched to the
++ * original writeable version when needed.
++ */
++#ifdef CONFIG_X86_64
+ static inline void native_load_tr_desc(void)
+ {
++	struct desc_ptr gdt;
++	int cpu = raw_smp_processor_id();
++	bool restore = 0;
++	struct desc_struct *fixmap_gdt;
++
++	native_store_gdt(&gdt);
++	fixmap_gdt = get_cpu_gdt_ro(cpu);
++
++	/*
++	 * If the current GDT is the read-only fixmap, swap to the original
++	 * writeable version. Swap back at the end.
++	 */
++	if (gdt.address == (unsigned long)fixmap_gdt) {
++		load_direct_gdt(cpu);
++		restore = 1;
++	}
+ 	asm volatile("ltr %w0"::"q" (GDT_ENTRY_TSS*8));
++	if (restore)
++		load_fixmap_gdt(cpu);
++}
++#else
++static inline void native_load_tr_desc(void)
++{
++	asm volatile("ltr %w0"::"q" (GDT_ENTRY_TSS*8));
++}
++#endif
++
++static inline unsigned long native_store_tr(void)
++{
++	unsigned long tr;
++
++	asm volatile("str %0":"=r" (tr));
++
++	return tr;
++}
++
++static inline void native_load_tls(struct thread_struct *t, unsigned int cpu)
++{
++	struct desc_struct *gdt = get_cpu_gdt_rw(cpu);
++	unsigned int i;
++
++	for (i = 0; i < GDT_ENTRY_TLS_ENTRIES; i++)
++		gdt[GDT_ENTRY_TLS_MIN + i] = t->tls_array[i];
+ }
+ 
+ DECLARE_PER_CPU(bool, __tss_limit_invalid);
+@@ -305,44 +373,6 @@ static inline void invalidate_tss_limit(void)
+ 		this_cpu_write(__tss_limit_invalid, true);
+ }
+ 
+-static inline void native_load_gdt(const struct desc_ptr *dtr)
+-{
+-	asm volatile("lgdt %0"::"m" (*dtr));
+-}
+-
+-static inline void native_load_idt(const struct desc_ptr *dtr)
+-{
+-	asm volatile("lidt %0"::"m" (*dtr));
+-}
+-
+-static inline void native_store_gdt(struct desc_ptr *dtr)
+-{
+-	asm volatile("sgdt %0":"=m" (*dtr));
+-}
+-
+-static inline void native_store_idt(struct desc_ptr *dtr)
+-{
+-	asm volatile("sidt %0":"=m" (*dtr));
+-}
+-
+-static inline unsigned long native_store_tr(void)
+-{
+-	unsigned long tr;
+-
+-	asm volatile("str %0":"=r" (tr));
+-
+-	return tr;
+-}
+-
+-static inline void native_load_tls(struct thread_struct *t, unsigned int cpu)
+-{
+-	struct desc_struct *gdt = get_cpu_gdt_rw(cpu);
+-	unsigned int i;
+-
+-	for (i = 0; i < GDT_ENTRY_TLS_ENTRIES; i++)
+-		gdt[GDT_ENTRY_TLS_MIN + i] = t->tls_array[i];
+-}
+-
+ /* This intentionally ignores lm, since 32-bit apps don't have that field. */
+ #define LDT_empty(info)					\
+ 	((info)->base_addr		== 0	&&	\

@@ -1,0 +1,48 @@
+diff --git a/arch/x86/include/asm/fpu/xstate.h b/arch/x86/include/asm/fpu/xstate.h
+index 579ac2358e63..83fee2469eb7 100644
+--- a/arch/x86/include/asm/fpu/xstate.h
++++ b/arch/x86/include/asm/fpu/xstate.h
+@@ -52,4 +52,8 @@ int copy_xstate_to_kernel(void *kbuf, struct xregs_state *xsave, unsigned int of
+ int copy_xstate_to_user(void __user *ubuf, struct xregs_state *xsave, unsigned int offset, unsigned int size);
+ int copy_kernel_to_xstate(struct xregs_state *xsave, const void *kbuf);
+ int copy_user_to_xstate(struct xregs_state *xsave, const void __user *ubuf);
++
++/* Validate an xstate header supplied by userspace (ptrace or sigreturn) */
++extern int validate_xstate_header(const struct xstate_header *hdr);
++
+ #endif
+diff --git a/arch/x86/kernel/fpu/xstate.c b/arch/x86/kernel/fpu/xstate.c
+index 703e76d027ee..2427aeea33b5 100644
+--- a/arch/x86/kernel/fpu/xstate.c
++++ b/arch/x86/kernel/fpu/xstate.c
+@@ -483,6 +483,30 @@ int using_compacted_format(void)
+ 	return boot_cpu_has(X86_FEATURE_XSAVES);
+ }
+ 
++/* Validate an xstate header supplied by userspace (ptrace or sigreturn) */
++int validate_xstate_header(const struct xstate_header *hdr)
++{
++	/* No unknown or supervisor features may be set */
++	if (hdr->xfeatures & (~xfeatures_mask | XFEATURE_MASK_SUPERVISOR))
++		return -EINVAL;
++
++	/* Userspace must use the uncompacted format */
++	if (hdr->xcomp_bv)
++		return -EINVAL;
++
++	/*
++	 * If 'reserved' is shrunken to add a new field, make sure to validate
++	 * that new field here!
++	 */
++	BUILD_BUG_ON(sizeof(hdr->reserved) != 48);
++
++	/* No reserved bits may be set */
++	if (memchr_inv(hdr->reserved, 0, sizeof(hdr->reserved)))
++		return -EINVAL;
++
++	return 0;
++}
++
+ static void __xstate_dump_leaves(void)
+ {
+ 	int i;

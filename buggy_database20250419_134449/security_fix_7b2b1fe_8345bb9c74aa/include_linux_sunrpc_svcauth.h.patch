@@ -1,0 +1,53 @@
+commit 7b2b1fee30df7e2165525cd03f7d1d01a3a56794
+Author: Greg Banks <gnb@melbourne.sgi.com>
+Date:   Wed Oct 4 02:15:50 2006 -0700
+
+    [PATCH] knfsd: knfsd: cache ipmap per TCP socket
+    
+    Speed up high call-rate workloads by caching the struct ip_map for the peer on
+    the connected struct svc_sock instead of looking it up in the ip_map cache
+    hashtable on every call.  This helps workloads using AUTH_SYS authentication
+    over TCP.
+    
+    Testing was on a 4 CPU 4 NIC Altix using 4 IRIX clients, each with 16
+    synthetic client threads simulating an rsync (i.e.  recursive directory
+    listing) workload reading from an i386 RH9 install image (161480 regular files
+    in 10841 directories) on the server.  That tree is small enough to fill in the
+    server's RAM so no disk traffic was involved.  This setup gives a sustained
+    call rate in excess of 60000 calls/sec before being CPU-bound on the server.
+    
+    Profiling showed strcmp(), called from ip_map_match(), was taking 4.8% of each
+    CPU, and ip_map_lookup() was taking 2.9%.  This patch drops both contribution
+    into the profile noise.
+    
+    Note that the above result overstates this value of this patch for most
+    workloads.  The synthetic clients are all using separate IP addresses, so
+    there are 64 entries in the ip_map cache hash.  Because the kernel measured
+    contained the bug fixed in commit
+    
+    commit 1f1e030bf75774b6a283518e1534d598e14147d4
+    
+    and was running on 64bit little-endian machine, probably all of those 64
+    entries were on a single chain, thus increasing the cost of ip_map_lookup().
+    
+    With a modern kernel you would need more clients to see the same amount of
+    performance improvement.  This patch has helped to scale knfsd to handle a
+    deployment with 2000 NFS clients.
+    
+    Signed-off-by: Greg Banks <gnb@melbourne.sgi.com>
+    Signed-off-by: Neil Brown <neilb@suse.de>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/include/linux/sunrpc/svcauth.h b/include/linux/sunrpc/svcauth.h
+index a6601650deeb..de92619b0826 100644
+--- a/include/linux/sunrpc/svcauth.h
++++ b/include/linux/sunrpc/svcauth.h
+@@ -126,6 +126,7 @@ extern struct auth_domain *auth_domain_find(char *name);
+ extern struct auth_domain *auth_unix_lookup(struct in_addr addr);
+ extern int auth_unix_forget_old(struct auth_domain *dom);
+ extern void svcauth_unix_purge(void);
++extern void svcauth_unix_info_release(void *);
+ 
+ static inline unsigned long hash_str(char *name, int bits)
+ {

@@ -1,0 +1,133 @@
+diff --git a/Documentation/ABI/testing/ima_policy b/Documentation/ABI/testing/ima_policy
+index 49db0ff288e5..c2385183826c 100644
+--- a/Documentation/ABI/testing/ima_policy
++++ b/Documentation/ABI/testing/ima_policy
+@@ -57,9 +57,9 @@ Description:
+ 				stored in security.ima xattr. Requires
+ 				specifying "digest_type=verity" first.)
+ 
+-			appraise_flag:= [check_blacklist]
+-			Currently, blacklist check is only for files signed with appended
+-			signature.
++			appraise_flag:= [check_blacklist] (deprecated)
++			Setting the check_blacklist flag is no longer necessary.
++			All appraisal functions set it by default.
+ 			digest_type:= verity
+ 			    Require fs-verity's file digest instead of the
+ 			    regular IMA file hash.
+diff --git a/arch/powerpc/kernel/ima_arch.c b/arch/powerpc/kernel/ima_arch.c
+index 957abd592075..b7029beed847 100644
+--- a/arch/powerpc/kernel/ima_arch.c
++++ b/arch/powerpc/kernel/ima_arch.c
+@@ -23,9 +23,9 @@ bool arch_ima_get_secureboot(void)
+  * is not enabled.
+  */
+ static const char *const secure_rules[] = {
+-	"appraise func=KEXEC_KERNEL_CHECK appraise_flag=check_blacklist appraise_type=imasig|modsig",
++	"appraise func=KEXEC_KERNEL_CHECK appraise_type=imasig|modsig",
+ #ifndef CONFIG_MODULE_SIG
+-	"appraise func=MODULE_CHECK appraise_flag=check_blacklist appraise_type=imasig|modsig",
++	"appraise func=MODULE_CHECK appraise_type=imasig|modsig",
+ #endif
+ 	NULL
+ };
+@@ -49,9 +49,9 @@ static const char *const trusted_rules[] = {
+ static const char *const secure_and_trusted_rules[] = {
+ 	"measure func=KEXEC_KERNEL_CHECK template=ima-modsig",
+ 	"measure func=MODULE_CHECK template=ima-modsig",
+-	"appraise func=KEXEC_KERNEL_CHECK appraise_flag=check_blacklist appraise_type=imasig|modsig",
++	"appraise func=KEXEC_KERNEL_CHECK appraise_type=imasig|modsig",
+ #ifndef CONFIG_MODULE_SIG
+-	"appraise func=MODULE_CHECK appraise_flag=check_blacklist appraise_type=imasig|modsig",
++	"appraise func=MODULE_CHECK appraise_type=imasig|modsig",
+ #endif
+ 	NULL
+ };
+diff --git a/security/integrity/ima/ima_appraise.c b/security/integrity/ima/ima_appraise.c
+index 491c1aca0b1c..870dde67707b 100644
+--- a/security/integrity/ima/ima_appraise.c
++++ b/security/integrity/ima/ima_appraise.c
+@@ -458,11 +458,13 @@ int ima_check_blacklist(struct integrity_iint_cache *iint,
+ 		ima_get_modsig_digest(modsig, &hash_algo, &digest, &digestsize);
+ 
+ 		rc = is_binary_blacklisted(digest, digestsize);
+-		if ((rc == -EPERM) && (iint->flags & IMA_MEASURE))
+-			process_buffer_measurement(&nop_mnt_idmap, NULL, digest, digestsize,
+-						   "blacklisted-hash", NONE,
+-						   pcr, NULL, false, NULL, 0);
+-	}
++	} else if (iint->flags & IMA_DIGSIG_REQUIRED && iint->ima_hash)
++		rc = is_binary_blacklisted(iint->ima_hash->digest, iint->ima_hash->length);
++
++	if ((rc == -EPERM) && (iint->flags & IMA_MEASURE))
++		process_buffer_measurement(&nop_mnt_idmap, NULL, digest, digestsize,
++					   "blacklisted-hash", NONE,
++					   pcr, NULL, false, NULL, 0);
+ 
+ 	return rc;
+ }
+diff --git a/security/integrity/ima/ima_policy.c b/security/integrity/ima/ima_policy.c
+index c9b3bd8f1bb9..69452b79686b 100644
+--- a/security/integrity/ima/ima_policy.c
++++ b/security/integrity/ima/ima_policy.c
+@@ -1280,7 +1280,7 @@ static bool ima_validate_rule(struct ima_rule_entry *entry)
+ 				     IMA_FSNAME | IMA_GID | IMA_EGID |
+ 				     IMA_FGROUP | IMA_DIGSIG_REQUIRED |
+ 				     IMA_PERMIT_DIRECTIO | IMA_VALIDATE_ALGOS |
+-				     IMA_VERITY_REQUIRED))
++				     IMA_CHECK_BLACKLIST | IMA_VERITY_REQUIRED))
+ 			return false;
+ 
+ 		break;
+@@ -1355,7 +1355,7 @@ static bool ima_validate_rule(struct ima_rule_entry *entry)
+ 
+ 	/* Ensure that combinations of flags are compatible with each other */
+ 	if (entry->flags & IMA_CHECK_BLACKLIST &&
+-	    !(entry->flags & IMA_MODSIG_ALLOWED))
++	    !(entry->flags & IMA_DIGSIG_REQUIRED))
+ 		return false;
+ 
+ 	/*
+@@ -1803,11 +1803,11 @@ static int ima_parse_rule(char *rule, struct ima_rule_entry *entry)
+ 				if (entry->flags & IMA_VERITY_REQUIRED)
+ 					result = -EINVAL;
+ 				else
+-					entry->flags |= IMA_DIGSIG_REQUIRED;
++					entry->flags |= IMA_DIGSIG_REQUIRED | IMA_CHECK_BLACKLIST;
+ 			} else if (strcmp(args[0].from, "sigv3") == 0) {
+ 				/* Only fsverity supports sigv3 for now */
+ 				if (entry->flags & IMA_VERITY_REQUIRED)
+-					entry->flags |= IMA_DIGSIG_REQUIRED;
++					entry->flags |= IMA_DIGSIG_REQUIRED | IMA_CHECK_BLACKLIST;
+ 				else
+ 					result = -EINVAL;
+ 			} else if (IS_ENABLED(CONFIG_IMA_APPRAISE_MODSIG) &&
+@@ -1816,18 +1816,13 @@ static int ima_parse_rule(char *rule, struct ima_rule_entry *entry)
+ 					result = -EINVAL;
+ 				else
+ 					entry->flags |= IMA_DIGSIG_REQUIRED |
+-						IMA_MODSIG_ALLOWED;
++						IMA_MODSIG_ALLOWED | IMA_CHECK_BLACKLIST;
+ 			} else {
+ 				result = -EINVAL;
+ 			}
+ 			break;
+ 		case Opt_appraise_flag:
+ 			ima_log_string(ab, "appraise_flag", args[0].from);
+-			if (IS_ENABLED(CONFIG_IMA_APPRAISE_MODSIG) &&
+-			    strstr(args[0].from, "blacklist"))
+-				entry->flags |= IMA_CHECK_BLACKLIST;
+-			else
+-				result = -EINVAL;
+ 			break;
+ 		case Opt_appraise_algos:
+ 			ima_log_string(ab, "appraise_algos", args[0].from);
+@@ -2271,8 +2266,6 @@ int ima_policy_show(struct seq_file *m, void *v)
+ 	}
+ 	if (entry->flags & IMA_VERITY_REQUIRED)
+ 		seq_puts(m, "digest_type=verity ");
+-	if (entry->flags & IMA_CHECK_BLACKLIST)
+-		seq_puts(m, "appraise_flag=check_blacklist ");
+ 	if (entry->flags & IMA_PERMIT_DIRECTIO)
+ 		seq_puts(m, "permit_directio ");
+ 	rcu_read_unlock();

@@ -1,0 +1,57 @@
+commit 15f73f5b3e5958f2d169fe13c420eeeeae07bbf2
+Author: Christoph Hellwig <hch@lst.de>
+Date:   Thu Jun 11 08:44:47 2020 +0200
+
+    blk-mq: move failure injection out of blk_mq_complete_request
+    
+    Move the call to blk_should_fake_timeout out of blk_mq_complete_request
+    and into the drivers, skipping call sites that are obvious error
+    handlers, and remove the now superflous blk_mq_force_complete_rq helper.
+    This ensures we don't keep injecting errors into completions that just
+    terminate the Linux request after the hardware has been reset or the
+    command has been aborted.
+    
+    Reviewed-by: Daniel Wagner <dwagner@suse.de>
+    Signed-off-by: Christoph Hellwig <hch@lst.de>
+    Signed-off-by: Jens Axboe <axboe@kernel.dk>
+
+diff --git a/drivers/mmc/core/block.c b/drivers/mmc/core/block.c
+index 7896952de1ac..4791c82f8f7c 100644
+--- a/drivers/mmc/core/block.c
++++ b/drivers/mmc/core/block.c
+@@ -1446,7 +1446,7 @@ static void mmc_blk_cqe_req_done(struct mmc_request *mrq)
+ 	 */
+ 	if (mq->in_recovery)
+ 		mmc_blk_cqe_complete_rq(mq, req);
+-	else
++	else if (likely(!blk_should_fake_timeout(req->q)))
+ 		blk_mq_complete_request(req);
+ }
+ 
+@@ -1926,7 +1926,7 @@ static void mmc_blk_hsq_req_done(struct mmc_request *mrq)
+ 	 */
+ 	if (mq->in_recovery)
+ 		mmc_blk_cqe_complete_rq(mq, req);
+-	else
++	else if (likely(!blk_should_fake_timeout(req->q)))
+ 		blk_mq_complete_request(req);
+ }
+ 
+@@ -1936,7 +1936,7 @@ void mmc_blk_mq_complete(struct request *req)
+ 
+ 	if (mq->use_cqe)
+ 		mmc_blk_cqe_complete_rq(mq, req);
+-	else
++	else if (likely(!blk_should_fake_timeout(req->q)))
+ 		mmc_blk_mq_complete_rq(mq, req);
+ }
+ 
+@@ -1988,7 +1988,7 @@ static void mmc_blk_mq_post_req(struct mmc_queue *mq, struct request *req)
+ 	 */
+ 	if (mq->in_recovery)
+ 		mmc_blk_mq_complete_rq(mq, req);
+-	else
++	else if (likely(!blk_should_fake_timeout(req->q)))
+ 		blk_mq_complete_request(req);
+ 
+ 	mmc_blk_mq_dec_in_flight(mq, req);

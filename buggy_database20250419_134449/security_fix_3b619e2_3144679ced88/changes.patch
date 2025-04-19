@@ -1,0 +1,483 @@
+diff --git a/arch/arm64/Kconfig b/arch/arm64/Kconfig
+index 7e3a9cf2193d..170832f31eff 100644
+--- a/arch/arm64/Kconfig
++++ b/arch/arm64/Kconfig
+@@ -2160,6 +2160,15 @@ config ARCH_NR_GPIO
+ 
+           If unsure, leave the default value.
+ 
++config UNWIND_PATCH_PAC_INTO_SCS
++	bool "Enable shadow call stack dynamically using code patching"
++	# needs Clang with https://reviews.llvm.org/D111780 incorporated
++	depends on CC_IS_CLANG && CLANG_VERSION >= 150000
++	depends on ARM64_PTR_AUTH_KERNEL && CC_HAS_BRANCH_PROT_PAC_RET
++	depends on SHADOW_CALL_STACK
++	select UNWIND_TABLES
++	select DYNAMIC_SCS
++
+ endmenu # "Kernel Features"
+ 
+ menu "Boot options"
+diff --git a/arch/arm64/Makefile b/arch/arm64/Makefile
+index 7868a176993f..4d272ad1df1f 100644
+--- a/arch/arm64/Makefile
++++ b/arch/arm64/Makefile
+@@ -77,10 +77,16 @@ branch-prot-flags-$(CONFIG_CC_HAS_SIGN_RETURN_ADDRESS) := -msign-return-address=
+ # We enable additional protection for leaf functions as there is some
+ # narrow potential for ROP protection benefits and no substantial
+ # performance impact has been observed.
++PACRET-y := pac-ret+leaf
++
++# Using a shadow call stack in leaf functions is too costly, so avoid PAC there
++# as well when we may be patching PAC into SCS
++PACRET-$(CONFIG_UNWIND_PATCH_PAC_INTO_SCS) := pac-ret
++
+ ifeq ($(CONFIG_ARM64_BTI_KERNEL),y)
+-branch-prot-flags-$(CONFIG_CC_HAS_BRANCH_PROT_PAC_RET_BTI) := -mbranch-protection=pac-ret+leaf+bti
++branch-prot-flags-$(CONFIG_CC_HAS_BRANCH_PROT_PAC_RET_BTI) := -mbranch-protection=$(PACRET-y)+bti
+ else
+-branch-prot-flags-$(CONFIG_CC_HAS_BRANCH_PROT_PAC_RET) := -mbranch-protection=pac-ret+leaf
++branch-prot-flags-$(CONFIG_CC_HAS_BRANCH_PROT_PAC_RET) := -mbranch-protection=$(PACRET-y)
+ endif
+ # -march=armv8.3-a enables the non-nops instructions for PAC, to avoid the
+ # compiler to generate them and consequently to break the single image contract
+diff --git a/arch/arm64/include/asm/scs.h b/arch/arm64/include/asm/scs.h
+index 8297bccf0784..ff7da1268a52 100644
+--- a/arch/arm64/include/asm/scs.h
++++ b/arch/arm64/include/asm/scs.h
+@@ -5,6 +5,7 @@
+ #ifdef __ASSEMBLY__
+ 
+ #include <asm/asm-offsets.h>
++#include <asm/sysreg.h>
+ 
+ #ifdef CONFIG_SHADOW_CALL_STACK
+ 	scs_sp	.req	x18
+@@ -24,6 +25,54 @@
+ 	.endm
+ #endif /* CONFIG_SHADOW_CALL_STACK */
+ 
++
++#else
++
++#include <linux/scs.h>
++#include <asm/cpufeature.h>
++
++#ifdef CONFIG_UNWIND_PATCH_PAC_INTO_SCS
++static inline bool should_patch_pac_into_scs(void)
++{
++	u64 reg;
++
++	/*
++	 * We only enable the shadow call stack dynamically if we are running
++	 * on a system that does not implement PAC or BTI. PAC and SCS provide
++	 * roughly the same level of protection, and BTI relies on the PACIASP
++	 * instructions serving as landing pads, preventing us from patching
++	 * those instructions into something else.
++	 */
++	reg = read_sysreg_s(SYS_ID_AA64ISAR1_EL1);
++	if (SYS_FIELD_GET(ID_AA64ISAR1_EL1, APA, reg) |
++	    SYS_FIELD_GET(ID_AA64ISAR1_EL1, API, reg))
++		return false;
++
++	reg = read_sysreg_s(SYS_ID_AA64ISAR2_EL1);
++	if (SYS_FIELD_GET(ID_AA64ISAR2_EL1, APA3, reg))
++		return false;
++
++	if (IS_ENABLED(CONFIG_ARM64_BTI_KERNEL)) {
++		reg = read_sysreg_s(SYS_ID_AA64PFR1_EL1);
++		if (reg & (0xf << ID_AA64PFR1_EL1_BT_SHIFT))
++			return false;
++	}
++	return true;
++}
++
++static inline void dynamic_scs_init(void)
++{
++	if (should_patch_pac_into_scs()) {
++		pr_info("Enabling dynamic shadow call stack\n");
++		static_branch_enable(&dynamic_scs_enabled);
++	}
++}
++#else
++static inline void dynamic_scs_init(void) {}
++#endif
++
++int scs_patch(const u8 eh_frame[], int size);
++
+ #endif /* __ASSEMBLY __ */
+ 
+ #endif /* _ASM_SCS_H */
+diff --git a/arch/arm64/kernel/Makefile b/arch/arm64/kernel/Makefile
+index 2f361a883d8c..8dd925f4a4c6 100644
+--- a/arch/arm64/kernel/Makefile
++++ b/arch/arm64/kernel/Makefile
+@@ -80,6 +80,8 @@ obj-$(CONFIG_ARM64_PTR_AUTH)		+= pointer_auth.o
+ obj-$(CONFIG_ARM64_MTE)			+= mte.o
+ obj-y					+= vdso-wrap.o
+ obj-$(CONFIG_COMPAT_VDSO)		+= vdso32-wrap.o
++obj-$(CONFIG_UNWIND_PATCH_PAC_INTO_SCS)	+= patch-scs.o
++CFLAGS_patch-scs.o			+= -mbranch-protection=none
+ 
+ # Force dependency (vdso*-wrap.S includes vdso.so through incbin)
+ $(obj)/vdso-wrap.o: $(obj)/vdso/vdso.so
+diff --git a/arch/arm64/kernel/head.S b/arch/arm64/kernel/head.S
+index 2196aad7b55b..952e17bd1c0b 100644
+--- a/arch/arm64/kernel/head.S
++++ b/arch/arm64/kernel/head.S
+@@ -462,6 +462,9 @@ SYM_FUNC_START_LOCAL(__primary_switched)
+ 	bl	early_fdt_map			// Try mapping the FDT early
+ 	mov	x0, x20				// pass the full boot status
+ 	bl	init_feature_override		// Parse cpu feature overrides
++#ifdef CONFIG_UNWIND_PATCH_PAC_INTO_SCS
++	bl	scs_patch_vmlinux
++#endif
+ 	mov	x0, x20
+ 	bl	finalise_el2			// Prefer VHE if possible
+ 	ldp	x29, x30, [sp], #16
+diff --git a/arch/arm64/kernel/irq.c b/arch/arm64/kernel/irq.c
+index 38dbd3828f13..9d8eaab742a4 100644
+--- a/arch/arm64/kernel/irq.c
++++ b/arch/arm64/kernel/irq.c
+@@ -41,7 +41,7 @@ static void init_irq_scs(void)
+ {
+ 	int cpu;
+ 
+-	if (!IS_ENABLED(CONFIG_SHADOW_CALL_STACK))
++	if (!scs_is_enabled())
+ 		return;
+ 
+ 	for_each_possible_cpu(cpu)
+diff --git a/arch/arm64/kernel/module.c b/arch/arm64/kernel/module.c
+index 76b41e4ca9fa..fa7b3228944b 100644
+--- a/arch/arm64/kernel/module.c
++++ b/arch/arm64/kernel/module.c
+@@ -15,9 +15,11 @@
+ #include <linux/kernel.h>
+ #include <linux/mm.h>
+ #include <linux/moduleloader.h>
++#include <linux/scs.h>
+ #include <linux/vmalloc.h>
+ #include <asm/alternative.h>
+ #include <asm/insn.h>
++#include <asm/scs.h>
+ #include <asm/sections.h>
+ 
+ void *module_alloc(unsigned long size)
+@@ -514,5 +516,11 @@ int module_finalize(const Elf_Ehdr *hdr,
+ 	if (s)
+ 		apply_alternatives_module((void *)s->sh_addr, s->sh_size);
+ 
++	if (scs_is_dynamic()) {
++		s = find_section(hdr, sechdrs, ".init.eh_frame");
++		if (s)
++			scs_patch((void *)s->sh_addr, s->sh_size);
++	}
++
+ 	return module_init_ftrace_plt(hdr, sechdrs, me);
+ }
+diff --git a/arch/arm64/kernel/patch-scs.c b/arch/arm64/kernel/patch-scs.c
+new file mode 100644
+index 000000000000..1b3da02d5b74
+--- /dev/null
++++ b/arch/arm64/kernel/patch-scs.c
+@@ -0,0 +1,257 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Copyright (C) 2022 - Google LLC
++ * Author: Ard Biesheuvel <ardb@google.com>
++ */
++
++#include <linux/bug.h>
++#include <linux/errno.h>
++#include <linux/init.h>
++#include <linux/linkage.h>
++#include <linux/printk.h>
++#include <linux/types.h>
++
++#include <asm/cacheflush.h>
++#include <asm/scs.h>
++
++//
++// This minimal DWARF CFI parser is partially based on the code in
++// arch/arc/kernel/unwind.c, and on the document below:
++// https://refspecs.linuxbase.org/LSB_4.0.0/LSB-Core-generic/LSB-Core-generic/ehframechpt.html
++//
++
++#define DW_CFA_nop                          0x00
++#define DW_CFA_set_loc                      0x01
++#define DW_CFA_advance_loc1                 0x02
++#define DW_CFA_advance_loc2                 0x03
++#define DW_CFA_advance_loc4                 0x04
++#define DW_CFA_offset_extended              0x05
++#define DW_CFA_restore_extended             0x06
++#define DW_CFA_undefined                    0x07
++#define DW_CFA_same_value                   0x08
++#define DW_CFA_register                     0x09
++#define DW_CFA_remember_state               0x0a
++#define DW_CFA_restore_state                0x0b
++#define DW_CFA_def_cfa                      0x0c
++#define DW_CFA_def_cfa_register             0x0d
++#define DW_CFA_def_cfa_offset               0x0e
++#define DW_CFA_def_cfa_expression           0x0f
++#define DW_CFA_expression                   0x10
++#define DW_CFA_offset_extended_sf           0x11
++#define DW_CFA_def_cfa_sf                   0x12
++#define DW_CFA_def_cfa_offset_sf            0x13
++#define DW_CFA_val_offset                   0x14
++#define DW_CFA_val_offset_sf                0x15
++#define DW_CFA_val_expression               0x16
++#define DW_CFA_lo_user                      0x1c
++#define DW_CFA_negate_ra_state              0x2d
++#define DW_CFA_GNU_args_size                0x2e
++#define DW_CFA_GNU_negative_offset_extended 0x2f
++#define DW_CFA_hi_user                      0x3f
++
++extern const u8 __eh_frame_start[], __eh_frame_end[];
++
++enum {
++	PACIASP		= 0xd503233f,
++	AUTIASP		= 0xd50323bf,
++	SCS_PUSH	= 0xf800865e,
++	SCS_POP		= 0xf85f8e5e,
++};
++
++static void __always_inline scs_patch_loc(u64 loc)
++{
++	u32 insn = le32_to_cpup((void *)loc);
++
++	switch (insn) {
++	case PACIASP:
++		*(u32 *)loc = cpu_to_le32(SCS_PUSH);
++		break;
++	case AUTIASP:
++		*(u32 *)loc = cpu_to_le32(SCS_POP);
++		break;
++	default:
++		/*
++		 * While the DW_CFA_negate_ra_state directive is guaranteed to
++		 * appear right after a PACIASP/AUTIASP instruction, it may
++		 * also appear after a DW_CFA_restore_state directive that
++		 * restores a state that is only partially accurate, and is
++		 * followed by DW_CFA_negate_ra_state directive to toggle the
++		 * PAC bit again. So we permit other instructions here, and ignore
++		 * them.
++		 */
++		return;
++	}
++	dcache_clean_pou(loc, loc + sizeof(u32));
++}
++
++/*
++ * Skip one uleb128/sleb128 encoded quantity from the opcode stream. All bytes
++ * except the last one have bit #7 set.
++ */
++static int __always_inline skip_xleb128(const u8 **opcode, int size)
++{
++	u8 c;
++
++	do {
++		c = *(*opcode)++;
++		size--;
++	} while (c & BIT(7));
++
++	return size;
++}
++
++struct eh_frame {
++	/*
++	 * The size of this frame if 0 < size < U32_MAX, 0 terminates the list.
++	 */
++	u32	size;
++
++	/*
++	 * The first frame is a Common Information Entry (CIE) frame, followed
++	 * by one or more Frame Description Entry (FDE) frames. In the former
++	 * case, this field is 0, otherwise it is the negated offset relative
++	 * to the associated CIE frame.
++	 */
++	u32	cie_id_or_pointer;
++
++	union {
++		struct { // CIE
++			u8	version;
++			u8	augmentation_string[];
++		};
++
++		struct { // FDE
++			s32	initial_loc;
++			s32	range;
++			u8	opcodes[];
++		};
++	};
++};
++
++static int noinstr scs_handle_fde_frame(const struct eh_frame *frame,
++					bool fde_has_augmentation_data,
++					int code_alignment_factor)
++{
++	int size = frame->size - offsetof(struct eh_frame, opcodes) + 4;
++	u64 loc = (u64)offset_to_ptr(&frame->initial_loc);
++	const u8 *opcode = frame->opcodes;
++
++	if (fde_has_augmentation_data) {
++		int l;
++
++		// assume single byte uleb128_t
++		if (WARN_ON(*opcode & BIT(7)))
++			return -ENOEXEC;
++
++		l = *opcode++;
++		opcode += l;
++		size -= l + 1;
++	}
++
++	/*
++	 * Starting from 'loc', apply the CFA opcodes that advance the location
++	 * pointer, and identify the locations of the PAC instructions.
++	 */
++	while (size-- > 0) {
++		switch (*opcode++) {
++		case DW_CFA_nop:
++		case DW_CFA_remember_state:
++		case DW_CFA_restore_state:
++			break;
++
++		case DW_CFA_advance_loc1:
++			loc += *opcode++ * code_alignment_factor;
++			size--;
++			break;
++
++		case DW_CFA_advance_loc2:
++			loc += *opcode++ * code_alignment_factor;
++			loc += (*opcode++ << 8) * code_alignment_factor;
++			size -= 2;
++			break;
++
++		case DW_CFA_def_cfa:
++		case DW_CFA_offset_extended:
++			size = skip_xleb128(&opcode, size);
++			fallthrough;
++		case DW_CFA_def_cfa_offset:
++		case DW_CFA_def_cfa_offset_sf:
++		case DW_CFA_def_cfa_register:
++		case DW_CFA_same_value:
++		case DW_CFA_restore_extended:
++		case 0x80 ... 0xbf:
++			size = skip_xleb128(&opcode, size);
++			break;
++
++		case DW_CFA_negate_ra_state:
++			scs_patch_loc(loc - 4);
++			break;
++
++		case 0x40 ... 0x7f:
++			// advance loc
++			loc += (opcode[-1] & 0x3f) * code_alignment_factor;
++			break;
++
++		case 0xc0 ... 0xff:
++			break;
++
++		default:
++			pr_err("unhandled opcode: %02x in FDE frame %lx\n", opcode[-1], (uintptr_t)frame);
++			return -ENOEXEC;
++		}
++	}
++	return 0;
++}
++
++int noinstr scs_patch(const u8 eh_frame[], int size)
++{
++	const u8 *p = eh_frame;
++
++	while (size > 4) {
++		const struct eh_frame *frame = (const void *)p;
++		bool fde_has_augmentation_data = true;
++		int code_alignment_factor = 1;
++		int ret;
++
++		if (frame->size == 0 ||
++		    frame->size == U32_MAX ||
++		    frame->size > size)
++			break;
++
++		if (frame->cie_id_or_pointer == 0) {
++			const u8 *p = frame->augmentation_string;
++
++			/* a 'z' in the augmentation string must come first */
++			fde_has_augmentation_data = *p == 'z';
++
++			/*
++			 * The code alignment factor is a uleb128 encoded field
++			 * but given that the only sensible values are 1 or 4,
++			 * there is no point in decoding the whole thing.
++			 */
++			p += strlen(p) + 1;
++			if (!WARN_ON(*p & BIT(7)))
++				code_alignment_factor = *p;
++		} else {
++			ret = scs_handle_fde_frame(frame,
++						   fde_has_augmentation_data,
++						   code_alignment_factor);
++			if (ret)
++				return ret;
++		}
++
++		p += sizeof(frame->size) + frame->size;
++		size -= sizeof(frame->size) + frame->size;
++	}
++	return 0;
++}
++
++asmlinkage void __init scs_patch_vmlinux(void)
++{
++	if (!should_patch_pac_into_scs())
++		return;
++
++	WARN_ON(scs_patch(__eh_frame_start, __eh_frame_end - __eh_frame_start));
++	icache_inval_all_pou();
++	isb();
++}
+diff --git a/arch/arm64/kernel/sdei.c b/arch/arm64/kernel/sdei.c
+index d56e170e1ca7..830be01af32d 100644
+--- a/arch/arm64/kernel/sdei.c
++++ b/arch/arm64/kernel/sdei.c
+@@ -144,7 +144,7 @@ static int init_sdei_scs(void)
+ 	int cpu;
+ 	int err = 0;
+ 
+-	if (!IS_ENABLED(CONFIG_SHADOW_CALL_STACK))
++	if (!scs_is_enabled())
+ 		return 0;
+ 
+ 	for_each_possible_cpu(cpu) {
+diff --git a/arch/arm64/kernel/setup.c b/arch/arm64/kernel/setup.c
+index fea3223704b6..12cfe9d0d3fa 100644
+--- a/arch/arm64/kernel/setup.c
++++ b/arch/arm64/kernel/setup.c
+@@ -30,6 +30,7 @@
+ #include <linux/efi.h>
+ #include <linux/psci.h>
+ #include <linux/sched/task.h>
++#include <linux/scs.h>
+ #include <linux/mm.h>
+ 
+ #include <asm/acpi.h>
+@@ -42,6 +43,7 @@
+ #include <asm/cpu_ops.h>
+ #include <asm/kasan.h>
+ #include <asm/numa.h>
++#include <asm/scs.h>
+ #include <asm/sections.h>
+ #include <asm/setup.h>
+ #include <asm/smp_plat.h>
+@@ -312,6 +314,8 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
+ 	jump_label_init();
+ 	parse_early_param();
+ 
++	dynamic_scs_init();
++
+ 	/*
+ 	 * Unmask asynchronous aborts and fiq after bringing up possible
+ 	 * earlycon. (Report possible System Errors once we can report this

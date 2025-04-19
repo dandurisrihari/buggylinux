@@ -1,0 +1,89 @@
+commit c11a1ae9b8f65ef7b82a5a1155581a6e6bafa375
+Author: Bart Van Assche <bvanassche@acm.org>
+Date:   Wed Jul 21 20:34:39 2021 -0700
+
+    scsi: ufs: Add fault injection support
+    
+    Make it easier to test the UFS error handler and abort handler.
+    
+    Link: https://lore.kernel.org/r/20210722033439.26550-19-bvanassche@acm.org
+    Acked-by: Bean Huo <beanhuo@micron.com>
+    Signed-off-by: Bart Van Assche <bvanassche@acm.org>
+    Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+
+diff --git a/drivers/scsi/ufs/ufs-fault-injection.c b/drivers/scsi/ufs/ufs-fault-injection.c
+new file mode 100644
+index 000000000000..7ac7c4e7ff83
+--- /dev/null
++++ b/drivers/scsi/ufs/ufs-fault-injection.c
+@@ -0,0 +1,70 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include <linux/kconfig.h>
++#include <linux/types.h>
++#include <linux/fault-inject.h>
++#include <linux/module.h>
++#include "ufs-fault-injection.h"
++
++static int ufs_fault_get(char *buffer, const struct kernel_param *kp);
++static int ufs_fault_set(const char *val, const struct kernel_param *kp);
++
++static const struct kernel_param_ops ufs_fault_ops = {
++	.get = ufs_fault_get,
++	.set = ufs_fault_set,
++};
++
++enum { FAULT_INJ_STR_SIZE = 80 };
++
++/*
++ * For more details about fault injection, please refer to
++ * Documentation/fault-injection/fault-injection.rst.
++ */
++static char g_trigger_eh_str[FAULT_INJ_STR_SIZE];
++module_param_cb(trigger_eh, &ufs_fault_ops, g_trigger_eh_str, 0644);
++MODULE_PARM_DESC(trigger_eh,
++	"Fault injection. trigger_eh=<interval>,<probability>,<space>,<times>");
++static DECLARE_FAULT_ATTR(ufs_trigger_eh_attr);
++
++static char g_timeout_str[FAULT_INJ_STR_SIZE];
++module_param_cb(timeout, &ufs_fault_ops, g_timeout_str, 0644);
++MODULE_PARM_DESC(timeout,
++	"Fault injection. timeout=<interval>,<probability>,<space>,<times>");
++static DECLARE_FAULT_ATTR(ufs_timeout_attr);
++
++static int ufs_fault_get(char *buffer, const struct kernel_param *kp)
++{
++	const char *fault_str = kp->arg;
++
++	return sysfs_emit(buffer, "%s\n", fault_str);
++}
++
++static int ufs_fault_set(const char *val, const struct kernel_param *kp)
++{
++	struct fault_attr *attr = NULL;
++
++	if (kp->arg == g_trigger_eh_str)
++		attr = &ufs_trigger_eh_attr;
++	else if (kp->arg == g_timeout_str)
++		attr = &ufs_timeout_attr;
++
++	if (WARN_ON_ONCE(!attr))
++		return -EINVAL;
++
++	if (!setup_fault_attr(attr, (char *)val))
++		return -EINVAL;
++
++	strlcpy(kp->arg, val, FAULT_INJ_STR_SIZE);
++
++	return 0;
++}
++
++bool ufs_trigger_eh(void)
++{
++	return should_fail(&ufs_trigger_eh_attr, 1);
++}
++
++bool ufs_fail_completion(void)
++{
++	return should_fail(&ufs_timeout_attr, 1);
++}

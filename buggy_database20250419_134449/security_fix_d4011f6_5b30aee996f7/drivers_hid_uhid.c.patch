@@ -1,0 +1,64 @@
+commit d4011f6817ae85e42874af705fec866fec7c4ecf
+Author: Justin Stitt <justinstitt@google.com>
+Date:   Tue Oct 3 21:01:58 2023 +0000
+
+    HID: uhid: replace deprecated strncpy with strscpy
+    
+    `strncpy` is deprecated for use on NUL-terminated destination strings
+    [1] and as such we should prefer more robust and less ambiguous string
+    interfaces.
+    
+    A suitable replacement is `strscpy` [2] due to the fact that it
+    guarantees NUL-termination on the destination buffer without
+    unnecessarily NUL-padding.
+    
+    Furthermore, let's make sure `hid->xyz` and `ev->u.create2.xyz` are the
+    same size at compile time to prevent silent truncation.
+    
+    With these changes, it is abundantly clear what the intent and behavior
+    of the code is -- We are getting a string to string copy with
+    NUL-termination and no truncation.
+    
+    Link: https://www.kernel.org/doc/html/latest/process/deprecated.html#strncpy-on-nul-terminated-strings [1]
+    Link: https://manpages.debian.org/testing/linux-manual-4.8/strscpy.9.en.html [2]
+    Link: https://github.com/KSPP/linux/issues/90
+    Cc: linux-hardening@vger.kernel.org
+    Cc: Kees Cook <keescook@chromium.org>
+    Signed-off-by: Justin Stitt <justinstitt@google.com>
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Link: https://lore.kernel.org/r/20231003-strncpy-drivers-hid-uhid-c-v2-1-6a501402581e@google.com
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+
+diff --git a/drivers/hid/uhid.c b/drivers/hid/uhid.c
+index 4588d2cd4ea4..a54c7995b9be 100644
+--- a/drivers/hid/uhid.c
++++ b/drivers/hid/uhid.c
+@@ -490,7 +490,7 @@ static int uhid_dev_create2(struct uhid_device *uhid,
+ 			    const struct uhid_event *ev)
+ {
+ 	struct hid_device *hid;
+-	size_t rd_size, len;
++	size_t rd_size;
+ 	void *rd_data;
+ 	int ret;
+ 
+@@ -514,13 +514,12 @@ static int uhid_dev_create2(struct uhid_device *uhid,
+ 		goto err_free;
+ 	}
+ 
+-	/* @hid is zero-initialized, strncpy() is correct, strlcpy() not */
+-	len = min(sizeof(hid->name), sizeof(ev->u.create2.name)) - 1;
+-	strncpy(hid->name, ev->u.create2.name, len);
+-	len = min(sizeof(hid->phys), sizeof(ev->u.create2.phys)) - 1;
+-	strncpy(hid->phys, ev->u.create2.phys, len);
+-	len = min(sizeof(hid->uniq), sizeof(ev->u.create2.uniq)) - 1;
+-	strncpy(hid->uniq, ev->u.create2.uniq, len);
++	BUILD_BUG_ON(sizeof(hid->name) != sizeof(ev->u.create2.name));
++	strscpy(hid->name, ev->u.create2.name, sizeof(hid->name));
++	BUILD_BUG_ON(sizeof(hid->phys) != sizeof(ev->u.create2.phys));
++	strscpy(hid->phys, ev->u.create2.phys, sizeof(hid->phys));
++	BUILD_BUG_ON(sizeof(hid->uniq) != sizeof(ev->u.create2.uniq));
++	strscpy(hid->uniq, ev->u.create2.uniq, sizeof(hid->uniq));
+ 
+ 	hid->ll_driver = &uhid_hid_driver;
+ 	hid->bus = ev->u.create2.bus;

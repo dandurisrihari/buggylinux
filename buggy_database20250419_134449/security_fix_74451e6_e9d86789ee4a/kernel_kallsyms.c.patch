@@ -1,0 +1,200 @@
+commit 74451e66d516c55e309e8d89a4a1e7596e46aacd
+Author: Daniel Borkmann <daniel@iogearbox.net>
+Date:   Thu Feb 16 22:24:50 2017 +0100
+
+    bpf: make jited programs visible in traces
+    
+    Long standing issue with JITed programs is that stack traces from
+    function tracing check whether a given address is kernel code
+    through {__,}kernel_text_address(), which checks for code in core
+    kernel, modules and dynamically allocated ftrace trampolines. But
+    what is still missing is BPF JITed programs (interpreted programs
+    are not an issue as __bpf_prog_run() will be attributed to them),
+    thus when a stack trace is triggered, the code walking the stack
+    won't see any of the JITed ones. The same for address correlation
+    done from user space via reading /proc/kallsyms. This is read by
+    tools like perf, but the latter is also useful for permanent live
+    tracing with eBPF itself in combination with stack maps when other
+    eBPF types are part of the callchain. See offwaketime example on
+    dumping stack from a map.
+    
+    This work tries to tackle that issue by making the addresses and
+    symbols known to the kernel. The lookup from *kernel_text_address()
+    is implemented through a latched RB tree that can be read under
+    RCU in fast-path that is also shared for symbol/size/offset lookup
+    for a specific given address in kallsyms. The slow-path iteration
+    through all symbols in the seq file done via RCU list, which holds
+    a tiny fraction of all exported ksyms, usually below 0.1 percent.
+    Function symbols are exported as bpf_prog_<tag>, in order to aide
+    debugging and attribution. This facility is currently enabled for
+    root-only when bpf_jit_kallsyms is set to 1, and disabled if hardening
+    is active in any mode. The rationale behind this is that still a lot
+    of systems ship with world read permissions on kallsyms thus addresses
+    should not get suddenly exposed for them. If that situation gets
+    much better in future, we always have the option to change the
+    default on this. Likewise, unprivileged programs are not allowed
+    to add entries there either, but that is less of a concern as most
+    such programs types relevant in this context are for root-only anyway.
+    If enabled, call graphs and stack traces will then show a correct
+    attribution; one example is illustrated below, where the trace is
+    now visible in tooling such as perf script --kallsyms=/proc/kallsyms
+    and friends.
+    
+    Before:
+    
+      7fff8166889d bpf_clone_redirect+0x80007f0020ed (/lib/modules/4.9.0-rc8+/build/vmlinux)
+             f5d80 __sendmsg_nocancel+0xffff006451f1a007 (/usr/lib64/libc-2.18.so)
+    
+    After:
+    
+      7fff816688b7 bpf_clone_redirect+0x80007f002107 (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fffa0575728 bpf_prog_33c45a467c9e061a+0x8000600020fb (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fffa07ef1fc cls_bpf_classify+0x8000600020dc (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff81678b68 tc_classify+0x80007f002078 (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff8164d40b __netif_receive_skb_core+0x80007f0025fb (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff8164d718 __netif_receive_skb+0x80007f002018 (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff8164e565 process_backlog+0x80007f002095 (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff8164dc71 net_rx_action+0x80007f002231 (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff81767461 __softirqentry_text_start+0x80007f0020d1 (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff817658ac do_softirq_own_stack+0x80007f00201c (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff810a2c20 do_softirq+0x80007f002050 (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff810a2cb5 __local_bh_enable_ip+0x80007f002085 (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff8168d452 ip_finish_output2+0x80007f002152 (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff8168ea3d ip_finish_output+0x80007f00217d (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff8168f2af ip_output+0x80007f00203f (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      [...]
+      7fff81005854 do_syscall_64+0x80007f002054 (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff817649eb return_from_SYSCALL_64+0x80007f002000 (/lib/modules/4.9.0-rc8+/build/vmlinux)
+             f5d80 __sendmsg_nocancel+0xffff01c484812007 (/usr/lib64/libc-2.18.so)
+    
+    Signed-off-by: Daniel Borkmann <daniel@iogearbox.net>
+    Acked-by: Alexei Starovoitov <ast@kernel.org>
+    Cc: linux-kernel@vger.kernel.org
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/kernel/kallsyms.c b/kernel/kallsyms.c
+index fafd1a3ef0da..6a3b249a2ae1 100644
+--- a/kernel/kallsyms.c
++++ b/kernel/kallsyms.c
+@@ -23,6 +23,7 @@
+ #include <linux/mm.h>
+ #include <linux/ctype.h>
+ #include <linux/slab.h>
++#include <linux/filter.h>
+ #include <linux/compiler.h>
+ 
+ #include <asm/sections.h>
+@@ -300,10 +301,11 @@ int kallsyms_lookup_size_offset(unsigned long addr, unsigned long *symbolsize,
+ 				unsigned long *offset)
+ {
+ 	char namebuf[KSYM_NAME_LEN];
++
+ 	if (is_ksym_addr(addr))
+ 		return !!get_symbol_pos(addr, symbolsize, offset);
+-
+-	return !!module_address_lookup(addr, symbolsize, offset, NULL, namebuf);
++	return !!module_address_lookup(addr, symbolsize, offset, NULL, namebuf) ||
++	       !!__bpf_address_lookup(addr, symbolsize, offset, namebuf);
+ }
+ 
+ /*
+@@ -318,6 +320,8 @@ const char *kallsyms_lookup(unsigned long addr,
+ 			    unsigned long *offset,
+ 			    char **modname, char *namebuf)
+ {
++	const char *ret;
++
+ 	namebuf[KSYM_NAME_LEN - 1] = 0;
+ 	namebuf[0] = 0;
+ 
+@@ -333,9 +337,13 @@ const char *kallsyms_lookup(unsigned long addr,
+ 		return namebuf;
+ 	}
+ 
+-	/* See if it's in a module. */
+-	return module_address_lookup(addr, symbolsize, offset, modname,
+-				     namebuf);
++	/* See if it's in a module or a BPF JITed image. */
++	ret = module_address_lookup(addr, symbolsize, offset,
++				    modname, namebuf);
++	if (!ret)
++		ret = bpf_address_lookup(addr, symbolsize,
++					 offset, modname, namebuf);
++	return ret;
+ }
+ 
+ int lookup_symbol_name(unsigned long addr, char *symname)
+@@ -471,6 +479,7 @@ EXPORT_SYMBOL(__print_symbol);
+ /* To avoid using get_symbol_offset for every symbol, we carry prefix along. */
+ struct kallsym_iter {
+ 	loff_t pos;
++	loff_t pos_mod_end;
+ 	unsigned long value;
+ 	unsigned int nameoff; /* If iterating in core kernel symbols. */
+ 	char type;
+@@ -481,13 +490,27 @@ struct kallsym_iter {
+ 
+ static int get_ksymbol_mod(struct kallsym_iter *iter)
+ {
+-	if (module_get_kallsym(iter->pos - kallsyms_num_syms, &iter->value,
+-				&iter->type, iter->name, iter->module_name,
+-				&iter->exported) < 0)
++	int ret = module_get_kallsym(iter->pos - kallsyms_num_syms,
++				     &iter->value, &iter->type,
++				     iter->name, iter->module_name,
++				     &iter->exported);
++	if (ret < 0) {
++		iter->pos_mod_end = iter->pos;
+ 		return 0;
++	}
++
+ 	return 1;
+ }
+ 
++static int get_ksymbol_bpf(struct kallsym_iter *iter)
++{
++	iter->module_name[0] = '\0';
++	iter->exported = 0;
++	return bpf_get_kallsym(iter->pos - iter->pos_mod_end,
++			       &iter->value, &iter->type,
++			       iter->name) < 0 ? 0 : 1;
++}
++
+ /* Returns space to next name. */
+ static unsigned long get_ksymbol_core(struct kallsym_iter *iter)
+ {
+@@ -508,16 +531,30 @@ static void reset_iter(struct kallsym_iter *iter, loff_t new_pos)
+ 	iter->name[0] = '\0';
+ 	iter->nameoff = get_symbol_offset(new_pos);
+ 	iter->pos = new_pos;
++	if (new_pos == 0)
++		iter->pos_mod_end = 0;
++}
++
++static int update_iter_mod(struct kallsym_iter *iter, loff_t pos)
++{
++	iter->pos = pos;
++
++	if (iter->pos_mod_end > 0 &&
++	    iter->pos_mod_end < iter->pos)
++		return get_ksymbol_bpf(iter);
++
++	if (!get_ksymbol_mod(iter))
++		return get_ksymbol_bpf(iter);
++
++	return 1;
+ }
+ 
+ /* Returns false if pos at or past end of file. */
+ static int update_iter(struct kallsym_iter *iter, loff_t pos)
+ {
+ 	/* Module symbols can be accessed randomly. */
+-	if (pos >= kallsyms_num_syms) {
+-		iter->pos = pos;
+-		return get_ksymbol_mod(iter);
+-	}
++	if (pos >= kallsyms_num_syms)
++		return update_iter_mod(iter, pos);
+ 
+ 	/* If we're not on the desired position, reset to new position. */
+ 	if (pos != iter->pos)

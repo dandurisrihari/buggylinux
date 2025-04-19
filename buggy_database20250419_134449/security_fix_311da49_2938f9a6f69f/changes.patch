@@ -1,0 +1,84 @@
+diff --cc arch/arm/include/asm/kvm_mmu.h
+index f675162663f0,cf2eae51f9a0..c94d291fd1a8
+--- a/arch/arm/include/asm/kvm_mmu.h
++++ b/arch/arm/include/asm/kvm_mmu.h
+@@@ -309,25 -309,30 +309,46 @@@ static inline unsigned int kvm_get_vmid
+  	return 8;
+  }
+  
+ +/*
+ + * We are not in the kvm->srcu critical section most of the time, so we take
+ + * the SRCU read lock here. Since we copy the data from the user page, we
+ + * can immediately drop the lock again.
+ + */
+ +static inline int kvm_read_guest_lock(struct kvm *kvm,
+ +				      gpa_t gpa, void *data, unsigned long len)
+ +{
+ +	int srcu_idx = srcu_read_lock(&kvm->srcu);
+ +	int ret = kvm_read_guest(kvm, gpa, data, len);
+ +
+ +	srcu_read_unlock(&kvm->srcu, srcu_idx);
+ +
+ +	return ret;
+ +}
+ +
+  static inline void *kvm_get_hyp_vector(void)
+  {
+- 	return kvm_ksym_ref(__kvm_hyp_vector);
++ 	switch(read_cpuid_part()) {
++ #ifdef CONFIG_HARDEN_BRANCH_PREDICTOR
++ 	case ARM_CPU_PART_CORTEX_A12:
++ 	case ARM_CPU_PART_CORTEX_A17:
++ 	{
++ 		extern char __kvm_hyp_vector_bp_inv[];
++ 		return kvm_ksym_ref(__kvm_hyp_vector_bp_inv);
++ 	}
++ 
++ 	case ARM_CPU_PART_BRAHMA_B15:
++ 	case ARM_CPU_PART_CORTEX_A15:
++ 	{
++ 		extern char __kvm_hyp_vector_ic_inv[];
++ 		return kvm_ksym_ref(__kvm_hyp_vector_ic_inv);
++ 	}
++ #endif
++ 	default:
++ 	{
++ 		extern char __kvm_hyp_vector[];
++ 		return kvm_ksym_ref(__kvm_hyp_vector);
++ 	}
++ 	}
+  }
+  
+  static inline int kvm_map_vectors(void)
+diff --cc arch/arm/mm/fault.c
+index 32034543f49c,3b1ba003c4f9..84becc911ee3
+--- a/arch/arm/mm/fault.c
++++ b/arch/arm/mm/fault.c
+@@@ -163,8 -163,9 +163,11 @@@ __do_user_fault(struct task_struct *tsk
+  {
+  	struct siginfo si;
+  
++ 	if (addr > TASK_SIZE)
++ 		harden_branch_predictor();
++ 
+ +	clear_siginfo(&si);
+ +
+  #ifdef CONFIG_DEBUG_USER
+  	if (((user_debug & UDBG_SEGV) && (sig == SIGSEGV)) ||
+  	    ((user_debug & UDBG_BUS)  && (sig == SIGBUS))) {
+diff --cc drivers/amba/bus.c
+index 3ece711a6a17,12283bd06733..41b706403ef7
+--- a/drivers/amba/bus.c
++++ b/drivers/amba/bus.c
+@@@ -202,9 -194,10 +202,10 @@@ struct bus_type amba_bustype = 
+  	.dev_groups	= amba_dev_groups,
+  	.match		= amba_match,
+  	.uevent		= amba_uevent,
+ +	.dma_configure	= platform_dma_configure,
+  	.pm		= &amba_pm,
+ -	.force_dma	= true,
+  };
++ EXPORT_SYMBOL_GPL(amba_bustype);
+  
+  static int __init amba_init(void)
+  {

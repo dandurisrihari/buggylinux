@@ -1,0 +1,53 @@
+commit 189af4657186da08a2e79fb8e906cfd82b2ccddc
+Author: Ard Biesheuvel <ardb@kernel.org>
+Date:   Thu Dec 6 09:32:57 2018 +0100
+
+    ARM: smp: add support for per-task stack canaries
+    
+    On ARM, we currently only change the value of the stack canary when
+    switching tasks if the kernel was built for UP. On SMP kernels, this
+    is impossible since the stack canary value is obtained via a global
+    symbol reference, which means
+    a) all running tasks on all CPUs must use the same value
+    b) we can only modify the value when no kernel stack frames are live
+       on any CPU, which is effectively never.
+    
+    So instead, use a GCC plugin to add a RTL pass that replaces each
+    reference to the address of the __stack_chk_guard symbol with an
+    expression that produces the address of the 'stack_canary' field
+    that is added to struct thread_info. This way, each task will use
+    its own randomized value.
+    
+    Cc: Russell King <linux@armlinux.org.uk>
+    Cc: Kees Cook <keescook@chromium.org>
+    Cc: Emese Revfy <re.emese@gmail.com>
+    Cc: Arnd Bergmann <arnd@arndb.de>
+    Cc: Laura Abbott <labbott@redhat.com>
+    Cc: kernel-hardening@lists.openwall.com
+    Acked-by: Nicolas Pitre <nico@linaro.org>
+    Signed-off-by: Ard Biesheuvel <ard.biesheuvel@linaro.org>
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+
+diff --git a/arch/arm/kernel/process.c b/arch/arm/kernel/process.c
+index 82ab015bf42b..16601d1442d1 100644
+--- a/arch/arm/kernel/process.c
++++ b/arch/arm/kernel/process.c
+@@ -39,7 +39,7 @@
+ #include <asm/tls.h>
+ #include <asm/vdso.h>
+ 
+-#ifdef CONFIG_STACKPROTECTOR
++#if defined(CONFIG_STACKPROTECTOR) && !defined(CONFIG_STACKPROTECTOR_PER_TASK)
+ #include <linux/stackprotector.h>
+ unsigned long __stack_chk_guard __read_mostly;
+ EXPORT_SYMBOL(__stack_chk_guard);
+@@ -267,6 +267,10 @@ copy_thread(unsigned long clone_flags, unsigned long stack_start,
+ 
+ 	thread_notify(THREAD_NOTIFY_COPY, thread);
+ 
++#ifdef CONFIG_STACKPROTECTOR_PER_TASK
++	thread->stack_canary = p->stack_canary;
++#endif
++
+ 	return 0;
+ }

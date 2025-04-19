@@ -1,0 +1,47 @@
+commit 413b61ce0b4de0e55a9f8cf91bbce1ad7e0870cd
+Author: Ard Biesheuvel <ardb@kernel.org>
+Date:   Tue Jul 7 09:31:57 2020 +0300
+
+    crypto: ccp - permit asynchronous skcipher as fallback
+    
+    Even though the ccp driver implements an asynchronous version of xts(aes),
+    the fallback it allocates is required to be synchronous. Given that SIMD
+    based software implementations are usually asynchronous as well, even
+    though they rarely complete asynchronously (this typically only happens
+    in cases where the request was made from softirq context, while SIMD was
+    already in use in the task context that it interrupted), these
+    implementations are disregarded, and either the generic C version or
+    another table based version implemented in assembler is selected instead.
+    
+    Since falling back to synchronous AES is not only a performance issue, but
+    potentially a security issue as well (due to the fact that table based AES
+    is not time invariant), let's fix this, by allocating an ordinary skcipher
+    as the fallback, and invoke it with the completion routine that was given
+    to the outer request.
+    
+    Signed-off-by: Ard Biesheuvel <ardb@kernel.org>
+    Acked-by: John Allen <john.allen@amd.com>
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+diff --git a/drivers/crypto/ccp/ccp-crypto.h b/drivers/crypto/ccp/ccp-crypto.h
+index 90a009e6b5c1..aed3d2192d01 100644
+--- a/drivers/crypto/ccp/ccp-crypto.h
++++ b/drivers/crypto/ccp/ccp-crypto.h
+@@ -89,7 +89,7 @@ static inline struct ccp_crypto_ahash_alg *
+ /***** AES related defines *****/
+ struct ccp_aes_ctx {
+ 	/* Fallback cipher for XTS with unsupported unit sizes */
+-	struct crypto_sync_skcipher *tfm_skcipher;
++	struct crypto_skcipher *tfm_skcipher;
+ 
+ 	enum ccp_engine engine;
+ 	enum ccp_aes_type type;
+@@ -121,6 +121,8 @@ struct ccp_aes_req_ctx {
+ 	u8 rfc3686_iv[AES_BLOCK_SIZE];
+ 
+ 	struct ccp_cmd cmd;
++
++	struct skcipher_request fallback_req;	// keep at the end
+ };
+ 
+ struct ccp_aes_cmac_req_ctx {

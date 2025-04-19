@@ -1,0 +1,56 @@
+commit 50e3ed0f93f4f62ed2aa83de5db6cb84ecdd5707
+Author: Ard Biesheuvel <ardb@kernel.org>
+Date:   Wed Feb 14 13:29:29 2024 +0100
+
+    arm64: mm: add support for WXN memory translation attribute
+    
+    The AArch64 virtual memory system supports a global WXN control, which
+    can be enabled to make all writable mappings implicitly no-exec. This is
+    a useful hardening feature, as it prevents mistakes in managing page
+    table permissions from being exploited to attack the system.
+    
+    When enabled at EL1, the restrictions apply to both EL1 and EL0. EL1 is
+    completely under our control, and has been cleaned up to allow WXN to be
+    enabled from boot onwards. EL0 is not under our control, but given that
+    widely deployed security features such as selinux or PaX already limit
+    the ability of user space to create mappings that are writable and
+    executable at the same time, the impact of enabling this for EL0 is
+    expected to be limited. (For this reason, common user space libraries
+    that have a legitimate need for manipulating executable code already
+    carry fallbacks such as [0].)
+    
+    If enabled at compile time, the feature can still be disabled at boot if
+    needed, by passing arm64.nowxn on the kernel command line.
+    
+    [0] https://github.com/libffi/libffi/blob/master/src/closures.c#L440
+    
+    Signed-off-by: Ard Biesheuvel <ardb@kernel.org>
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Link: https://lore.kernel.org/r/20240214122845.2033971-88-ardb+git@google.com
+    Signed-off-by: Catalin Marinas <catalin.marinas@arm.com>
+
+diff --git a/arch/arm64/include/asm/cpufeature.h b/arch/arm64/include/asm/cpufeature.h
+index a8f97690ce1f..ee33b7e52da7 100644
+--- a/arch/arm64/include/asm/cpufeature.h
++++ b/arch/arm64/include/asm/cpufeature.h
+@@ -18,6 +18,7 @@
+ #define ARM64_SW_FEATURE_OVERRIDE_NOKASLR	0
+ #define ARM64_SW_FEATURE_OVERRIDE_HVHE		4
+ #define ARM64_SW_FEATURE_OVERRIDE_RODATA_OFF	8
++#define ARM64_SW_FEATURE_OVERRIDE_NOWXN		12
+ 
+ #ifndef __ASSEMBLY__
+ 
+@@ -962,6 +963,13 @@ static inline bool kaslr_disabled_cmdline(void)
+ 	return arm64_test_sw_feature_override(ARM64_SW_FEATURE_OVERRIDE_NOKASLR);
+ }
+ 
++static inline bool arm64_wxn_enabled(void)
++{
++	if (!IS_ENABLED(CONFIG_ARM64_WXN))
++		return false;
++	return !arm64_test_sw_feature_override(ARM64_SW_FEATURE_OVERRIDE_NOWXN);
++}
++
+ u32 get_kvm_ipa_limit(void);
+ void dump_cpu_features(void);

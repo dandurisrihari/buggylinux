@@ -1,0 +1,60 @@
+commit 57dfd7b53dec740afe402135fdd1c5708ec337f0
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Fri Jan 28 00:51:48 2022 +0000
+
+    KVM: x86: Move delivery of non-APICv interrupt into vendor code
+    
+    Handle non-APICv interrupt delivery in vendor code, even though it means
+    VMX and SVM will temporarily have duplicate code.  SVM's AVIC has a race
+    condition that requires KVM to fall back to legacy interrupt injection
+    _after_ the interrupt has been logged in the vIRR, i.e. to fix the race,
+    SVM will need to open code the full flow anyways[*].  Refactor the code
+    so that the SVM bug without introducing other issues, e.g. SVM would
+    return "success" and thus invoke trace_kvm_apicv_accept_irq() even when
+    delivery through the AVIC failed, and to opportunistically prepare for
+    using KVM_X86_OP to fill each vendor's kvm_x86_ops struct, which will
+    rely on the vendor function matching the kvm_x86_op pointer name.
+    
+    No functional change intended.
+    
+    [*] https://lore.kernel.org/all/20211213104634.199141-4-mlevitsk@redhat.com
+    
+    Signed-off-by: Sean Christopherson <seanjc@google.com>
+    Message-Id: <20220128005208.4008533-3-seanjc@google.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index b1165bb13a5a..3c0ba5b1bbcf 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -4041,6 +4041,21 @@ static int vmx_deliver_posted_interrupt(struct kvm_vcpu *vcpu, int vector)
+ 	return 0;
+ }
+ 
++static void vmx_deliver_interrupt(struct kvm_lapic *apic, int delivery_mode,
++				  int trig_mode, int vector)
++{
++	struct kvm_vcpu *vcpu = apic->vcpu;
++
++	if (vmx_deliver_posted_interrupt(vcpu, vector)) {
++		kvm_lapic_set_irr(vector, apic);
++		kvm_make_request(KVM_REQ_EVENT, vcpu);
++		kvm_vcpu_kick(vcpu);
++	} else {
++		trace_kvm_apicv_accept_irq(vcpu->vcpu_id, delivery_mode,
++					   trig_mode, vector);
++	}
++}
++
+ /*
+  * Set up the vmcs's constant host-state fields, i.e., host-state fields that
+  * will not change in the lifetime of the guest.
+@@ -7766,7 +7781,7 @@ static struct kvm_x86_ops vmx_x86_ops __initdata = {
+ 	.hwapic_isr_update = vmx_hwapic_isr_update,
+ 	.guest_apic_has_interrupt = vmx_guest_apic_has_interrupt,
+ 	.sync_pir_to_irr = vmx_sync_pir_to_irr,
+-	.deliver_posted_interrupt = vmx_deliver_posted_interrupt,
++	.deliver_interrupt = vmx_deliver_interrupt,
+ 	.dy_apicv_has_pending_interrupt = pi_has_pending_interrupt,
+ 
+ 	.set_tss_addr = vmx_set_tss_addr,

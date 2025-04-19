@@ -1,0 +1,143 @@
+diff --git a/arch/arm64/include/asm/esr.h b/arch/arm64/include/asm/esr.h
+index 035003acfa87..22c81f1edda2 100644
+--- a/arch/arm64/include/asm/esr.h
++++ b/arch/arm64/include/asm/esr.h
+@@ -35,7 +35,9 @@
+ #define ESR_ELx_EC_SYS64	(0x18)
+ #define ESR_ELx_EC_SVE		(0x19)
+ #define ESR_ELx_EC_ERET		(0x1a)	/* EL2 only */
+-/* Unallocated EC: 0x1b - 0x1E */
++/* Unallocated EC: 0x1B */
++#define ESR_ELx_EC_FPAC		(0x1C)	/* EL1 and above */
++/* Unallocated EC: 0x1D - 0x1E */
+ #define ESR_ELx_EC_IMP_DEF	(0x1f)	/* EL3 only */
+ #define ESR_ELx_EC_IABT_LOW	(0x20)
+ #define ESR_ELx_EC_IABT_CUR	(0x21)
+diff --git a/arch/arm64/include/asm/exception.h b/arch/arm64/include/asm/exception.h
+index 7577a754d443..99b9383cd036 100644
+--- a/arch/arm64/include/asm/exception.h
++++ b/arch/arm64/include/asm/exception.h
+@@ -47,4 +47,5 @@ void bad_el0_sync(struct pt_regs *regs, int reason, unsigned int esr);
+ void do_cp15instr(unsigned int esr, struct pt_regs *regs);
+ void do_el0_svc(struct pt_regs *regs);
+ void do_el0_svc_compat(struct pt_regs *regs);
++void do_ptrauth_fault(struct pt_regs *regs, unsigned int esr);
+ #endif	/* __ASM_EXCEPTION_H */
+diff --git a/arch/arm64/include/asm/sysreg.h b/arch/arm64/include/asm/sysreg.h
+index 554a7e8ecb07..b738bc793369 100644
+--- a/arch/arm64/include/asm/sysreg.h
++++ b/arch/arm64/include/asm/sysreg.h
+@@ -636,14 +636,22 @@
+ #define ID_AA64ISAR1_APA_SHIFT		4
+ #define ID_AA64ISAR1_DPB_SHIFT		0
+ 
+-#define ID_AA64ISAR1_APA_NI		0x0
+-#define ID_AA64ISAR1_APA_ARCHITECTED	0x1
+-#define ID_AA64ISAR1_API_NI		0x0
+-#define ID_AA64ISAR1_API_IMP_DEF	0x1
+-#define ID_AA64ISAR1_GPA_NI		0x0
+-#define ID_AA64ISAR1_GPA_ARCHITECTED	0x1
+-#define ID_AA64ISAR1_GPI_NI		0x0
+-#define ID_AA64ISAR1_GPI_IMP_DEF	0x1
++#define ID_AA64ISAR1_APA_NI			0x0
++#define ID_AA64ISAR1_APA_ARCHITECTED		0x1
++#define ID_AA64ISAR1_APA_ARCH_EPAC		0x2
++#define ID_AA64ISAR1_APA_ARCH_EPAC2		0x3
++#define ID_AA64ISAR1_APA_ARCH_EPAC2_FPAC	0x4
++#define ID_AA64ISAR1_APA_ARCH_EPAC2_FPAC_CMB	0x5
++#define ID_AA64ISAR1_API_NI			0x0
++#define ID_AA64ISAR1_API_IMP_DEF		0x1
++#define ID_AA64ISAR1_API_IMP_DEF_EPAC		0x2
++#define ID_AA64ISAR1_API_IMP_DEF_EPAC2		0x3
++#define ID_AA64ISAR1_API_IMP_DEF_EPAC2_FPAC	0x4
++#define ID_AA64ISAR1_API_IMP_DEF_EPAC2_FPAC_CMB	0x5
++#define ID_AA64ISAR1_GPA_NI			0x0
++#define ID_AA64ISAR1_GPA_ARCHITECTED		0x1
++#define ID_AA64ISAR1_GPI_NI			0x0
++#define ID_AA64ISAR1_GPI_IMP_DEF		0x1
+ 
+ /* id_aa64pfr0 */
+ #define ID_AA64PFR0_CSV3_SHIFT		60
+diff --git a/arch/arm64/kernel/entry-common.c b/arch/arm64/kernel/entry-common.c
+index d3be9dbf5490..43d4c329775f 100644
+--- a/arch/arm64/kernel/entry-common.c
++++ b/arch/arm64/kernel/entry-common.c
+@@ -66,6 +66,13 @@ static void notrace el1_dbg(struct pt_regs *regs, unsigned long esr)
+ }
+ NOKPROBE_SYMBOL(el1_dbg);
+ 
++static void notrace el1_fpac(struct pt_regs *regs, unsigned long esr)
++{
++	local_daif_inherit(regs);
++	do_ptrauth_fault(regs, esr);
++}
++NOKPROBE_SYMBOL(el1_fpac);
++
+ asmlinkage void notrace el1_sync_handler(struct pt_regs *regs)
+ {
+ 	unsigned long esr = read_sysreg(esr_el1);
+@@ -92,6 +99,9 @@ asmlinkage void notrace el1_sync_handler(struct pt_regs *regs)
+ 	case ESR_ELx_EC_BRK64:
+ 		el1_dbg(regs, esr);
+ 		break;
++	case ESR_ELx_EC_FPAC:
++		el1_fpac(regs, esr);
++		break;
+ 	default:
+ 		el1_inv(regs, esr);
+ 	}
+@@ -227,6 +237,14 @@ static void notrace el0_svc(struct pt_regs *regs)
+ }
+ NOKPROBE_SYMBOL(el0_svc);
+ 
++static void notrace el0_fpac(struct pt_regs *regs, unsigned long esr)
++{
++	user_exit_irqoff();
++	local_daif_restore(DAIF_PROCCTX);
++	do_ptrauth_fault(regs, esr);
++}
++NOKPROBE_SYMBOL(el0_fpac);
++
+ asmlinkage void notrace el0_sync_handler(struct pt_regs *regs)
+ {
+ 	unsigned long esr = read_sysreg(esr_el1);
+@@ -272,6 +290,9 @@ asmlinkage void notrace el0_sync_handler(struct pt_regs *regs)
+ 	case ESR_ELx_EC_BRK64:
+ 		el0_dbg(regs, esr);
+ 		break;
++	case ESR_ELx_EC_FPAC:
++		el0_fpac(regs, esr);
++		break;
+ 	default:
+ 		el0_inv(regs, esr);
+ 	}
+diff --git a/arch/arm64/kernel/traps.c b/arch/arm64/kernel/traps.c
+index 29fd00fe94f2..b24f81197a68 100644
+--- a/arch/arm64/kernel/traps.c
++++ b/arch/arm64/kernel/traps.c
+@@ -479,6 +479,17 @@ void do_bti(struct pt_regs *regs)
+ }
+ NOKPROBE_SYMBOL(do_bti);
+ 
++void do_ptrauth_fault(struct pt_regs *regs, unsigned int esr)
++{
++	/*
++	 * Unexpected FPAC exception or pointer authentication failure in
++	 * the kernel: kill the task before it does any more harm.
++	 */
++	BUG_ON(!user_mode(regs));
++	force_signal_inject(SIGILL, ILL_ILLOPN, regs->pc, esr);
++}
++NOKPROBE_SYMBOL(do_ptrauth_fault);
++
+ #define __user_cache_maint(insn, address, res)			\
+ 	if (address >= user_addr_max()) {			\
+ 		res = -EFAULT;					\
+@@ -775,6 +786,7 @@ static const char *esr_class_str[] = {
+ 	[ESR_ELx_EC_SYS64]		= "MSR/MRS (AArch64)",
+ 	[ESR_ELx_EC_SVE]		= "SVE",
+ 	[ESR_ELx_EC_ERET]		= "ERET/ERETAA/ERETAB",
++	[ESR_ELx_EC_FPAC]		= "FPAC",
+ 	[ESR_ELx_EC_IMP_DEF]		= "EL3 IMP DEF",
+ 	[ESR_ELx_EC_IABT_LOW]		= "IABT (lower EL)",
+ 	[ESR_ELx_EC_IABT_CUR]		= "IABT (current EL)",

@@ -1,0 +1,70 @@
+commit 45888b40d2a6221d46bb69959e2600ddba71cc1f
+Author: Thomas Gleixner <tglx@linutronix.de>
+Date:   Sun Apr 22 18:23:55 2018 +0200
+
+    rslib: Allocate decoder buffers to avoid VLAs
+    
+    To get rid of the variable length arrays on stack in the RS decoder it's
+    necessary to allocate the decoder buffers per control structure instance.
+    
+    All usage sites have been checked for potential parallel decoder usage and
+    fixed where necessary. Kees confirmed that the pstore decoding is strictly
+    single threaded so there should be no surprises.
+    
+    Allocate them in the rs control structure sized depending on the number of
+    roots for the chosen codec and adapt the decoder code to make use of them.
+    
+    Document the fact that decode operations based on a particular rs control
+    instance cannot run in parallel and the caller has to ensure that as it's
+    not possible to provide a proper locking construct which fits all use
+    cases.
+    
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Acked-by: Kees Cook <keescook@chromium.org>
+    Cc: Boris Brezillon <boris.brezillon@free-electrons.com>
+    Cc: Tony Luck <tony.luck@intel.com>
+    Cc: Segher Boessenkool <segher@kernel.crashing.org>
+    Cc: Kernel Hardening <kernel-hardening@lists.openwall.com>
+    Cc: Richard Weinberger <richard@nod.at>
+    Cc: Mike Snitzer <snitzer@redhat.com>
+    Cc: Anton Vorontsov <anton@enomsg.org>
+    Cc: Colin Cross <ccross@android.com>
+    Cc: Andrew Morton <akpm@linuxfoundation.org>
+    Cc: David Woodhouse <dwmw2@infradead.org>
+    Cc: Alasdair Kergon <agk@redhat.com>
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+
+diff --git a/lib/reed_solomon/decode_rs.c b/lib/reed_solomon/decode_rs.c
+index 794cced31c75..1db74eb098d0 100644
+--- a/lib/reed_solomon/decode_rs.c
++++ b/lib/reed_solomon/decode_rs.c
+@@ -21,16 +21,22 @@
+ 	uint16_t *alpha_to = rs->alpha_to;
+ 	uint16_t *index_of = rs->index_of;
+ 	uint16_t u, q, tmp, num1, num2, den, discr_r, syn_error;
+-	/* Err+Eras Locator poly and syndrome poly The maximum value
+-	 * of nroots is 8. So the necessary stack size will be about
+-	 * 220 bytes max.
+-	 */
+-	uint16_t lambda[nroots + 1], syn[nroots];
+-	uint16_t b[nroots + 1], t[nroots + 1], omega[nroots + 1];
+-	uint16_t root[nroots], reg[nroots + 1], loc[nroots];
+ 	int count = 0;
+ 	uint16_t msk = (uint16_t) rs->nn;
+ 
++	/*
++	 * The decoder buffers are in the rs control struct. They are
++	 * arrays sized [nroots + 1]
++	 */
++	uint16_t *lambda = rsc->buffers + RS_DECODE_LAMBDA * (nroots + 1);
++	uint16_t *syn = rsc->buffers + RS_DECODE_SYN * (nroots + 1);
++	uint16_t *b = rsc->buffers + RS_DECODE_B * (nroots + 1);
++	uint16_t *t = rsc->buffers + RS_DECODE_T * (nroots + 1);
++	uint16_t *omega = rsc->buffers + RS_DECODE_OMEGA * (nroots + 1);
++	uint16_t *root = rsc->buffers + RS_DECODE_ROOT * (nroots + 1);
++	uint16_t *reg = rsc->buffers + RS_DECODE_REG * (nroots + 1);
++	uint16_t *loc = rsc->buffers + RS_DECODE_LOC * (nroots + 1);
++
+ 	/* Check length parameter for validity */
+ 	pad = nn - nroots - len;
+ 	BUG_ON(pad < 0 || pad >= nn);

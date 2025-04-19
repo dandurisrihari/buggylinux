@@ -1,0 +1,45 @@
+commit 3f5c90b890acfa7ad0b817a67cfc5eaaf0e21f7d
+Author: Christoffer Dall <christoffer.dall@linaro.org>
+Date:   Tue Oct 3 14:02:12 2017 +0200
+
+    KVM: arm64: Introduce VHE-specific kvm_vcpu_run
+    
+    So far this is mostly (see below) a copy of the legacy non-VHE switch
+    function, but we will start reworking these functions in separate
+    directions to work on VHE and non-VHE in the most optimal way in later
+    patches.
+    
+    The only difference after this patch between the VHE and non-VHE run
+    functions is that we omit the branch-predictor variant-2 hardening for
+    QC Falkor CPUs, because this workaround is specific to a series of
+    non-VHE ARMv8.0 CPUs.
+    
+    Reviewed-by: Marc Zyngier <marc.zyngier@arm.com>
+    Signed-off-by: Christoffer Dall <christoffer.dall@linaro.org>
+    Signed-off-by: Marc Zyngier <marc.zyngier@arm.com>
+
+diff --git a/virt/kvm/arm/arm.c b/virt/kvm/arm/arm.c
+index 2062d9357971..09dbee56ed8f 100644
+--- a/virt/kvm/arm/arm.c
++++ b/virt/kvm/arm/arm.c
+@@ -733,13 +733,15 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu, struct kvm_run *run)
+ 		 */
+ 		trace_kvm_entry(*vcpu_pc(vcpu));
+ 		guest_enter_irqoff();
+-		if (has_vhe())
+-			kvm_arm_vhe_guest_enter();
+-
+-		ret = kvm_call_hyp(__kvm_vcpu_run, vcpu);
+ 
+-		if (has_vhe())
++		if (has_vhe()) {
++			kvm_arm_vhe_guest_enter();
++			ret = kvm_vcpu_run_vhe(vcpu);
+ 			kvm_arm_vhe_guest_exit();
++		} else {
++			ret = kvm_call_hyp(__kvm_vcpu_run_nvhe, vcpu);
++		}
++
+ 		vcpu->mode = OUTSIDE_GUEST_MODE;
+ 		vcpu->stat.exits++;
+ 		/*

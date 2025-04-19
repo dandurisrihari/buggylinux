@@ -1,0 +1,96 @@
+diff --git a/include/uapi/linux/nl80211.h b/include/uapi/linux/nl80211.h
+index c8520c150f9c..9a0ac0363f1f 100644
+--- a/include/uapi/linux/nl80211.h
++++ b/include/uapi/linux/nl80211.h
+@@ -6348,6 +6348,10 @@ enum nl80211_feature_flags {
+  * @NL80211_EXT_FEATURE_SECURE_NAN: Device supports NAN Pairing which enables
+  *	authentication, data encryption and message integrity.
+  *
++ * @NL80211_EXT_FEATURE_AUTH_AND_DEAUTH_RANDOM_TA: Device supports randomized TA
++ *	in authentication and deauthentication frames sent to unassociated peer
++ *	using @NL80211_CMD_FRAME.
++ *
+  * @NUM_NL80211_EXT_FEATURES: number of extended features.
+  * @MAX_NL80211_EXT_FEATURES: highest extended feature index.
+  */
+@@ -6418,6 +6422,7 @@ enum nl80211_ext_feature_index {
+ 	NL80211_EXT_FEATURE_POWERED_ADDR_CHANGE,
+ 	NL80211_EXT_FEATURE_PUNCT,
+ 	NL80211_EXT_FEATURE_SECURE_NAN,
++	NL80211_EXT_FEATURE_AUTH_AND_DEAUTH_RANDOM_TA,
+ 
+ 	/* add new features before the definition below */
+ 	NUM_NL80211_EXT_FEATURES,
+diff --git a/net/wireless/mlme.c b/net/wireless/mlme.c
+index 81d3f40d6235..ac059cefbeb3 100644
+--- a/net/wireless/mlme.c
++++ b/net/wireless/mlme.c
+@@ -673,6 +673,39 @@ static bool cfg80211_allowed_address(struct wireless_dev *wdev, const u8 *addr)
+ 	return ether_addr_equal(addr, wdev_address(wdev));
+ }
+ 
++static bool cfg80211_allowed_random_address(struct wireless_dev *wdev,
++					    const struct ieee80211_mgmt *mgmt)
++{
++	if (ieee80211_is_auth(mgmt->frame_control) ||
++	    ieee80211_is_deauth(mgmt->frame_control)) {
++		/* Allow random TA to be used with authentication and
++		 * deauthentication frames if the driver has indicated support.
++		 */
++		if (wiphy_ext_feature_isset(
++			    wdev->wiphy,
++			    NL80211_EXT_FEATURE_AUTH_AND_DEAUTH_RANDOM_TA))
++			return true;
++	} else if (ieee80211_is_action(mgmt->frame_control) &&
++		   mgmt->u.action.category == WLAN_CATEGORY_PUBLIC) {
++		/* Allow random TA to be used with Public Action frames if the
++		 * driver has indicated support.
++		 */
++		if (!wdev->connected &&
++		    wiphy_ext_feature_isset(
++			    wdev->wiphy,
++			    NL80211_EXT_FEATURE_MGMT_TX_RANDOM_TA))
++			return true;
++
++		if (wdev->connected &&
++		    wiphy_ext_feature_isset(
++			    wdev->wiphy,
++			    NL80211_EXT_FEATURE_MGMT_TX_RANDOM_TA_CONNECTED))
++			return true;
++	}
++
++	return false;
++}
++
+ int cfg80211_mlme_mgmt_tx(struct cfg80211_registered_device *rdev,
+ 			  struct wireless_dev *wdev,
+ 			  struct cfg80211_mgmt_tx_params *params, u64 *cookie)
+@@ -774,25 +807,9 @@ int cfg80211_mlme_mgmt_tx(struct cfg80211_registered_device *rdev,
+ 			return err;
+ 	}
+ 
+-	if (!cfg80211_allowed_address(wdev, mgmt->sa)) {
+-		/* Allow random TA to be used with Public Action frames if the
+-		 * driver has indicated support for this. Otherwise, only allow
+-		 * the local address to be used.
+-		 */
+-		if (!ieee80211_is_action(mgmt->frame_control) ||
+-		    mgmt->u.action.category != WLAN_CATEGORY_PUBLIC)
+-			return -EINVAL;
+-		if (!wdev->connected &&
+-		    !wiphy_ext_feature_isset(
+-			    &rdev->wiphy,
+-			    NL80211_EXT_FEATURE_MGMT_TX_RANDOM_TA))
+-			return -EINVAL;
+-		if (wdev->connected &&
+-		    !wiphy_ext_feature_isset(
+-			    &rdev->wiphy,
+-			    NL80211_EXT_FEATURE_MGMT_TX_RANDOM_TA_CONNECTED))
+-			return -EINVAL;
+-	}
++	if (!cfg80211_allowed_address(wdev, mgmt->sa) &&
++	    !cfg80211_allowed_random_address(wdev, mgmt))
++		return -EINVAL;
+ 
+ 	/* Transmit the management frame as requested by user space */
+ 	return rdev_mgmt_tx(rdev, wdev, params, cookie);

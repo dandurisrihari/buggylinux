@@ -1,0 +1,113 @@
+diff --git a/arch/x86/kvm/svm/nested.c b/arch/x86/kvm/svm/nested.c
+index 8300fd31878d..96936ddf1b3c 100644
+--- a/arch/x86/kvm/svm/nested.c
++++ b/arch/x86/kvm/svm/nested.c
+@@ -281,6 +281,11 @@ static bool __nested_vmcb_check_controls(struct kvm_vcpu *vcpu,
+ 	if (CC(!nested_svm_check_tlb_ctl(vcpu, control->tlb_ctl)))
+ 		return false;
+ 
++	if (CC((control->int_ctl & V_NMI_ENABLE_MASK) &&
++	       !vmcb12_is_intercept(control, INTERCEPT_NMI))) {
++		return false;
++	}
++
+ 	return true;
+ }
+ 
+@@ -436,6 +441,9 @@ void nested_sync_control_from_vmcb02(struct vcpu_svm *svm)
+ 	if (nested_vgif_enabled(svm))
+ 		mask |= V_GIF_MASK;
+ 
++	if (nested_vnmi_enabled(svm))
++		mask |= V_NMI_BLOCKING_MASK | V_NMI_PENDING_MASK;
++
+ 	svm->nested.ctl.int_ctl        &= ~mask;
+ 	svm->nested.ctl.int_ctl        |= svm->vmcb->control.int_ctl & mask;
+ }
+@@ -655,6 +663,17 @@ static void nested_vmcb02_prepare_control(struct vcpu_svm *svm,
+ 	else
+ 		int_ctl_vmcb01_bits |= (V_GIF_MASK | V_GIF_ENABLE_MASK);
+ 
++	if (vnmi) {
++		if (vmcb01->control.int_ctl & V_NMI_PENDING_MASK) {
++			svm->vcpu.arch.nmi_pending++;
++			kvm_make_request(KVM_REQ_EVENT, &svm->vcpu);
++		}
++		if (nested_vnmi_enabled(svm))
++			int_ctl_vmcb12_bits |= (V_NMI_PENDING_MASK |
++						V_NMI_ENABLE_MASK |
++						V_NMI_BLOCKING_MASK);
++	}
++
+ 	/* Copied from vmcb01.  msrpm_base can be overwritten later.  */
+ 	vmcb02->control.nested_ctl = vmcb01->control.nested_ctl;
+ 	vmcb02->control.iopm_base_pa = vmcb01->control.iopm_base_pa;
+@@ -1055,6 +1074,20 @@ int nested_svm_vmexit(struct vcpu_svm *svm)
+ 		svm_update_lbrv(vcpu);
+ 	}
+ 
++	if (vnmi) {
++		if (vmcb02->control.int_ctl & V_NMI_BLOCKING_MASK)
++			vmcb01->control.int_ctl |= V_NMI_BLOCKING_MASK;
++		else
++			vmcb01->control.int_ctl &= ~V_NMI_BLOCKING_MASK;
++
++		if (vcpu->arch.nmi_pending) {
++			vcpu->arch.nmi_pending--;
++			vmcb01->control.int_ctl |= V_NMI_PENDING_MASK;
++		} else {
++			vmcb01->control.int_ctl &= ~V_NMI_PENDING_MASK;
++		}
++	}
++
+ 	/*
+ 	 * On vmexit the  GIF is set to false and
+ 	 * no event can be injected in L1.
+diff --git a/arch/x86/kvm/svm/svm.c b/arch/x86/kvm/svm/svm.c
+index 7a14c937a36d..e0ec95f1f068 100644
+--- a/arch/x86/kvm/svm/svm.c
++++ b/arch/x86/kvm/svm/svm.c
+@@ -4246,6 +4246,8 @@ static void svm_vcpu_after_set_cpuid(struct kvm_vcpu *vcpu)
+ 
+ 	svm->vgif_enabled = vgif && guest_cpuid_has(vcpu, X86_FEATURE_VGIF);
+ 
++	svm->vnmi_enabled = vnmi && guest_cpuid_has(vcpu, X86_FEATURE_VNMI);
++
+ 	svm_recalc_instruction_intercepts(vcpu, svm);
+ 
+ 	/* For sev guests, the memory encryption bit is not reserved in CR3.  */
+@@ -5001,6 +5003,9 @@ static __init void svm_set_cpu_caps(void)
+ 		if (vgif)
+ 			kvm_cpu_cap_set(X86_FEATURE_VGIF);
+ 
++		if (vnmi)
++			kvm_cpu_cap_set(X86_FEATURE_VNMI);
++
+ 		/* Nested VM can receive #VMEXIT instead of triggering #GP */
+ 		kvm_cpu_cap_set(X86_FEATURE_SVME_ADDR_CHK);
+ 	}
+diff --git a/arch/x86/kvm/svm/svm.h b/arch/x86/kvm/svm/svm.h
+index fb48c347bbe0..f44751dd8d5d 100644
+--- a/arch/x86/kvm/svm/svm.h
++++ b/arch/x86/kvm/svm/svm.h
+@@ -266,6 +266,7 @@ struct vcpu_svm {
+ 	bool pause_filter_enabled         : 1;
+ 	bool pause_threshold_enabled      : 1;
+ 	bool vgif_enabled                 : 1;
++	bool vnmi_enabled                 : 1;
+ 
+ 	u32 ldr_reg;
+ 	u32 dfr_reg;
+@@ -540,6 +541,12 @@ static inline bool nested_npt_enabled(struct vcpu_svm *svm)
+ 	return svm->nested.ctl.nested_ctl & SVM_NESTED_CTL_NP_ENABLE;
+ }
+ 
++static inline bool nested_vnmi_enabled(struct vcpu_svm *svm)
++{
++	return svm->vnmi_enabled &&
++	       (svm->nested.ctl.int_ctl & V_NMI_ENABLE_MASK);
++}
++
+ static inline bool is_x2apic_msrpm_offset(u32 offset)
+ {
+ 	/* 4 msrs per u8, and 4 u8 in u32 */

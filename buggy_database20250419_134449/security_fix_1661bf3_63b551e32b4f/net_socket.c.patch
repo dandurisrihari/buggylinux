@@ -1,0 +1,69 @@
+commit 1661bf364ae9c506bc8795fef70d1532931be1e8
+Author: Dan Carpenter <error27@gmail.com>
+Date:   Thu Oct 3 00:27:20 2013 +0300
+
+    net: heap overflow in __audit_sockaddr()
+    
+    We need to cap ->msg_namelen or it leads to a buffer overflow when we
+    to the memcpy() in __audit_sockaddr().  It requires CAP_AUDIT_CONTROL to
+    exploit this bug.
+    
+    The call tree is:
+    ___sys_recvmsg()
+      move_addr_to_user()
+        audit_sockaddr()
+          __audit_sockaddr()
+    
+    Reported-by: Jüri Aedla <juri.aedla@gmail.com>
+    Signed-off-by: Dan Carpenter <dan.carpenter@oracle.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/socket.c b/net/socket.c
+index ebed4b68f768..c226aceee65b 100644
+--- a/net/socket.c
++++ b/net/socket.c
+@@ -1964,6 +1964,16 @@ struct used_address {
+ 	unsigned int name_len;
+ };
+ 
++static int copy_msghdr_from_user(struct msghdr *kmsg,
++				 struct msghdr __user *umsg)
++{
++	if (copy_from_user(kmsg, umsg, sizeof(struct msghdr)))
++		return -EFAULT;
++	if (kmsg->msg_namelen > sizeof(struct sockaddr_storage))
++		return -EINVAL;
++	return 0;
++}
++
+ static int ___sys_sendmsg(struct socket *sock, struct msghdr __user *msg,
+ 			 struct msghdr *msg_sys, unsigned int flags,
+ 			 struct used_address *used_address)
+@@ -1982,8 +1992,11 @@ static int ___sys_sendmsg(struct socket *sock, struct msghdr __user *msg,
+ 	if (MSG_CMSG_COMPAT & flags) {
+ 		if (get_compat_msghdr(msg_sys, msg_compat))
+ 			return -EFAULT;
+-	} else if (copy_from_user(msg_sys, msg, sizeof(struct msghdr)))
+-		return -EFAULT;
++	} else {
++		err = copy_msghdr_from_user(msg_sys, msg);
++		if (err)
++			return err;
++	}
+ 
+ 	if (msg_sys->msg_iovlen > UIO_FASTIOV) {
+ 		err = -EMSGSIZE;
+@@ -2191,8 +2204,11 @@ static int ___sys_recvmsg(struct socket *sock, struct msghdr __user *msg,
+ 	if (MSG_CMSG_COMPAT & flags) {
+ 		if (get_compat_msghdr(msg_sys, msg_compat))
+ 			return -EFAULT;
+-	} else if (copy_from_user(msg_sys, msg, sizeof(struct msghdr)))
+-		return -EFAULT;
++	} else {
++		err = copy_msghdr_from_user(msg_sys, msg);
++		if (err)
++			return err;
++	}
+ 
+ 	if (msg_sys->msg_iovlen > UIO_FASTIOV) {
+ 		err = -EMSGSIZE;

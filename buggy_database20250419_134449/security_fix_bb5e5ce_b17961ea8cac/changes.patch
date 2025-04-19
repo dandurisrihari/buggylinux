@@ -1,0 +1,115 @@
+diff --git a/arch/x86/include/asm/kdebug.h b/arch/x86/include/asm/kdebug.h
+index d31881188431..29a594a3b82a 100644
+--- a/arch/x86/include/asm/kdebug.h
++++ b/arch/x86/include/asm/kdebug.h
+@@ -21,7 +21,6 @@ enum die_val {
+ 	DIE_NMIUNKNOWN,
+ };
+ 
+-extern void printk_address(unsigned long address);
+ extern void die(const char *, struct pt_regs *,long);
+ extern int __must_check __die(const char *, struct pt_regs *, long);
+ extern void show_stack_regs(struct pt_regs *regs);
+diff --git a/arch/x86/kernel/dumpstack.c b/arch/x86/kernel/dumpstack.c
+index 64281a1d4e48..f967652500fa 100644
+--- a/arch/x86/kernel/dumpstack.c
++++ b/arch/x86/kernel/dumpstack.c
+@@ -46,14 +46,7 @@ static void printk_stack_address(unsigned long address, int reliable,
+ 				 char *log_lvl)
+ {
+ 	touch_nmi_watchdog();
+-	printk("%s [<%p>] %s%pB\n",
+-		log_lvl, (void *)address, reliable ? "" : "? ",
+-		(void *)address);
+-}
+-
+-void printk_address(unsigned long address)
+-{
+-	pr_cont(" [<%p>] %pS\n", (void *)address, (void *)address);
++	printk("%s %s%pB\n", log_lvl, reliable ? "" : "? ", (void *)address);
+ }
+ 
+ void show_trace_log_lvl(struct task_struct *task, struct pt_regs *regs,
+@@ -275,14 +268,11 @@ int __die(const char *str, struct pt_regs *regs, long err)
+ 		sp = kernel_stack_pointer(regs);
+ 		savesegment(ss, ss);
+ 	}
+-	printk(KERN_EMERG "EIP: [<%08lx>] ", regs->ip);
+-	print_symbol("%s", regs->ip);
+-	printk(" SS:ESP %04x:%08lx\n", ss, sp);
++	printk(KERN_EMERG "EIP: %pS SS:ESP: %04x:%08lx\n",
++	       (void *)regs->ip, ss, sp);
+ #else
+ 	/* Executive summary in case the oops scrolled away */
+-	printk(KERN_ALERT "RIP ");
+-	printk_address(regs->ip);
+-	printk(" RSP <%016lx>\n", regs->sp);
++	printk(KERN_ALERT "RIP: %pS RSP: %016lx\n", (void *)regs->ip, regs->sp);
+ #endif
+ 	return 0;
+ }
+diff --git a/arch/x86/kernel/process_32.c b/arch/x86/kernel/process_32.c
+index bd7be8efdc4c..e3223bc78cb6 100644
+--- a/arch/x86/kernel/process_32.c
++++ b/arch/x86/kernel/process_32.c
+@@ -72,10 +72,9 @@ void __show_regs(struct pt_regs *regs, int all)
+ 		savesegment(gs, gs);
+ 	}
+ 
+-	printk(KERN_DEFAULT "EIP: %04x:[<%08lx>] EFLAGS: %08lx CPU: %d\n",
+-			(u16)regs->cs, regs->ip, regs->flags,
+-			smp_processor_id());
+-	print_symbol("EIP is at %s\n", regs->ip);
++	printk(KERN_DEFAULT "EIP: %pS\n", (void *)regs->ip);
++	printk(KERN_DEFAULT "EFLAGS: %08lx CPU: %d\n", regs->flags,
++		smp_processor_id());
+ 
+ 	printk(KERN_DEFAULT "EAX: %08lx EBX: %08lx ECX: %08lx EDX: %08lx\n",
+ 		regs->ax, regs->bx, regs->cx, regs->dx);
+diff --git a/arch/x86/kernel/process_64.c b/arch/x86/kernel/process_64.c
+index f1c36da4c9b5..c99f1ca35eb5 100644
+--- a/arch/x86/kernel/process_64.c
++++ b/arch/x86/kernel/process_64.c
+@@ -61,10 +61,10 @@ void __show_regs(struct pt_regs *regs, int all)
+ 	unsigned int fsindex, gsindex;
+ 	unsigned int ds, cs, es;
+ 
+-	printk(KERN_DEFAULT "RIP: %04lx:[<%016lx>] %pS\n", regs->cs & 0xffff,
+-			regs->ip, (void *)regs->ip);
++	printk(KERN_DEFAULT "RIP: %04lx:%pS\n", regs->cs & 0xffff,
++		(void *)regs->ip);
+ 	printk(KERN_DEFAULT "RSP: %04lx:%016lx EFLAGS: %08lx", regs->ss,
+-			regs->sp, regs->flags);
++		regs->sp, regs->flags);
+ 	if (regs->orig_ax != -1)
+ 		pr_cont(" ORIG_RAX: %016lx\n", regs->orig_ax);
+ 	else
+diff --git a/arch/x86/mm/fault.c b/arch/x86/mm/fault.c
+index 9f72ca3b2669..17c55a536fdd 100644
+--- a/arch/x86/mm/fault.c
++++ b/arch/x86/mm/fault.c
+@@ -679,8 +679,7 @@ show_fault_oops(struct pt_regs *regs, unsigned long error_code,
+ 		printk(KERN_CONT "paging request");
+ 
+ 	printk(KERN_CONT " at %p\n", (void *) address);
+-	printk(KERN_ALERT "IP:");
+-	printk_address(regs->ip);
++	printk(KERN_ALERT "IP: %pS\n", (void *)regs->ip);
+ 
+ 	dump_pagetable(address);
+ }
+diff --git a/arch/x86/platform/uv/uv_nmi.c b/arch/x86/platform/uv/uv_nmi.c
+index cd5173a2733f..8410e7d0a5b5 100644
+--- a/arch/x86/platform/uv/uv_nmi.c
++++ b/arch/x86/platform/uv/uv_nmi.c
+@@ -387,8 +387,8 @@ static void uv_nmi_dump_cpu_ip_hdr(void)
+ /* Dump Instruction Pointer info */
+ static void uv_nmi_dump_cpu_ip(int cpu, struct pt_regs *regs)
+ {
+-	pr_info("UV: %4d %6d %-32.32s ", cpu, current->pid, current->comm);
+-	printk_address(regs->ip);
++	pr_info("UV: %4d %6d %-32.32s %pS",
++		cpu, current->pid, current->comm, (void *)regs->ip);
+ }
+ 
+ /*

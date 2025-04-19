@@ -1,0 +1,271 @@
+diff --git a/drivers/scsi/qla2xxx/qla_def.h b/drivers/scsi/qla2xxx/qla_def.h
+index e0c5bb54b258..c2bc67c42648 100644
+--- a/drivers/scsi/qla2xxx/qla_def.h
++++ b/drivers/scsi/qla2xxx/qla_def.h
+@@ -372,10 +372,10 @@ struct device_reg_2xxx {
+ };
+ 
+ struct device_reg_25xxmq {
+-	volatile uint32_t req_q_in;
+-	volatile uint32_t req_q_out;
+-	volatile uint32_t rsp_q_in;
+-	volatile uint32_t rsp_q_out;
++	uint32_t req_q_in;
++	uint32_t req_q_out;
++	uint32_t rsp_q_in;
++	uint32_t rsp_q_out;
+ };
+ 
+ typedef union {
+@@ -2102,9 +2102,6 @@ struct isp_operations {
+ 
+ 	int (*get_flash_version) (struct scsi_qla_host *, void *);
+ 	int (*start_scsi) (srb_t *);
+-	void (*wrt_req_reg) (struct qla_hw_data *, uint16_t, uint16_t);
+-	void (*wrt_rsp_reg) (struct qla_hw_data *, uint16_t, uint16_t);
+-	uint16_t (*rd_req_reg) (struct qla_hw_data *, uint16_t);
+ };
+ 
+ /* MSI-X Support *************************************************************/
+@@ -2200,6 +2197,8 @@ struct rsp_que {
+ 	dma_addr_t  dma;
+ 	response_t *ring;
+ 	response_t *ring_ptr;
++	uint32_t __iomem *rsp_q_in;	/* FWI2-capable only. */
++	uint32_t __iomem *rsp_q_out;
+ 	uint16_t  ring_index;
+ 	uint16_t  out_ptr;
+ 	uint16_t  length;
+@@ -2217,6 +2216,8 @@ struct req_que {
+ 	dma_addr_t  dma;
+ 	request_t *ring;
+ 	request_t *ring_ptr;
++	uint32_t __iomem *req_q_in;	/* FWI2-capable only. */
++	uint32_t __iomem *req_q_out;
+ 	uint16_t  ring_index;
+ 	uint16_t  in_ptr;
+ 	uint16_t  cnt;
+@@ -2277,7 +2278,7 @@ struct qla_hw_data {
+ 
+ #define MIN_IOBASE_LEN          0x100
+ /* Multi queue data structs */
+-	device_reg_t    *mqiobase;
++	device_reg_t __iomem *mqiobase;
+ 	uint16_t        msix_count;
+ 	uint8_t         mqenable;
+ 	struct req_que **req_q_map;
+diff --git a/drivers/scsi/qla2xxx/qla_iocb.c b/drivers/scsi/qla2xxx/qla_iocb.c
+index 2258152b1f41..a8abbb95730d 100644
+--- a/drivers/scsi/qla2xxx/qla_iocb.c
++++ b/drivers/scsi/qla2xxx/qla_iocb.c
+@@ -776,7 +776,7 @@ qla24xx_start_scsi(srb_t *sp)
+ 
+ 	req_cnt = qla24xx_calc_iocbs(tot_dsds);
+ 	if (req->cnt < (req_cnt + 2)) {
+-		cnt = ha->isp_ops->rd_req_reg(ha, req->id);
++		cnt = RD_REG_DWORD_RELAXED(req->req_q_out);
+ 
+ 		if (req->ring_index < cnt)
+ 			req->cnt = cnt - req->ring_index;
+@@ -836,7 +836,8 @@ qla24xx_start_scsi(srb_t *sp)
+ 	sp->flags |= SRB_DMA_VALID;
+ 
+ 	/* Set chip new ring index. */
+-	ha->isp_ops->wrt_req_reg(ha, req->id, req->ring_index);
++	WRT_REG_DWORD(req->req_q_in, req->ring_index);
++	RD_REG_DWORD_RELAXED(&ha->iobase->isp24.hccr);
+ 
+ 	/* Manage unprocessed RIO/ZIO commands in response queue. */
+ 	if (vha->flags.process_response_queue &&
+@@ -854,35 +855,3 @@ qla24xx_start_scsi(srb_t *sp)
+ 
+ 	return QLA_FUNCTION_FAILED;
+ }
+-
+-uint16_t
+-qla24xx_rd_req_reg(struct qla_hw_data *ha, uint16_t id)
+-{
+-	device_reg_t __iomem *reg = (void *) ha->iobase;
+-	return RD_REG_DWORD_RELAXED(&reg->isp24.req_q_out);
+-}
+-
+-uint16_t
+-qla25xx_rd_req_reg(struct qla_hw_data *ha, uint16_t id)
+-{
+-	device_reg_t __iomem *reg = (void *) ha->mqiobase + QLA_QUE_PAGE * id;
+-	return RD_REG_DWORD_RELAXED(&reg->isp25mq.req_q_out);
+-}
+-
+-void
+-qla24xx_wrt_req_reg(struct qla_hw_data *ha, uint16_t id, uint16_t index)
+-{
+-	device_reg_t __iomem *reg = (void *) ha->iobase;
+-	WRT_REG_DWORD(&reg->isp24.req_q_in, index);
+-	RD_REG_DWORD_RELAXED(&reg->isp24.req_q_in);
+-}
+-
+-void
+-qla25xx_wrt_req_reg(struct qla_hw_data *ha, uint16_t id, uint16_t index)
+-{
+-	device_reg_t __iomem *reg = (void *) ha->mqiobase + QLA_QUE_PAGE * id;
+-	struct device_reg_2xxx __iomem *ioreg = &ha->iobase->isp;
+-	WRT_REG_DWORD(&reg->isp25mq.req_q_in, index);
+-	RD_REG_DWORD(&ioreg->hccr); /* PCI posting */
+-}
+-
+diff --git a/drivers/scsi/qla2xxx/qla_isr.c b/drivers/scsi/qla2xxx/qla_isr.c
+index f250e5b7897c..8e91f4aec977 100644
+--- a/drivers/scsi/qla2xxx/qla_isr.c
++++ b/drivers/scsi/qla2xxx/qla_isr.c
+@@ -1499,7 +1499,6 @@ qla24xx_mbx_completion(scsi_qla_host_t *vha, uint16_t mb0)
+ void
+ qla24xx_process_response_queue(struct rsp_que *rsp)
+ {
+-	struct qla_hw_data *ha = rsp->hw;
+ 	struct sts_entry_24xx *pkt;
+ 	struct scsi_qla_host *vha;
+ 
+@@ -1553,7 +1552,7 @@ qla24xx_process_response_queue(struct rsp_que *rsp)
+ 	}
+ 
+ 	/* Adjust ring index */
+-	ha->isp_ops->wrt_rsp_reg(ha, rsp->id, rsp->ring_index);
++	WRT_REG_DWORD(rsp->rsp_q_out, rsp->ring_index);
+ }
+ 
+ static void
+@@ -2117,18 +2116,3 @@ int qla25xx_request_irq(struct rsp_que *rsp)
+ 	msix->rsp = rsp;
+ 	return ret;
+ }
+-
+-void
+-qla25xx_wrt_rsp_reg(struct qla_hw_data *ha, uint16_t id, uint16_t index)
+-{
+-	device_reg_t __iomem *reg = (void *) ha->mqiobase + QLA_QUE_PAGE * id;
+-	WRT_REG_DWORD(&reg->isp25mq.rsp_q_out, index);
+-}
+-
+-void
+-qla24xx_wrt_rsp_reg(struct qla_hw_data *ha, uint16_t id, uint16_t index)
+-{
+-	device_reg_t __iomem *reg = (void *) ha->iobase;
+-	WRT_REG_DWORD(&reg->isp24.rsp_q_out, index);
+-}
+-
+diff --git a/drivers/scsi/qla2xxx/qla_mid.c b/drivers/scsi/qla2xxx/qla_mid.c
+index 785c61279e6e..e2bd36e7e885 100644
+--- a/drivers/scsi/qla2xxx/qla_mid.c
++++ b/drivers/scsi/qla2xxx/qla_mid.c
+@@ -584,6 +584,7 @@ qla25xx_create_req_que(struct qla_hw_data *ha, uint16_t options,
+ 	struct req_que *req = NULL;
+ 	struct scsi_qla_host *base_vha = pci_get_drvdata(ha->pdev);
+ 	uint16_t que_id = 0;
++	device_reg_t __iomem *reg;
+ 
+ 	req = kzalloc(sizeof(struct req_que), GFP_KERNEL);
+ 	if (req == NULL) {
+@@ -631,6 +632,9 @@ qla25xx_create_req_que(struct qla_hw_data *ha, uint16_t options,
+ 	req->ring_index = 0;
+ 	req->cnt = req->length;
+ 	req->id = que_id;
++	reg = ISP_QUE_REG(ha, que_id);
++	req->req_q_in = &reg->isp25mq.req_q_in;
++	req->req_q_out = &reg->isp25mq.req_q_out;
+ 	req->max_q_depth = ha->req_q_map[0]->max_q_depth;
+ 	mutex_unlock(&ha->vport_lock);
+ 
+@@ -658,7 +662,8 @@ qla25xx_create_rsp_que(struct qla_hw_data *ha, uint16_t options,
+ 	int ret = 0;
+ 	struct rsp_que *rsp = NULL;
+ 	struct scsi_qla_host *base_vha = pci_get_drvdata(ha->pdev);
+-	uint16_t que_id = 0;;
++	uint16_t que_id = 0;
++	device_reg_t __iomem *reg;
+ 
+ 	rsp = kzalloc(sizeof(struct rsp_que), GFP_KERNEL);
+ 	if (rsp == NULL) {
+@@ -706,6 +711,9 @@ qla25xx_create_rsp_que(struct qla_hw_data *ha, uint16_t options,
+ 	rsp->ring_ptr = rsp->ring;
+ 	rsp->ring_index = 0;
+ 	rsp->id = que_id;
++	reg = ISP_QUE_REG(ha, que_id);
++	rsp->rsp_q_in = &reg->isp25mq.rsp_q_in;
++	rsp->rsp_q_out = &reg->isp25mq.rsp_q_out;
+ 	mutex_unlock(&ha->vport_lock);
+ 
+ 	ret = qla25xx_request_irq(rsp);
+diff --git a/drivers/scsi/qla2xxx/qla_os.c b/drivers/scsi/qla2xxx/qla_os.c
+index 3ddfa889e949..a6761ff73e24 100644
+--- a/drivers/scsi/qla2xxx/qla_os.c
++++ b/drivers/scsi/qla2xxx/qla_os.c
+@@ -1351,9 +1351,6 @@ static struct isp_operations qla2100_isp_ops = {
+ 	.write_optrom		= qla2x00_write_optrom_data,
+ 	.get_flash_version	= qla2x00_get_flash_version,
+ 	.start_scsi		= qla2x00_start_scsi,
+-	.wrt_req_reg		= NULL,
+-	.wrt_rsp_reg		= NULL,
+-	.rd_req_reg		= NULL,
+ };
+ 
+ static struct isp_operations qla2300_isp_ops = {
+@@ -1389,9 +1386,6 @@ static struct isp_operations qla2300_isp_ops = {
+ 	.write_optrom		= qla2x00_write_optrom_data,
+ 	.get_flash_version	= qla2x00_get_flash_version,
+ 	.start_scsi		= qla2x00_start_scsi,
+-	.wrt_req_reg		= NULL,
+-	.wrt_rsp_reg		= NULL,
+-	.rd_req_reg		= NULL,
+ };
+ 
+ static struct isp_operations qla24xx_isp_ops = {
+@@ -1427,9 +1421,6 @@ static struct isp_operations qla24xx_isp_ops = {
+ 	.write_optrom		= qla24xx_write_optrom_data,
+ 	.get_flash_version	= qla24xx_get_flash_version,
+ 	.start_scsi		= qla24xx_start_scsi,
+-	.wrt_req_reg		= qla24xx_wrt_req_reg,
+-	.wrt_rsp_reg		= qla24xx_wrt_rsp_reg,
+-	.rd_req_reg		= qla24xx_rd_req_reg,
+ };
+ 
+ static struct isp_operations qla25xx_isp_ops = {
+@@ -1465,9 +1456,6 @@ static struct isp_operations qla25xx_isp_ops = {
+ 	.write_optrom		= qla24xx_write_optrom_data,
+ 	.get_flash_version	= qla24xx_get_flash_version,
+ 	.start_scsi		= qla24xx_start_scsi,
+-	.wrt_req_reg		= qla24xx_wrt_req_reg,
+-	.wrt_rsp_reg		= qla24xx_wrt_rsp_reg,
+-	.rd_req_reg		= qla24xx_rd_req_reg,
+ };
+ 
+ static struct isp_operations qla81xx_isp_ops = {
+@@ -1503,9 +1491,6 @@ static struct isp_operations qla81xx_isp_ops = {
+ 	.write_optrom		= qla24xx_write_optrom_data,
+ 	.get_flash_version	= qla24xx_get_flash_version,
+ 	.start_scsi		= qla24xx_start_scsi,
+-	.wrt_req_reg		= qla24xx_wrt_req_reg,
+-	.wrt_rsp_reg		= qla24xx_wrt_rsp_reg,
+-	.rd_req_reg		= qla24xx_rd_req_reg,
+ };
+ 
+ static inline void
+@@ -1927,10 +1912,16 @@ qla2x00_probe_one(struct pci_dev *pdev, const struct pci_device_id *id)
+ 	ha->rsp_q_map[0] = rsp;
+ 	ha->req_q_map[0] = req;
+ 
++	/* FWI2-capable only. */
++	req->req_q_in = &ha->iobase->isp24.req_q_in;
++	req->req_q_out = &ha->iobase->isp24.req_q_out;
++	rsp->rsp_q_in = &ha->iobase->isp24.rsp_q_in;
++	rsp->rsp_q_out = &ha->iobase->isp24.rsp_q_out;
+ 	if (ha->mqenable) {
+-		ha->isp_ops->wrt_req_reg = qla25xx_wrt_req_reg;
+-		ha->isp_ops->wrt_rsp_reg = qla25xx_wrt_rsp_reg;
+-		ha->isp_ops->rd_req_reg = qla25xx_rd_req_reg;
++		req->req_q_in = &ha->mqiobase->isp25mq.req_q_in;
++		req->req_q_out = &ha->mqiobase->isp25mq.req_q_out;
++		rsp->rsp_q_in = &ha->mqiobase->isp25mq.rsp_q_in;
++		rsp->rsp_q_out =  &ha->mqiobase->isp25mq.rsp_q_out;
+ 	}
+ 
+ 	if (qla2x00_initialize_adapter(base_vha)) {

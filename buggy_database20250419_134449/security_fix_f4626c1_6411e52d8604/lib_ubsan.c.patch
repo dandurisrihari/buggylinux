@@ -1,0 +1,56 @@
+commit f4626c12e4b538f757a73d08f4d86d564175b4f7
+Author: Kees Cook <kees@kernel.org>
+Date:   Mon Apr 15 11:28:35 2024 -0700
+
+    ubsan: Add awareness of signed integer overflow traps
+    
+    On arm64, UBSAN traps can be decoded from the trap instruction. Add the
+    add, sub, and mul overflow trap codes now that CONFIG_UBSAN_SIGNED_WRAP
+    exists. Seen under clang 19:
+    
+      Internal error: UBSAN: unrecognized failure code: 00000000f2005515 [#1] PREEMPT SMP
+    
+    Reported-by: Nathan Chancellor <nathan@kernel.org>
+    Closes: https://lore.kernel.org/lkml/20240411-fix-ubsan-in-hardening-config-v1-0-e0177c80ffaa@kernel.org
+    Fixes: 557f8c582a9b ("ubsan: Reintroduce signed overflow sanitizer")
+    Tested-by: Nathan Chancellor <nathan@kernel.org>
+    Link: https://lore.kernel.org/r/20240415182832.work.932-kees@kernel.org
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+
+diff --git a/lib/ubsan.c b/lib/ubsan.c
+index 5fc107f61934..a1c983d148f1 100644
+--- a/lib/ubsan.c
++++ b/lib/ubsan.c
+@@ -44,9 +44,10 @@ const char *report_ubsan_failure(struct pt_regs *regs, u32 check_type)
+ 	case ubsan_shift_out_of_bounds:
+ 		return "UBSAN: shift out of bounds";
+ #endif
+-#ifdef CONFIG_UBSAN_DIV_ZERO
++#if defined(CONFIG_UBSAN_DIV_ZERO) || defined(CONFIG_UBSAN_SIGNED_WRAP)
+ 	/*
+-	 * SanitizerKind::IntegerDivideByZero emits
++	 * SanitizerKind::IntegerDivideByZero and
++	 * SanitizerKind::SignedIntegerOverflow emit
+ 	 * SanitizerHandler::DivremOverflow.
+ 	 */
+ 	case ubsan_divrem_overflow:
+@@ -77,6 +78,19 @@ const char *report_ubsan_failure(struct pt_regs *regs, u32 check_type)
+ 		return "UBSAN: alignment assumption";
+ 	case ubsan_type_mismatch:
+ 		return "UBSAN: type mismatch";
++#endif
++#ifdef CONFIG_UBSAN_SIGNED_WRAP
++	/*
++	 * SanitizerKind::SignedIntegerOverflow emits
++	 * SanitizerHandler::AddOverflow, SanitizerHandler::SubOverflow,
++	 * or SanitizerHandler::MulOverflow.
++	 */
++	case ubsan_add_overflow:
++		return "UBSAN: integer addition overflow";
++	case ubsan_sub_overflow:
++		return "UBSAN: integer subtraction overflow";
++	case ubsan_mul_overflow:
++		return "UBSAN: integer multiplication overflow";
+ #endif
+ 	default:
+ 		return "UBSAN: unrecognized failure code";

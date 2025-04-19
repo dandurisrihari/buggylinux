@@ -1,0 +1,37 @@
+commit 0e8bc06a2fbb4d6b688baa8e2416cd07f9453595
+Author: David Hildenbrand <dahi@linux.vnet.ibm.com>
+Date:   Wed Nov 4 13:47:58 2015 +0100
+
+    KVM: s390: PSW forwarding / rewinding / ilc rework
+    
+    We have some confusion about ilc vs. ilen in our current code. So let's
+    correctly use the term ilen when dealing with (ilc << 1).
+    
+    Program irq injection didn't take care of the correct ilc in case of
+    irqs triggered by EXECUTE functions, let's provide one function
+    kvm_s390_get_ilen() to take care of all that.
+    
+    Also, manually specifying in intercept handlers the size of the
+    instruction (and sometimes overwriting that value for EXECUTE internally)
+    doesn't make too much sense. So also provide the functions:
+    - kvm_s390_retry_instr to retry the currently intercepted instruction
+    - kvm_s390_rewind_psw to rewind the PSW without internal overwrites
+    - kvm_s390_forward_psw to forward the PSW
+    
+    Reviewed-by: Christian Borntraeger <borntraeger@de.ibm.com>
+    Signed-off-by: David Hildenbrand <dahi@linux.vnet.ibm.com>
+    Signed-off-by: Christian Borntraeger <borntraeger@de.ibm.com>
+
+diff --git a/arch/s390/kvm/kvm-s390.c b/arch/s390/kvm/kvm-s390.c
+index 2270fe4c8b71..cd84a3eeb214 100644
+--- a/arch/s390/kvm/kvm-s390.c
++++ b/arch/s390/kvm/kvm-s390.c
+@@ -2181,7 +2181,7 @@ static int vcpu_post_run_fault_in_sie(struct kvm_vcpu *vcpu)
+ 	rc = read_guest(vcpu, psw->addr, 0, &opcode, 1);
+ 	if (rc)
+ 		return kvm_s390_inject_prog_cond(vcpu, rc);
+-	psw->addr = __rewind_psw(*psw, -insn_length(opcode));
++	kvm_s390_forward_psw(vcpu, insn_length(opcode));
+ 
+ 	return kvm_s390_inject_program_int(vcpu, PGM_ADDRESSING);
+ }

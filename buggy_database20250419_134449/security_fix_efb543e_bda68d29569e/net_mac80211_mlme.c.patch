@@ -1,0 +1,176 @@
+commit efb543e61cc3a2e75ffbe52f9b4cfcb850d812fd
+Author: Jouni Malinen <quic_jouni@quicinc.com>
+Date:   Thu Oct 11 00:21:21 2018 +0300
+
+    mac80211: Extend SAE authentication in infra BSS STA mode
+    
+    Previous implementation of SAE authentication in infrastructure BSS was
+    somewhat restricting and not exactly clean way of handling the two
+    auth() operations. This ended up removing and re-adding the STA entry
+    for the AP in the middle of authentication and also messing up
+    authentication state tracking through the sequence of four
+    Authentication frames. Furthermore, this did not work if the AP ended up
+    sending out SAE Confirm (auth trans #2) immediately after SAE Commit
+    (auth trans #1) before the station had time to transmit its SAE Confirm.
+    
+    Clean up authentication state handling for the SAE case to allow two
+    rounds of auth() calls without dropping all state between those
+    operations. Track peer Confirmed status and mark authentication
+    completed only once both ends have confirmed.
+    
+    ieee80211_mgd_auth() check for EBUSY cases is now handling only the
+    pending association (ifmgd->assoc_data) while all pending authentication
+    (ifmgd->auth_data) cases are allowed to proceed to allow user space to
+    start a new connection attempt from scratch even if the previously
+    requested authentication is still waiting completion. This is needed to
+    avoid making SAE error cases with retries take excessive amount of time
+    with no means for the user space to stop that (apart from setting the
+    netdev down).
+    
+    As an extra bonus, the end of ieee80211_rx_mgmt_auth() can be cleaned up
+    to avoid the extra copy of the cfg80211_rx_mlme_mgmt() call for ongoing
+    SAE authentication since the new ieee80211_mark_sta_auth() helper
+    function can handle both completion of authentication and updates to the
+    STA entry under the same condition and there is no need to return from
+    the function between those operations.
+    
+    Signed-off-by: Jouni Malinen <jouni@codeaurora.org>
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+diff --git a/net/mac80211/mlme.c b/net/mac80211/mlme.c
+index 1818dbc5622d..d2bc8d57c87e 100644
+--- a/net/mac80211/mlme.c
++++ b/net/mac80211/mlme.c
+@@ -2764,8 +2764,15 @@ static void ieee80211_auth_challenge(struct ieee80211_sub_if_data *sdata,
+ static bool ieee80211_mark_sta_auth(struct ieee80211_sub_if_data *sdata,
+ 				    const u8 *bssid)
+ {
++	struct ieee80211_if_managed *ifmgd = &sdata->u.mgd;
+ 	struct sta_info *sta;
+ 
++	sdata_info(sdata, "authenticated\n");
++	ifmgd->auth_data->done = true;
++	ifmgd->auth_data->timeout = jiffies + IEEE80211_AUTH_WAIT_ASSOC;
++	ifmgd->auth_data->timeout_started = true;
++	run_again(sdata, ifmgd->auth_data->timeout);
++
+ 	/* move station state to auth */
+ 	mutex_lock(&sdata->local->sta_mtx);
+ 	sta = sta_info_get(sdata, bssid);
+@@ -2811,7 +2818,11 @@ static void ieee80211_rx_mgmt_auth(struct ieee80211_sub_if_data *sdata,
+ 	status_code = le16_to_cpu(mgmt->u.auth.status_code);
+ 
+ 	if (auth_alg != ifmgd->auth_data->algorithm ||
+-	    auth_transaction != ifmgd->auth_data->expected_transaction) {
++	    (auth_alg != WLAN_AUTH_SAE &&
++	     auth_transaction != ifmgd->auth_data->expected_transaction) ||
++	    (auth_alg == WLAN_AUTH_SAE &&
++	     (auth_transaction < ifmgd->auth_data->expected_transaction ||
++	      auth_transaction > 2))) {
+ 		sdata_info(sdata, "%pM unexpected authentication state: alg %d (expected %d) transact %d (expected %d)\n",
+ 			   mgmt->sa, auth_alg, ifmgd->auth_data->algorithm,
+ 			   auth_transaction,
+@@ -2854,25 +2865,17 @@ static void ieee80211_rx_mgmt_auth(struct ieee80211_sub_if_data *sdata,
+ 
+ 	event.u.mlme.status = MLME_SUCCESS;
+ 	drv_event_callback(sdata->local, sdata, &event);
+-	sdata_info(sdata, "authenticated\n");
+-	ifmgd->auth_data->done = true;
+-	ifmgd->auth_data->timeout = jiffies + IEEE80211_AUTH_WAIT_ASSOC;
+-	ifmgd->auth_data->timeout_started = true;
+-	run_again(sdata, ifmgd->auth_data->timeout);
+-
+-	if (ifmgd->auth_data->algorithm == WLAN_AUTH_SAE &&
+-	    ifmgd->auth_data->expected_transaction != 2) {
+-		/*
+-		 * Report auth frame to user space for processing since another
+-		 * round of Authentication frames is still needed.
+-		 */
+-		cfg80211_rx_mlme_mgmt(sdata->dev, (u8 *)mgmt, len);
+-		return;
++	if (ifmgd->auth_data->algorithm != WLAN_AUTH_SAE ||
++	    (auth_transaction == 2 &&
++	     ifmgd->auth_data->expected_transaction == 2)) {
++		if (!ieee80211_mark_sta_auth(sdata, bssid))
++			goto out_err;
++	} else if (ifmgd->auth_data->algorithm == WLAN_AUTH_SAE &&
++		   auth_transaction == 2) {
++		sdata_info(sdata, "SAE peer confirmed\n");
++		ifmgd->auth_data->peer_confirmed = true;
+ 	}
+ 
+-	if (!ieee80211_mark_sta_auth(sdata, bssid))
+-		goto out_err;
+-
+ 	cfg80211_rx_mlme_mgmt(sdata->dev, (u8 *)mgmt, len);
+ 	return;
+  out_err:
+@@ -4888,6 +4891,7 @@ int ieee80211_mgd_auth(struct ieee80211_sub_if_data *sdata,
+ 	struct ieee80211_mgd_auth_data *auth_data;
+ 	u16 auth_alg;
+ 	int err;
++	bool cont_auth;
+ 
+ 	/* prepare auth data structure */
+ 
+@@ -4922,8 +4926,7 @@ int ieee80211_mgd_auth(struct ieee80211_sub_if_data *sdata,
+ 		return -EOPNOTSUPP;
+ 	}
+ 
+-	if ((ifmgd->auth_data && !ifmgd->auth_data->done) ||
+-	    ifmgd->assoc_data)
++	if (ifmgd->assoc_data)
+ 		return -EBUSY;
+ 
+ 	auth_data = kzalloc(sizeof(*auth_data) + req->auth_data_len +
+@@ -4945,6 +4948,13 @@ int ieee80211_mgd_auth(struct ieee80211_sub_if_data *sdata,
+ 		auth_data->data_len += req->auth_data_len - 4;
+ 	}
+ 
++	/* Check if continuing authentication or trying to authenticate with the
++	 * same BSS that we were in the process of authenticating with and avoid
++	 * removal and re-addition of the STA entry in
++	 * ieee80211_prep_connection().
++	 */
++	cont_auth = ifmgd->auth_data && req->bss == ifmgd->auth_data->bss;
++
+ 	if (req->ie && req->ie_len) {
+ 		memcpy(&auth_data->data[auth_data->data_len],
+ 		       req->ie, req->ie_len);
+@@ -4961,12 +4971,26 @@ int ieee80211_mgd_auth(struct ieee80211_sub_if_data *sdata,
+ 
+ 	/* try to authenticate/probe */
+ 
+-	if (ifmgd->auth_data)
+-		ieee80211_destroy_auth_data(sdata, false);
++	if (ifmgd->auth_data) {
++		if (cont_auth && req->auth_type == NL80211_AUTHTYPE_SAE) {
++			auth_data->peer_confirmed =
++				ifmgd->auth_data->peer_confirmed;
++		}
++		ieee80211_destroy_auth_data(sdata, cont_auth);
++	}
+ 
+ 	/* prep auth_data so we don't go into idle on disassoc */
+ 	ifmgd->auth_data = auth_data;
+ 
++	/* If this is continuation of an ongoing SAE authentication exchange
++	 * (i.e., request to send SAE Confirm) and the peer has already
++	 * confirmed, mark authentication completed since we are about to send
++	 * out SAE Confirm.
++	 */
++	if (cont_auth && req->auth_type == NL80211_AUTHTYPE_SAE &&
++	    auth_data->peer_confirmed && auth_data->sae_trans == 2)
++		ieee80211_mark_sta_auth(sdata, req->bss->bssid);
++
+ 	if (ifmgd->associated) {
+ 		u8 frame_buf[IEEE80211_DEAUTH_FRAME_LEN];
+ 
+@@ -4984,7 +5008,7 @@ int ieee80211_mgd_auth(struct ieee80211_sub_if_data *sdata,
+ 
+ 	sdata_info(sdata, "authenticate with %pM\n", req->bss->bssid);
+ 
+-	err = ieee80211_prep_connection(sdata, req->bss, false, false);
++	err = ieee80211_prep_connection(sdata, req->bss, cont_auth, false);
+ 	if (err)
+ 		goto err_clear;

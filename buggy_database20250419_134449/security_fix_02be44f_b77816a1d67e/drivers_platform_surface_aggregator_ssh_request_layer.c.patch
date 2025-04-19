@@ -1,0 +1,86 @@
+commit 02be44f6b5a9e4ff1215d337ac4d2a6fbafc7874
+Author: Maximilian Luz <luzmaximilian@gmail.com>
+Date:   Mon Dec 21 19:39:55 2020 +0100
+
+    platform/surface: aggregator: Add error injection capabilities
+    
+    This commit adds error injection hooks to the Surface Serial Hub
+    communication protocol implementation, to:
+    
+     - simulate simple serial transmission errors,
+    
+     - drop packets, requests, and responses, simulating communication
+       failures and potentially trigger retransmission timeouts, as well as
+    
+     - inject invalid data into submitted and received packets.
+    
+    Together with the trace points introduced in the previous commit, these
+    facilities are intended to aid in testing, validation, and debugging of
+    the Surface Aggregator communication layer.
+    
+    Signed-off-by: Maximilian Luz <luzmaximilian@gmail.com>
+    Reviewed-by: Hans de Goede <hdegoede@redhat.com>
+    Acked-by: Steven Rostedt (VMware) <rostedt@goodmis.org>
+    Link: https://lore.kernel.org/r/20201221183959.1186143-6-luzmaximilian@gmail.com
+    Signed-off-by: Hans de Goede <hdegoede@redhat.com>
+
+diff --git a/drivers/platform/surface/aggregator/ssh_request_layer.c b/drivers/platform/surface/aggregator/ssh_request_layer.c
+index b649d71840fd..bb1c862411a2 100644
+--- a/drivers/platform/surface/aggregator/ssh_request_layer.c
++++ b/drivers/platform/surface/aggregator/ssh_request_layer.c
+@@ -8,6 +8,7 @@
+ #include <asm/unaligned.h>
+ #include <linux/atomic.h>
+ #include <linux/completion.h>
++#include <linux/error-injection.h>
+ #include <linux/ktime.h>
+ #include <linux/limits.h>
+ #include <linux/list.h>
+@@ -58,6 +59,30 @@
+  */
+ #define SSH_RTL_TX_BATCH		10
+ 
++#ifdef CONFIG_SURFACE_AGGREGATOR_ERROR_INJECTION
++
++/**
++ * ssh_rtl_should_drop_response() - Error injection hook to drop request
++ * responses.
++ *
++ * Useful to cause request transmission timeouts in the driver by dropping the
++ * response to a request.
++ */
++static noinline bool ssh_rtl_should_drop_response(void)
++{
++	return false;
++}
++ALLOW_ERROR_INJECTION(ssh_rtl_should_drop_response, TRUE);
++
++#else
++
++static inline bool ssh_rtl_should_drop_response(void)
++{
++	return false;
++}
++
++#endif
++
+ static u16 ssh_request_get_rqid(struct ssh_request *rqst)
+ {
+ 	return get_unaligned_le16(rqst->packet.data.ptr
+@@ -459,6 +484,16 @@ static void ssh_rtl_complete(struct ssh_rtl *rtl,
+ 		if (unlikely(ssh_request_get_rqid(p) != rqid))
+ 			continue;
+ 
++		/* Simulate response timeout. */
++		if (ssh_rtl_should_drop_response()) {
++			spin_unlock(&rtl->pending.lock);
++
++			trace_ssam_ei_rx_drop_response(p);
++			rtl_info(rtl, "request error injection: dropping response for request %p\n",
++				 &p->packet);
++			return;
++		}
++
+ 		/*
+ 		 * Mark as "response received" and "locked" as we're going to
+ 		 * complete it.

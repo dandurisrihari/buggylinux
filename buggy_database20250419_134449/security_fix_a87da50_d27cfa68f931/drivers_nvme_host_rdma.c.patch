@@ -1,0 +1,36 @@
+commit a87da50f39d467f2ea4c1f98decb72ef6d87a31e
+Author: Chao Leng <lengchao@huawei.com>
+Date:   Mon Oct 12 16:55:37 2020 +0800
+
+    nvme-rdma: fix crash due to incorrect cqe
+    
+    A crash happened due to injecting error test.
+    When a CQE has incorrect command id due do an error injection, the host
+    may find a request which is already freed.  Dereferencing req->mr->rkey
+    causes a crash in nvme_rdma_process_nvme_rsp because the mr is already
+    freed.
+    
+    Add a check for the mr to fix it.
+    
+    Signed-off-by: Chao Leng <lengchao@huawei.com>
+    Reviewed-by: Sagi Grimberg <sagi@grimberg.me>
+    Signed-off-by: Christoph Hellwig <hch@lst.de>
+
+diff --git a/drivers/nvme/host/rdma.c b/drivers/nvme/host/rdma.c
+index 116902b1b2c3..aad829a2b50d 100644
+--- a/drivers/nvme/host/rdma.c
++++ b/drivers/nvme/host/rdma.c
+@@ -1730,10 +1730,11 @@ static void nvme_rdma_process_nvme_rsp(struct nvme_rdma_queue *queue,
+ 	req->result = cqe->result;
+ 
+ 	if (wc->wc_flags & IB_WC_WITH_INVALIDATE) {
+-		if (unlikely(wc->ex.invalidate_rkey != req->mr->rkey)) {
++		if (unlikely(!req->mr ||
++			     wc->ex.invalidate_rkey != req->mr->rkey)) {
+ 			dev_err(queue->ctrl->ctrl.device,
+ 				"Bogus remote invalidation for rkey %#x\n",
+-				req->mr->rkey);
++				req->mr ? req->mr->rkey : 0);
+ 			nvme_rdma_error_recovery(queue->ctrl);
+ 		}
+ 	} else if (req->mr) {

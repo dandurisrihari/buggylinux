@@ -1,0 +1,95 @@
+commit 93da6af3ae563b7dbc60d97b5872109822d7bf0a
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Tue Dec 10 17:33:02 2024 -0800
+
+    KVM: x86: Defer runtime updates of dynamic CPUID bits until CPUID emulation
+    
+    Defer runtime CPUID updates until the next non-faulting CPUID emulation
+    or KVM_GET_CPUID2, which are the only paths in KVM that consume the
+    dynamic entries.  Deferring the updates is especially beneficial to
+    nested VM-Enter/VM-Exit, as KVM will almost always detect multiple state
+    changes, not to mention the updates don't need to be realized while L2 is
+    active if CPUID is being intercepted by L1 (CPUID is a mandatory intercept
+    on Intel, but not AMD).
+    
+    Deferring CPUID updates shaves several hundred cycles from nested VMX
+    roundtrips, as measured from L2 executing CPUID in a tight loop:
+    
+      SKX 6850 => 6450
+      ICX 9000 => 8800
+      EMR 7900 => 7700
+    
+    Alternatively, KVM could update only the CPUID leaves that are affected
+    by the state change, e.g. update XSAVE info only if XCR0 or XSS changes,
+    but that adds non-trivial complexity and doesn't solve the underlying
+    problem of nested transitions potentially changing both XCR0 and XSS, on
+    both nested VM-Enter and VM-Exit.
+    
+    Skipping updates entirely if L2 is active and CPUID is being intercepted
+    by L1 could work for the common case.  However, simply skipping updates if
+    L2 is active is *very* subtly dangerous and complex.  Most KVM updates are
+    triggered by changes to the current vCPU state, which may be L2 state,
+    whereas performing updates only for L1 would requiring detecting changes
+    to L1 state.  KVM would need to either track relevant L1 state, or defer
+    runtime CPUID updates until the next nested VM-Exit.  The former is ugly
+    and complex, while the latter comes with similar dangers to deferring all
+    CPUID updates, and would only address the nested VM-Enter path.
+    
+    To guard against using stale data, disallow querying dynamic CPUID feature
+    bits, i.e. features that KVM updates at runtime, via a compile-time
+    assertion in guest_cpu_cap_has().  Exempt MWAIT from the rule, as the
+    MISC_ENABLE_NO_MWAIT means that MWAIT is _conditionally_ a dynamic CPUID
+    feature.
+    
+    Note, the rule could be enforced for MWAIT as well, e.g. by querying guest
+    CPUID in kvm_emulate_monitor_mwait, but there's no obvious advtantage to
+    doing so, and allowing MWAIT for guest_cpuid_has() opens up a different can
+    of worms.  MONITOR/MWAIT can't be virtualized (for a reasonable definition),
+    and the nature of the MWAIT_NEVER_UD_FAULTS and MISC_ENABLE_NO_MWAIT quirks
+    means checking X86_FEATURE_MWAIT outside of kvm_emulate_monitor_mwait() is
+    wrong for other reasons.
+    
+    Beyond the aforementioned feature bits, the only other dynamic CPUID
+    (sub)leaves are the XSAVE sizes, and similar to MWAIT, consuming those
+    CPUID entries in KVM is all but guaranteed to be a bug.  The layout for an
+    actual XSAVE buffer depends on the format (compacted or not) and
+    potentially the features that are actually enabled.  E.g. see the logic in
+    fpstate_clear_xstate_component() needed to poke into the guest's effective
+    XSAVE state to clear MPX state on INIT.  KVM does consume
+    CPUID.0xD.0.{EAX,EDX} in kvm_check_cpuid() and cpuid_get_supported_xcr0(),
+    but not EBX, which is the only dynamic output register in the leaf.
+    
+    Link: https://lore.kernel.org/r/20241211013302.1347853-6-seanjc@google.com
+    Signed-off-by: Sean Christopherson <seanjc@google.com>
+
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 9883f0565baf..263ab2ec6f71 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -1264,7 +1264,7 @@ static int __kvm_set_xcr(struct kvm_vcpu *vcpu, u32 index, u64 xcr)
+ 	vcpu->arch.xcr0 = xcr0;
+ 
+ 	if ((xcr0 ^ old_xcr0) & XFEATURE_MASK_EXTEND)
+-		kvm_update_cpuid_runtime(vcpu);
++		vcpu->arch.cpuid_dynamic_bits_dirty = true;
+ 	return 0;
+ }
+ 
+@@ -3899,7 +3899,7 @@ int kvm_set_msr_common(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
+ 			if (!guest_cpu_cap_has(vcpu, X86_FEATURE_XMM3))
+ 				return 1;
+ 			vcpu->arch.ia32_misc_enable_msr = data;
+-			kvm_update_cpuid_runtime(vcpu);
++			vcpu->arch.cpuid_dynamic_bits_dirty = true;
+ 		} else {
+ 			vcpu->arch.ia32_misc_enable_msr = data;
+ 		}
+@@ -3934,7 +3934,7 @@ int kvm_set_msr_common(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
+ 		if (data & ~kvm_caps.supported_xss)
+ 			return 1;
+ 		vcpu->arch.ia32_xss = data;
+-		kvm_update_cpuid_runtime(vcpu);
++		vcpu->arch.cpuid_dynamic_bits_dirty = true;
+ 		break;
+ 	case MSR_SMI_COUNT:
+ 		if (!msr_info->host_initiated)

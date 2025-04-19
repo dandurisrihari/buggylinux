@@ -1,0 +1,62 @@
+commit 6ef88d6e36c2b4b3886ec9967cafabe4424d27d5
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Mon May 2 00:07:29 2022 +0200
+
+    KVM: SVM: Re-inject INT3/INTO instead of retrying the instruction
+    
+    Re-inject INT3/INTO instead of retrying the instruction if the CPU
+    encountered an intercepted exception while vectoring the software
+    exception, e.g. if vectoring INT3 encounters a #PF and KVM is using
+    shadow paging.  Retrying the instruction is architecturally wrong, e.g.
+    will result in a spurious #DB if there's a code breakpoint on the INT3/O,
+    and lack of re-injection also breaks nested virtualization, e.g. if L1
+    injects a software exception and vectoring the injected exception
+    encounters an exception that is intercepted by L0 but not L1.
+    
+    Due to, ahem, deficiencies in the SVM architecture, acquiring the next
+    RIP may require flowing through the emulator even if NRIPS is supported,
+    as the CPU clears next_rip if the VM-Exit is due to an exception other
+    than "exceptions caused by the INT3, INTO, and BOUND instructions".  To
+    deal with this, "skip" the instruction to calculate next_rip (if it's
+    not already known), and then unwind the RIP write and any side effects
+    (RFLAGS updates).
+    
+    Save the computed next_rip and use it to re-stuff next_rip if injection
+    doesn't complete.  This allows KVM to do the right thing if next_rip was
+    known prior to injection, e.g. if L1 injects a soft event into L2, and
+    there is no backing INTn instruction, e.g. if L1 is injecting an
+    arbitrary event.
+    
+    Note, it's impossible to guarantee architectural correctness given SVM's
+    architectural flaws.  E.g. if the guest executes INTn (no KVM injection),
+    an exit occurs while vectoring the INTn, and the guest modifies the code
+    stream while the exit is being handled, KVM will compute the incorrect
+    next_rip due to "skipping" the wrong instruction.  A future enhancement
+    to make this less awful would be for KVM to detect that the decoded
+    instruction is not the correct INTn and drop the to-be-injected soft
+    event (retrying is a lesser evil compared to shoving the wrong RIP on the
+    exception stack).
+    
+    Reported-by: Maciej S. Szmigiero <maciej.szmigiero@oracle.com>
+    Signed-off-by: Sean Christopherson <seanjc@google.com>
+    Signed-off-by: Maciej S. Szmigiero <maciej.szmigiero@oracle.com>
+    Message-Id: <65cb88deab40bc1649d509194864312a89bbe02e.1651440202.git.maciej.szmigiero@oracle.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/svm/svm.h b/arch/x86/kvm/svm/svm.h
+index de076d658390..f0b6111ee5b1 100644
+--- a/arch/x86/kvm/svm/svm.h
++++ b/arch/x86/kvm/svm/svm.h
+@@ -230,8 +230,10 @@ struct vcpu_svm {
+ 	bool nmi_singlestep;
+ 	u64 nmi_singlestep_guest_rflags;
+ 
+-	unsigned int3_injected;
+-	unsigned long int3_rip;
++	unsigned long soft_int_csbase;
++	unsigned long soft_int_old_rip;
++	unsigned long soft_int_next_rip;
++	bool soft_int_injected;
+ 
+ 	/* optional nested SVM features that are enabled for this guest  */
+ 	bool nrips_enabled                : 1;

@@ -1,0 +1,136 @@
+diff --git a/fs/nfsd/nfs3proc.c b/fs/nfsd/nfs3proc.c
+index 4d617ea28cfc..9dbd2eb91281 100644
+--- a/fs/nfsd/nfs3proc.c
++++ b/fs/nfsd/nfs3proc.c
+@@ -63,7 +63,8 @@ nfsd3_proc_getattr(struct svc_rqst *rqstp, struct nfsd_fhandle  *argp,
+ 		SVCFH_fmt(&argp->fh));
+ 
+ 	fh_copy(&resp->fh, &argp->fh);
+-	nfserr = fh_verify(rqstp, &resp->fh, 0, NFSD_MAY_NOP);
++	nfserr = fh_verify(rqstp, &resp->fh, 0,
++			NFSD_MAY_NOP | NFSD_MAY_BYPASS_GSS_ON_ROOT);
+ 	if (nfserr)
+ 		RETURN_STATUS(nfserr);
+ 
+@@ -530,7 +531,7 @@ nfsd3_proc_fsstat(struct svc_rqst * rqstp, struct nfsd_fhandle    *argp,
+ 	dprintk("nfsd: FSSTAT(3)   %s\n",
+ 				SVCFH_fmt(&argp->fh));
+ 
+-	nfserr = nfsd_statfs(rqstp, &argp->fh, &resp->stats);
++	nfserr = nfsd_statfs(rqstp, &argp->fh, &resp->stats, 0);
+ 	fh_put(&argp->fh);
+ 	RETURN_STATUS(nfserr);
+ }
+@@ -558,7 +559,8 @@ nfsd3_proc_fsinfo(struct svc_rqst * rqstp, struct nfsd_fhandle    *argp,
+ 	resp->f_maxfilesize = ~(u32) 0;
+ 	resp->f_properties = NFS3_FSF_DEFAULT;
+ 
+-	nfserr = fh_verify(rqstp, &argp->fh, 0, NFSD_MAY_NOP);
++	nfserr = fh_verify(rqstp, &argp->fh, 0,
++			NFSD_MAY_NOP | NFSD_MAY_BYPASS_GSS_ON_ROOT);
+ 
+ 	/* Check special features of the file system. May request
+ 	 * different read/write sizes for file systems known to have
+diff --git a/fs/nfsd/nfsfh.c b/fs/nfsd/nfsfh.c
+index ea37c96f0445..cd25d91895a1 100644
+--- a/fs/nfsd/nfsfh.c
++++ b/fs/nfsd/nfsfh.c
+@@ -302,17 +302,27 @@ fh_verify(struct svc_rqst *rqstp, struct svc_fh *fhp, int type, int access)
+ 	if (error)
+ 		goto out;
+ 
+-	if (!(access & NFSD_MAY_LOCK)) {
+-		/*
+-		 * pseudoflavor restrictions are not enforced on NLM,
+-		 * which clients virtually always use auth_sys for,
+-		 * even while using RPCSEC_GSS for NFS.
+-		 */
+-		error = check_nfsd_access(exp, rqstp);
+-		if (error)
+-			goto out;
+-	}
++	/*
++	 * pseudoflavor restrictions are not enforced on NLM,
++	 * which clients virtually always use auth_sys for,
++	 * even while using RPCSEC_GSS for NFS.
++	 */
++	if (access & NFSD_MAY_LOCK)
++		goto skip_pseudoflavor_check;
++	/*
++	 * Clients may expect to be able to use auth_sys during mount,
++	 * even if they use gss for everything else; see section 2.3.2
++	 * of rfc 2623.
++	 */
++	if (access & NFSD_MAY_BYPASS_GSS_ON_ROOT
++			&& exp->ex_path.dentry == dentry)
++		goto skip_pseudoflavor_check;
++
++	error = check_nfsd_access(exp, rqstp);
++	if (error)
++		goto out;
+ 
++skip_pseudoflavor_check:
+ 	/* Finally, check access permissions. */
+ 	error = nfsd_permission(rqstp, exp, dentry, access);
+ 
+diff --git a/fs/nfsd/nfsproc.c b/fs/nfsd/nfsproc.c
+index 0766f95d236a..5cffeca7acef 100644
+--- a/fs/nfsd/nfsproc.c
++++ b/fs/nfsd/nfsproc.c
+@@ -65,7 +65,8 @@ nfsd_proc_getattr(struct svc_rqst *rqstp, struct nfsd_fhandle  *argp,
+ 	dprintk("nfsd: GETATTR  %s\n", SVCFH_fmt(&argp->fh));
+ 
+ 	fh_copy(&resp->fh, &argp->fh);
+-	nfserr = fh_verify(rqstp, &resp->fh, 0, NFSD_MAY_NOP);
++	nfserr = fh_verify(rqstp, &resp->fh, 0,
++			NFSD_MAY_NOP | NFSD_MAY_BYPASS_GSS_ON_ROOT);
+ 	return nfsd_return_attrs(nfserr, resp);
+ }
+ 
+@@ -521,7 +522,8 @@ nfsd_proc_statfs(struct svc_rqst * rqstp, struct nfsd_fhandle   *argp,
+ 
+ 	dprintk("nfsd: STATFS   %s\n", SVCFH_fmt(&argp->fh));
+ 
+-	nfserr = nfsd_statfs(rqstp, &argp->fh, &resp->stats);
++	nfserr = nfsd_statfs(rqstp, &argp->fh, &resp->stats,
++			NFSD_MAY_BYPASS_GSS_ON_ROOT);
+ 	fh_put(&argp->fh);
+ 	return nfserr;
+ }
+diff --git a/fs/nfsd/vfs.c b/fs/nfsd/vfs.c
+index 18060bed5267..1319e8027d55 100644
+--- a/fs/nfsd/vfs.c
++++ b/fs/nfsd/vfs.c
+@@ -1866,9 +1866,9 @@ nfsd_readdir(struct svc_rqst *rqstp, struct svc_fh *fhp, loff_t *offsetp,
+  * N.B. After this call fhp needs an fh_put
+  */
+ __be32
+-nfsd_statfs(struct svc_rqst *rqstp, struct svc_fh *fhp, struct kstatfs *stat)
++nfsd_statfs(struct svc_rqst *rqstp, struct svc_fh *fhp, struct kstatfs *stat, int access)
+ {
+-	__be32 err = fh_verify(rqstp, fhp, 0, NFSD_MAY_NOP);
++	__be32 err = fh_verify(rqstp, fhp, 0, NFSD_MAY_NOP | access);
+ 	if (!err && vfs_statfs(fhp->fh_dentry,stat))
+ 		err = nfserr_io;
+ 	return err;
+diff --git a/include/linux/nfsd/nfsd.h b/include/linux/nfsd/nfsd.h
+index 108f47e5fd95..21269405ffe2 100644
+--- a/include/linux/nfsd/nfsd.h
++++ b/include/linux/nfsd/nfsd.h
+@@ -38,6 +38,7 @@
+ #define NFSD_MAY_LOCK		32
+ #define NFSD_MAY_OWNER_OVERRIDE	64
+ #define NFSD_MAY_LOCAL_ACCESS	128 /* IRIX doing local access check on device special file*/
++#define NFSD_MAY_BYPASS_GSS_ON_ROOT 256
+ 
+ #define NFSD_MAY_CREATE		(NFSD_MAY_EXEC|NFSD_MAY_WRITE)
+ #define NFSD_MAY_REMOVE		(NFSD_MAY_EXEC|NFSD_MAY_WRITE|NFSD_MAY_TRUNC)
+@@ -125,7 +126,7 @@ int		nfsd_truncate(struct svc_rqst *, struct svc_fh *,
+ __be32		nfsd_readdir(struct svc_rqst *, struct svc_fh *,
+ 			     loff_t *, struct readdir_cd *, filldir_t);
+ __be32		nfsd_statfs(struct svc_rqst *, struct svc_fh *,
+-				struct kstatfs *);
++				struct kstatfs *, int access);
+ 
+ int		nfsd_notify_change(struct inode *, struct iattr *);
+ __be32		nfsd_permission(struct svc_rqst *, struct svc_export *,

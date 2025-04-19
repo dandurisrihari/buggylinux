@@ -1,0 +1,40 @@
+commit fa40a8214bb9bcae8d49c234c19d8b4a6c1f37ff
+Author: Marcelo Tosatti <mtosatti@redhat.com>
+Date:   Thu Jun 4 15:08:24 2009 -0300
+
+    KVM: switch irq injection/acking data structures to irq_lock
+    
+    Protect irq injection/acking data structures with a separate irq_lock
+    mutex. This fixes the following deadlock:
+    
+    CPU A                               CPU B
+    kvm_vm_ioctl_deassign_dev_irq()
+      mutex_lock(&kvm->lock);            worker_thread()
+      -> kvm_deassign_irq()                -> kvm_assigned_dev_interrupt_work_handler()
+        -> deassign_host_irq()               mutex_lock(&kvm->lock);
+          -> cancel_work_sync() [blocked]
+    
+    [gleb: fix ia64 path]
+    
+    Reported-by: Alex Williamson <alex.williamson@hp.com>
+    Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
+    Signed-off-by: Gleb Natapov <gleb@redhat.com>
+    Signed-off-by: Avi Kivity <avi@redhat.com>
+
+diff --git a/arch/x86/kvm/i8254.c b/arch/x86/kvm/i8254.c
+index 977af7ab8193..3837db65d33e 100644
+--- a/arch/x86/kvm/i8254.c
++++ b/arch/x86/kvm/i8254.c
+@@ -654,10 +654,10 @@ static void __inject_pit_timer_intr(struct kvm *kvm)
+ 	struct kvm_vcpu *vcpu;
+ 	int i;
+ 
+-	mutex_lock(&kvm->lock);
++	mutex_lock(&kvm->irq_lock);
+ 	kvm_set_irq(kvm, kvm->arch.vpit->irq_source_id, 0, 1);
+ 	kvm_set_irq(kvm, kvm->arch.vpit->irq_source_id, 0, 0);
+-	mutex_unlock(&kvm->lock);
++	mutex_unlock(&kvm->irq_lock);
+ 
+ 	/*
+ 	 * Provides NMI watchdog support via Virtual Wire mode.

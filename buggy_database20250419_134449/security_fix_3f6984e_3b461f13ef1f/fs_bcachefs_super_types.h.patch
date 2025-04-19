@@ -1,0 +1,101 @@
+commit 3f6984e7301f4a37285cc5962f97c83c7c3b8239
+Merge: c604110e662a 8ff363ade395
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Mon Jan 8 10:43:51 2024 -0800
+
+    Merge tag 'vfs-6.8.super' of git://git.kernel.org/pub/scm/linux/kernel/git/vfs/vfs
+    
+    Pull vfs super updates from Christian Brauner:
+     "This contains the super work for this cycle including the long-awaited
+      series by Jan to make it possible to prevent writing to mounted block
+      devices:
+    
+       - Writing to mounted devices is dangerous and can lead to filesystem
+         corruption as well as crashes. Furthermore syzbot comes with more
+         and more involved examples how to corrupt block device under a
+         mounted filesystem leading to kernel crashes and reports we can do
+         nothing about. Add tracking of writers to each block device and a
+         kernel cmdline argument which controls whether other writeable
+         opens to block devices open with BLK_OPEN_RESTRICT_WRITES flag are
+         allowed.
+    
+         Note that this effectively only prevents modification of the
+         particular block device's page cache by other writers. The actual
+         device content can still be modified by other means - e.g. by
+         issuing direct scsi commands, by doing writes through devices lower
+         in the storage stack (e.g. in case loop devices, DM, or MD are
+         involved) etc. But blocking direct modifications of the block
+         device page cache is enough to give filesystems a chance to perform
+         data validation when loading data from the underlying storage and
+         thus prevent kernel crashes.
+    
+         Syzbot can use this cmdline argument option to avoid uninteresting
+         crashes. Also users whose userspace setup does not need writing to
+         mounted block devices can set this option for hardening. We expect
+         that this will be interesting to quite a few workloads.
+    
+         Btrfs is currently opted out of this because they still haven't
+         merged patches we require for this to work from three kernel
+         releases ago.
+    
+       - Reimplement block device freezing and thawing as holder operations
+         on the block device.
+    
+         This allows us to extend block device freezing to all devices
+         associated with a superblock and not just the main device. It also
+         allows us to remove get_active_super() and thus another function
+         that scans the global list of superblocks.
+    
+         Freezing via additional block devices only works if the filesystem
+         chooses to use @fs_holder_ops for these additional devices as well.
+         That currently only includes ext4 and xfs.
+    
+         Earlier releases switched get_tree_bdev() and mount_bdev() to use
+         @fs_holder_ops. The remaining nilfs2 open-coded version of
+         mount_bdev() has been converted to rely on @fs_holder_ops as well.
+         So block device freezing for the main block device will continue to
+         work as before.
+    
+         There should be no regressions in functionality. The only special
+         case is btrfs where block device freezing for the main block device
+         never worked because sb->s_bdev isn't set. Block device freezing
+         for btrfs can be fixed once they can switch to @fs_holder_ops but
+         that can happen whenever they're ready"
+    
+    * tag 'vfs-6.8.super' of git://git.kernel.org/pub/scm/linux/kernel/git/vfs/vfs: (27 commits)
+      block: Fix a memory leak in bdev_open_by_dev()
+      super: don't bother with WARN_ON_ONCE()
+      super: massage wait event mechanism
+      ext4: Block writes to journal device
+      xfs: Block writes to log device
+      fs: Block writes to mounted block devices
+      btrfs: Do not restrict writes to btrfs devices
+      block: Add config option to not allow writing to mounted devices
+      block: Remove blkdev_get_by_*() functions
+      bcachefs: Convert to bdev_open_by_path()
+      fs: handle freezing from multiple devices
+      fs: remove dead check
+      nilfs2: simplify device handling
+      fs: streamline thaw_super_locked
+      ext4: simplify device handling
+      xfs: simplify device handling
+      fs: simplify setup_bdev_super() calls
+      blkdev: comment fs_holder_ops
+      porting: document block device freeze and thaw changes
+      fs: remove unused helper
+      ...
+
+diff --cc fs/bcachefs/super_types.h
+index 9c1fd4ca2b10,65a294329681..b2119686e2e1
+--- a/fs/bcachefs/super_types.h
++++ b/fs/bcachefs/super_types.h
+@@@ -4,8 -4,8 +4,9 @@@
+  
+  struct bch_sb_handle {
+  	struct bch_sb		*sb;
++ 	struct bdev_handle	*bdev_handle;
+  	struct block_device	*bdev;
+ +	char			*sb_name;
+  	struct bio		*bio;
+  	void			*holder;
+  	size_t			buffer_size;

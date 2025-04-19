@@ -1,0 +1,33 @@
+commit 35d8b10a25884050bb3b0149b62c3818ec59f77c
+Author: Chuck Lever <chuck.lever@oracle.com>
+Date:   Mon Apr 19 14:02:41 2021 -0400
+
+    xprtrdma: Fix cwnd update ordering
+    
+    After a reconnect, the reply handler is opening the cwnd (and thus
+    enabling more RPC Calls to be sent) /before/ rpcrdma_post_recvs()
+    can post enough Receive WRs to receive their replies. This causes an
+    RNR and the new connection is lost immediately.
+    
+    The race is most clearly exposed when KASAN and disconnect injection
+    are enabled. This slows down rpcrdma_rep_create() enough to allow
+    the send side to post a bunch of RPC Calls before the Receive
+    completion handler can invoke ib_post_recv().
+    
+    Fixes: 2ae50ad68cd7 ("xprtrdma: Close window between waking RPC senders and posting Receives")
+    Signed-off-by: Chuck Lever <chuck.lever@oracle.com>
+    Signed-off-by: Trond Myklebust <trond.myklebust@hammerspace.com>
+
+diff --git a/net/sunrpc/xprtrdma/xprt_rdma.h b/net/sunrpc/xprtrdma/xprt_rdma.h
+index 31404326f29f..2504f67af63e 100644
+--- a/net/sunrpc/xprtrdma/xprt_rdma.h
++++ b/net/sunrpc/xprtrdma/xprt_rdma.h
+@@ -462,7 +462,7 @@ int rpcrdma_xprt_connect(struct rpcrdma_xprt *r_xprt);
+ void rpcrdma_xprt_disconnect(struct rpcrdma_xprt *r_xprt);
+ 
+ int rpcrdma_post_sends(struct rpcrdma_xprt *r_xprt, struct rpcrdma_req *req);
+-void rpcrdma_post_recvs(struct rpcrdma_xprt *r_xprt, bool temp);
++void rpcrdma_post_recvs(struct rpcrdma_xprt *r_xprt, int needed, bool temp);
+ 
+ /*
+  * Buffer calls - xprtrdma/verbs.c

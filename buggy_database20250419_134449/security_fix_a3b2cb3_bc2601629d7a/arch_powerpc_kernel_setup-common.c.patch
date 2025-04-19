@@ -1,0 +1,66 @@
+commit a3b2cb30f252b21a6f962e0dd107c8b897ca65e4
+Author: Nicholas Piggin <npiggin@gmail.com>
+Date:   Wed Jul 5 13:56:25 2017 +1000
+
+    powerpc: Do not call ppc_md.panic in fadump panic notifier
+    
+    If fadump is not registered, and no other crash or debug handlers are
+    registered, the powerpc panic handler stops the guest before the
+    generic panic code can push out debug information to the console.
+    
+    Currently, system reset injection causes the guest to silently stop.
+    
+    Stop calling ppc_md.panic in the panic notifier. crash_fadump already
+    does rtas_os_term() to terminate the guest if fadump is registered.
+    
+    Remove ppc_md.panic. Move fadump panic notifier into fadump code.
+    
+    Signed-off-by: Nicholas Piggin <npiggin@gmail.com>
+    Reviewed-by: Mahesh Salgaonkar <mahesh@linux.vnet.ibm.com>
+    Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+
+diff --git a/arch/powerpc/kernel/setup-common.c b/arch/powerpc/kernel/setup-common.c
+index c8ea5bd28302..7de73589d8e2 100644
+--- a/arch/powerpc/kernel/setup-common.c
++++ b/arch/powerpc/kernel/setup-common.c
+@@ -704,30 +704,6 @@ int check_legacy_ioport(unsigned long base_port)
+ }
+ EXPORT_SYMBOL(check_legacy_ioport);
+ 
+-static int ppc_panic_event(struct notifier_block *this,
+-                             unsigned long event, void *ptr)
+-{
+-	/*
+-	 * If firmware-assisted dump has been registered then trigger
+-	 * firmware-assisted dump and let firmware handle everything else.
+-	 */
+-	crash_fadump(NULL, ptr);
+-	ppc_md.panic(ptr);  /* May not return */
+-	return NOTIFY_DONE;
+-}
+-
+-static struct notifier_block ppc_panic_block = {
+-	.notifier_call = ppc_panic_event,
+-	.priority = INT_MIN /* may not return; must be done last */
+-};
+-
+-void __init setup_panic(void)
+-{
+-	if (!ppc_md.panic)
+-		return;
+-	atomic_notifier_chain_register(&panic_notifier_list, &ppc_panic_block);
+-}
+-
+ #ifdef CONFIG_CHECK_CACHE_COHERENCY
+ /*
+  * For platforms that have configurable cache-coherency.  This function
+@@ -872,9 +848,6 @@ void __init setup_arch(char **cmdline_p)
+ 	/* Probe the machine type, establish ppc_md. */
+ 	probe_machine();
+ 
+-	/* Setup panic notifier if requested by the platform. */
+-	setup_panic();
+-
+ 	/*
+ 	 * Configure ppc_md.power_save (ppc32 only, 64-bit machines do
+ 	 * it from their respective probe() function.

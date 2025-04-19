@@ -1,0 +1,71 @@
+commit c01e71b49c37e3b9c9652d28c42a88197a9d7f02
+Author: Roman Žilka <roman.zilka@gmail.com>
+Date:   Tue Jan 9 11:43:46 2024 +0100
+
+    tty/vt: UTF-8 parsing update according to RFC 3629, modern Unicode
+    
+    vc_translate_unicode() and vc_sanitize_unicode() parse input to the
+    UTF-8-enabled console, marking invalid byte sequences and producing Unicode
+    codepoints. The current algorithm follows ancient Unicode and may accept
+    invalid byte sequences, pass on non-existent codepoints and reject valid
+    sequences.
+    
+    The patch restores the functions' compliance with modern Unicode (v15.1 [1]
+    + many previous versions) as well as RFC 3629 [2].
+    1. Codepoint space is limited to 0x10FFFF.
+    2. "Noncharacters", such as U+FFFE, U+FFFF, are no longer invalid in
+       Unicode and will be accepted. Another option was to complete the set of
+       noncharacters (used to be just those two, now there's more) and preserve
+       the rejection step. This is indeed what Unicode suggests ([1] chap.
+       23.7) (not requires), but most codepoints are !iswprint(), so selecting
+       just the noncharacters seemed arbitrary and futile (and unnecessary).
+    
+    This is not a security patch. I'm not aware of any present security
+    implications of the old code.
+    
+    [1] https://www.unicode.org/versions/Unicode15.1.0
+    [2] https://datatracker.ietf.org/doc/html/rfc3629
+    
+    Signed-off-by: Roman Žilka <roman.zilka@gmail.com>
+    Link: https://lore.kernel.org/r/598ab459-6ba9-4a17-b4a1-08f26a356fc0@gmail.com
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/tty/vt/vt.c b/drivers/tty/vt/vt.c
+index e9cdcf40fe14..65cd40cac96b 100644
+--- a/drivers/tty/vt/vt.c
++++ b/drivers/tty/vt/vt.c
+@@ -2637,7 +2637,7 @@ static inline int vc_translate_ascii(const struct vc_data *vc, int c)
+  */
+ static inline int vc_sanitize_unicode(const int c)
+ {
+-	if ((c >= 0xd800 && c <= 0xdfff) || c == 0xfffe || c == 0xffff)
++	if (c >= 0xd800 && c <= 0xdfff)
+ 		return 0xfffd;
+ 
+ 	return c;
+@@ -2656,10 +2656,7 @@ static inline int vc_sanitize_unicode(const int c)
+  */
+ static int vc_translate_unicode(struct vc_data *vc, int c, bool *rescan)
+ {
+-	static const u32 utf8_length_changes[] = {
+-		0x0000007f, 0x000007ff, 0x0000ffff,
+-		0x001fffff, 0x03ffffff, 0x7fffffff
+-	};
++	static const u32 utf8_length_changes[] = {0x7f, 0x7ff, 0xffff, 0x10ffff};
+ 
+ 	/* Continuation byte received */
+ 	if ((c & 0xc0) == 0x80) {
+@@ -2705,14 +2702,7 @@ static int vc_translate_unicode(struct vc_data *vc, int c, bool *rescan)
+ 	} else if ((c & 0xf8) == 0xf0) {
+ 		vc->vc_utf_count = 3;
+ 		vc->vc_utf_char = (c & 0x07);
+-	} else if ((c & 0xfc) == 0xf8) {
+-		vc->vc_utf_count = 4;
+-		vc->vc_utf_char = (c & 0x03);
+-	} else if ((c & 0xfe) == 0xfc) {
+-		vc->vc_utf_count = 5;
+-		vc->vc_utf_char = (c & 0x01);
+ 	} else {
+-		/* 254 and 255 are invalid */
+ 		return 0xfffd;
+ 	}

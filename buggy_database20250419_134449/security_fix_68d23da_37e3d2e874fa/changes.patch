@@ -1,0 +1,205 @@
+diff --git a/arch/arm64/Kconfig b/arch/arm64/Kconfig
+index ca1f93233b22..905ce1653e82 100644
+--- a/arch/arm64/Kconfig
++++ b/arch/arm64/Kconfig
+@@ -682,15 +682,43 @@ config ARM64_VA_BITS_47
+ config ARM64_VA_BITS_48
+ 	bool "48-bit"
+ 
++config ARM64_USER_VA_BITS_52
++	bool "52-bit (user)"
++	depends on ARM64_64K_PAGES && (ARM64_PAN || !ARM64_SW_TTBR0_PAN)
++	help
++	  Enable 52-bit virtual addressing for userspace when explicitly
++	  requested via a hint to mmap(). The kernel will continue to
++	  use 48-bit virtual addresses for its own mappings.
++
++	  NOTE: Enabling 52-bit virtual addressing in conjunction with
++	  ARMv8.3 Pointer Authentication will result in the PAC being
++	  reduced from 7 bits to 3 bits, which may have a significant
++	  impact on its susceptibility to brute-force attacks.
++
++	  If unsure, select 48-bit virtual addressing instead.
++
+ endchoice
+ 
++config ARM64_FORCE_52BIT
++	bool "Force 52-bit virtual addresses for userspace"
++	depends on ARM64_USER_VA_BITS_52 && EXPERT
++	help
++	  For systems with 52-bit userspace VAs enabled, the kernel will attempt
++	  to maintain compatibility with older software by providing 48-bit VAs
++	  unless a hint is supplied to mmap.
++
++	  This configuration option disables the 48-bit compatibility logic, and
++	  forces all userspace addresses to be 52-bit on HW that supports it. One
++	  should only enable this configuration option for stress testing userspace
++	  memory management code. If unsure say N here.
++
+ config ARM64_VA_BITS
+ 	int
+ 	default 36 if ARM64_VA_BITS_36
+ 	default 39 if ARM64_VA_BITS_39
+ 	default 42 if ARM64_VA_BITS_42
+ 	default 47 if ARM64_VA_BITS_47
+-	default 48 if ARM64_VA_BITS_48
++	default 48 if ARM64_VA_BITS_48 || ARM64_USER_VA_BITS_52
+ 
+ choice
+ 	prompt "Physical address space size"
+@@ -716,10 +744,6 @@ config ARM64_PA_BITS_52
+ 
+ endchoice
+ 
+-config ARM64_52BIT_VA
+-	def_bool y
+-	depends on ARM64_VA_BITS_48 && ARM64_64K_PAGES && (ARM64_PAN || !ARM64_SW_TTBR0_PAN)
+-
+ config ARM64_PA_BITS
+ 	int
+ 	default 48 if ARM64_PA_BITS_48
+@@ -1186,19 +1210,6 @@ config ARM64_CNP
+ 	  at runtime, and does not affect PEs that do not implement
+ 	  this feature.
+ 
+-config ARM64_FORCE_52BIT
+-	bool "Force 52-bit virtual addresses for userspace"
+-	depends on ARM64_52BIT_VA && EXPERT
+-	help
+-	  For systems with 52-bit userspace VAs enabled, the kernel will attempt
+-	  to maintain compatibility with older software by providing 48-bit VAs
+-	  unless a hint is supplied to mmap.
+-
+-	  This configuration option disables the 48-bit compatibility logic, and
+-	  forces all userspace addresses to be 52-bit on HW that supports it. One
+-	  should only enable this configuration option for stress testing userspace
+-	  memory management code. If unsure say N here.
+-
+ endmenu
+ 
+ config ARM64_SVE
+diff --git a/arch/arm64/include/asm/assembler.h b/arch/arm64/include/asm/assembler.h
+index 122d91d4097a..ce985f13dce5 100644
+--- a/arch/arm64/include/asm/assembler.h
++++ b/arch/arm64/include/asm/assembler.h
+@@ -549,7 +549,7 @@ USER(\label, ic	ivau, \tmp2)			// invalidate I line PoU
+  * 	ttbr: Value of ttbr to set, modified.
+  */
+ 	.macro	offset_ttbr1, ttbr
+-#ifdef CONFIG_ARM64_52BIT_VA
++#ifdef CONFIG_ARM64_USER_VA_BITS_52
+ 	orr	\ttbr, \ttbr, #TTBR1_BADDR_4852_OFFSET
+ #endif
+ 	.endm
+@@ -560,7 +560,7 @@ USER(\label, ic	ivau, \tmp2)			// invalidate I line PoU
+  * to be nop'ed out when dealing with 52-bit kernel VAs.
+  */
+ 	.macro	restore_ttbr1, ttbr
+-#ifdef CONFIG_ARM64_52BIT_VA
++#ifdef CONFIG_ARM64_USER_VA_BITS_52
+ 	bic	\ttbr, \ttbr, #TTBR1_BADDR_4852_OFFSET
+ #endif
+ 	.endm
+diff --git a/arch/arm64/include/asm/mmu_context.h b/arch/arm64/include/asm/mmu_context.h
+index b0768502fa08..2da3e478fd8f 100644
+--- a/arch/arm64/include/asm/mmu_context.h
++++ b/arch/arm64/include/asm/mmu_context.h
+@@ -74,7 +74,7 @@ extern u64 idmap_ptrs_per_pgd;
+ 
+ static inline bool __cpu_uses_extended_idmap(void)
+ {
+-	if (IS_ENABLED(CONFIG_ARM64_52BIT_VA))
++	if (IS_ENABLED(CONFIG_ARM64_USER_VA_BITS_52))
+ 		return false;
+ 
+ 	return unlikely(idmap_t0sz != TCR_T0SZ(VA_BITS));
+diff --git a/arch/arm64/include/asm/pgtable-hwdef.h b/arch/arm64/include/asm/pgtable-hwdef.h
+index d5219f2624b7..41c808d9168a 100644
+--- a/arch/arm64/include/asm/pgtable-hwdef.h
++++ b/arch/arm64/include/asm/pgtable-hwdef.h
+@@ -80,7 +80,7 @@
+ #define PGDIR_SHIFT		ARM64_HW_PGTABLE_LEVEL_SHIFT(4 - CONFIG_PGTABLE_LEVELS)
+ #define PGDIR_SIZE		(_AC(1, UL) << PGDIR_SHIFT)
+ #define PGDIR_MASK		(~(PGDIR_SIZE-1))
+-#ifdef CONFIG_ARM64_52BIT_VA
++#ifdef CONFIG_ARM64_USER_VA_BITS_52
+ #define PTRS_PER_PGD		(1 << (52 - PGDIR_SHIFT))
+ #else
+ #define PTRS_PER_PGD		(1 << (VA_BITS - PGDIR_SHIFT))
+@@ -310,7 +310,7 @@
+ #define TTBR_BADDR_MASK_52	(((UL(1) << 46) - 1) << 2)
+ #endif
+ 
+-#ifdef CONFIG_ARM64_52BIT_VA
++#ifdef CONFIG_ARM64_USER_VA_BITS_52
+ /* Must be at least 64-byte aligned to prevent corruption of the TTBR */
+ #define TTBR1_BADDR_4852_OFFSET	(((UL(1) << (52 - PGDIR_SHIFT)) - \
+ 				 (UL(1) << (48 - PGDIR_SHIFT))) * 8)
+diff --git a/arch/arm64/include/asm/processor.h b/arch/arm64/include/asm/processor.h
+index efa0210cf927..538ecbc15067 100644
+--- a/arch/arm64/include/asm/processor.h
++++ b/arch/arm64/include/asm/processor.h
+@@ -20,11 +20,11 @@
+ #define __ASM_PROCESSOR_H
+ 
+ #define KERNEL_DS		UL(-1)
+-#ifdef CONFIG_ARM64_52BIT_VA
++#ifdef CONFIG_ARM64_USER_VA_BITS_52
+ #define USER_DS			((UL(1) << 52) - 1)
+ #else
+ #define USER_DS			((UL(1) << VA_BITS) - 1)
+-#endif /* CONFIG_ARM64_52BIT_VA */
++#endif /* CONFIG_ARM64_USER_VA_BITS_52 */
+ 
+ /*
+  * On arm64 systems, unaligned accesses by the CPU are cheap, and so there is
+diff --git a/arch/arm64/kernel/head.S b/arch/arm64/kernel/head.S
+index c229d9cfe9bf..6b70dd625f01 100644
+--- a/arch/arm64/kernel/head.S
++++ b/arch/arm64/kernel/head.S
+@@ -318,7 +318,7 @@ __create_page_tables:
+ 	adrp	x0, idmap_pg_dir
+ 	adrp	x3, __idmap_text_start		// __pa(__idmap_text_start)
+ 
+-#ifdef CONFIG_ARM64_52BIT_VA
++#ifdef CONFIG_ARM64_USER_VA_BITS_52
+ 	mrs_s	x6, SYS_ID_AA64MMFR2_EL1
+ 	and	x6, x6, #(0xf << ID_AA64MMFR2_LVA_SHIFT)
+ 	mov	x5, #52
+@@ -800,7 +800,7 @@ ENTRY(__enable_mmu)
+ ENDPROC(__enable_mmu)
+ 
+ ENTRY(__cpu_secondary_check52bitva)
+-#ifdef CONFIG_ARM64_52BIT_VA
++#ifdef CONFIG_ARM64_USER_VA_BITS_52
+ 	ldr_l	x0, vabits_user
+ 	cmp	x0, #52
+ 	b.ne	2f
+diff --git a/arch/arm64/kernel/smp.c b/arch/arm64/kernel/smp.c
+index e15b0b64d4d0..1ff18f5fbecb 100644
+--- a/arch/arm64/kernel/smp.c
++++ b/arch/arm64/kernel/smp.c
+@@ -139,7 +139,7 @@ int __cpu_up(unsigned int cpu, struct task_struct *idle)
+ 		if (!cpu_online(cpu)) {
+ 			pr_crit("CPU%u: failed to come online\n", cpu);
+ 
+-			if (IS_ENABLED(CONFIG_ARM64_52BIT_VA) && va52mismatch)
++			if (IS_ENABLED(CONFIG_ARM64_USER_VA_BITS_52) && va52mismatch)
+ 				pr_crit("CPU%u: does not support 52-bit VAs\n", cpu);
+ 
+ 			ret = -EIO;
+diff --git a/arch/arm64/mm/proc.S b/arch/arm64/mm/proc.S
+index 0cf86b17714c..e05b3ce1db6b 100644
+--- a/arch/arm64/mm/proc.S
++++ b/arch/arm64/mm/proc.S
+@@ -451,8 +451,8 @@ ENTRY(__cpu_setup)
+ 			TCR_TG_FLAGS | TCR_KASLR_FLAGS | TCR_ASID16 | \
+ 			TCR_TBI0 | TCR_A1
+ 
+-#ifdef CONFIG_ARM64_52BIT_VA
+-	ldr_l 		x9, vabits_user
++#ifdef CONFIG_ARM64_USER_VA_BITS_52
++	ldr_l		x9, vabits_user
+ 	sub		x9, xzr, x9
+ 	add		x9, x9, #64
+ #else

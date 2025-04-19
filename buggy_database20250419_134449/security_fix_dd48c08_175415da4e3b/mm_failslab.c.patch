@@ -1,0 +1,68 @@
+commit dd48c085c1cdf9446f92826f1fd451167fb6c2fd
+Author: Akinobu Mita <akinobu.mita@gmail.com>
+Date:   Wed Aug 3 16:21:01 2011 -0700
+
+    fault-injection: add ability to export fault_attr in arbitrary directory
+    
+    init_fault_attr_dentries() is used to export fault_attr via debugfs.
+    But it can only export it in debugfs root directory.
+    
+    Per Forlin is working on mmc_fail_request which adds support to inject
+    data errors after a completed host transfer in MMC subsystem.
+    
+    The fault_attr for mmc_fail_request should be defined per mmc host and
+    export it in debugfs directory per mmc host like
+    /sys/kernel/debug/mmc0/mmc_fail_request.
+    
+    init_fault_attr_dentries() doesn't help for mmc_fail_request.  So this
+    introduces fault_create_debugfs_attr() which is able to create a
+    directory in the arbitrary directory and replace
+    init_fault_attr_dentries().
+    
+    [akpm@linux-foundation.org: extraneous semicolon, per Randy]
+    Signed-off-by: Akinobu Mita <akinobu.mita@gmail.com>
+    Tested-by: Per Forlin <per.forlin@linaro.org>
+    Cc: Jens Axboe <axboe@kernel.dk>
+    Cc: Christoph Lameter <cl@linux-foundation.org>
+    Cc: Pekka Enberg <penberg@kernel.org>
+    Cc: Matt Mackall <mpm@selenic.com>
+    Cc: Randy Dunlap <rdunlap@xenotime.net>
+    Cc: Stephen Rothwell <sfr@canb.auug.org.au>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/mm/failslab.c b/mm/failslab.c
+index 1ce58c201dca..0dd7b8fec71c 100644
+--- a/mm/failslab.c
++++ b/mm/failslab.c
+@@ -34,23 +34,23 @@ __setup("failslab=", setup_failslab);
+ #ifdef CONFIG_FAULT_INJECTION_DEBUG_FS
+ static int __init failslab_debugfs_init(void)
+ {
++	struct dentry *dir;
+ 	mode_t mode = S_IFREG | S_IRUSR | S_IWUSR;
+-	int err;
+ 
+-	err = init_fault_attr_dentries(&failslab.attr, "failslab");
+-	if (err)
+-		return err;
++	dir = fault_create_debugfs_attr("failslab", NULL, &failslab.attr);
++	if (IS_ERR(dir))
++		return PTR_ERR(dir);
+ 
+-	if (!debugfs_create_bool("ignore-gfp-wait", mode, failslab.attr.dir,
++	if (!debugfs_create_bool("ignore-gfp-wait", mode, dir,
+ 				&failslab.ignore_gfp_wait))
+ 		goto fail;
+-	if (!debugfs_create_bool("cache-filter", mode, failslab.attr.dir,
++	if (!debugfs_create_bool("cache-filter", mode, dir,
+ 				&failslab.cache_filter))
+ 		goto fail;
+ 
+ 	return 0;
+ fail:
+-	cleanup_fault_attr_dentries(&failslab.attr);
++	debugfs_remove_recursive(dir);
+ 
+ 	return -ENOMEM;
+ }

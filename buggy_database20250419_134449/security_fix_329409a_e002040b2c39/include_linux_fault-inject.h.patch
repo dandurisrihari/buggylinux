@@ -1,0 +1,76 @@
+commit 329409aeda064c4aff00c51f837fcd3bbdaeeba6
+Author: Akinobu Mita <akinobu.mita@gmail.com>
+Date:   Fri Dec 8 02:39:48 2006 -0800
+
+    [PATCH] fault injection: stacktrace filtering
+    
+    This patch provides stacktrace filtering feature.
+    
+    The stacktrace filter allows failing only for the caller you are
+    interested in.
+    
+    For example someone may want to inject kmalloc() failures into
+    only e100 module. they want to inject not only direct kmalloc() call,
+    but also indirect allocation, too.
+    
+    - e100_poll --> netif_receive_skb --> packet_rcv_spkt --> skb_clone
+      --> kmem_cache_alloc
+    
+    This patch enables to detect function calls like this by stacktrace
+    and inject failures. The script Documentaion/fault-injection/failmodule.sh
+    helps it.
+    
+    The range of text section of loaded e100 is expected to be
+    [/sys/module/e100/sections/.text, /sys/module/e100/sections/.exit.text)
+    
+    So failmodule.sh stores these values into /debug/failslab/address-start
+    and /debug/failslab/address-end. The maximum stacktrace depth is specified
+    by /debug/failslab/stacktrace-depth.
+    
+    Please see the example that demonstrates how to inject slab allocation
+    failures only for a specific module
+    in Documentation/fault-injection/fault-injection.txt
+    
+    [dwm@meer.net: reject failure if any caller lies within specified range]
+    Signed-off-by: Akinobu Mita <akinobu.mita@gmail.com>
+    Signed-off-by: Don Mullis <dwm@meer.net>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/include/linux/fault-inject.h b/include/linux/fault-inject.h
+index a525f9b9f015..9bb584e89399 100644
+--- a/include/linux/fault-inject.h
++++ b/include/linux/fault-inject.h
+@@ -18,6 +18,11 @@ struct fault_attr {
+ 	atomic_t space;
+ 	unsigned long verbose;
+ 	u32 task_filter;
++	unsigned long stacktrace_depth;
++	unsigned long require_start;
++	unsigned long require_end;
++	unsigned long reject_start;
++	unsigned long reject_end;
+ 
+ 	unsigned long count;
+ 
+@@ -32,6 +37,11 @@ struct fault_attr {
+ 		struct dentry *space_file;
+ 		struct dentry *verbose_file;
+ 		struct dentry *task_filter_file;
++		struct dentry *stacktrace_depth_file;
++		struct dentry *require_start_file;
++		struct dentry *require_end_file;
++		struct dentry *reject_start_file;
++		struct dentry *reject_end_file;
+ 	} dentries;
+ 
+ #endif
+@@ -40,6 +50,8 @@ struct fault_attr {
+ #define FAULT_ATTR_INITIALIZER {				\
+ 		.interval = 1,					\
+ 		.times = ATOMIC_INIT(1),			\
++		.require_end = ULONG_MAX,			\
++		.stacktrace_depth = 32,				\
+ 	}
+ 
+ #define DECLARE_FAULT_ATTR(name) struct fault_attr name = FAULT_ATTR_INITIALIZER

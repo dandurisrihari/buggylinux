@@ -1,0 +1,67 @@
+diff --git a/arch/x86/kvm/vmx.c b/arch/x86/kvm/vmx.c
+index 579a0b51696a..d75d91465246 100644
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -3945,12 +3945,15 @@ static bool nested_exit_on_intr(struct kvm_vcpu *vcpu)
+ static void enable_irq_window(struct kvm_vcpu *vcpu)
+ {
+ 	u32 cpu_based_vm_exec_control;
+-	if (is_guest_mode(vcpu) && nested_exit_on_intr(vcpu))
+-		/* We can get here when nested_run_pending caused
+-		 * vmx_interrupt_allowed() to return false. In this case, do
+-		 * nothing - the interrupt will be injected later.
++	if (is_guest_mode(vcpu) && nested_exit_on_intr(vcpu)) {
++		/*
++		 * We get here if vmx_interrupt_allowed() said we can't
++		 * inject to L1 now because L2 must run. Ask L2 to exit
++		 * right after entry, so we can inject to L1 more promptly.
+ 		 */
++		kvm_make_request(KVM_REQ_IMMEDIATE_EXIT, vcpu);
+ 		return;
++	}
+ 
+ 	cpu_based_vm_exec_control = vmcs_read32(CPU_BASED_VM_EXEC_CONTROL);
+ 	cpu_based_vm_exec_control |= CPU_BASED_VIRTUAL_INTR_PENDING;
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 4c938da2ba00..e24edbc7f2ec 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -5648,6 +5648,7 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 	int r;
+ 	bool req_int_win = !irqchip_in_kernel(vcpu->kvm) &&
+ 		vcpu->run->request_interrupt_window;
++	bool req_immediate_exit = 0;
+ 
+ 	if (vcpu->requests) {
+ 		if (kvm_check_request(KVM_REQ_MMU_RELOAD, vcpu))
+@@ -5687,7 +5688,8 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 			record_steal_time(vcpu);
+ 		if (kvm_check_request(KVM_REQ_NMI, vcpu))
+ 			process_nmi(vcpu);
+-
++		req_immediate_exit =
++			kvm_check_request(KVM_REQ_IMMEDIATE_EXIT, vcpu);
+ 	}
+ 
+ 	r = kvm_mmu_reload(vcpu);
+@@ -5738,6 +5740,9 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 
+ 	srcu_read_unlock(&vcpu->kvm->srcu, vcpu->srcu_idx);
+ 
++	if (req_immediate_exit)
++		smp_send_reschedule(vcpu->cpu);
++
+ 	kvm_guest_enter();
+ 
+ 	if (unlikely(vcpu->arch.switch_db_regs)) {
+diff --git a/include/linux/kvm_host.h b/include/linux/kvm_host.h
+index d52623199978..9fedeb356b95 100644
+--- a/include/linux/kvm_host.h
++++ b/include/linux/kvm_host.h
+@@ -50,6 +50,7 @@
+ #define KVM_REQ_APF_HALT          12
+ #define KVM_REQ_STEAL_UPDATE      13
+ #define KVM_REQ_NMI               14
++#define KVM_REQ_IMMEDIATE_EXIT    15
+ 
+ #define KVM_USERSPACE_IRQ_SOURCE_ID	0

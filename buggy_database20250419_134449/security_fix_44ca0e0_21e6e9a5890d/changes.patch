@@ -1,0 +1,222 @@
+diff --cc arch/arm64/Kconfig
+index 8889ce7094e0,c876afce10f3..e6712b6818fa
+--- a/arch/arm64/Kconfig
++++ b/arch/arm64/Kconfig
+@@@ -1518,35 -1525,31 +1528,58 @@@ config ARM64_PTR_AUT
+  	  be enabled. However, KVM guest also require VHE mode and hence
+  	  CONFIG_ARM64_VHE=y option to use this feature.
+  
++ 	  If the feature is present on the boot CPU but not on a late CPU, then
++ 	  the late CPU will be parked. Also, if the boot CPU does not have
++ 	  address auth and the late CPU has then the late CPU will still boot
++ 	  but with the feature disabled. On such a system, this option should
++ 	  not be selected.
++ 
++ 	  This feature works with FUNCTION_GRAPH_TRACER option only if
++ 	  DYNAMIC_FTRACE_WITH_REGS is enabled.
++ 
++ config CC_HAS_BRANCH_PROT_PAC_RET
++ 	# GCC 9 or later, clang 8 or later
++ 	def_bool $(cc-option,-mbranch-protection=pac-ret+leaf)
++ 
++ config CC_HAS_SIGN_RETURN_ADDRESS
++ 	# GCC 7, 8
++ 	def_bool $(cc-option,-msign-return-address=all)
++ 
++ config AS_HAS_PAC
++ 	def_bool $(as-option,-Wa$(comma)-march=armv8.3-a)
++ 
++ config AS_HAS_CFI_NEGATE_RA_STATE
++ 	def_bool $(as-instr,.cfi_startproc\n.cfi_negate_ra_state\n.cfi_endproc\n)
++ 
+  endmenu
+  
+ +menu "ARMv8.4 architectural features"
+ +
+ +config ARM64_AMU_EXTN
+ +	bool "Enable support for the Activity Monitors Unit CPU extension"
+ +	default y
+ +	help
+ +	  The activity monitors extension is an optional extension introduced
+ +	  by the ARMv8.4 CPU architecture. This enables support for version 1
+ +	  of the activity monitors architecture, AMUv1.
+ +
+ +	  To enable the use of this extension on CPUs that implement it, say Y.
+ +
+ +	  Note that for architectural reasons, firmware _must_ implement AMU
+ +	  support when running on CPUs that present the activity monitors
+ +	  extension. The required support is present in:
+ +	    * Version 1.5 and later of the ARM Trusted Firmware
+ +
+ +	  For kernels that have this configuration enabled but boot with broken
+ +	  firmware, you may need to say N here until the firmware is fixed.
+ +	  Otherwise you may experience firmware panics or lockups when
+ +	  accessing the counter registers. Even if you are not observing these
+ +	  symptoms, the values returned by the register reads might not
+ +	  correctly reflect reality. Most commonly, the value read will be 0,
+ +	  indicating that the counter is not enabled.
+ +
+ +endmenu
+ +
+  menu "ARMv8.5 architectural features"
+  
+  config ARM64_E0PD
+diff --cc arch/arm64/include/asm/cpucaps.h
+index 185e44aa2713,72e4e0580ddb..8eb5a088ae65
+--- a/arch/arm64/include/asm/cpucaps.h
++++ b/arch/arm64/include/asm/cpucaps.h
+@@@ -58,8 -58,9 +58,10 @@@
+  #define ARM64_WORKAROUND_SPECULATIVE_AT_NVHE	48
+  #define ARM64_HAS_E0PD				49
+  #define ARM64_HAS_RNG				50
+ -#define ARM64_HAS_ADDRESS_AUTH			51
+ -#define ARM64_HAS_GENERIC_AUTH			52
+ +#define ARM64_HAS_AMU_EXTN			51
+++#define ARM64_HAS_ADDRESS_AUTH			52
+++#define ARM64_HAS_GENERIC_AUTH			53
+  
+- #define ARM64_NCAPS				52
+ -#define ARM64_NCAPS				53
+++#define ARM64_NCAPS				54
+  
+  #endif /* __ASM_CPUCAPS_H */
+diff --cc arch/arm64/kernel/entry.S
+index e5d4e30ee242,6273d7bed962..ddcde093c433
+--- a/arch/arm64/kernel/entry.S
++++ b/arch/arm64/kernel/entry.S
+@@@ -895,8 -900,9 +900,9 @@@ SYM_FUNC_START(cpu_switch_to
+  	ldr	lr, [x8]
+  	mov	sp, x9
+  	msr	sp_el0, x1
++ 	ptrauth_keys_install_kernel x1, 1, x8, x9, x10
+  	ret
+ -ENDPROC(cpu_switch_to)
+ +SYM_FUNC_END(cpu_switch_to)
+  NOKPROBE(cpu_switch_to)
+  
+  /*
+diff --cc arch/arm64/kernel/head.S
+index 2f7ea6d8f5bf,797573fe0e9c..57a91032b4c2
+--- a/arch/arm64/kernel/head.S
++++ b/arch/arm64/kernel/head.S
+@@@ -118,9 -118,10 +118,10 @@@ SYM_CODE_START(stext
+  	 * On return, the CPU will be ready for the MMU to be turned on and
+  	 * the TCR will have been set.
+  	 */
++ 	mov	x0, #ARM64_CPU_BOOT_PRIMARY
+  	bl	__cpu_setup			// initialise processor
+  	b	__primary_switch
+ -ENDPROC(stext)
+ +SYM_CODE_END(stext)
+  
+  /*
+   * Preserve the arguments passed by the bootloader in x0 .. x3
+diff --cc arch/arm64/kernel/smp.c
+index 034806725598,08903413f106..fd4b2ec3ddd5
+--- a/arch/arm64/kernel/smp.c
++++ b/arch/arm64/kernel/smp.c
+@@@ -124,48 -140,43 +128,52 @@@ int __cpu_up(unsigned int cpu, struct t
+  		return ret;
+  	}
+  
+ +	/*
+ +	 * CPU was successfully started, wait for it to come online or
+ +	 * time out.
+ +	 */
+ +	wait_for_completion_timeout(&cpu_running,
+ +				    msecs_to_jiffies(5000));
+ +	if (cpu_online(cpu))
+ +		return 0;
+ +
+ +	pr_crit("CPU%u: failed to come online\n", cpu);
+  	secondary_data.task = NULL;
+  	secondary_data.stack = NULL;
++ #if defined(CONFIG_ARM64_PTR_AUTH)
++ 	secondary_data.ptrauth_key.apia.lo = 0;
++ 	secondary_data.ptrauth_key.apia.hi = 0;
++ #endif
+  	__flush_dcache_area(&secondary_data, sizeof(secondary_data));
+  	status = READ_ONCE(secondary_data.status);
+ -	if (ret && status) {
+ +	if (status == CPU_MMU_OFF)
+ +		status = READ_ONCE(__early_cpu_boot_status);
+  
+ -		if (status == CPU_MMU_OFF)
+ -			status = READ_ONCE(__early_cpu_boot_status);
+ -
+ -		switch (status & CPU_BOOT_STATUS_MASK) {
+ -		default:
+ -			pr_err("CPU%u: failed in unknown state : 0x%lx\n",
+ -					cpu, status);
+ -			cpus_stuck_in_kernel++;
+ -			break;
+ -		case CPU_KILL_ME:
+ -			if (!op_cpu_kill(cpu)) {
+ -				pr_crit("CPU%u: died during early boot\n", cpu);
+ -				break;
+ -			}
+ -			pr_crit("CPU%u: may not have shut down cleanly\n", cpu);
+ -			/* Fall through */
+ -		case CPU_STUCK_IN_KERNEL:
+ -			pr_crit("CPU%u: is stuck in kernel\n", cpu);
+ -			if (status & CPU_STUCK_REASON_52_BIT_VA)
+ -				pr_crit("CPU%u: does not support 52-bit VAs\n", cpu);
+ -			if (status & CPU_STUCK_REASON_NO_GRAN)
+ -				pr_crit("CPU%u: does not support %luK granule \n", cpu, PAGE_SIZE / SZ_1K);
+ -			cpus_stuck_in_kernel++;
+ +	switch (status & CPU_BOOT_STATUS_MASK) {
+ +	default:
+ +		pr_err("CPU%u: failed in unknown state : 0x%lx\n",
+ +		       cpu, status);
+ +		cpus_stuck_in_kernel++;
+ +		break;
+ +	case CPU_KILL_ME:
+ +		if (!op_cpu_kill(cpu)) {
+ +			pr_crit("CPU%u: died during early boot\n", cpu);
+  			break;
+ -		case CPU_PANIC_KERNEL:
+ -			panic("CPU%u detected unsupported configuration\n", cpu);
+  		}
+ +		pr_crit("CPU%u: may not have shut down cleanly\n", cpu);
+ +		/* Fall through */
+ +	case CPU_STUCK_IN_KERNEL:
+ +		pr_crit("CPU%u: is stuck in kernel\n", cpu);
+ +		if (status & CPU_STUCK_REASON_52_BIT_VA)
+ +			pr_crit("CPU%u: does not support 52-bit VAs\n", cpu);
+ +		if (status & CPU_STUCK_REASON_NO_GRAN) {
+ +			pr_crit("CPU%u: does not support %luK granule\n",
+ +				cpu, PAGE_SIZE / SZ_1K);
+ +		}
+ +		cpus_stuck_in_kernel++;
+ +		break;
+ +	case CPU_PANIC_KERNEL:
+ +		panic("CPU%u detected unsupported configuration\n", cpu);
+  	}
+  
+  	return ret;
+diff --cc arch/arm64/mm/proc.S
+index 6bd228067ebc,4450dc83cf5c..197a9ba2d5ea
+--- a/arch/arm64/mm/proc.S
++++ b/arch/arm64/mm/proc.S
+@@@ -389,15 -423,13 +396,15 @@@ SYM_FUNC_START(__cpu_setup
+  	tlbi	vmalle1				// Invalidate local TLB
+  	dsb	nsh
+  
+- 	mov	x0, #3 << 20
+- 	msr	cpacr_el1, x0			// Enable FP/ASIMD
+- 	mov	x0, #1 << 12			// Reset mdscr_el1 and disable
+- 	msr	mdscr_el1, x0			// access to the DCC from EL0
++ 	mov	x1, #3 << 20
++ 	msr	cpacr_el1, x1			// Enable FP/ASIMD
++ 	mov	x1, #1 << 12			// Reset mdscr_el1 and disable
++ 	msr	mdscr_el1, x1			// access to the DCC from EL0
+  	isb					// Unmask debug exceptions now,
+  	enable_dbg				// since this is per-cpu
+- 	reset_pmuserenr_el0 x0			// Disable PMU access from EL0
+- 	reset_amuserenr_el0 x0			// Disable AMU access from EL0
++ 	reset_pmuserenr_el0 x1			// Disable PMU access from EL0
+++	reset_amuserenr_el0 x1			// Disable AMU access from EL0
+ +
+  	/*
+  	 * Memory region attributes
+  	 */

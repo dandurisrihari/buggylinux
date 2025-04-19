@@ -1,0 +1,45 @@
+commit f5a5a406b4b8bb6c1fc7a1e92a872bd86061a53f
+Author: Marc Zyngier <maz@kernel.org>
+Date:   Wed Feb 14 13:18:19 2024 +0000
+
+    KVM: arm64: Propagate and handle Fine-Grained UNDEF bits
+    
+    In order to correctly honor our FGU bits, they must be converted
+    into a set of FGT bits. They get merged as part of the existing
+    FGT setting.
+    
+    Similarly, the UNDEF injection phase takes place when handling
+    the trap.
+    
+    This results in a bit of rework in the FGT macros in order to
+    help with the code generation, as burying per-CPU accesses in
+    macros results in a lot of expansion, not to mention the vcpu->kvm
+    access on nvhe (kern_hyp_va() is not optimisation-friendly).
+    
+    Reviewed-by: Joey Gouly <joey.gouly@arm.com>
+    Signed-off-by: Marc Zyngier <maz@kernel.org>
+    Link: https://lore.kernel.org/r/20240214131827.2856277-19-maz@kernel.org
+    Signed-off-by: Oliver Upton <oliver.upton@linux.dev>
+
+diff --git a/arch/arm64/kvm/emulate-nested.c b/arch/arm64/kvm/emulate-nested.c
+index b67078b8271b..4697ba41b3a9 100644
+--- a/arch/arm64/kvm/emulate-nested.c
++++ b/arch/arm64/kvm/emulate-nested.c
+@@ -2017,6 +2017,17 @@ bool triage_sysreg_trap(struct kvm_vcpu *vcpu, int *sr_index)
+ 	if (!tc.val)
+ 		goto local;
+ 
++	/*
++	 * If a sysreg can be trapped using a FGT, first check whether we
++	 * trap for the purpose of forbidding the feature. In that case,
++	 * inject an UNDEF.
++	 */
++	if (tc.fgt != __NO_FGT_GROUP__ &&
++	    (vcpu->kvm->arch.fgu[tc.fgt] & BIT(tc.bit))) {
++		kvm_inject_undefined(vcpu);
++		return true;
++	}
++
+ 	/*
+ 	 * If we're not nesting, immediately return to the caller, with the
+ 	 * sysreg index, should we have it.

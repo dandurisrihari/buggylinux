@@ -1,0 +1,75 @@
+diff --cc drivers/md/raid10.c
+index 800fe0628d25,3153183b7772..c5d88ef6a45c
+--- a/drivers/md/raid10.c
++++ b/drivers/md/raid10.c
+@@@ -1491,7 -1508,8 +1491,8 @@@ static void __make_request(struct mdde
+  	r10_bio->mddev = mddev;
+  	r10_bio->sector = bio->bi_iter.bi_sector;
+  	r10_bio->state = 0;
++ 	r10_bio->read_slot = -1;
+ -	memset(r10_bio->devs, 0, sizeof(r10_bio->devs[0]) * conf->geo.raid_disks);
+ +	memset(r10_bio->devs, 0, sizeof(r10_bio->devs[0]) * conf->copies);
+  
+  	if (bio_data_dir(bio) == READ)
+  		raid10_read_request(mddev, bio, r10_bio);
+diff --cc drivers/s390/block/dasd.c
+index 6efacadc8fcd,874345e1138c..c7eb9a10c680
+--- a/drivers/s390/block/dasd.c
++++ b/drivers/s390/block/dasd.c
+@@@ -2084,19 -2107,25 +2084,24 @@@ static void __dasd_device_start_head(st
+  
+  static void __dasd_device_check_path_events(struct dasd_device *device)
+  {
++ 	__u8 tbvpm, fcsecpm;
+  	int rc;
+  
+- 	if (!dasd_path_get_tbvpm(device))
++ 	tbvpm = dasd_path_get_tbvpm(device);
++ 	fcsecpm = dasd_path_get_fcsecpm(device);
++ 
++ 	if (!tbvpm && !fcsecpm)
+  		return;
+  
+ -	if (device->stopped &
+ -	    ~(DASD_STOPPED_DC_WAIT | DASD_UNRESUMED_PM))
+ +	if (device->stopped & ~(DASD_STOPPED_DC_WAIT))
+  		return;
+- 	rc = device->discipline->verify_path(device,
+- 					     dasd_path_get_tbvpm(device));
+- 	if (rc)
++ 	rc = device->discipline->pe_handler(device, tbvpm, fcsecpm);
++ 	if (rc) {
+  		dasd_device_set_timer(device, 50);
+- 	else
++ 	} else {
+  		dasd_path_clear_all_verify(device);
++ 		dasd_path_clear_all_fcsec(device);
++ 	}
+  };
+  
+  /*
+diff --cc include/linux/blk-mq.h
+index 5f639240760e,e7482e6ad3ec..47b021952ac7
+--- a/include/linux/blk-mq.h
++++ b/include/linux/blk-mq.h
+@@@ -594,8 -593,18 +594,20 @@@ static inline void blk_mq_cleanup_rq(st
+  		rq->q->mq_ops->cleanup_rq(rq);
+  }
+  
++ static inline void blk_rq_bio_prep(struct request *rq, struct bio *bio,
++ 		unsigned int nr_segs)
++ {
++ 	rq->nr_phys_segments = nr_segs;
++ 	rq->__data_len = bio->bi_iter.bi_size;
++ 	rq->bio = rq->biotail = bio;
++ 	rq->ioprio = bio_prio(bio);
++ 
++ 	if (bio->bi_disk)
++ 		rq->rq_disk = bio->bi_disk;
++ }
++ 
+  blk_qc_t blk_mq_submit_bio(struct bio *bio);
+ +void blk_mq_hctx_set_fq_lock_class(struct blk_mq_hw_ctx *hctx,
+ +		struct lock_class_key *key);
+  
+  #endif

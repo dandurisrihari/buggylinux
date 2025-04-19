@@ -1,0 +1,55 @@
+commit 7fa750a163089cf96866de402314d853a96cb342
+Author: Arnd Bergmann <arnd@arndb.de>
+Date:   Mon Aug 13 23:38:06 2018 +0200
+
+    f2fs: rework fault injection handling to avoid a warning
+    
+    When CONFIG_F2FS_FAULT_INJECTION is disabled, we get a warning about an
+    unused label:
+    
+    fs/f2fs/segment.c: In function '__submit_discard_cmd':
+    fs/f2fs/segment.c:1059:1: error: label 'submit' defined but not used [-Werror=unused-label]
+    
+    This could be fixed by adding another #ifdef around it, but the more
+    reliable way of doing this seems to be to remove the other #ifdefs
+    where that is easily possible.
+    
+    By defining time_to_inject() as a trivial stub, most of the checks for
+    CONFIG_F2FS_FAULT_INJECTION can go away. This also leads to nicer
+    formatting of the code.
+    
+    Signed-off-by: Arnd Bergmann <arnd@arndb.de>
+    Reviewed-by: Chao Yu <yuchao0@huawei.com>
+    Signed-off-by: Jaegeuk Kim <jaegeuk@kernel.org>
+
+diff --git a/fs/f2fs/segment.c b/fs/f2fs/segment.c
+index 63fc647f9ac2..b136e39e1e9e 100644
+--- a/fs/f2fs/segment.c
++++ b/fs/f2fs/segment.c
+@@ -470,12 +470,10 @@ int f2fs_commit_inmem_pages(struct inode *inode)
+  */
+ void f2fs_balance_fs(struct f2fs_sb_info *sbi, bool need)
+ {
+-#ifdef CONFIG_F2FS_FAULT_INJECTION
+ 	if (time_to_inject(sbi, FAULT_CHECKPOINT)) {
+ 		f2fs_show_injection_info(FAULT_CHECKPOINT);
+ 		f2fs_stop_checkpoint(sbi, false);
+ 	}
+-#endif
+ 
+ 	/* balance_fs_bg is able to be pending */
+ 	if (need && excess_cached_nats(sbi))
+@@ -1041,13 +1039,11 @@ static int __submit_discard_cmd(struct f2fs_sb_info *sbi,
+ 
+ 		dc->len += len;
+ 
+-#ifdef CONFIG_F2FS_FAULT_INJECTION
+ 		if (time_to_inject(sbi, FAULT_DISCARD)) {
+ 			f2fs_show_injection_info(FAULT_DISCARD);
+ 			err = -EIO;
+ 			goto submit;
+ 		}
+-#endif
+ 		err = __blkdev_issue_discard(bdev,
+ 					SECTOR_FROM_BLOCK(start),
+ 					SECTOR_FROM_BLOCK(len),

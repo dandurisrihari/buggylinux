@@ -1,0 +1,45 @@
+commit 4953919feedaeb6d0161ecea920c35d1d1f639d3
+Author: David Hildenbrand <dahi@linux.vnet.ibm.com>
+Date:   Fri Feb 21 08:59:59 2014 +0100
+
+    KVM: s390: interpretive execution of SIGP EXTERNAL CALL
+    
+    If the sigp interpretation facility is installed, most SIGP EXTERNAL CALL
+    operations will be interpreted instead of intercepted. A partial execution
+    interception will occurr at the sending cpu only if the target cpu is in the
+    wait state ("W" bit in the cpuflags set). Instruction interception will only
+    happen in error cases (e.g. cpu addr invalid).
+    
+    As a sending cpu might set the external call interrupt pending flags at the
+    target cpu at every point in time, we can't handle this kind of interrupt using
+    our kvm interrupt injection mechanism. The injection will be done automatically
+    by the SIE when preparing the start of the target cpu.
+    
+    Signed-off-by: David Hildenbrand <dahi@linux.vnet.ibm.com>
+    Reviewed-by: Cornelia Huck <cornelia.huck@de.ibm.com>
+    CC: Thomas Huth <thuth@linux.vnet.ibm.com>
+    [Adopt external call injection to check for sigp interpretion]
+    Signed-off-by: Christian Borntraeger <borntraeger@de.ibm.com>
+
+diff --git a/arch/s390/kvm/intercept.c b/arch/s390/kvm/intercept.c
+index 147b87fefecd..a0b586c1913c 100644
+--- a/arch/s390/kvm/intercept.c
++++ b/arch/s390/kvm/intercept.c
+@@ -272,6 +272,8 @@ static int handle_external_interrupt(struct kvm_vcpu *vcpu)
+ 		irq.type = KVM_S390_INT_CPU_TIMER;
+ 		break;
+ 	case EXT_IRQ_EXTERNAL_CALL:
++		if (kvm_s390_si_ext_call_pending(vcpu))
++			return 0;
+ 		irq.type = KVM_S390_INT_EXTERNAL_CALL;
+ 		irq.parm = vcpu->arch.sie_block->extcpuaddr;
+ 		break;
+@@ -323,6 +325,8 @@ static int handle_partial_execution(struct kvm_vcpu *vcpu)
+ {
+ 	if (vcpu->arch.sie_block->ipa == 0xb254)	/* MVPG */
+ 		return handle_mvpg_pei(vcpu);
++	if (vcpu->arch.sie_block->ipa >> 8 == 0xae)	/* SIGP */
++		return kvm_s390_handle_sigp_pei(vcpu);
+ 
+ 	return -EOPNOTSUPP;
+ }

@@ -1,0 +1,195 @@
+commit 791cceb89f7987c0375ff2e8971928a47f62ccae
+Author: Arnaldo Carvalho de Melo <acme@redhat.com>
+Date:   Tue Aug 9 11:48:07 2016 -0300
+
+    toops: Sync tools/include/uapi/linux/bpf.h with the kernel
+    
+    The way we're using kernel headers in tools/ now, with a copy that is
+    made to the same path prefixed by "tools/" plus checking if that copy
+    got stale, i.e. if the kernel counterpart changed, helps in keeping
+    track with new features that may be useful for tools to exploit.
+    
+    For instance, looking at all the changes to bpf.h since it was last
+    copied to tools/include brings this to toolers' attention:
+    
+    Need to investigate this one to check how to run a program via perf, setting up
+    a BPF event, that will take advantage of the way perf already calls clang/LLVM,
+    sets up the event and runs the workload in a single command line, helping in
+    debugging such semi cooperative programs:
+    
+      96ae52279594 ("bpf: Add bpf_probe_write_user BPF helper to be called in tracers")
+    
+    This one needs further investigation about using the feature it improves
+    in 'perf trace' to do some tcpdumpin' mixed with syscalls, tracepoints,
+    probe points, callgraphs, etc:
+    
+      555c8a8623a3 ("bpf: avoid stack copy and use skb ctx for event output")
+    
+    Add tracing just packets that are related to some container to that mix:
+    
+      4a482f34afcc ("cgroup: bpf: Add bpf_skb_in_cgroup_proto")
+      4ed8ec521ed5 ("cgroup: bpf: Add BPF_MAP_TYPE_CGROUP_ARRAY")
+    
+    Definetely needs to have example programs accessing task_struct from a bpf proggie
+    started from 'perf trace':
+    
+      606274c5abd8 ("bpf: introduce bpf_get_current_task() helper")
+    
+    Core networking related, XDP:
+    
+      6ce96ca348a9 ("bpf: add XDP_TX xdp_action for direct forwarding")
+      6a773a15a1e8 ("bpf: add XDP prog type for early driver filter")
+      13c5c240f789 ("bpf: add bpf_get_hash_recalc helper")
+      d2485c4242a8 ("bpf: add bpf_skb_change_type helper")
+      6578171a7ff0 ("bpf: add bpf_skb_change_proto helper")
+    
+    Changes detected by the tools build system:
+    
+      $ make -C tools/perf O=/tmp/build/perf install-bin
+      make: Entering directory '/home/acme/git/linux/tools/perf'
+        BUILD:   Doing 'make -j4' parallel build
+      Warning: tools/include/uapi/linux/bpf.h differs from kernel
+        INSTALL  GTK UI
+        CC       /tmp/build/perf/bench/mem-memcpy-x86-64-asm.o
+      <SNIP>
+      $
+    
+    Cc: Adrian Hunter <adrian.hunter@intel.com>
+    Cc: Alexei Starovoitov <ast@fb.com>
+    Cc: Brenden Blanco <bblanco@plumgrid.com>
+    Cc: Daniel Borkmann <daniel@iogearbox.net>
+    Cc: David Ahern <dsahern@gmail.com>
+    Cc: David S. Miller <davem@davemloft.net>
+    Cc: Jiri Olsa <jolsa@kernel.org>
+    Cc: Martin KaFai Lau <kafai@fb.com>
+    Cc: Namhyung Kim <namhyung@kernel.org>
+    Cc: Sargun Dhillon <sargun@sargun.me>
+    Cc: Wang Nan <wangnan0@huawei.com>
+    Link: http://lkml.kernel.org/n/tip-difq4ts1xvww6eyfs9e7zlft@git.kernel.org
+    Signed-off-by: Arnaldo Carvalho de Melo <acme@redhat.com>
+
+diff --git a/tools/include/uapi/linux/bpf.h b/tools/include/uapi/linux/bpf.h
+index 406459b935a2..da218fec6056 100644
+--- a/tools/include/uapi/linux/bpf.h
++++ b/tools/include/uapi/linux/bpf.h
+@@ -84,6 +84,7 @@ enum bpf_map_type {
+ 	BPF_MAP_TYPE_PERCPU_HASH,
+ 	BPF_MAP_TYPE_PERCPU_ARRAY,
+ 	BPF_MAP_TYPE_STACK_TRACE,
++	BPF_MAP_TYPE_CGROUP_ARRAY,
+ };
+ 
+ enum bpf_prog_type {
+@@ -93,6 +94,7 @@ enum bpf_prog_type {
+ 	BPF_PROG_TYPE_SCHED_CLS,
+ 	BPF_PROG_TYPE_SCHED_ACT,
+ 	BPF_PROG_TYPE_TRACEPOINT,
++	BPF_PROG_TYPE_XDP,
+ };
+ 
+ #define BPF_PSEUDO_MAP_FD	1
+@@ -313,6 +315,66 @@ enum bpf_func_id {
+ 	 */
+ 	BPF_FUNC_skb_get_tunnel_opt,
+ 	BPF_FUNC_skb_set_tunnel_opt,
++
++	/**
++	 * bpf_skb_change_proto(skb, proto, flags)
++	 * Change protocol of the skb. Currently supported is
++	 * v4 -> v6, v6 -> v4 transitions. The helper will also
++	 * resize the skb. eBPF program is expected to fill the
++	 * new headers via skb_store_bytes and lX_csum_replace.
++	 * @skb: pointer to skb
++	 * @proto: new skb->protocol type
++	 * @flags: reserved
++	 * Return: 0 on success or negative error
++	 */
++	BPF_FUNC_skb_change_proto,
++
++	/**
++	 * bpf_skb_change_type(skb, type)
++	 * Change packet type of skb.
++	 * @skb: pointer to skb
++	 * @type: new skb->pkt_type type
++	 * Return: 0 on success or negative error
++	 */
++	BPF_FUNC_skb_change_type,
++
++	/**
++	 * bpf_skb_in_cgroup(skb, map, index) - Check cgroup2 membership of skb
++	 * @skb: pointer to skb
++	 * @map: pointer to bpf_map in BPF_MAP_TYPE_CGROUP_ARRAY type
++	 * @index: index of the cgroup in the bpf_map
++	 * Return:
++	 *   == 0 skb failed the cgroup2 descendant test
++	 *   == 1 skb succeeded the cgroup2 descendant test
++	 *    < 0 error
++	 */
++	BPF_FUNC_skb_in_cgroup,
++
++	/**
++	 * bpf_get_hash_recalc(skb)
++	 * Retrieve and possibly recalculate skb->hash.
++	 * @skb: pointer to skb
++	 * Return: hash
++	 */
++	BPF_FUNC_get_hash_recalc,
++
++	/**
++	 * u64 bpf_get_current_task(void)
++	 * Returns current task_struct
++	 * Return: current
++	 */
++	BPF_FUNC_get_current_task,
++
++	/**
++	 * bpf_probe_write_user(void *dst, void *src, int len)
++	 * safely attempt to write to a location
++	 * @dst: destination address in userspace
++	 * @src: source address on stack
++	 * @len: number of bytes to copy
++	 * Return: 0 on success or negative error
++	 */
++	BPF_FUNC_probe_write_user,
++
+ 	__BPF_FUNC_MAX_ID,
+ };
+ 
+@@ -347,9 +409,11 @@ enum bpf_func_id {
+ #define BPF_F_ZERO_CSUM_TX		(1ULL << 1)
+ #define BPF_F_DONT_FRAGMENT		(1ULL << 2)
+ 
+-/* BPF_FUNC_perf_event_output flags. */
++/* BPF_FUNC_perf_event_output and BPF_FUNC_perf_event_read flags. */
+ #define BPF_F_INDEX_MASK		0xffffffffULL
+ #define BPF_F_CURRENT_CPU		BPF_F_INDEX_MASK
++/* BPF_FUNC_perf_event_output for sk_buff input context. */
++#define BPF_F_CTXLEN_MASK		(0xfffffULL << 32)
+ 
+ /* user accessible mirror of in-kernel sk_buff.
+  * new fields can only be added to the end of this structure
+@@ -386,4 +450,24 @@ struct bpf_tunnel_key {
+ 	__u32 tunnel_label;
+ };
+ 
++/* User return codes for XDP prog type.
++ * A valid XDP program must return one of these defined values. All other
++ * return codes are reserved for future use. Unknown return codes will result
++ * in packet drop.
++ */
++enum xdp_action {
++	XDP_ABORTED = 0,
++	XDP_DROP,
++	XDP_PASS,
++	XDP_TX,
++};
++
++/* user accessible metadata for XDP packet hook
++ * new fields must be added to the end of this structure
++ */
++struct xdp_md {
++	__u32 data;
++	__u32 data_end;
++};
++
+ #endif /* _UAPI__LINUX_BPF_H__ */

@@ -1,0 +1,84 @@
+diff --cc drivers/bus/arm-ccn.c
+index 884c0305e290,e0ad47534126..d1074d9b38ba
+--- a/drivers/bus/arm-ccn.c
++++ b/drivers/bus/arm-ccn.c
+@@@ -187,12 -187,8 +187,9 @@@ struct arm_ccn 
+  	struct arm_ccn_component *xp;
+  
+  	struct arm_ccn_dt dt;
+ +	int mn_id;
+  };
+  
+- static DEFINE_MUTEX(arm_ccn_mutex);
+- static LIST_HEAD(arm_ccn_list);
+- 
+  static int arm_ccn_node_to_xp(int node)
+  {
+  	return node / CCN_NUM_XP_PORTS;
+diff --cc drivers/cpufreq/cpufreq.c
+index 3a64136bf21b,8b44de4d7438..6e6c1fb60fbc
+--- a/drivers/cpufreq/cpufreq.c
++++ b/drivers/cpufreq/cpufreq.c
+@@@ -1286,8 -1331,6 +1286,8 @@@ out_free_policy
+  	return ret;
+  }
+  
+- static void cpufreq_offline(unsigned int cpu);
+++static int cpufreq_offline(unsigned int cpu);
+ +
+  /**
+   * cpufreq_add_dev - the cpufreq interface for a CPU device.
+   * @dev: CPU device.
+@@@ -1312,16 -1355,10 +1312,16 @@@ static int cpufreq_add_dev(struct devic
+  	if (!policy || cpumask_test_and_set_cpu(cpu, policy->real_cpus))
+  		return 0;
+  
+ -	return add_cpu_dev_symlink(policy, cpu);
+ +	ret = add_cpu_dev_symlink(policy, dev);
+ +	if (ret) {
+ +		cpumask_clear_cpu(cpu, policy->real_cpus);
+ +		cpufreq_offline(cpu);
+ +	}
+ +
+ +	return ret;
+  }
+  
+- static void cpufreq_offline(unsigned int cpu)
++ static int cpufreq_offline(unsigned int cpu)
+  {
+  	struct cpufreq_policy *policy;
+  	int ret;
+diff --cc include/linux/perf/arm_pmu.h
+index 9ff07d3fc8de,4ad1b408c0bb..8462da266089
+--- a/include/linux/perf/arm_pmu.h
++++ b/include/linux/perf/arm_pmu.h
+@@@ -116,10 -109,8 +116,10 @@@ struct arm_pmu 
+  	DECLARE_BITMAP(pmceid_bitmap, ARMV8_PMUV3_MAX_COMMON_EVENTS);
+  	struct platform_device	*plat_device;
+  	struct pmu_hw_events	__percpu *hw_events;
+- 	struct list_head	entry;
++ 	struct hlist_node	node;
+  	struct notifier_block	cpu_pm_nb;
+ +	/* the attr_groups array must be NULL-terminated */
+ +	const struct attribute_group *attr_groups[ARMPMU_NR_ATTR_GROUPS + 1];
+  };
+  
+  #define to_arm_pmu(p) (container_of(p, struct arm_pmu, pmu))
+diff --cc kernel/cpu.c
+index 92c2451db415,7c783876cbcb..5df20d6d1520
+--- a/kernel/cpu.c
++++ b/kernel/cpu.c
+@@@ -889,13 -966,9 +966,10 @@@ void notify_cpu_starting(unsigned int c
+  	struct cpuhp_cpu_state *st = per_cpu_ptr(&cpuhp_state, cpu);
+  	enum cpuhp_state target = min((int)st->target, CPUHP_AP_ONLINE);
+  
+ +	rcu_cpu_starting(cpu);	/* Enables RCU usage on this CPU. */
+  	while (st->state < target) {
+- 		struct cpuhp_step *step;
+- 
+  		st->state++;
+- 		step = cpuhp_ap_states + st->state;
+- 		cpuhp_invoke_callback(cpu, st->state, step->startup);
++ 		cpuhp_invoke_callback(cpu, st->state, true, NULL);
+  	}
+  }

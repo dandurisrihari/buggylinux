@@ -1,0 +1,137 @@
+commit aa8a5e0062ac940f7659394f4817c948dc8c0667
+Author: Michael Ellerman <mpe@ellerman.id.au>
+Date:   Wed Jan 10 03:07:15 2018 +1100
+
+    powerpc/64s: Add support for RFI flush of L1-D cache
+    
+    On some CPUs we can prevent the Meltdown vulnerability by flushing the
+    L1-D cache on exit from kernel to user mode, and from hypervisor to
+    guest.
+    
+    This is known to be the case on at least Power7, Power8 and Power9. At
+    this time we do not know the status of the vulnerability on other CPUs
+    such as the 970 (Apple G5), pasemi CPUs (AmigaOne X1000) or Freescale
+    CPUs. As more information comes to light we can enable this, or other
+    mechanisms on those CPUs.
+    
+    The vulnerability occurs when the load of an architecturally
+    inaccessible memory region (eg. userspace load of kernel memory) is
+    speculatively executed to the point where its result can influence the
+    address of a subsequent speculatively executed load.
+    
+    In order for that to happen, the first load must hit in the L1,
+    because before the load is sent to the L2 the permission check is
+    performed. Therefore if no kernel addresses hit in the L1 the
+    vulnerability can not occur. We can ensure that is the case by
+    flushing the L1 whenever we return to userspace. Similarly for
+    hypervisor vs guest.
+    
+    In order to flush the L1-D cache on exit, we add a section of nops at
+    each (h)rfi location that returns to a lower privileged context, and
+    patch that with some sequence. Newer firmwares are able to advertise
+    to us that there is a special nop instruction that flushes the L1-D.
+    If we do not see that advertised, we fall back to doing a displacement
+    flush in software.
+    
+    For guest kernels we support migration between some CPU versions, and
+    different CPUs may use different flush instructions. So that we are
+    prepared to migrate to a machine with a different flush instruction
+    activated, we may have to patch more than one flush instruction at
+    boot if the hypervisor tells us to.
+    
+    In the end this patch is mostly the work of Nicholas Piggin and
+    Michael Ellerman. However a cast of thousands contributed to analysis
+    of the issue, earlier versions of the patch, back ports testing etc.
+    Many thanks to all of them.
+    
+    Tested-by: Jon Masters <jcm@redhat.com>
+    Signed-off-by: Nicholas Piggin <npiggin@gmail.com>
+    Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+
+diff --git a/arch/powerpc/kernel/setup_64.c b/arch/powerpc/kernel/setup_64.c
+index 8956a9856604..96163f4c3673 100644
+--- a/arch/powerpc/kernel/setup_64.c
++++ b/arch/powerpc/kernel/setup_64.c
+@@ -801,3 +801,82 @@ static int __init disable_hardlockup_detector(void)
+ 	return 0;
+ }
+ early_initcall(disable_hardlockup_detector);
++
++#ifdef CONFIG_PPC_BOOK3S_64
++static enum l1d_flush_type enabled_flush_types;
++static void *l1d_flush_fallback_area;
++bool rfi_flush;
++
++static void do_nothing(void *unused)
++{
++	/*
++	 * We don't need to do the flush explicitly, just enter+exit kernel is
++	 * sufficient, the RFI exit handlers will do the right thing.
++	 */
++}
++
++void rfi_flush_enable(bool enable)
++{
++	if (rfi_flush == enable)
++		return;
++
++	if (enable) {
++		do_rfi_flush_fixups(enabled_flush_types);
++		on_each_cpu(do_nothing, NULL, 1);
++	} else
++		do_rfi_flush_fixups(L1D_FLUSH_NONE);
++
++	rfi_flush = enable;
++}
++
++static void init_fallback_flush(void)
++{
++	u64 l1d_size, limit;
++	int cpu;
++
++	l1d_size = ppc64_caches.l1d.size;
++	limit = min(safe_stack_limit(), ppc64_rma_size);
++
++	/*
++	 * Align to L1d size, and size it at 2x L1d size, to catch possible
++	 * hardware prefetch runoff. We don't have a recipe for load patterns to
++	 * reliably avoid the prefetcher.
++	 */
++	l1d_flush_fallback_area = __va(memblock_alloc_base(l1d_size * 2, l1d_size, limit));
++	memset(l1d_flush_fallback_area, 0, l1d_size * 2);
++
++	for_each_possible_cpu(cpu) {
++		/*
++		 * The fallback flush is currently coded for 8-way
++		 * associativity. Different associativity is possible, but it
++		 * will be treated as 8-way and may not evict the lines as
++		 * effectively.
++		 *
++		 * 128 byte lines are mandatory.
++		 */
++		u64 c = l1d_size / 8;
++
++		paca[cpu].rfi_flush_fallback_area = l1d_flush_fallback_area;
++		paca[cpu].l1d_flush_congruence = c;
++		paca[cpu].l1d_flush_sets = c / 128;
++	}
++}
++
++void __init setup_rfi_flush(enum l1d_flush_type types, bool enable)
++{
++	if (types & L1D_FLUSH_FALLBACK) {
++		pr_info("rfi-flush: Using fallback displacement flush\n");
++		init_fallback_flush();
++	}
++
++	if (types & L1D_FLUSH_ORI)
++		pr_info("rfi-flush: Using ori type flush\n");
++
++	if (types & L1D_FLUSH_MTTRIG)
++		pr_info("rfi-flush: Using mttrig type flush\n");
++
++	enabled_flush_types = types;
++
++	rfi_flush_enable(enable);
++}
++#endif /* CONFIG_PPC_BOOK3S_64 */

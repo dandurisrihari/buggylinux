@@ -1,0 +1,79 @@
+commit fac2807946c10b9a509b9c348afd442fa823c5f7
+Author: Quinn Tran <qutran@marvell.com>
+Date:   Wed Jun 23 22:25:59 2021 -0700
+
+    scsi: qla2xxx: edif: Add extraction of auth_els from the wire
+    
+    Some FC adapters from Marvell offer the ability to encrypt data in flight
+    (EDIF). This feature requires an application to act as an authenticator.
+    
+    Once authentication messages sent from a remote device have arrived, each
+    message is extracted and placed in a buffer for application to retrieve.
+    The FC frame header will be stripped, leaving behind the AUTH ELS payload.
+    It is up to the application to strip the AUTH ELS header to get to the
+    actual authentication message.
+    
+    Link: https://lore.kernel.org/r/20210624052606.21613-5-njavali@marvell.com
+    Reviewed-by: Hannes Reinecke <hare@suse.de>
+    Reviewed-by: Himanshu Madhani <himanshu.madhani@oracle.com>
+    Co-developed-by: Larry Wisneski <Larry.Wisneski@marvell.com>
+    Signed-off-by: Larry Wisneski <Larry.Wisneski@marvell.com>
+    Co-developed-by: Duane Grigsby <duane.grigsby@marvell.com>
+    Signed-off-by: Duane Grigsby <duane.grigsby@marvell.com>
+    Co-developed-by: Rick Hicksted Jr <rhicksted@marvell.com>
+    Signed-off-by: Rick Hicksted Jr <rhicksted@marvell.com>
+    Signed-off-by: Quinn Tran <qutran@marvell.com>
+    Signed-off-by: Nilesh Javali <njavali@marvell.com>
+    Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+
+diff --git a/drivers/scsi/qla2xxx/qla_os.c b/drivers/scsi/qla2xxx/qla_os.c
+index 8a698042db3e..b7e1d7437d81 100644
+--- a/drivers/scsi/qla2xxx/qla_os.c
++++ b/drivers/scsi/qla2xxx/qla_os.c
+@@ -3797,7 +3797,6 @@ qla2x00_remove_one(struct pci_dev *pdev)
+ 	qla2x00_free_sysfs_attr(base_vha, true);
+ 
+ 	fc_remove_host(base_vha->host);
+-	qlt_remove_target_resources(ha);
+ 
+ 	scsi_remove_host(base_vha->host);
+ 
+@@ -3974,15 +3973,20 @@ qla2x00_mem_alloc(struct qla_hw_data *ha, uint16_t req_len, uint16_t rsp_len,
+ 	struct req_que **req, struct rsp_que **rsp)
+ {
+ 	char	name[16];
++	int rc;
+ 
+ 	ha->init_cb = dma_alloc_coherent(&ha->pdev->dev, ha->init_cb_size,
+ 		&ha->init_cb_dma, GFP_KERNEL);
+ 	if (!ha->init_cb)
+ 		goto fail;
+ 
+-	if (qlt_mem_alloc(ha) < 0)
++	rc = btree_init32(&ha->host_map);
++	if (rc)
+ 		goto fail_free_init_cb;
+ 
++	if (qlt_mem_alloc(ha) < 0)
++		goto fail_free_btree;
++
+ 	ha->gid_list = dma_alloc_coherent(&ha->pdev->dev,
+ 		qla2x00_gid_list_size(ha), &ha->gid_list_dma, GFP_KERNEL);
+ 	if (!ha->gid_list)
+@@ -4386,6 +4390,8 @@ qla2x00_mem_alloc(struct qla_hw_data *ha, uint16_t req_len, uint16_t rsp_len,
+ 	ha->gid_list_dma = 0;
+ fail_free_tgt_mem:
+ 	qlt_mem_free(ha);
++fail_free_btree:
++	btree_destroy32(&ha->host_map);
+ fail_free_init_cb:
+ 	dma_free_coherent(&ha->pdev->dev, ha->init_cb_size, ha->init_cb,
+ 	ha->init_cb_dma);
+@@ -4802,6 +4808,7 @@ qla2x00_mem_free(struct qla_hw_data *ha)
+ 	ha->dif_bundl_pool = NULL;
+ 
+ 	qlt_mem_free(ha);
++	qla_remove_hostmap(ha);
+ 
+ 	if (ha->init_cb)
+ 		dma_free_coherent(&ha->pdev->dev, ha->init_cb_size,

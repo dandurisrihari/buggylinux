@@ -1,0 +1,111 @@
+diff --git a/fs/btrfs/ctree.h b/fs/btrfs/ctree.h
+index 18ed4643cde1..a75887d1fe3f 100644
+--- a/fs/btrfs/ctree.h
++++ b/fs/btrfs/ctree.h
+@@ -3154,6 +3154,8 @@ void btrfs_set_delalloc_extent(struct inode *inode, struct extent_state *state,
+ 			       unsigned *bits);
+ void btrfs_clear_delalloc_extent(struct inode *inode,
+ 				 struct extent_state *state, unsigned *bits);
++void btrfs_merge_delalloc_extent(struct inode *inode, struct extent_state *new,
++				 struct extent_state *other);
+ int btrfs_merge_bio_hook(struct page *page, unsigned long offset,
+ 			 size_t size, struct bio *bio,
+ 			 unsigned long bio_flags);
+diff --git a/fs/btrfs/extent_io.c b/fs/btrfs/extent_io.c
+index b9aadbf1a9f9..861a087025a9 100644
+--- a/fs/btrfs/extent_io.c
++++ b/fs/btrfs/extent_io.c
+@@ -353,13 +353,6 @@ static inline struct rb_node *tree_search(struct extent_io_tree *tree,
+ 	return tree_search_for_insert(tree, offset, NULL, NULL);
+ }
+ 
+-static void merge_cb(struct extent_io_tree *tree, struct extent_state *new,
+-		     struct extent_state *other)
+-{
+-	if (tree->ops && tree->ops->merge_extent_hook)
+-		tree->ops->merge_extent_hook(tree->private_data, new, other);
+-}
+-
+ /*
+  * utility function to look for merge candidates inside a given range.
+  * Any extents with matching state are merged together into a single
+@@ -383,7 +376,10 @@ static void merge_state(struct extent_io_tree *tree,
+ 		other = rb_entry(other_node, struct extent_state, rb_node);
+ 		if (other->end == state->start - 1 &&
+ 		    other->state == state->state) {
+-			merge_cb(tree, state, other);
++			if (tree->private_data &&
++			    is_data_inode(tree->private_data))
++				btrfs_merge_delalloc_extent(tree->private_data,
++							    state, other);
+ 			state->start = other->start;
+ 			rb_erase(&other->rb_node, &tree->state);
+ 			RB_CLEAR_NODE(&other->rb_node);
+@@ -395,7 +391,10 @@ static void merge_state(struct extent_io_tree *tree,
+ 		other = rb_entry(other_node, struct extent_state, rb_node);
+ 		if (other->start == state->end + 1 &&
+ 		    other->state == state->state) {
+-			merge_cb(tree, state, other);
++			if (tree->private_data &&
++			    is_data_inode(tree->private_data))
++				btrfs_merge_delalloc_extent(tree->private_data,
++							    state, other);
+ 			state->end = other->end;
+ 			rb_erase(&other->rb_node, &tree->state);
+ 			RB_CLEAR_NODE(&other->rb_node);
+diff --git a/fs/btrfs/extent_io.h b/fs/btrfs/extent_io.h
+index a3a3302f3625..7d181a378d90 100644
+--- a/fs/btrfs/extent_io.h
++++ b/fs/btrfs/extent_io.h
+@@ -106,9 +106,6 @@ struct extent_io_ops {
+ 	/*
+ 	 * Optional hooks, called if the pointer is not NULL
+ 	 */
+-	void (*merge_extent_hook)(void *private_data,
+-				  struct extent_state *new,
+-				  struct extent_state *other);
+ 	void (*split_extent_hook)(void *private_data,
+ 				  struct extent_state *orig, u64 split);
+ };
+diff --git a/fs/btrfs/inode.c b/fs/btrfs/inode.c
+index 79a900d1bcdf..9111ae9eb5ad 100644
+--- a/fs/btrfs/inode.c
++++ b/fs/btrfs/inode.c
+@@ -1625,7 +1625,7 @@ static void btrfs_split_extent_hook(void *private_data,
+ 		u64 new_size;
+ 
+ 		/*
+-		 * See the explanation in btrfs_merge_extent_hook, the same
++		 * See the explanation in btrfs_merge_delalloc_extent, the same
+ 		 * applies here, just in reverse.
+ 		 */
+ 		new_size = orig->end - split + 1;
+@@ -1642,16 +1642,13 @@ static void btrfs_split_extent_hook(void *private_data,
+ }
+ 
+ /*
+- * extent_io.c merge_extent_hook, used to track merged delayed allocation
+- * extents so we can keep track of new extents that are just merged onto old
+- * extents, such as when we are doing sequential writes, so we can properly
+- * account for the metadata space we'll need.
++ * Handle merged delayed allocation extents so we can keep track of new extents
++ * that are just merged onto old extents, such as when we are doing sequential
++ * writes, so we can properly account for the metadata space we'll need.
+  */
+-static void btrfs_merge_extent_hook(void *private_data,
+-				    struct extent_state *new,
+-				    struct extent_state *other)
++void btrfs_merge_delalloc_extent(struct inode *inode, struct extent_state *new,
++				 struct extent_state *other)
+ {
+-	struct inode *inode = private_data;
+ 	u64 new_size, old_size;
+ 	u32 num_extents;
+ 
+@@ -10509,7 +10506,6 @@ static const struct extent_io_ops btrfs_extent_io_ops = {
+ 	.readpage_io_failed_hook = btrfs_readpage_io_failed_hook,
+ 
+ 	/* optional callbacks */
+-	.merge_extent_hook = btrfs_merge_extent_hook,
+ 	.split_extent_hook = btrfs_split_extent_hook,
+ };

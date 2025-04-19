@@ -1,0 +1,221 @@
+commit 26299b3f6ba26bfc234b73126d14bdf4dec5275a
+Author: Mark Rutland <mark.rutland@arm.com>
+Date:   Thu Nov 3 17:05:20 2022 +0000
+
+    ftrace: arm64: move from REGS to ARGS
+    
+    This commit replaces arm64's support for FTRACE_WITH_REGS with support
+    for FTRACE_WITH_ARGS. This removes some overhead and complexity, and
+    removes some latent issues with inconsistent presentation of struct
+    pt_regs (which can only be reliably saved/restored at exception
+    boundaries).
+    
+    FTRACE_WITH_REGS has been supported on arm64 since commit:
+    
+      3b23e4991fb66f6d ("arm64: implement ftrace with regs")
+    
+    As noted in the commit message, the major reasons for implementing
+    FTRACE_WITH_REGS were:
+    
+    (1) To make it possible to use the ftrace graph tracer with pointer
+        authentication, where it's necessary to snapshot/manipulate the LR
+        before it is signed by the instrumented function.
+    
+    (2) To make it possible to implement LIVEPATCH in future, where we need
+        to hook function entry before an instrumented function manipulates
+        the stack or argument registers. Practically speaking, we need to
+        preserve the argument/return registers, PC, LR, and SP.
+    
+    Neither of these need a struct pt_regs, and only require the set of
+    registers which are live at function call/return boundaries. Our calling
+    convention is defined by "Procedure Call Standard for the Arm® 64-bit
+    Architecture (AArch64)" (AKA "AAPCS64"), which can currently be found
+    at:
+    
+      https://github.com/ARM-software/abi-aa/blob/main/aapcs64/aapcs64.rst
+    
+    Per AAPCS64, all function call argument and return values are held in
+    the following GPRs:
+    
+    * X0 - X7 : parameter / result registers
+    * X8      : indirect result location register
+    * SP      : stack pointer (AKA SP)
+    
+    Additionally, ad function call boundaries, the following GPRs hold
+    context/return information:
+    
+    * X29 : frame pointer (AKA FP)
+    * X30 : link register (AKA LR)
+    
+    ... and for ftrace we need to capture the instrumented address:
+    
+     * PC  : program counter
+    
+    No other GPRs are relevant, as none of the other arguments hold
+    parameters or return values:
+    
+    * X9  - X17 : temporaries, may be clobbered
+    * X18       : shadow call stack pointer (or temorary)
+    * X19 - X28 : callee saved
+    
+    This patch implements FTRACE_WITH_ARGS for arm64, only saving/restoring
+    the minimal set of registers necessary. This is always sufficient to
+    manipulate control flow (e.g. for live-patching) or to manipulate
+    function arguments and return values.
+    
+    This reduces the necessary stack usage from 336 bytes for pt_regs down
+    to 112 bytes for ftrace_regs + 32 bytes for two frame records, freeing
+    up 188 bytes. This could be reduced further with changes to the
+    unwinder.
+    
+    As there is no longer a need to save different sets of registers for
+    different features, we no longer need distinct `ftrace_caller` and
+    `ftrace_regs_caller` trampolines. This allows the trampoline assembly to
+    be simpler, and simplifies code which previously had to handle the two
+    trampolines.
+    
+    I've tested this with the ftrace selftests, where there are no
+    unexpected failures.
+    
+    Co-developed-by: Florent Revest <revest@chromium.org>
+    Signed-off-by: Mark Rutland <mark.rutland@arm.com>
+    Signed-off-by: Florent Revest <revest@chromium.org>
+    Cc: Catalin Marinas <catalin.marinas@arm.com>
+    Cc: Masami Hiramatsu <mhiramat@kernel.org>
+    Cc: Steven Rostedt <rostedt@goodmis.org>
+    Cc: Will Deacon <will@kernel.org>
+    Reviewed-by: Masami Hiramatsu (Google) <mhiramat@kernel.org>
+    Reviewed-by: Steven Rostedt (Google) <rostedt@goodmis.org>
+    Link: https://lore.kernel.org/r/20221103170520.931305-5-mark.rutland@arm.com
+    Signed-off-by: Will Deacon <will@kernel.org>
+
+diff --git a/arch/arm64/kernel/ftrace.c b/arch/arm64/kernel/ftrace.c
+index 8745175f4a75..5cf990d052ba 100644
+--- a/arch/arm64/kernel/ftrace.c
++++ b/arch/arm64/kernel/ftrace.c
+@@ -17,6 +17,49 @@
+ #include <asm/insn.h>
+ #include <asm/patching.h>
+ 
++#ifdef CONFIG_DYNAMIC_FTRACE_WITH_ARGS
++struct fregs_offset {
++	const char *name;
++	int offset;
++};
++
++#define FREGS_OFFSET(n, field)				\
++{							\
++	.name = n,					\
++	.offset = offsetof(struct ftrace_regs, field),	\
++}
++
++static const struct fregs_offset fregs_offsets[] = {
++	FREGS_OFFSET("x0", regs[0]),
++	FREGS_OFFSET("x1", regs[1]),
++	FREGS_OFFSET("x2", regs[2]),
++	FREGS_OFFSET("x3", regs[3]),
++	FREGS_OFFSET("x4", regs[4]),
++	FREGS_OFFSET("x5", regs[5]),
++	FREGS_OFFSET("x6", regs[6]),
++	FREGS_OFFSET("x7", regs[7]),
++	FREGS_OFFSET("x8", regs[8]),
++
++	FREGS_OFFSET("x29", fp),
++	FREGS_OFFSET("x30", lr),
++	FREGS_OFFSET("lr", lr),
++
++	FREGS_OFFSET("sp", sp),
++	FREGS_OFFSET("pc", pc),
++};
++
++int ftrace_regs_query_register_offset(const char *name)
++{
++	for (int i = 0; i < ARRAY_SIZE(fregs_offsets); i++) {
++		const struct fregs_offset *roff = &fregs_offsets[i];
++		if (!strcmp(roff->name, name))
++			return roff->offset;
++	}
++
++	return -EINVAL;
++}
++#endif
++
+ #ifdef CONFIG_DYNAMIC_FTRACE
+ /*
+  * Replace a single instruction, which may be a branch or NOP.
+@@ -70,9 +113,6 @@ static struct plt_entry *get_ftrace_plt(struct module *mod, unsigned long addr)
+ 
+ 	if (addr == FTRACE_ADDR)
+ 		return &plt[FTRACE_PLT_IDX];
+-	if (addr == FTRACE_REGS_ADDR &&
+-	    IS_ENABLED(CONFIG_DYNAMIC_FTRACE_WITH_REGS))
+-		return &plt[FTRACE_REGS_PLT_IDX];
+ #endif
+ 	return NULL;
+ }
+@@ -154,25 +194,7 @@ int ftrace_make_call(struct dyn_ftrace *rec, unsigned long addr)
+ 	return ftrace_modify_code(pc, old, new, true);
+ }
+ 
+-#ifdef CONFIG_DYNAMIC_FTRACE_WITH_REGS
+-int ftrace_modify_call(struct dyn_ftrace *rec, unsigned long old_addr,
+-			unsigned long addr)
+-{
+-	unsigned long pc = rec->ip;
+-	u32 old, new;
+-
+-	if (!ftrace_find_callable_addr(rec, NULL, &old_addr))
+-		return -EINVAL;
+-	if (!ftrace_find_callable_addr(rec, NULL, &addr))
+-		return -EINVAL;
+-
+-	old = aarch64_insn_gen_branch_imm(pc, old_addr,
+-					  AARCH64_INSN_BRANCH_LINK);
+-	new = aarch64_insn_gen_branch_imm(pc, addr, AARCH64_INSN_BRANCH_LINK);
+-
+-	return ftrace_modify_code(pc, old, new, true);
+-}
+-
++#ifdef CONFIG_DYNAMIC_FTRACE_WITH_ARGS
+ /*
+  * The compiler has inserted two NOPs before the regular function prologue.
+  * All instrumented functions follow the AAPCS, so x0-x8 and x19-x30 are live,
+@@ -228,7 +250,7 @@ int ftrace_make_nop(struct module *mod, struct dyn_ftrace *rec,
+ 	 *
+ 	 * Note: 'mod' is only set at module load time.
+ 	 */
+-	if (!IS_ENABLED(CONFIG_DYNAMIC_FTRACE_WITH_REGS) &&
++	if (!IS_ENABLED(CONFIG_DYNAMIC_FTRACE_WITH_ARGS) &&
+ 	    IS_ENABLED(CONFIG_ARM64_MODULE_PLTS) && mod) {
+ 		return aarch64_insn_patch_text_nosync((void *)pc, new);
+ 	}
+@@ -279,19 +301,11 @@ void prepare_ftrace_return(unsigned long self_addr, unsigned long *parent,
+ 
+ #ifdef CONFIG_DYNAMIC_FTRACE
+ 
+-#ifdef CONFIG_DYNAMIC_FTRACE_WITH_REGS
++#ifdef CONFIG_DYNAMIC_FTRACE_WITH_ARGS
+ void ftrace_graph_func(unsigned long ip, unsigned long parent_ip,
+ 		       struct ftrace_ops *op, struct ftrace_regs *fregs)
+ {
+-	/*
+-	 * When DYNAMIC_FTRACE_WITH_REGS is selected, `fregs` can never be NULL
+-	 * and arch_ftrace_get_regs(fregs) will always give a non-NULL pt_regs
+-	 * in which we can safely modify the LR.
+-	 */
+-	struct pt_regs *regs = arch_ftrace_get_regs(fregs);
+-	unsigned long *parent = (unsigned long *)&procedure_link_pointer(regs);
+-
+-	prepare_ftrace_return(ip, parent, frame_pointer(regs));
++	prepare_ftrace_return(ip, &fregs->lr, fregs->fp);
+ }
+ #else
+ /*
+@@ -323,6 +337,6 @@ int ftrace_disable_ftrace_graph_caller(void)
+ {
+ 	return ftrace_modify_graph_caller(false);
+ }
+-#endif /* CONFIG_DYNAMIC_FTRACE_WITH_REGS */
++#endif /* CONFIG_DYNAMIC_FTRACE_WITH_ARGS */
+ #endif /* CONFIG_DYNAMIC_FTRACE */
+ #endif /* CONFIG_FUNCTION_GRAPH_TRACER */

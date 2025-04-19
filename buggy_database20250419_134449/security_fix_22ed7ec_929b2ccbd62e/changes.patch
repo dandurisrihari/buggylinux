@@ -1,0 +1,143 @@
+diff --git a/fs/fs_context.c b/fs/fs_context.c
+index 851214d1d013..30d82d2979af 100644
+--- a/fs/fs_context.c
++++ b/fs/fs_context.c
+@@ -692,6 +692,7 @@ void vfs_clean_context(struct fs_context *fc)
+ 	security_free_mnt_opts(&fc->security);
+ 	kfree(fc->source);
+ 	fc->source = NULL;
++	fc->exclusive = false;
+ 
+ 	fc->purpose = FS_CONTEXT_FOR_RECONFIGURE;
+ 	fc->phase = FS_CONTEXT_AWAITING_RECONF;
+diff --git a/fs/fsopen.c b/fs/fsopen.c
+index a69b7c9cc59c..ce03f6521c88 100644
+--- a/fs/fsopen.c
++++ b/fs/fsopen.c
+@@ -209,7 +209,7 @@ SYSCALL_DEFINE3(fspick, int, dfd, const char __user *, path, unsigned int, flags
+ 	return ret;
+ }
+ 
+-static int vfs_cmd_create(struct fs_context *fc)
++static int vfs_cmd_create(struct fs_context *fc, bool exclusive)
+ {
+ 	struct super_block *sb;
+ 	int ret;
+@@ -220,7 +220,12 @@ static int vfs_cmd_create(struct fs_context *fc)
+ 	if (!mount_capable(fc))
+ 		return -EPERM;
+ 
++	/* require the new mount api */
++	if (exclusive && fc->ops == &legacy_fs_context_ops)
++		return -EOPNOTSUPP;
++
+ 	fc->phase = FS_CONTEXT_CREATING;
++	fc->exclusive = exclusive;
+ 
+ 	ret = vfs_get_tree(fc);
+ 	if (ret) {
+@@ -284,7 +289,9 @@ static int vfs_fsconfig_locked(struct fs_context *fc, int cmd,
+ 		return ret;
+ 	switch (cmd) {
+ 	case FSCONFIG_CMD_CREATE:
+-		return vfs_cmd_create(fc);
++		return vfs_cmd_create(fc, false);
++	case FSCONFIG_CMD_CREATE_EXCL:
++		return vfs_cmd_create(fc, true);
+ 	case FSCONFIG_CMD_RECONFIGURE:
+ 		return vfs_cmd_reconfigure(fc);
+ 	default:
+@@ -381,6 +388,7 @@ SYSCALL_DEFINE5(fsconfig,
+ 			return -EINVAL;
+ 		break;
+ 	case FSCONFIG_CMD_CREATE:
++	case FSCONFIG_CMD_CREATE_EXCL:
+ 	case FSCONFIG_CMD_RECONFIGURE:
+ 		if (_key || _value || aux)
+ 			return -EINVAL;
+diff --git a/fs/super.c b/fs/super.c
+index 96bec768684a..e04a403dbffd 100644
+--- a/fs/super.c
++++ b/fs/super.c
+@@ -546,17 +546,31 @@ bool mount_capable(struct fs_context *fc)
+  * @test: Comparison callback
+  * @set: Setup callback
+  *
+- * Find or create a superblock using the parameters stored in the filesystem
+- * context and the two callback functions.
++ * Create a new superblock or find an existing one.
+  *
+- * If an extant superblock is matched, then that will be returned with an
+- * elevated reference count that the caller must transfer or discard.
++ * The @test callback is used to find a matching existing superblock.
++ * Whether or not the requested parameters in @fc are taken into account
++ * is specific to the @test callback that is used. They may even be
++ * completely ignored.
++ *
++ * If an extant superblock is matched, it will be returned unless:
++ *
++ * (1) the namespace the filesystem context @fc and the extant
++ *     superblock's namespace differ
++ *
++ * (2) the filesystem context @fc has requested that reusing an extant
++ *     superblock is not allowed
++ *
++ * In both cases EBUSY will be returned.
+  *
+  * If no match is made, a new superblock will be allocated and basic
+- * initialisation will be performed (s_type, s_fs_info and s_id will be set and
+- * the set() callback will be invoked), the superblock will be published and it
+- * will be returned in a partially constructed state with SB_BORN and SB_ACTIVE
+- * as yet unset.
++ * initialisation will be performed (s_type, s_fs_info and s_id will be
++ * set and the @set callback will be invoked), the superblock will be
++ * published and it will be returned in a partially constructed state
++ * with SB_BORN and SB_ACTIVE as yet unset.
++ *
++ * Return: On success, an extant or newly created superblock is
++ *         returned. On failure an error pointer is returned.
+  */
+ struct super_block *sget_fc(struct fs_context *fc,
+ 			    int (*test)(struct super_block *, struct fs_context *),
+@@ -603,9 +617,13 @@ struct super_block *sget_fc(struct fs_context *fc,
+ 	return s;
+ 
+ share_extant_sb:
+-	if (user_ns != old->s_user_ns) {
++	if (user_ns != old->s_user_ns || fc->exclusive) {
+ 		spin_unlock(&sb_lock);
+ 		destroy_unused_super(s);
++		if (fc->exclusive)
++			warnfc(fc, "reusing existing filesystem not allowed");
++		else
++			warnfc(fc, "reusing existing filesystem in another namespace not allowed");
+ 		return ERR_PTR(-EBUSY);
+ 	}
+ 	if (!grab_super(old))
+diff --git a/include/linux/fs_context.h b/include/linux/fs_context.h
+index 851b3fe2549c..a33a3b1d9016 100644
+--- a/include/linux/fs_context.h
++++ b/include/linux/fs_context.h
+@@ -109,6 +109,7 @@ struct fs_context {
+ 	bool			need_free:1;	/* Need to call ops->free() */
+ 	bool			global:1;	/* Goes into &init_user_ns */
+ 	bool			oldapi:1;	/* Coming from mount(2) */
++	bool			exclusive:1;    /* create new superblock, reject existing one */
+ };
+ 
+ struct fs_context_operations {
+diff --git a/include/uapi/linux/mount.h b/include/uapi/linux/mount.h
+index 8eb0d7b758d2..bb242fdcfe6b 100644
+--- a/include/uapi/linux/mount.h
++++ b/include/uapi/linux/mount.h
+@@ -100,8 +100,9 @@ enum fsconfig_command {
+ 	FSCONFIG_SET_PATH	= 3,	/* Set parameter, supplying an object by path */
+ 	FSCONFIG_SET_PATH_EMPTY	= 4,	/* Set parameter, supplying an object by (empty) path */
+ 	FSCONFIG_SET_FD		= 5,	/* Set parameter, supplying an object by fd */
+-	FSCONFIG_CMD_CREATE	= 6,	/* Invoke superblock creation */
++	FSCONFIG_CMD_CREATE	= 6,	/* Create new or reuse existing superblock */
+ 	FSCONFIG_CMD_RECONFIGURE = 7,	/* Invoke superblock reconfiguration */
++	FSCONFIG_CMD_CREATE_EXCL = 8,	/* Create new superblock, fail if reusing existing superblock */
+ };
+ 
+ /*

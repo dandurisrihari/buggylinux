@@ -1,0 +1,102 @@
+commit 390bf1773c7eba3b45df62ae82b3d2be911185b7
+Author: Andre Przywara <andre.przywara@arm.com>
+Date:   Tue Jun 28 18:07:31 2016 +0100
+
+    arm64: consolidate signal injection on emulation errors
+    
+    The code for injecting a signal into userland if a trapped instruction
+    fails emulation due to a _userland_ error (like an illegal address)
+    will be used more often with the next patch.
+    Factor out the core functionality into a separate function and use
+    that both for the existing trap handler and for the deprecated
+    instructions emulation.
+    
+    Signed-off-by: Andre Przywara <andre.przywara@arm.com>
+    [catalin.marinas@arm.com: s/set_segfault/arm64_notify_segfault/]
+    Signed-off-by: Catalin Marinas <catalin.marinas@arm.com>
+
+diff --git a/arch/arm64/kernel/traps.c b/arch/arm64/kernel/traps.c
+index a4250a59f2b9..d8a5366dcc24 100644
+--- a/arch/arm64/kernel/traps.c
++++ b/arch/arm64/kernel/traps.c
+@@ -364,30 +364,67 @@ static int call_undef_hook(struct pt_regs *regs)
+ 	return fn ? fn(regs, instr) : 1;
+ }
+ 
+-asmlinkage void __exception do_undefinstr(struct pt_regs *regs)
++static void force_signal_inject(int signal, int code, struct pt_regs *regs,
++				unsigned long address)
+ {
+ 	siginfo_t info;
+ 	void __user *pc = (void __user *)instruction_pointer(regs);
++	const char *desc;
+ 
+-	/* check for AArch32 breakpoint instructions */
+-	if (!aarch32_break_handler(regs))
+-		return;
+-
+-	if (call_undef_hook(regs) == 0)
+-		return;
++	switch (signal) {
++	case SIGILL:
++		desc = "undefined instruction";
++		break;
++	case SIGSEGV:
++		desc = "illegal memory access";
++		break;
++	default:
++		desc = "bad mode";
++		break;
++	}
+ 
+-	if (unhandled_signal(current, SIGILL) && show_unhandled_signals_ratelimited()) {
+-		pr_info("%s[%d]: undefined instruction: pc=%p\n",
+-			current->comm, task_pid_nr(current), pc);
++	if (unhandled_signal(current, signal) &&
++	    show_unhandled_signals_ratelimited()) {
++		pr_info("%s[%d]: %s: pc=%p\n",
++			current->comm, task_pid_nr(current), desc, pc);
+ 		dump_instr(KERN_INFO, regs);
+ 	}
+ 
+-	info.si_signo = SIGILL;
++	info.si_signo = signal;
+ 	info.si_errno = 0;
+-	info.si_code  = ILL_ILLOPC;
++	info.si_code  = code;
+ 	info.si_addr  = pc;
+ 
+-	arm64_notify_die("Oops - undefined instruction", regs, &info, 0);
++	arm64_notify_die(desc, regs, &info, 0);
++}
++
++/*
++ * Set up process info to signal segmentation fault - called on access error.
++ */
++void arm64_notify_segfault(struct pt_regs *regs, unsigned long addr)
++{
++	int code;
++
++	down_read(&current->mm->mmap_sem);
++	if (find_vma(current->mm, addr) == NULL)
++		code = SEGV_MAPERR;
++	else
++		code = SEGV_ACCERR;
++	up_read(&current->mm->mmap_sem);
++
++	force_signal_inject(SIGSEGV, code, regs, addr);
++}
++
++asmlinkage void __exception do_undefinstr(struct pt_regs *regs)
++{
++	/* check for AArch32 breakpoint instructions */
++	if (!aarch32_break_handler(regs))
++		return;
++
++	if (call_undef_hook(regs) == 0)
++		return;
++
++	force_signal_inject(SIGILL, ILL_ILLOPC, regs, 0);
+ }
+ 
+ long compat_arm_syscall(struct pt_regs *regs);

@@ -1,0 +1,69 @@
+commit d264ee0c2ed20c6a426663590d4fc7a36cb6abd7
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Mon Aug 27 15:21:12 2018 -0700
+
+    KVM: VMX: use preemption timer to force immediate VMExit
+    
+    A VMX preemption timer value of '0' is guaranteed to cause a VMExit
+    prior to the CPU executing any instructions in the guest.  Use the
+    preemption timer (if it's supported) to trigger immediate VMExit
+    in place of the current method of sending a self-IPI.  This ensures
+    that pending VMExit injection to L1 occurs prior to executing any
+    instructions in the guest (regardless of nesting level).
+    
+    When deferring VMExit injection, KVM generates an immediate VMExit
+    from the (possibly nested) guest by sending itself an IPI.  Because
+    hardware interrupts are blocked prior to VMEnter and are unblocked
+    (in hardware) after VMEnter, this results in taking a VMExit(INTR)
+    before any guest instruction is executed.  But, as this approach
+    relies on the IPI being received before VMEnter executes, it only
+    works as intended when KVM is running as L0.  Because there are no
+    architectural guarantees regarding when IPIs are delivered, when
+    running nested the INTR may "arrive" long after L2 is running e.g.
+    L0 KVM doesn't force an immediate switch to L1 to deliver an INTR.
+    
+    For the most part, this unintended delay is not an issue since the
+    events being injected to L1 also do not have architectural guarantees
+    regarding their timing.  The notable exception is the VMX preemption
+    timer[1], which is architecturally guaranteed to cause a VMExit prior
+    to executing any instructions in the guest if the timer value is '0'
+    at VMEnter.  Specifically, the delay in injecting the VMExit causes
+    the preemption timer KVM unit test to fail when run in a nested guest.
+    
+    Note: this approach is viable even on CPUs with a broken preemption
+    timer, as broken in this context only means the timer counts at the
+    wrong rate.  There are no known errata affecting timer value of '0'.
+    
+    [1] I/O SMIs also have guarantees on when they arrive, but I have
+        no idea if/how those are emulated in KVM.
+    
+    Signed-off-by: Sean Christopherson <sean.j.christopherson@intel.com>
+    [Use a hook for SVM instead of leaving the default in x86.c - Paolo]
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 5c870203737f..9d0fda9056de 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -7361,6 +7361,12 @@ void kvm_vcpu_reload_apic_access_page(struct kvm_vcpu *vcpu)
+ }
+ EXPORT_SYMBOL_GPL(kvm_vcpu_reload_apic_access_page);
+ 
++void __kvm_request_immediate_exit(struct kvm_vcpu *vcpu)
++{
++	smp_send_reschedule(vcpu->cpu);
++}
++EXPORT_SYMBOL_GPL(__kvm_request_immediate_exit);
++
+ /*
+  * Returns 1 to let vcpu_run() continue the guest execution loop without
+  * exiting to the userspace.  Otherwise, the value will be returned to the
+@@ -7565,7 +7571,7 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 
+ 	if (req_immediate_exit) {
+ 		kvm_make_request(KVM_REQ_EVENT, vcpu);
+-		smp_send_reschedule(vcpu->cpu);
++		kvm_x86_ops->request_immediate_exit(vcpu);
+ 	}
+ 
+ 	trace_kvm_entry(vcpu->vcpu_id);

@@ -1,0 +1,92 @@
+commit 1793126fcebd7c18834f95d43b55e387a8803aa8
+Author: David Rheinsberg <david@readahead.eu>
+Date:   Sun Aug 25 18:29:00 2013 +0200
+
+    drm: implement experimental render nodes
+    
+    Render nodes provide an API for userspace to use non-privileged GPU
+    commands without any running DRM-Master. It is useful for offscreen
+    rendering, GPGPU clients, and normal render clients which do not perform
+    modesetting.
+    
+    Compared to legacy clients, render clients no longer need any
+    authentication to perform client ioctls. Instead, user-space controls
+    render/client access to GPUs via filesystem access-modes on the
+    render-node. Once a render-node was opened, a client has full access to
+    the client/render operations on the GPU. However, no modesetting or ioctls
+    that affect global state are allowed on render nodes.
+    
+    To prevent privilege-escalation, drivers must explicitly state that they
+    support render nodes. They must mark their render-only ioctls as
+    DRM_RENDER_ALLOW so render clients can use them. Furthermore, they must
+    support clients without any attached master.
+    
+    If filesystem access-modes are not enough for fine-grained access control
+    to render nodes (very unlikely, considering the versaitlity of FS-ACLs),
+    you may still fall-back to fd-passing from server to client (which allows
+    arbitrary access-control). However, note that revoking access is
+    currently impossible and unlikely to get implemented.
+    
+    Note: Render clients no longer have any associated DRM-Master as they are
+    supposed to be independent of any server state. DRM core highly depends on
+    file_priv->master to be non-NULL for modesetting/ctx/etc. commands.
+    Therefore, drivers must be very careful to not require DRM-Master if they
+    support DRIVER_RENDER.
+    
+    So far render-nodes are protected by "drm_rnodes". As long as this
+    module-parameter is not set to 1, a driver will not create render nodes.
+    This allows us to experiment with the API a bit before we stabilize it.
+    
+    v2: drop insecure GEM_FLINK to force use of dmabuf
+    
+    Signed-off-by: David Herrmann <dh.herrmann@gmail.com>
+    Signed-off-by: Dave Airlie <airlied@redhat.com>
+
+diff --git a/include/drm/drmP.h b/include/drm/drmP.h
+index 0e3d51793b65..290734191f72 100644
+--- a/include/drm/drmP.h
++++ b/include/drm/drmP.h
+@@ -145,6 +145,7 @@ int drm_err(const char *func, const char *format, ...);
+ #define DRIVER_GEM         0x1000
+ #define DRIVER_MODESET     0x2000
+ #define DRIVER_PRIME       0x4000
++#define DRIVER_RENDER      0x8000
+ 
+ #define DRIVER_BUS_PCI 0x1
+ #define DRIVER_BUS_PLATFORM 0x2
+@@ -290,6 +291,7 @@ typedef int drm_ioctl_compat_t(struct file *filp, unsigned int cmd,
+ #define DRM_ROOT_ONLY	0x4
+ #define DRM_CONTROL_ALLOW 0x8
+ #define DRM_UNLOCKED	0x10
++#define DRM_RENDER_ALLOW 0x20
+ 
+ struct drm_ioctl_desc {
+ 	unsigned int cmd;
+@@ -1204,6 +1206,7 @@ struct drm_device {
+ 	unsigned int agp_buffer_token;
+ 	struct drm_minor *control;		/**< Control node for card */
+ 	struct drm_minor *primary;		/**< render type primary screen head */
++	struct drm_minor *render;		/**< render node for card */
+ 
+         struct drm_mode_config mode_config;	/**< Current mode config */
+ 
+@@ -1251,6 +1254,11 @@ static inline bool drm_modeset_is_locked(struct drm_device *dev)
+ 	return mutex_is_locked(&dev->mode_config.mutex);
+ }
+ 
++static inline bool drm_is_render_client(struct drm_file *file_priv)
++{
++	return file_priv->minor->type == DRM_MINOR_RENDER;
++}
++
+ /******************************************************************/
+ /** \name Internal function definitions */
+ /*@{*/
+@@ -1450,6 +1458,7 @@ extern void drm_put_dev(struct drm_device *dev);
+ extern int drm_put_minor(struct drm_minor **minor);
+ extern void drm_unplug_dev(struct drm_device *dev);
+ extern unsigned int drm_debug;
++extern unsigned int drm_rnodes;
+ 
+ extern unsigned int drm_vblank_offdelay;
+ extern unsigned int drm_timestamp_precision;

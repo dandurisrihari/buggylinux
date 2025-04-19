@@ -1,0 +1,202 @@
+diff --git a/fs/coredump.c b/fs/coredump.c
+index f258c17c1841..be6403b4b14b 100644
+--- a/fs/coredump.c
++++ b/fs/coredump.c
+@@ -872,6 +872,9 @@ static int dump_emit_page(struct coredump_params *cprm, struct page *page)
+ 	loff_t pos;
+ 	ssize_t n;
+ 
++	if (!page)
++		return 0;
++
+ 	if (cprm->to_skip) {
+ 		if (!__dump_skip(cprm, cprm->to_skip))
+ 			return 0;
+@@ -884,7 +887,6 @@ static int dump_emit_page(struct coredump_params *cprm, struct page *page)
+ 	pos = file->f_pos;
+ 	bvec_set_page(&bvec, page, PAGE_SIZE, 0);
+ 	iov_iter_bvec(&iter, ITER_SOURCE, &bvec, 1, PAGE_SIZE);
+-	iov_iter_set_copy_mc(&iter);
+ 	n = __kernel_write_iter(cprm->file, &iter, &pos);
+ 	if (n != PAGE_SIZE)
+ 		return 0;
+@@ -895,10 +897,44 @@ static int dump_emit_page(struct coredump_params *cprm, struct page *page)
+ 	return 1;
+ }
+ 
++/*
++ * If we might get machine checks from kernel accesses during the
++ * core dump, let's get those errors early rather than during the
++ * IO. This is not performance-critical enough to warrant having
++ * all the machine check logic in the iovec paths.
++ */
++#ifdef copy_mc_to_kernel
++
++#define dump_page_alloc() alloc_page(GFP_KERNEL)
++#define dump_page_free(x) __free_page(x)
++static struct page *dump_page_copy(struct page *src, struct page *dst)
++{
++	void *buf = kmap_local_page(src);
++	size_t left = copy_mc_to_kernel(page_address(dst), buf, PAGE_SIZE);
++	kunmap_local(buf);
++	return left ? NULL : dst;
++}
++
++#else
++
++/* We just want to return non-NULL; it's never used. */
++#define dump_page_alloc() ERR_PTR(-EINVAL)
++#define dump_page_free(x) ((void)(x))
++static inline struct page *dump_page_copy(struct page *src, struct page *dst)
++{
++	return src;
++}
++#endif
++
+ int dump_user_range(struct coredump_params *cprm, unsigned long start,
+ 		    unsigned long len)
+ {
+ 	unsigned long addr;
++	struct page *dump_page;
++
++	dump_page = dump_page_alloc();
++	if (!dump_page)
++		return 0;
+ 
+ 	for (addr = start; addr < start + len; addr += PAGE_SIZE) {
+ 		struct page *page;
+@@ -912,14 +948,17 @@ int dump_user_range(struct coredump_params *cprm, unsigned long start,
+ 		 */
+ 		page = get_dump_page(addr);
+ 		if (page) {
+-			int stop = !dump_emit_page(cprm, page);
++			int stop = !dump_emit_page(cprm, dump_page_copy(page, dump_page));
+ 			put_page(page);
+-			if (stop)
++			if (stop) {
++				dump_page_free(dump_page);
+ 				return 0;
++			}
+ 		} else {
+ 			dump_skip(cprm, PAGE_SIZE);
+ 		}
+ 	}
++	dump_page_free(dump_page);
+ 	return 1;
+ }
+ #endif
+diff --git a/include/linux/uio.h b/include/linux/uio.h
+index bea9c89922d9..00cebe2b70de 100644
+--- a/include/linux/uio.h
++++ b/include/linux/uio.h
+@@ -40,7 +40,6 @@ struct iov_iter_state {
+ 
+ struct iov_iter {
+ 	u8 iter_type;
+-	bool copy_mc;
+ 	bool nofault;
+ 	bool data_source;
+ 	size_t iov_offset;
+@@ -248,22 +247,8 @@ size_t _copy_from_iter_flushcache(void *addr, size_t bytes, struct iov_iter *i);
+ 
+ #ifdef CONFIG_ARCH_HAS_COPY_MC
+ size_t _copy_mc_to_iter(const void *addr, size_t bytes, struct iov_iter *i);
+-static inline void iov_iter_set_copy_mc(struct iov_iter *i)
+-{
+-	i->copy_mc = true;
+-}
+-
+-static inline bool iov_iter_is_copy_mc(const struct iov_iter *i)
+-{
+-	return i->copy_mc;
+-}
+ #else
+ #define _copy_mc_to_iter _copy_to_iter
+-static inline void iov_iter_set_copy_mc(struct iov_iter *i) { }
+-static inline bool iov_iter_is_copy_mc(const struct iov_iter *i)
+-{
+-	return false;
+-}
+ #endif
+ 
+ size_t iov_iter_zero(size_t bytes, struct iov_iter *);
+@@ -355,7 +340,6 @@ static inline void iov_iter_ubuf(struct iov_iter *i, unsigned int direction,
+ 	WARN_ON(direction & ~(READ | WRITE));
+ 	*i = (struct iov_iter) {
+ 		.iter_type = ITER_UBUF,
+-		.copy_mc = false,
+ 		.data_source = direction,
+ 		.ubuf = buf,
+ 		.count = count,
+diff --git a/lib/iov_iter.c b/lib/iov_iter.c
+index e0aa6b440ca5..cf2eb2b2f983 100644
+--- a/lib/iov_iter.c
++++ b/lib/iov_iter.c
+@@ -166,7 +166,6 @@ void iov_iter_init(struct iov_iter *i, unsigned int direction,
+ 	WARN_ON(direction & ~(READ | WRITE));
+ 	*i = (struct iov_iter) {
+ 		.iter_type = ITER_IOVEC,
+-		.copy_mc = false,
+ 		.nofault = false,
+ 		.data_source = direction,
+ 		.__iov = iov,
+@@ -244,27 +243,9 @@ size_t _copy_mc_to_iter(const void *addr, size_t bytes, struct iov_iter *i)
+ EXPORT_SYMBOL_GPL(_copy_mc_to_iter);
+ #endif /* CONFIG_ARCH_HAS_COPY_MC */
+ 
+-static __always_inline
+-size_t memcpy_from_iter_mc(void *iter_from, size_t progress,
+-			   size_t len, void *to, void *priv2)
+-{
+-	return copy_mc_to_kernel(to + progress, iter_from, len);
+-}
+-
+-static size_t __copy_from_iter_mc(void *addr, size_t bytes, struct iov_iter *i)
+-{
+-	if (unlikely(i->count < bytes))
+-		bytes = i->count;
+-	if (unlikely(!bytes))
+-		return 0;
+-	return iterate_bvec(i, bytes, addr, NULL, memcpy_from_iter_mc);
+-}
+-
+ static __always_inline
+ size_t __copy_from_iter(void *addr, size_t bytes, struct iov_iter *i)
+ {
+-	if (unlikely(iov_iter_is_copy_mc(i)))
+-		return __copy_from_iter_mc(addr, bytes, i);
+ 	return iterate_and_advance(i, bytes, addr,
+ 				   copy_from_user_iter, memcpy_from_iter);
+ }
+@@ -633,7 +614,6 @@ void iov_iter_kvec(struct iov_iter *i, unsigned int direction,
+ 	WARN_ON(direction & ~(READ | WRITE));
+ 	*i = (struct iov_iter){
+ 		.iter_type = ITER_KVEC,
+-		.copy_mc = false,
+ 		.data_source = direction,
+ 		.kvec = kvec,
+ 		.nr_segs = nr_segs,
+@@ -650,7 +630,6 @@ void iov_iter_bvec(struct iov_iter *i, unsigned int direction,
+ 	WARN_ON(direction & ~(READ | WRITE));
+ 	*i = (struct iov_iter){
+ 		.iter_type = ITER_BVEC,
+-		.copy_mc = false,
+ 		.data_source = direction,
+ 		.bvec = bvec,
+ 		.nr_segs = nr_segs,
+@@ -679,7 +658,6 @@ void iov_iter_xarray(struct iov_iter *i, unsigned int direction,
+ 	BUG_ON(direction & ~1);
+ 	*i = (struct iov_iter) {
+ 		.iter_type = ITER_XARRAY,
+-		.copy_mc = false,
+ 		.data_source = direction,
+ 		.xarray = xarray,
+ 		.xarray_start = start,
+@@ -703,7 +681,6 @@ void iov_iter_discard(struct iov_iter *i, unsigned int direction, size_t count)
+ 	BUG_ON(direction != READ);
+ 	*i = (struct iov_iter){
+ 		.iter_type = ITER_DISCARD,
+-		.copy_mc = false,
+ 		.data_source = false,
+ 		.count = count,
+ 		.iov_offset = 0

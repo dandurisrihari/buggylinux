@@ -1,0 +1,122 @@
+diff --cc fs/afs/rxrpc.c
+index e613dd754383,b819900916e6..f7ae54b6a393
+--- a/fs/afs/rxrpc.c
++++ b/fs/afs/rxrpc.c
+@@@ -169,13 -170,14 +170,14 @@@ void afs_put_call(struct afs_call *call
+  		afs_put_server(call->net, call->cm_server);
+  		afs_put_cb_interest(call->net, call->cbi);
+  		kfree(call->request);
+- 		kfree(call);
+  
+- 		o = atomic_dec_return(&net->nr_outstanding_calls);
+  		trace_afs_call(call, afs_call_trace_free, 0, o,
+  			       __builtin_return_address(0));
++ 		kfree(call);
++ 
++ 		o = atomic_dec_return(&net->nr_outstanding_calls);
+  		if (o == 0)
+ -			wake_up_atomic_t(&net->nr_outstanding_calls);
+ +			wake_up_var(&net->nr_outstanding_calls);
+  	}
+  }
+  
+diff --cc include/linux/socket.h
+index e2b6bd4fe977,60e01482a9c4..ea50f4a65816
+--- a/include/linux/socket.h
++++ b/include/linux/socket.h
+@@@ -356,30 -353,7 +357,30 @@@ extern long __sys_sendmsg(int fd, struc
+  extern int __sys_recvmmsg(int fd, struct mmsghdr __user *mmsg, unsigned int vlen,
+  			  unsigned int flags, struct timespec *timeout);
+  extern int __sys_sendmmsg(int fd, struct mmsghdr __user *mmsg,
+ -			  unsigned int vlen, unsigned int flags);
+ +			  unsigned int vlen, unsigned int flags,
+ +			  bool forbid_cmsg_compat);
+ +
+ +/* helpers which do the actual work for syscalls */
+ +extern int __sys_recvfrom(int fd, void __user *ubuf, size_t size,
+ +			  unsigned int flags, struct sockaddr __user *addr,
+ +			  int __user *addr_len);
+ +extern int __sys_sendto(int fd, void __user *buff, size_t len,
+ +			unsigned int flags, struct sockaddr __user *addr,
+ +			int addr_len);
+ +extern int __sys_accept4(int fd, struct sockaddr __user *upeer_sockaddr,
+ +			 int __user *upeer_addrlen, int flags);
+ +extern int __sys_socket(int family, int type, int protocol);
+ +extern int __sys_bind(int fd, struct sockaddr __user *umyaddr, int addrlen);
+ +extern int __sys_connect(int fd, struct sockaddr __user *uservaddr,
+ +			 int addrlen);
+ +extern int __sys_listen(int fd, int backlog);
+ +extern int __sys_getsockname(int fd, struct sockaddr __user *usockaddr,
+ +			     int __user *usockaddr_len);
+ +extern int __sys_getpeername(int fd, struct sockaddr __user *usockaddr,
+ +			     int __user *usockaddr_len);
+ +extern int __sys_socketpair(int family, int type, int protocol,
+ +			    int __user *usockvec);
+ +extern int __sys_shutdown(int fd, int how);
+  
+- 
++ extern struct ns_common *get_net_ns(struct ns_common *ns);
+  #endif /* _LINUX_SOCKET_H */
+diff --cc net/rxrpc/call_accept.c
+index 3028298ca561,f67017dcb25e..a9a9be5519b9
+--- a/net/rxrpc/call_accept.c
++++ b/net/rxrpc/call_accept.c
+@@@ -216,6 -219,8 +219,8 @@@ void rxrpc_discard_prealloc(struct rxrp
+  		list_del(&conn->proc_link);
+  		write_unlock(&rxnet->conn_lock);
+  		kfree(conn);
++ 		if (atomic_dec_and_test(&rxnet->nr_conns))
+ -			wake_up_atomic_t(&rxnet->nr_conns);
+++			wake_up_var(&rxnet->nr_conns);
+  		tail = (tail + 1) & (size - 1);
+  	}
+  
+diff --cc net/rxrpc/call_object.c
+index 0b2db38dd32d,f721c2b7e234..f6734d8cb01a
+--- a/net/rxrpc/call_object.c
++++ b/net/rxrpc/call_object.c
+@@@ -648,6 -657,8 +657,8 @@@ static void rxrpc_rcu_destroy_call(stru
+  	kfree(call->rxtx_buffer);
+  	kfree(call->rxtx_annotations);
+  	kmem_cache_free(rxrpc_call_jar, call);
++ 	if (atomic_dec_and_test(&rxnet->nr_calls))
+ -		wake_up_atomic_t(&rxnet->nr_calls);
+++		wake_up_var(&rxnet->nr_calls);
+  }
+  
+  /*
+@@@ -712,4 -723,7 +723,7 @@@ void rxrpc_destroy_all_calls(struct rxr
+  	}
+  
+  	write_unlock(&rxnet->call_lock);
++ 
++ 	atomic_dec(&rxnet->nr_calls);
+ -	wait_on_atomic_t(&rxnet->nr_calls, atomic_t_wait, TASK_UNINTERRUPTIBLE);
+++	wait_var_event(&rxnet->nr_calls, !atomic_read(&rxnet->nr_calls));
+  }
+diff --cc net/rxrpc/conn_object.c
+index ccbac190add1,0950ee3d26f5..4c77a78a252a
+--- a/net/rxrpc/conn_object.c
++++ b/net/rxrpc/conn_object.c
+@@@ -365,6 -365,9 +365,9 @@@ static void rxrpc_destroy_connection(st
+  	key_put(conn->params.key);
+  	key_put(conn->server_key);
+  	rxrpc_put_peer(conn->params.peer);
++ 
++ 	if (atomic_dec_and_test(&conn->params.local->rxnet->nr_conns))
+ -		wake_up_atomic_t(&conn->params.local->rxnet->nr_conns);
+++		wake_up_var(&conn->params.local->rxnet->nr_conns);
+  	rxrpc_put_local(conn->params.local);
+  
+  	kfree(conn);
+@@@ -475,5 -479,9 +479,9 @@@ void rxrpc_destroy_all_connections(stru
+  
+  	ASSERT(list_empty(&rxnet->conn_proc_list));
+  
++ 	/* We need to wait for the connections to be destroyed by RCU as they
++ 	 * pin things that we still need to get rid of.
++ 	 */
+ -	wait_on_atomic_t(&rxnet->nr_conns, atomic_t_wait, TASK_UNINTERRUPTIBLE);
+++	wait_var_event(&rxnet->nr_conns, !atomic_read(&rxnet->nr_conns));
+  	_leave("");
+  }

@@ -1,0 +1,46 @@
+commit f1dad166e88a5ddca0acf8f11dea0e2bd92d8bf3
+Author: Pavel Emelyanov <xemul@openvz.org>
+Date:   Tue Dec 4 23:45:24 2007 -0800
+
+    Avoid potential NULL dereference in unregister_sysctl_table
+    
+    register_sysctl_table() can return NULL sometimes, e.g.  when kmalloc()
+    returns NULL or when sysctl check fails.
+    
+    I've also noticed, that many (most?) code in the kernel doesn't check for
+    the return value from register_sysctl_table() and later simply calls the
+    unregister_sysctl_table() with potentially NULL argument.
+    
+    This is unlikely on a common kernel configuration, but in case we're
+    dealing with modules and/or fault-injection support, there's a slight
+    possibility of an OOPS.
+    
+    Changing all the users to check for return code from the registering does
+    not look like a good solution - there are too many code doing this and
+    failure in sysctl tables registration is not a good reason to abort module
+    loading (in most of the cases).
+    
+    So I think, that we can just have this check in unregister_sysctl_table
+    just to avoid accidental OOPS-es (actually, the unregister_sysctl_table()
+    did exactly this, before the start_unregistering() appeared).
+    
+    Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+    Cc: "Eric W. Biederman" <ebiederm@xmission.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/kernel/sysctl.c b/kernel/sysctl.c
+index 0deed82a6156..8ac51714b08c 100644
+--- a/kernel/sysctl.c
++++ b/kernel/sysctl.c
+@@ -1588,6 +1588,10 @@ struct ctl_table_header *register_sysctl_table(struct ctl_table * table)
+ void unregister_sysctl_table(struct ctl_table_header * header)
+ {
+ 	might_sleep();
++
++	if (header == NULL)
++		return;
++
+ 	spin_lock(&sysctl_lock);
+ 	start_unregistering(header);
+ 	spin_unlock(&sysctl_lock);

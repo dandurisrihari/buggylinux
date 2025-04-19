@@ -1,0 +1,55 @@
+commit dcffc3b1ae3251d796a25c673f614e3099ca83d3
+Author: Kent Overstreet <kent.overstreet@linux.dev>
+Date:   Sat Mar 29 23:11:08 2025 -0400
+
+    bcachefs: Split up bch_dev.io_ref
+    
+    We now have separate per device io_refs for read and write access.
+    
+    This fixes a device removal bug where the discard workers were still
+    running while we're removing alloc info for that device.
+    
+    It's also a bit of hardening; we no longer allow writes to devices that
+    are read-only.
+    
+    Signed-off-by: Kent Overstreet <kent.overstreet@linux.dev>
+
+diff --git a/fs/bcachefs/btree_node_scan.c b/fs/bcachefs/btree_node_scan.c
+index 25d54b77cdc2..8c9fdb7263fe 100644
+--- a/fs/bcachefs/btree_node_scan.c
++++ b/fs/bcachefs/btree_node_scan.c
+@@ -271,7 +271,7 @@ static int read_btree_nodes_worker(void *p)
+ err:
+ 	bio_put(bio);
+ 	free_page((unsigned long) buf);
+-	percpu_ref_put(&ca->io_ref);
++	percpu_ref_put(&ca->io_ref[READ]);
+ 	closure_put(w->cl);
+ 	kfree(w);
+ 	return 0;
+@@ -291,7 +291,7 @@ static int read_btree_nodes(struct find_btree_nodes *f)
+ 
+ 		struct find_btree_nodes_worker *w = kmalloc(sizeof(*w), GFP_KERNEL);
+ 		if (!w) {
+-			percpu_ref_put(&ca->io_ref);
++			percpu_ref_put(&ca->io_ref[READ]);
+ 			ret = -ENOMEM;
+ 			goto err;
+ 		}
+@@ -303,14 +303,14 @@ static int read_btree_nodes(struct find_btree_nodes *f)
+ 		struct task_struct *t = kthread_create(read_btree_nodes_worker, w, "read_btree_nodes/%s", ca->name);
+ 		ret = PTR_ERR_OR_ZERO(t);
+ 		if (ret) {
+-			percpu_ref_put(&ca->io_ref);
++			percpu_ref_put(&ca->io_ref[READ]);
+ 			kfree(w);
+ 			bch_err_msg(c, ret, "starting kthread");
+ 			break;
+ 		}
+ 
+ 		closure_get(&cl);
+-		percpu_ref_get(&ca->io_ref);
++		percpu_ref_get(&ca->io_ref[READ]);
+ 		wake_up_process(t);
+ 	}
+ err:

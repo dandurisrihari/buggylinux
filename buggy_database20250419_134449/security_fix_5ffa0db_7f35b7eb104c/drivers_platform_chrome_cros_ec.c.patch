@@ -1,0 +1,39 @@
+commit 5ffa0dbfdc9fc05acae02d5b0dc766ec778569ac
+Author: Dawid Niedzwiecki <dawidn@google.com>
+Date:   Fri Dec 6 09:15:13 2024 +0000
+
+    platform/chrome: cros_ec: jump to RW before probing
+    
+    There are EC devices, like FPMCU, that use RWSIG as a method of
+    authenticating RW section. After the authentication succeeds, EC device
+    waits some time before jumping to RW. EC can be probed before the jump,
+    which means there is a time window after jump to RW in which EC won't
+    respond, because it is not initialized. It can cause a communication
+    errors after probing.
+    
+    To avoid such problems, send the RWSIG continue command first, which
+    skips waiting for the jump to RW. Send the command more times, to make
+    sure EC is ready in RW before the start of the actual probing process. If
+    a EC device doesn't support the RWSIG, it will respond with invalid
+    command error code and probing will continue as usual.
+    
+    Signed-off-by: Dawid Niedzwiecki <dawidn@google.com>
+    Link: https://lore.kernel.org/r/20241206091514.2538350-2-dawidn@google.com
+    Signed-off-by: Tzung-Bi Shih <tzungbi@kernel.org>
+
+diff --git a/drivers/platform/chrome/cros_ec.c b/drivers/platform/chrome/cros_ec.c
+index e821b3d39590..110771a8645e 100644
+--- a/drivers/platform/chrome/cros_ec.c
++++ b/drivers/platform/chrome/cros_ec.c
+@@ -204,6 +204,11 @@ int cros_ec_register(struct cros_ec_device *ec_dev)
+ 	mutex_init(&ec_dev->lock);
+ 	lockdep_set_class(&ec_dev->lock, &ec_dev->lockdep_key);
+ 
++	/* Send RWSIG continue to jump to RW for devices using RWSIG. */
++	err = cros_ec_rwsig_continue(ec_dev);
++	if (err)
++		dev_info(dev, "Failed to continue RWSIG: %d\n", err);
++
+ 	err = cros_ec_query_all(ec_dev);
+ 	if (err) {
+ 		dev_err(dev, "Cannot identify the EC: error %d\n", err);

@@ -1,0 +1,60 @@
+commit a61d7c5432ac5a953bbcec17af031661c2bd201d
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Mon May 2 00:07:31 2022 +0200
+
+    KVM: x86: Trace re-injected exceptions
+    
+    Trace exceptions that are re-injected, not just those that KVM is
+    injecting for the first time.  Debugging re-injection bugs is painful
+    enough as is, not having visibility into what KVM is doing only makes
+    things worse.
+    
+    Delay propagating pending=>injected in the non-reinjection path so that
+    the tracing can properly identify reinjected exceptions.
+    
+    Signed-off-by: Sean Christopherson <seanjc@google.com>
+    Reviewed-by: Maxim Levitsky <mlevitsk@redhat.com>
+    Signed-off-by: Maciej S. Szmigiero <maciej.szmigiero@oracle.com>
+    Message-Id: <25470690a38b4d2b32b6204875dd35676c65c9f2.1651440202.git.maciej.szmigiero@oracle.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 921b1139c303..c9f3ad89bf4c 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -9408,6 +9408,11 @@ int kvm_check_nested_events(struct kvm_vcpu *vcpu)
+ 
+ static void kvm_inject_exception(struct kvm_vcpu *vcpu)
+ {
++	trace_kvm_inj_exception(vcpu->arch.exception.nr,
++				vcpu->arch.exception.has_error_code,
++				vcpu->arch.exception.error_code,
++				vcpu->arch.exception.injected);
++
+ 	if (vcpu->arch.exception.error_code && !is_protmode(vcpu))
+ 		vcpu->arch.exception.error_code = false;
+ 	static_call(kvm_x86_queue_exception)(vcpu);
+@@ -9465,13 +9470,6 @@ static int inject_pending_event(struct kvm_vcpu *vcpu, bool *req_immediate_exit)
+ 
+ 	/* try to inject new event if pending */
+ 	if (vcpu->arch.exception.pending) {
+-		trace_kvm_inj_exception(vcpu->arch.exception.nr,
+-					vcpu->arch.exception.has_error_code,
+-					vcpu->arch.exception.error_code);
+-
+-		vcpu->arch.exception.pending = false;
+-		vcpu->arch.exception.injected = true;
+-
+ 		if (exception_type(vcpu->arch.exception.nr) == EXCPT_FAULT)
+ 			__kvm_set_rflags(vcpu, kvm_get_rflags(vcpu) |
+ 					     X86_EFLAGS_RF);
+@@ -9485,6 +9483,10 @@ static int inject_pending_event(struct kvm_vcpu *vcpu, bool *req_immediate_exit)
+ 		}
+ 
+ 		kvm_inject_exception(vcpu);
++
++		vcpu->arch.exception.pending = false;
++		vcpu->arch.exception.injected = true;
++
+ 		can_inject = false;
+ 	}

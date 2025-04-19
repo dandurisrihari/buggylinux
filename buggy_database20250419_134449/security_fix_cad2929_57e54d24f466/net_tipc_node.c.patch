@@ -1,0 +1,148 @@
+commit cad2929dc4321b1f237767e9bd271b61a2eaa752
+Author: Hoang Huu Le <hoang.h.le@dektech.com.au>
+Date:   Wed Jun 17 13:56:05 2020 +0700
+
+    tipc: update a binding service via broadcast
+    
+    Currently, updating binding table (add service binding to
+    name table/withdraw a service binding) is being sent over replicast.
+    However, if we are scaling up clusters to > 100 nodes/containers this
+    method is less affection because of looping through nodes in a cluster one
+    by one.
+    
+    It is worth to use broadcast to update a binding service. This way, the
+    binding table can be updated on all peer nodes in one shot.
+    
+    Broadcast is used when all peer nodes, as indicated by a new capability
+    flag TIPC_NAMED_BCAST, support reception of this message type.
+    
+    Four problems need to be considered when introducing this feature.
+    1) When establishing a link to a new peer node we still update this by a
+    unicast 'bulk' update. This may lead to race conditions, where a later
+    broadcast publication/withdrawal bypass the 'bulk', resulting in
+    disordered publications, or even that a withdrawal may arrive before the
+    corresponding publication. We solve this by adding an 'is_last_bulk' bit
+    in the last bulk messages so that it can be distinguished from all other
+    messages. Only when this message has arrived do we open up for reception
+    of broadcast publications/withdrawals.
+    
+    2) When a first legacy node is added to the cluster all distribution
+    will switch over to use the legacy 'replicast' method, while the
+    opposite happens when the last legacy node leaves the cluster. This
+    entails another risk of message disordering that has to be handled. We
+    solve this by adding a sequence number to the broadcast/replicast
+    messages, so that disordering can be discovered and corrected. Note
+    however that we don't need to consider potential message loss or
+    duplication at this protocol level.
+    
+    3) Bulk messages don't contain any sequence numbers, and will always
+    arrive in order. Hence we must exempt those from the sequence number
+    control and deliver them unconditionally. We solve this by adding a new
+    'is_bulk' bit in those messages so that they can be recognized.
+    
+    4) Legacy messages, which don't contain any new bits or sequence
+    numbers, but neither can arrive out of order, also need to be exempt
+    from the initial synchronization and sequence number check, and
+    delivered unconditionally. Therefore, we add another 'is_not_legacy' bit
+    to all new messages so that those can be distinguished from legacy
+    messages and the latter delivered directly.
+    
+    v1->v2:
+     - fix warning issue reported by kbuild test robot <lkp@intel.com>
+     - add santiy check to drop the publication message with a sequence
+    number that is lower than the agreed synch point
+    
+    Signed-off-by: kernel test robot <lkp@intel.com>
+    Signed-off-by: Hoang Huu Le <hoang.h.le@dektech.com.au>
+    Acked-by: Jon Maloy <jmaloy@redhat.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/tipc/node.c b/net/tipc/node.c
+index a4c2816c3746..030a51c4d1fa 100644
+--- a/net/tipc/node.c
++++ b/net/tipc/node.c
+@@ -75,6 +75,8 @@ struct tipc_bclink_entry {
+ 	struct sk_buff_head arrvq;
+ 	struct sk_buff_head inputq2;
+ 	struct sk_buff_head namedq;
++	u16 named_rcv_nxt;
++	bool named_open;
+ };
+ 
+ /**
+@@ -396,10 +398,10 @@ static void tipc_node_write_unlock(struct tipc_node *n)
+ 	write_unlock_bh(&n->lock);
+ 
+ 	if (flags & TIPC_NOTIFY_NODE_DOWN)
+-		tipc_publ_notify(net, publ_list, addr);
++		tipc_publ_notify(net, publ_list, addr, n->capabilities);
+ 
+ 	if (flags & TIPC_NOTIFY_NODE_UP)
+-		tipc_named_node_up(net, addr);
++		tipc_named_node_up(net, addr, n->capabilities);
+ 
+ 	if (flags & TIPC_NOTIFY_LINK_UP) {
+ 		tipc_mon_peer_up(net, addr, bearer_id);
+@@ -1483,6 +1485,7 @@ static void node_lost_contact(struct tipc_node *n,
+ 
+ 	/* Clean up broadcast state */
+ 	tipc_bcast_remove_peer(n->net, n->bc_entry.link);
++	__skb_queue_purge(&n->bc_entry.namedq);
+ 
+ 	/* Abort any ongoing link failover */
+ 	for (i = 0; i < MAX_BEARERS; i++) {
+@@ -1729,12 +1732,23 @@ int tipc_node_distr_xmit(struct net *net, struct sk_buff_head *xmitq)
+ 	return 0;
+ }
+ 
+-void tipc_node_broadcast(struct net *net, struct sk_buff *skb)
++void tipc_node_broadcast(struct net *net, struct sk_buff *skb, int rc_dests)
+ {
++	struct sk_buff_head xmitq;
+ 	struct sk_buff *txskb;
+ 	struct tipc_node *n;
++	u16 dummy;
+ 	u32 dst;
+ 
++	/* Use broadcast if all nodes support it */
++	if (!rc_dests && tipc_bcast_get_mode(net) != BCLINK_MODE_RCAST) {
++		__skb_queue_head_init(&xmitq);
++		__skb_queue_tail(&xmitq, skb);
++		tipc_bcast_xmit(net, &xmitq, &dummy);
++		return;
++	}
++
++	/* Otherwise use legacy replicast method */
+ 	rcu_read_lock();
+ 	list_for_each_entry_rcu(n, tipc_nodes(net), list) {
+ 		dst = n->addr;
+@@ -1749,7 +1763,6 @@ void tipc_node_broadcast(struct net *net, struct sk_buff *skb)
+ 		tipc_node_xmit_skb(net, txskb, dst, 0);
+ 	}
+ 	rcu_read_unlock();
+-
+ 	kfree_skb(skb);
+ }
+ 
+@@ -1844,7 +1857,9 @@ static void tipc_node_bc_rcv(struct net *net, struct sk_buff *skb, int bearer_id
+ 
+ 	/* Handle NAME_DISTRIBUTOR messages sent from 1.7 nodes */
+ 	if (!skb_queue_empty(&n->bc_entry.namedq))
+-		tipc_named_rcv(net, &n->bc_entry.namedq);
++		tipc_named_rcv(net, &n->bc_entry.namedq,
++			       &n->bc_entry.named_rcv_nxt,
++			       &n->bc_entry.named_open);
+ 
+ 	/* If reassembly or retransmission failure => reset all links to peer */
+ 	if (rc & TIPC_LINK_DOWN_EVT)
+@@ -2114,7 +2129,9 @@ void tipc_rcv(struct net *net, struct sk_buff *skb, struct tipc_bearer *b)
+ 		tipc_node_link_down(n, bearer_id, false);
+ 
+ 	if (unlikely(!skb_queue_empty(&n->bc_entry.namedq)))
+-		tipc_named_rcv(net, &n->bc_entry.namedq);
++		tipc_named_rcv(net, &n->bc_entry.namedq,
++			       &n->bc_entry.named_rcv_nxt,
++			       &n->bc_entry.named_open);
+ 
+ 	if (unlikely(!skb_queue_empty(&n->bc_entry.inputq1)))
+ 		tipc_node_mcast_rcv(n);

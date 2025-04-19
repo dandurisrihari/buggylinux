@@ -1,0 +1,45 @@
+commit 41057ebde0025b0179b852dd785c9f3f0f08adad
+Author: David Howells <dhowells@redhat.com>
+Date:   Wed Sep 16 08:19:12 2020 +0100
+
+    rxrpc: Support keys with multiple authentication tokens
+    
+    rxrpc-type keys can have multiple tokens attached for different security
+    classes.  Currently, rxrpc always picks the first one, whether or not the
+    security class it indicates is supported.
+    
+    Add preliminary support for choosing which security class will be used
+    (this will need to be directed from a higher layer) and go through the
+    tokens to find one that's supported.
+    
+    Signed-off-by: David Howells <dhowells@redhat.com>
+
+diff --git a/net/rxrpc/security.c b/net/rxrpc/security.c
+index 9b1fb9ed0717..0c5168f52bd6 100644
+--- a/net/rxrpc/security.c
++++ b/net/rxrpc/security.c
+@@ -81,16 +81,17 @@ int rxrpc_init_client_conn_security(struct rxrpc_connection *conn)
+ 	if (ret < 0)
+ 		return ret;
+ 
+-	token = key->payload.data[0];
+-	if (!token)
+-		return -EKEYREJECTED;
++	for (token = key->payload.data[0]; token; token = token->next) {
++		sec = rxrpc_security_lookup(token->security_index);
++		if (sec)
++			goto found;
++	}
++	return -EKEYREJECTED;
+ 
+-	sec = rxrpc_security_lookup(token->security_index);
+-	if (!sec)
+-		return -EKEYREJECTED;
++found:
+ 	conn->security = sec;
+ 
+-	ret = conn->security->init_connection_security(conn);
++	ret = conn->security->init_connection_security(conn, token);
+ 	if (ret < 0) {
+ 		conn->security = &rxrpc_no_security;
+ 		return ret;

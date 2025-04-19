@@ -1,0 +1,176 @@
+diff --git a/fs/netfs/read_collect.c b/fs/netfs/read_collect.c
+index f65affa5a9e4..636cc5a98ef5 100644
+--- a/fs/netfs/read_collect.c
++++ b/fs/netfs/read_collect.c
+@@ -470,7 +470,8 @@ void netfs_read_collection_worker(struct work_struct *work)
+  */
+ void netfs_wake_read_collector(struct netfs_io_request *rreq)
+ {
+-	if (test_bit(NETFS_RREQ_OFFLOAD_COLLECTION, &rreq->flags)) {
++	if (test_bit(NETFS_RREQ_OFFLOAD_COLLECTION, &rreq->flags) &&
++	    !test_bit(NETFS_RREQ_RETRYING, &rreq->flags)) {
+ 		if (!work_pending(&rreq->work)) {
+ 			netfs_get_request(rreq, netfs_rreq_trace_get_work);
+ 			if (!queue_work(system_unbound_wq, &rreq->work))
+@@ -586,7 +587,8 @@ void netfs_read_subreq_terminated(struct netfs_io_subrequest *subreq)
+ 	smp_mb__after_atomic(); /* Clear IN_PROGRESS before task state */
+ 
+ 	/* If we are at the head of the queue, wake up the collector. */
+-	if (list_is_first(&subreq->rreq_link, &stream->subrequests))
++	if (list_is_first(&subreq->rreq_link, &stream->subrequests) ||
++	    test_bit(NETFS_RREQ_RETRYING, &rreq->flags))
+ 		netfs_wake_read_collector(rreq);
+ 
+ 	netfs_put_subrequest(subreq, true, netfs_sreq_trace_put_terminated);
+diff --git a/fs/netfs/read_retry.c b/fs/netfs/read_retry.c
+index 2290af0d51ac..8316c4533a51 100644
+--- a/fs/netfs/read_retry.c
++++ b/fs/netfs/read_retry.c
+@@ -14,7 +14,6 @@ static void netfs_reissue_read(struct netfs_io_request *rreq,
+ {
+ 	__clear_bit(NETFS_SREQ_MADE_PROGRESS, &subreq->flags);
+ 	__set_bit(NETFS_SREQ_IN_PROGRESS, &subreq->flags);
+-	netfs_get_subrequest(subreq, netfs_sreq_trace_get_resubmit);
+ 	subreq->rreq->netfs_ops->issue_read(subreq);
+ }
+ 
+@@ -48,6 +47,7 @@ static void netfs_retry_read_subrequests(struct netfs_io_request *rreq)
+ 				__clear_bit(NETFS_SREQ_MADE_PROGRESS, &subreq->flags);
+ 				subreq->retry_count++;
+ 				netfs_reset_iter(subreq);
++				netfs_get_subrequest(subreq, netfs_sreq_trace_get_resubmit);
+ 				netfs_reissue_read(rreq, subreq);
+ 			}
+ 		}
+@@ -75,7 +75,7 @@ static void netfs_retry_read_subrequests(struct netfs_io_request *rreq)
+ 		struct iov_iter source;
+ 		unsigned long long start, len;
+ 		size_t part;
+-		bool boundary = false;
++		bool boundary = false, subreq_superfluous = false;
+ 
+ 		/* Go through the subreqs and find the next span of contiguous
+ 		 * buffer that we then rejig (cifs, for example, needs the
+@@ -116,8 +116,10 @@ static void netfs_retry_read_subrequests(struct netfs_io_request *rreq)
+ 		/* Work through the sublist. */
+ 		subreq = from;
+ 		list_for_each_entry_from(subreq, &stream->subrequests, rreq_link) {
+-			if (!len)
++			if (!len) {
++				subreq_superfluous = true;
+ 				break;
++			}
+ 			subreq->source	= NETFS_DOWNLOAD_FROM_SERVER;
+ 			subreq->start	= start - subreq->transferred;
+ 			subreq->len	= len   + subreq->transferred;
+@@ -154,19 +156,21 @@ static void netfs_retry_read_subrequests(struct netfs_io_request *rreq)
+ 
+ 			netfs_get_subrequest(subreq, netfs_sreq_trace_get_resubmit);
+ 			netfs_reissue_read(rreq, subreq);
+-			if (subreq == to)
++			if (subreq == to) {
++				subreq_superfluous = false;
+ 				break;
++			}
+ 		}
+ 
+ 		/* If we managed to use fewer subreqs, we can discard the
+ 		 * excess; if we used the same number, then we're done.
+ 		 */
+ 		if (!len) {
+-			if (subreq == to)
++			if (!subreq_superfluous)
+ 				continue;
+ 			list_for_each_entry_safe_from(subreq, tmp,
+ 						      &stream->subrequests, rreq_link) {
+-				trace_netfs_sreq(subreq, netfs_sreq_trace_discard);
++				trace_netfs_sreq(subreq, netfs_sreq_trace_superfluous);
+ 				list_del(&subreq->rreq_link);
+ 				netfs_put_subrequest(subreq, false, netfs_sreq_trace_put_done);
+ 				if (subreq == to)
+@@ -187,14 +191,12 @@ static void netfs_retry_read_subrequests(struct netfs_io_request *rreq)
+ 			subreq->source		= NETFS_DOWNLOAD_FROM_SERVER;
+ 			subreq->start		= start;
+ 			subreq->len		= len;
+-			subreq->debug_index	= atomic_inc_return(&rreq->subreq_counter);
+ 			subreq->stream_nr	= stream->stream_nr;
+ 			subreq->retry_count	= 1;
+ 
+ 			trace_netfs_sreq_ref(rreq->debug_id, subreq->debug_index,
+ 					     refcount_read(&subreq->ref),
+ 					     netfs_sreq_trace_new);
+-			netfs_get_subrequest(subreq, netfs_sreq_trace_get_resubmit);
+ 
+ 			list_add(&subreq->rreq_link, &to->rreq_link);
+ 			to = list_next_entry(to, rreq_link);
+@@ -256,14 +258,32 @@ void netfs_retry_reads(struct netfs_io_request *rreq)
+ {
+ 	struct netfs_io_subrequest *subreq;
+ 	struct netfs_io_stream *stream = &rreq->io_streams[0];
++	DEFINE_WAIT(myself);
++
++	set_bit(NETFS_RREQ_RETRYING, &rreq->flags);
+ 
+ 	/* Wait for all outstanding I/O to quiesce before performing retries as
+ 	 * we may need to renegotiate the I/O sizes.
+ 	 */
+ 	list_for_each_entry(subreq, &stream->subrequests, rreq_link) {
+-		wait_on_bit(&subreq->flags, NETFS_SREQ_IN_PROGRESS,
+-			    TASK_UNINTERRUPTIBLE);
++		if (!test_bit(NETFS_SREQ_IN_PROGRESS, &subreq->flags))
++			continue;
++
++		trace_netfs_rreq(rreq, netfs_rreq_trace_wait_queue);
++		for (;;) {
++			prepare_to_wait(&rreq->waitq, &myself, TASK_UNINTERRUPTIBLE);
++
++			if (!test_bit(NETFS_SREQ_IN_PROGRESS, &subreq->flags))
++				break;
++
++			trace_netfs_sreq(subreq, netfs_sreq_trace_wait_for);
++			schedule();
++			trace_netfs_rreq(rreq, netfs_rreq_trace_woke_queue);
++		}
++
++		finish_wait(&rreq->waitq, &myself);
+ 	}
++	clear_bit(NETFS_RREQ_RETRYING, &rreq->flags);
+ 
+ 	trace_netfs_rreq(rreq, netfs_rreq_trace_resubmit);
+ 	netfs_retry_read_subrequests(rreq);
+diff --git a/include/linux/netfs.h b/include/linux/netfs.h
+index 071d05d81d38..c86a11cfc4a3 100644
+--- a/include/linux/netfs.h
++++ b/include/linux/netfs.h
+@@ -278,7 +278,7 @@ struct netfs_io_request {
+ #define NETFS_RREQ_PAUSE		11	/* Pause subrequest generation */
+ #define NETFS_RREQ_USE_IO_ITER		12	/* Use ->io_iter rather than ->i_pages */
+ #define NETFS_RREQ_ALL_QUEUED		13	/* All subreqs are now queued */
+-#define NETFS_RREQ_NEED_RETRY		14	/* Need to try retrying */
++#define NETFS_RREQ_RETRYING		14	/* Set if we're in the retry path */
+ #define NETFS_RREQ_USE_PGPRIV2		31	/* [DEPRECATED] Use PG_private_2 to mark
+ 						 * write to cache on read */
+ 	const struct netfs_request_ops *netfs_ops;
+diff --git a/include/trace/events/netfs.h b/include/trace/events/netfs.h
+index 6e699cadcb29..f880835f7695 100644
+--- a/include/trace/events/netfs.h
++++ b/include/trace/events/netfs.h
+@@ -99,7 +99,7 @@
+ 	EM(netfs_sreq_trace_limited,		"LIMIT")	\
+ 	EM(netfs_sreq_trace_need_clear,		"N-CLR")	\
+ 	EM(netfs_sreq_trace_partial_read,	"PARTR")	\
+-	EM(netfs_sreq_trace_need_retry,		"NRTRY")	\
++	EM(netfs_sreq_trace_need_retry,		"ND-RT")	\
+ 	EM(netfs_sreq_trace_prepare,		"PREP ")	\
+ 	EM(netfs_sreq_trace_prep_failed,	"PRPFL")	\
+ 	EM(netfs_sreq_trace_progress,		"PRGRS")	\
+@@ -108,7 +108,9 @@
+ 	EM(netfs_sreq_trace_short,		"SHORT")	\
+ 	EM(netfs_sreq_trace_split,		"SPLIT")	\
+ 	EM(netfs_sreq_trace_submit,		"SUBMT")	\
++	EM(netfs_sreq_trace_superfluous,	"SPRFL")	\
+ 	EM(netfs_sreq_trace_terminated,		"TERM ")	\
++	EM(netfs_sreq_trace_wait_for,		"_WAIT")	\
+ 	EM(netfs_sreq_trace_write,		"WRITE")	\
+ 	EM(netfs_sreq_trace_write_skip,		"SKIP ")	\
+ 	E_(netfs_sreq_trace_write_term,		"WTERM")

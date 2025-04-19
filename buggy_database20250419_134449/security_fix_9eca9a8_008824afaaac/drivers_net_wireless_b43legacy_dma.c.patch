@@ -1,0 +1,54 @@
+commit 9eca9a8e81928685b4de00ecef83a7c13c340fc9
+Author: Stefano Brivio <stefano.brivio@polimi.it>
+Date:   Sat Feb 2 19:16:01 2008 +0100
+
+    b43legacy: drop packets we are not able to encrypt
+    
+    We must drop any packets we are not able to encrypt.
+    We must not send them unencrypted or with an all-zero-key (which
+    basically is the same as unencrypted, from a security point of view).
+    
+    This might only trigger shortly after resume before mac80211 reassociated
+    and reconfigured the keys.
+    
+    It is safe to drop these packets, as the association they belong to
+    is not guaranteed anymore anyway.
+    This is a security fix in the sense that it prevents information leakage.
+    
+    This patch by Michael Buesch has been ported to b43legacy.
+    
+    Cc: Michael Buesch <mb@bu3sch.de>
+    Signed-off-by: Stefano Brivio <stefano.brivio@polimi.it>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/drivers/net/wireless/b43legacy/dma.c b/drivers/net/wireless/b43legacy/dma.c
+index 83161d9af813..0023de8235bf 100644
+--- a/drivers/net/wireless/b43legacy/dma.c
++++ b/drivers/net/wireless/b43legacy/dma.c
+@@ -1181,9 +1181,11 @@ static int dma_tx_fragment(struct b43legacy_dmaring *ring,
+ 
+ 	header = &(ring->txhdr_cache[slot * sizeof(
+ 			       struct b43legacy_txhdr_fw3)]);
+-	b43legacy_generate_txhdr(ring->dev, header,
++	err = b43legacy_generate_txhdr(ring->dev, header,
+ 				 skb->data, skb->len, ctl,
+ 				 generate_cookie(ring, slot));
++	if (unlikely(err))
++		return err;
+ 
+ 	meta_hdr->dmaaddr = map_descbuffer(ring, (unsigned char *)header,
+ 				       sizeof(struct b43legacy_txhdr_fw3), 1);
+@@ -1282,6 +1284,13 @@ int b43legacy_dma_tx(struct b43legacy_wldev *dev,
+ 	B43legacy_BUG_ON(ring->stopped);
+ 
+ 	err = dma_tx_fragment(ring, skb, ctl);
++	if (unlikely(err == -ENOKEY)) {
++		/* Drop this packet, as we don't have the encryption key
++		 * anymore and must not transmit it unencrypted. */
++		dev_kfree_skb_any(skb);
++		err = 0;
++		goto out_unlock;
++	}
+ 	if (unlikely(err)) {
+ 		b43legacyerr(dev->wl, "DMA tx mapping failure\n");
+ 		goto out_unlock;

@@ -1,0 +1,54 @@
+commit 62e1cbfc5d795381a0f237ae7ee229a92d51cf9e
+Author: Kees Cook <kees@kernel.org>
+Date:   Sun Oct 2 09:17:03 2022 -0700
+
+    fortify: Short-circuit known-safe calls to strscpy()
+    
+    Replacing compile-time safe calls of strcpy()-related functions with
+    strscpy() was always calling the full strscpy() logic when a builtin
+    would be better. For example:
+    
+            char buf[16];
+            strcpy(buf, "yes");
+    
+    would reduce to __builtin_memcpy(buf, "yes", 4), but not if it was:
+    
+            strscpy(buf, yes, sizeof(buf));
+    
+    Fix this by checking if all sizes are known at compile-time.
+    
+    Cc: linux-hardening@vger.kernel.org
+    Tested-by: Nathan Chancellor <nathan@kernel.org>
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+
+diff --git a/lib/strscpy_kunit.c b/lib/strscpy_kunit.c
+index 98523f828d3a..a6b6344354ed 100644
+--- a/lib/strscpy_kunit.c
++++ b/lib/strscpy_kunit.c
+@@ -81,6 +81,8 @@ static void tc(struct kunit *test, char *src, int count, int expected,
+ 
+ static void strscpy_test(struct kunit *test)
+ {
++	char dest[8];
++
+ 	/*
+ 	 * tc() uses a destination buffer of size 6 and needs at
+ 	 * least 2 characters spare (one for null and one to check for
+@@ -111,6 +113,17 @@ static void strscpy_test(struct kunit *test)
+ 	tc(test, "ab",   4, 2,	    2, 1, 1);
+ 	tc(test, "a",    4, 1,	    1, 1, 2);
+ 	tc(test, "",     4, 0,	    0, 1, 3);
++
++	/* Compile-time-known source strings. */
++	KUNIT_EXPECT_EQ(test, strscpy(dest, "", ARRAY_SIZE(dest)), 0);
++	KUNIT_EXPECT_EQ(test, strscpy(dest, "", 3), 0);
++	KUNIT_EXPECT_EQ(test, strscpy(dest, "", 1), 0);
++	KUNIT_EXPECT_EQ(test, strscpy(dest, "", 0), -E2BIG);
++	KUNIT_EXPECT_EQ(test, strscpy(dest, "Fixed", ARRAY_SIZE(dest)), 5);
++	KUNIT_EXPECT_EQ(test, strscpy(dest, "Fixed", 3), -E2BIG);
++	KUNIT_EXPECT_EQ(test, strscpy(dest, "Fixed", 1), -E2BIG);
++	KUNIT_EXPECT_EQ(test, strscpy(dest, "Fixed", 0), -E2BIG);
++	KUNIT_EXPECT_EQ(test, strscpy(dest, "This is too long", ARRAY_SIZE(dest)), -E2BIG);
+ }
+ 
+ static struct kunit_case strscpy_test_cases[] = {

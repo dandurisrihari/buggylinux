@@ -1,0 +1,148 @@
+commit fc1b6d6de2208774efd2a20bf0daddb02d18b1e0
+Author: Tuong Lien <tuong.t.lien@dektech.com.au>
+Date:   Fri Nov 8 12:05:11 2019 +0700
+
+    tipc: introduce TIPC encryption & authentication
+    
+    This commit offers an option to encrypt and authenticate all messaging,
+    including the neighbor discovery messages. The currently most advanced
+    algorithm supported is the AEAD AES-GCM (like IPSec or TLS). All
+    encryption/decryption is done at the bearer layer, just before leaving
+    or after entering TIPC.
+    
+    Supported features:
+    - Encryption & authentication of all TIPC messages (header + data);
+    - Two symmetric-key modes: Cluster and Per-node;
+    - Automatic key switching;
+    - Key-expired revoking (sequence number wrapped);
+    - Lock-free encryption/decryption (RCU);
+    - Asynchronous crypto, Intel AES-NI supported;
+    - Multiple cipher transforms;
+    - Logs & statistics;
+    
+    Two key modes:
+    - Cluster key mode: One single key is used for both TX & RX in all
+    nodes in the cluster.
+    - Per-node key mode: Each nodes in the cluster has one specific TX key.
+    For RX, a node requires its peers' TX key to be able to decrypt the
+    messages from those peers.
+    
+    Key setting from user-space is performed via netlink by a user program
+    (e.g. the iproute2 'tipc' tool).
+    
+    Internal key state machine:
+    
+                                     Attach    Align(RX)
+                                         +-+   +-+
+                                         | V   | V
+            +---------+      Attach     +---------+
+            |  IDLE   |---------------->| PENDING |(user = 0)
+            +---------+                 +---------+
+               A   A                   Switch|  A
+               |   |                         |  |
+               |   | Free(switch/revoked)    |  |
+         (Free)|   +----------------------+  |  |Timeout
+               |              (TX)        |  |  |(RX)
+               |                          |  |  |
+               |                          |  v  |
+            +---------+      Switch     +---------+
+            | PASSIVE |<----------------| ACTIVE  |
+            +---------+       (RX)      +---------+
+            (user = 1)                  (user >= 1)
+    
+    The number of TFMs is 10 by default and can be changed via the procfs
+    'net/tipc/max_tfms'. At this moment, as for simplicity, this file is
+    also used to print the crypto statistics at runtime:
+    
+    echo 0xfff1 > /proc/sys/net/tipc/max_tfms
+    
+    The patch defines a new TIPC version (v7) for the encryption message (-
+    backward compatibility as well). The message is basically encapsulated
+    as follows:
+    
+       +----------------------------------------------------------+
+       | TIPCv7 encryption  | Original TIPCv2    | Authentication |
+       | header             | packet (encrypted) | Tag            |
+       +----------------------------------------------------------+
+    
+    The throughput is about ~40% for small messages (compared with non-
+    encryption) and ~9% for large messages. With the support from hardware
+    crypto i.e. the Intel AES-NI CPU instructions, the throughput increases
+    upto ~85% for small messages and ~55% for large messages.
+    
+    By default, the new feature is inactive (i.e. no encryption) until user
+    sets a key for TIPC. There is however also a new option - "TIPC_CRYPTO"
+    in the kernel configuration to enable/disable the new code when needed.
+    
+    MAINTAINERS | add two new files 'crypto.h' & 'crypto.c' in tipc
+    
+    Acked-by: Ying Xue <ying.xue@windreiver.com>
+    Acked-by: Jon Maloy <jon.maloy@ericsson.com>
+    Signed-off-by: Tuong Lien <tuong.t.lien@dektech.com.au>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/tipc/link.c b/net/tipc/link.c
+index e7bb4cbb7716..fb72031228c9 100644
+--- a/net/tipc/link.c
++++ b/net/tipc/link.c
+@@ -44,6 +44,7 @@
+ #include "netlink.h"
+ #include "monitor.h"
+ #include "trace.h"
++#include "crypto.h"
+ 
+ #include <linux/pkt_sched.h>
+ 
+@@ -397,6 +398,15 @@ int tipc_link_mtu(struct tipc_link *l)
+ 	return l->mtu;
+ }
+ 
++int tipc_link_mss(struct tipc_link *l)
++{
++#ifdef CONFIG_TIPC_CRYPTO
++	return l->mtu - INT_H_SIZE - EMSG_OVERHEAD;
++#else
++	return l->mtu - INT_H_SIZE;
++#endif
++}
++
+ u16 tipc_link_rcv_nxt(struct tipc_link *l)
+ {
+ 	return l->rcv_nxt;
+@@ -948,6 +958,7 @@ int tipc_link_xmit(struct tipc_link *l, struct sk_buff_head *list,
+ 	u16 seqno = l->snd_nxt;
+ 	int pkt_cnt = skb_queue_len(list);
+ 	int imp = msg_importance(hdr);
++	unsigned int mss = tipc_link_mss(l);
+ 	unsigned int maxwin = l->window;
+ 	unsigned int mtu = l->mtu;
+ 	bool new_bundle;
+@@ -1000,8 +1011,7 @@ int tipc_link_xmit(struct tipc_link *l, struct sk_buff_head *list,
+ 			continue;
+ 		}
+ 		if (tipc_msg_try_bundle(l->backlog[imp].target_bskb, &skb,
+-					mtu - INT_H_SIZE, l->addr,
+-					&new_bundle)) {
++					mss, l->addr, &new_bundle)) {
+ 			if (skb) {
+ 				/* Keep a ref. to the skb for next try */
+ 				l->backlog[imp].target_bskb = skb;
+@@ -1154,7 +1164,7 @@ static int tipc_link_bc_retrans(struct tipc_link *l, struct tipc_link *r,
+ 		if (time_before(jiffies, TIPC_SKB_CB(skb)->nxt_retr))
+ 			continue;
+ 		TIPC_SKB_CB(skb)->nxt_retr = TIPC_BC_RETR_LIM;
+-		_skb = __pskb_copy(skb, LL_MAX_HEADER + MIN_H_SIZE, GFP_ATOMIC);
++		_skb = pskb_copy(skb, GFP_ATOMIC);
+ 		if (!_skb)
+ 			return 0;
+ 		hdr = buf_msg(_skb);
+@@ -1430,8 +1440,7 @@ static int tipc_link_advance_transmq(struct tipc_link *l, u16 acked, u16 gap,
+ 			if (time_before(jiffies, TIPC_SKB_CB(skb)->nxt_retr))
+ 				continue;
+ 			TIPC_SKB_CB(skb)->nxt_retr = TIPC_UC_RETR_TIME;
+-			_skb = __pskb_copy(skb, LL_MAX_HEADER + MIN_H_SIZE,
+-					   GFP_ATOMIC);
++			_skb = pskb_copy(skb, GFP_ATOMIC);
+ 			if (!_skb)
+ 				continue;
+ 			hdr = buf_msg(_skb);

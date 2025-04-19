@@ -1,0 +1,39 @@
+commit 3b619e22c4601b444ed2d6a5458271f72625ac89
+Author: Ard Biesheuvel <ardb@kernel.org>
+Date:   Thu Oct 27 17:59:08 2022 +0200
+
+    arm64: implement dynamic shadow call stack for Clang
+    
+    Implement dynamic shadow call stack support on Clang, by parsing the
+    unwind tables at init time to locate all occurrences of PACIASP/AUTIASP
+    instructions, and replacing them with the shadow call stack push and pop
+    instructions, respectively.
+    
+    This is useful because the overhead of the shadow call stack is
+    difficult to justify on hardware that implements pointer authentication
+    (PAC), and given that the PAC instructions are executed as NOPs on
+    hardware that doesn't, we can just replace them without breaking
+    anything. As PACIASP/AUTIASP are guaranteed to be paired with respect to
+    manipulations of the return address, replacing them 1:1 with shadow call
+    stack pushes and pops is guaranteed to result in the desired behavior.
+    
+    Signed-off-by: Ard Biesheuvel <ardb@kernel.org>
+    Reviewed-by: Sami Tolvanen <samitolvanen@google.com>
+    Tested-by: Sami Tolvanen <samitolvanen@google.com>
+    Link: https://lore.kernel.org/r/20221027155908.1940624-4-ardb@kernel.org
+    Signed-off-by: Will Deacon <will@kernel.org>
+
+diff --git a/arch/arm64/kernel/head.S b/arch/arm64/kernel/head.S
+index 2196aad7b55b..952e17bd1c0b 100644
+--- a/arch/arm64/kernel/head.S
++++ b/arch/arm64/kernel/head.S
+@@ -462,6 +462,9 @@ SYM_FUNC_START_LOCAL(__primary_switched)
+ 	bl	early_fdt_map			// Try mapping the FDT early
+ 	mov	x0, x20				// pass the full boot status
+ 	bl	init_feature_override		// Parse cpu feature overrides
++#ifdef CONFIG_UNWIND_PATCH_PAC_INTO_SCS
++	bl	scs_patch_vmlinux
++#endif
+ 	mov	x0, x20
+ 	bl	finalise_el2			// Prefer VHE if possible
+ 	ldp	x29, x30, [sp], #16

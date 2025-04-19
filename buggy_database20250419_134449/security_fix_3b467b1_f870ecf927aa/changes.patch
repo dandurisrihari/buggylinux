@@ -1,0 +1,42 @@
+diff --git a/Documentation/virt/kvm/api.rst b/Documentation/virt/kvm/api.rst
+index 0b5a33ee71ee..b11b70ae137e 100644
+--- a/Documentation/virt/kvm/api.rst
++++ b/Documentation/virt/kvm/api.rst
+@@ -6894,6 +6894,13 @@ Note that KVM does not skip the faulting instruction as it does for
+ KVM_EXIT_MMIO, but userspace has to emulate any change to the processing state
+ if it decides to decode and emulate the instruction.
+ 
++This feature isn't available to protected VMs, as userspace does not
++have access to the state that is required to perform the emulation.
++Instead, a data abort exception is directly injected in the guest.
++Note that although KVM_CAP_ARM_NISV_TO_USER will be reported if
++queried outside of a protected VM context, the feature will not be
++exposed if queried on a protected VM file descriptor.
++
+ ::
+ 
+ 		/* KVM_EXIT_X86_RDMSR / KVM_EXIT_X86_WRMSR */
+diff --git a/arch/arm64/kvm/mmio.c b/arch/arm64/kvm/mmio.c
+index 5e1ffb0d5363..cd6b7b83e2c3 100644
+--- a/arch/arm64/kvm/mmio.c
++++ b/arch/arm64/kvm/mmio.c
+@@ -133,11 +133,19 @@ int io_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa)
+ 	/*
+ 	 * No valid syndrome? Ask userspace for help if it has
+ 	 * volunteered to do so, and bail out otherwise.
++	 *
++	 * In the protected VM case, there isn't much userspace can do
++	 * though, so directly deliver an exception to the guest.
+ 	 */
+ 	if (!kvm_vcpu_dabt_isvalid(vcpu)) {
+ 		trace_kvm_mmio_nisv(*vcpu_pc(vcpu), kvm_vcpu_get_esr(vcpu),
+ 				    kvm_vcpu_get_hfar(vcpu), fault_ipa);
+ 
++		if (vcpu_is_protected(vcpu)) {
++			kvm_inject_dabt(vcpu, kvm_vcpu_get_hfar(vcpu));
++			return 1;
++		}
++
+ 		if (test_bit(KVM_ARCH_FLAG_RETURN_NISV_IO_ABORT_TO_USER,
+ 			     &vcpu->kvm->arch.flags)) {
+ 			run->exit_reason = KVM_EXIT_ARM_NISV;

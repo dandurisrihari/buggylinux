@@ -1,0 +1,60 @@
+commit 57dfd7b53dec740afe402135fdd1c5708ec337f0
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Fri Jan 28 00:51:48 2022 +0000
+
+    KVM: x86: Move delivery of non-APICv interrupt into vendor code
+    
+    Handle non-APICv interrupt delivery in vendor code, even though it means
+    VMX and SVM will temporarily have duplicate code.  SVM's AVIC has a race
+    condition that requires KVM to fall back to legacy interrupt injection
+    _after_ the interrupt has been logged in the vIRR, i.e. to fix the race,
+    SVM will need to open code the full flow anyways[*].  Refactor the code
+    so that the SVM bug without introducing other issues, e.g. SVM would
+    return "success" and thus invoke trace_kvm_apicv_accept_irq() even when
+    delivery through the AVIC failed, and to opportunistically prepare for
+    using KVM_X86_OP to fill each vendor's kvm_x86_ops struct, which will
+    rely on the vendor function matching the kvm_x86_op pointer name.
+    
+    No functional change intended.
+    
+    [*] https://lore.kernel.org/all/20211213104634.199141-4-mlevitsk@redhat.com
+    
+    Signed-off-by: Sean Christopherson <seanjc@google.com>
+    Message-Id: <20220128005208.4008533-3-seanjc@google.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/svm/svm.c b/arch/x86/kvm/svm/svm.c
+index 9cef8e4598df..5772dd6f79a4 100644
+--- a/arch/x86/kvm/svm/svm.c
++++ b/arch/x86/kvm/svm/svm.c
+@@ -3291,6 +3291,21 @@ static void svm_set_irq(struct kvm_vcpu *vcpu)
+ 		SVM_EVTINJ_VALID | SVM_EVTINJ_TYPE_INTR;
+ }
+ 
++static void svm_deliver_interrupt(struct kvm_lapic *apic, int delivery_mode,
++				  int trig_mode, int vector)
++{
++	struct kvm_vcpu *vcpu = apic->vcpu;
++
++	if (svm_deliver_avic_intr(vcpu, vector)) {
++		kvm_lapic_set_irr(vector, apic);
++		kvm_make_request(KVM_REQ_EVENT, vcpu);
++		kvm_vcpu_kick(vcpu);
++	} else {
++		trace_kvm_apicv_accept_irq(vcpu->vcpu_id, delivery_mode,
++					   trig_mode, vector);
++	}
++}
++
+ static void svm_update_cr8_intercept(struct kvm_vcpu *vcpu, int tpr, int irr)
+ {
+ 	struct vcpu_svm *svm = to_svm(vcpu);
+@@ -4545,7 +4560,7 @@ static struct kvm_x86_ops svm_x86_ops __initdata = {
+ 	.pmu_ops = &amd_pmu_ops,
+ 	.nested_ops = &svm_nested_ops,
+ 
+-	.deliver_posted_interrupt = svm_deliver_avic_intr,
++	.deliver_interrupt = svm_deliver_interrupt,
+ 	.dy_apicv_has_pending_interrupt = svm_dy_apicv_has_pending_interrupt,
+ 	.update_pi_irte = svm_update_pi_irte,
+ 	.setup_mce = svm_setup_mce,

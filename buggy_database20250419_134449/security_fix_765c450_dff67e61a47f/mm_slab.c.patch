@@ -1,0 +1,213 @@
+commit 765c4507af71c39aba21006bbd3ec809fe9714ff
+Author: Christoph Lameter <clameter@sgi.com>
+Date:   Wed Sep 27 01:50:08 2006 -0700
+
+    [PATCH] GFP_THISNODE for the slab allocator
+    
+    This patch insures that the slab node lists in the NUMA case only contain
+    slabs that belong to that specific node.  All slab allocations use
+    GFP_THISNODE when calling into the page allocator.  If an allocation fails
+    then we fall back in the slab allocator according to the zonelists appropriate
+    for a certain context.
+    
+    This allows a replication of the behavior of alloc_pages and alloc_pages node
+    in the slab layer.
+    
+    Currently allocations requested from the page allocator may be redirected via
+    cpusets to other nodes.  This results in remote pages on nodelists and that in
+    turn results in interrupt latency issues during cache draining.  Plus the slab
+    is handing out memory as local when it is really remote.
+    
+    Fallback for slab memory allocations will occur within the slab allocator and
+    not in the page allocator.  This is necessary in order to be able to use the
+    existing pools of objects on the nodes that we fall back to before adding more
+    pages to a slab.
+    
+    The fallback function insures that the nodes we fall back to obey cpuset
+    restrictions of the current context.  We do not allocate objects from outside
+    of the current cpuset context like before.
+    
+    Note that the implementation of locality constraints within the slab allocator
+    requires importing logic from the page allocator.  This is a mischmash that is
+    not that great.  Other allocators (uncached allocator, vmalloc, huge pages)
+    face similar problems and have similar minimal reimplementations of the basic
+    fallback logic of the page allocator.  There is another way of implementing a
+    slab by avoiding per node lists (see modular slab) but this wont work within
+    the existing slab.
+    
+    V1->V2:
+    - Use NUMA_BUILD to avoid #ifdef CONFIG_NUMA
+    - Exploit GFP_THISNODE being 0 in the NON_NUMA case to avoid another
+      #ifdef
+    
+    [akpm@osdl.org: build fix]
+    Signed-off-by: Christoph Lameter <clameter@sgi.com>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/mm/slab.c b/mm/slab.c
+index 69e11c45002f..792bfe320a8b 100644
+--- a/mm/slab.c
++++ b/mm/slab.c
+@@ -972,7 +972,39 @@ static int transfer_objects(struct array_cache *to,
+ 	return nr;
+ }
+ 
+-#ifdef CONFIG_NUMA
++#ifndef CONFIG_NUMA
++
++#define drain_alien_cache(cachep, alien) do { } while (0)
++#define reap_alien(cachep, l3) do { } while (0)
++
++static inline struct array_cache **alloc_alien_cache(int node, int limit)
++{
++	return (struct array_cache **)BAD_ALIEN_MAGIC;
++}
++
++static inline void free_alien_cache(struct array_cache **ac_ptr)
++{
++}
++
++static inline int cache_free_alien(struct kmem_cache *cachep, void *objp)
++{
++	return 0;
++}
++
++static inline void *alternate_node_alloc(struct kmem_cache *cachep,
++		gfp_t flags)
++{
++	return NULL;
++}
++
++static inline void *__cache_alloc_node(struct kmem_cache *cachep,
++		 gfp_t flags, int nodeid)
++{
++	return NULL;
++}
++
++#else	/* CONFIG_NUMA */
++
+ static void *__cache_alloc_node(struct kmem_cache *, gfp_t, int);
+ static void *alternate_node_alloc(struct kmem_cache *, gfp_t);
+ 
+@@ -1101,26 +1133,6 @@ static inline int cache_free_alien(struct kmem_cache *cachep, void *objp)
+ 	}
+ 	return 1;
+ }
+-
+-#else
+-
+-#define drain_alien_cache(cachep, alien) do { } while (0)
+-#define reap_alien(cachep, l3) do { } while (0)
+-
+-static inline struct array_cache **alloc_alien_cache(int node, int limit)
+-{
+-	return (struct array_cache **)BAD_ALIEN_MAGIC;
+-}
+-
+-static inline void free_alien_cache(struct array_cache **ac_ptr)
+-{
+-}
+-
+-static inline int cache_free_alien(struct kmem_cache *cachep, void *objp)
+-{
+-	return 0;
+-}
+-
+ #endif
+ 
+ static int __cpuinit cpuup_callback(struct notifier_block *nfb,
+@@ -1564,7 +1576,13 @@ static void *kmem_getpages(struct kmem_cache *cachep, gfp_t flags, int nodeid)
+ 	 */
+ 	flags |= __GFP_COMP;
+ #endif
+-	flags |= cachep->gfpflags;
++
++	/*
++	 * Under NUMA we want memory on the indicated node. We will handle
++	 * the needed fallback ourselves since we want to serve from our
++	 * per node object lists first for other nodes.
++	 */
++	flags |= cachep->gfpflags | GFP_THISNODE;
+ 
+ 	page = alloc_pages_node(nodeid, flags, cachep->gfporder);
+ 	if (!page)
+@@ -3051,13 +3069,18 @@ static __always_inline void *__cache_alloc(struct kmem_cache *cachep,
+ 
+ 	local_irq_save(save_flags);
+ 
+-#ifdef CONFIG_NUMA
+-	if (unlikely(current->flags & (PF_SPREAD_SLAB | PF_MEMPOLICY)))
++	if (unlikely(NUMA_BUILD &&
++			current->flags & (PF_SPREAD_SLAB | PF_MEMPOLICY)))
+ 		objp = alternate_node_alloc(cachep, flags);
+-#endif
+ 
+ 	if (!objp)
+ 		objp = ____cache_alloc(cachep, flags);
++	/*
++	 * We may just have run out of memory on the local node.
++	 * __cache_alloc_node() knows how to locate memory on other nodes
++	 */
++ 	if (NUMA_BUILD && !objp)
++ 		objp = __cache_alloc_node(cachep, flags, numa_node_id());
+ 	local_irq_restore(save_flags);
+ 	objp = cache_alloc_debugcheck_after(cachep, flags, objp,
+ 					    caller);
+@@ -3076,7 +3099,7 @@ static void *alternate_node_alloc(struct kmem_cache *cachep, gfp_t flags)
+ {
+ 	int nid_alloc, nid_here;
+ 
+-	if (in_interrupt())
++	if (in_interrupt() || (flags & __GFP_THISNODE))
+ 		return NULL;
+ 	nid_alloc = nid_here = numa_node_id();
+ 	if (cpuset_do_slab_mem_spread() && (cachep->flags & SLAB_MEM_SPREAD))
+@@ -3088,6 +3111,28 @@ static void *alternate_node_alloc(struct kmem_cache *cachep, gfp_t flags)
+ 	return NULL;
+ }
+ 
++/*
++ * Fallback function if there was no memory available and no objects on a
++ * certain node and we are allowed to fall back. We mimick the behavior of
++ * the page allocator. We fall back according to a zonelist determined by
++ * the policy layer while obeying cpuset constraints.
++ */
++void *fallback_alloc(struct kmem_cache *cache, gfp_t flags)
++{
++	struct zonelist *zonelist = &NODE_DATA(slab_node(current->mempolicy))
++					->node_zonelists[gfp_zone(flags)];
++	struct zone **z;
++	void *obj = NULL;
++
++	for (z = zonelist->zones; *z && !obj; z++)
++		if (zone_idx(*z) <= ZONE_NORMAL &&
++				cpuset_zone_allowed(*z, flags))
++			obj = __cache_alloc_node(cache,
++					flags | __GFP_THISNODE,
++					zone_to_nid(*z));
++	return obj;
++}
++
+ /*
+  * A interface to enable slab creation on nodeid
+  */
+@@ -3141,11 +3186,15 @@ static void *__cache_alloc_node(struct kmem_cache *cachep, gfp_t flags,
+ must_grow:
+ 	spin_unlock(&l3->list_lock);
+ 	x = cache_grow(cachep, flags, nodeid);
++	if (x)
++		goto retry;
+ 
+-	if (!x)
+-		return NULL;
++	if (!(flags & __GFP_THISNODE))
++		/* Unable to grow the cache. Fall back to other nodes. */
++		return fallback_alloc(cachep, flags);
++
++	return NULL;
+ 
+-	goto retry;
+ done:
+ 	return obj;
+ }

@@ -1,0 +1,286 @@
+commit 4f712ee0cbbd5c777d270427092bb301fc31044f
+Merge: 8a2fbffcbfcb 4781179012d9
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Fri Mar 15 13:03:13 2024 -0700
+
+    Merge tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm
+    
+    Pull kvm updates from Paolo Bonzini:
+     "S390:
+    
+       - Changes to FPU handling came in via the main s390 pull request
+    
+       - Only deliver to the guest the SCLP events that userspace has
+         requested
+    
+       - More virtual vs physical address fixes (only a cleanup since
+         virtual and physical address spaces are currently the same)
+    
+       - Fix selftests undefined behavior
+    
+      x86:
+    
+       - Fix a restriction that the guest can't program a PMU event whose
+         encoding matches an architectural event that isn't included in the
+         guest CPUID. The enumeration of an architectural event only says
+         that if a CPU supports an architectural event, then the event can
+         be programmed *using the architectural encoding*. The enumeration
+         does NOT say anything about the encoding when the CPU doesn't
+         report support the event *in general*. It might support it, and it
+         might support it using the same encoding that made it into the
+         architectural PMU spec
+    
+       - Fix a variety of bugs in KVM's emulation of RDPMC (more details on
+         individual commits) and add a selftest to verify KVM correctly
+         emulates RDMPC, counter availability, and a variety of other
+         PMC-related behaviors that depend on guest CPUID and therefore are
+         easier to validate with selftests than with custom guests (aka
+         kvm-unit-tests)
+    
+       - Zero out PMU state on AMD if the virtual PMU is disabled, it does
+         not cause any bug but it wastes time in various cases where KVM
+         would check if a PMC event needs to be synthesized
+    
+       - Optimize triggering of emulated events, with a nice ~10%
+         performance improvement in VM-Exit microbenchmarks when a vPMU is
+         exposed to the guest
+    
+       - Tighten the check for "PMI in guest" to reduce false positives if
+         an NMI arrives in the host while KVM is handling an IRQ VM-Exit
+    
+       - Fix a bug where KVM would report stale/bogus exit qualification
+         information when exiting to userspace with an internal error exit
+         code
+    
+       - Add a VMX flag in /proc/cpuinfo to report 5-level EPT support
+    
+       - Rework TDP MMU root unload, free, and alloc to run with mmu_lock
+         held for read, e.g. to avoid serializing vCPUs when userspace
+         deletes a memslot
+    
+       - Tear down TDP MMU page tables at 4KiB granularity (used to be
+         1GiB). KVM doesn't support yielding in the middle of processing a
+         zap, and 1GiB granularity resulted in multi-millisecond lags that
+         are quite impolite for CONFIG_PREEMPT kernels
+    
+       - Allocate write-tracking metadata on-demand to avoid the memory
+         overhead when a kernel is built with i915 virtualization support
+         but the workloads use neither shadow paging nor i915 virtualization
+    
+       - Explicitly initialize a variety of on-stack variables in the
+         emulator that triggered KMSAN false positives
+    
+       - Fix the debugregs ABI for 32-bit KVM
+    
+       - Rework the "force immediate exit" code so that vendor code
+         ultimately decides how and when to force the exit, which allowed
+         some optimization for both Intel and AMD
+    
+       - Fix a long-standing bug where kvm_has_noapic_vcpu could be left
+         elevated if vCPU creation ultimately failed, causing extra
+         unnecessary work
+    
+       - Cleanup the logic for checking if the currently loaded vCPU is
+         in-kernel
+    
+       - Harden against underflowing the active mmu_notifier invalidation
+         count, so that "bad" invalidations (usually due to bugs elsehwere
+         in the kernel) are detected earlier and are less likely to hang the
+         kernel
+    
+      x86 Xen emulation:
+    
+       - Overlay pages can now be cached based on host virtual address,
+         instead of guest physical addresses. This removes the need to
+         reconfigure and invalidate the cache if the guest changes the gpa
+         but the underlying host virtual address remains the same
+    
+       - When possible, use a single host TSC value when computing the
+         deadline for Xen timers in order to improve the accuracy of the
+         timer emulation
+    
+       - Inject pending upcall events when the vCPU software-enables its
+         APIC to fix a bug where an upcall can be lost (and to follow Xen's
+         behavior)
+    
+       - Fall back to the slow path instead of warning if "fast" IRQ
+         delivery of Xen events fails, e.g. if the guest has aliased xAPIC
+         IDs
+    
+      RISC-V:
+    
+       - Support exception and interrupt handling in selftests
+    
+       - New self test for RISC-V architectural timer (Sstc extension)
+    
+       - New extension support (Ztso, Zacas)
+    
+       - Support userspace emulation of random number seed CSRs
+    
+      ARM:
+    
+       - Infrastructure for building KVM's trap configuration based on the
+         architectural features (or lack thereof) advertised in the VM's ID
+         registers
+    
+       - Support for mapping vfio-pci BARs as Normal-NC (vaguely similar to
+         x86's WC) at stage-2, improving the performance of interacting with
+         assigned devices that can tolerate it
+    
+       - Conversion of KVM's representation of LPIs to an xarray, utilized
+         to address serialization some of the serialization on the LPI
+         injection path
+    
+       - Support for _architectural_ VHE-only systems, advertised through
+         the absence of FEAT_E2H0 in the CPU's ID register
+    
+       - Miscellaneous cleanups, fixes, and spelling corrections to KVM and
+         selftests
+    
+      LoongArch:
+    
+       - Set reserved bits as zero in CPUCFG
+    
+       - Start SW timer only when vcpu is blocking
+    
+       - Do not restart SW timer when it is expired
+    
+       - Remove unnecessary CSR register saving during enter guest
+    
+       - Misc cleanups and fixes as usual
+    
+      Generic:
+    
+       - Clean up Kconfig by removing CONFIG_HAVE_KVM, which was basically
+         always true on all architectures except MIPS (where Kconfig
+         determines the available depending on CPU capabilities). It is
+         replaced either by an architecture-dependent symbol for MIPS, and
+         IS_ENABLED(CONFIG_KVM) everywhere else
+    
+       - Factor common "select" statements in common code instead of
+         requiring each architecture to specify it
+    
+       - Remove thoroughly obsolete APIs from the uapi headers
+    
+       - Move architecture-dependent stuff to uapi/asm/kvm.h
+    
+       - Always flush the async page fault workqueue when a work item is
+         being removed, especially during vCPU destruction, to ensure that
+         there are no workers running in KVM code when all references to
+         KVM-the-module are gone, i.e. to prevent a very unlikely
+         use-after-free if kvm.ko is unloaded
+    
+       - Grab a reference to the VM's mm_struct in the async #PF worker
+         itself instead of gifting the worker a reference, so that there's
+         no need to remember to *conditionally* clean up after the worker
+    
+      Selftests:
+    
+       - Reduce boilerplate especially when utilize selftest TAP
+         infrastructure
+    
+       - Add basic smoke tests for SEV and SEV-ES, along with a pile of
+         library support for handling private/encrypted/protected memory
+    
+       - Fix benign bugs where tests neglect to close() guest_memfd files"
+    
+    * tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm: (246 commits)
+      selftests: kvm: remove meaningless assignments in Makefiles
+      KVM: riscv: selftests: Add Zacas extension to get-reg-list test
+      RISC-V: KVM: Allow Zacas extension for Guest/VM
+      KVM: riscv: selftests: Add Ztso extension to get-reg-list test
+      RISC-V: KVM: Allow Ztso extension for Guest/VM
+      RISC-V: KVM: Forward SEED CSR access to user space
+      KVM: riscv: selftests: Add sstc timer test
+      KVM: riscv: selftests: Change vcpu_has_ext to a common function
+      KVM: riscv: selftests: Add guest helper to get vcpu id
+      KVM: riscv: selftests: Add exception handling support
+      LoongArch: KVM: Remove unnecessary CSR register saving during enter guest
+      LoongArch: KVM: Do not restart SW timer when it is expired
+      LoongArch: KVM: Start SW timer only when vcpu is blocking
+      LoongArch: KVM: Set reserved bits as zero in CPUCFG
+      KVM: selftests: Explicitly close guest_memfd files in some gmem tests
+      KVM: x86/xen: fix recursive deadlock in timer injection
+      KVM: pfncache: simplify locking and make more self-contained
+      KVM: x86/xen: remove WARN_ON_ONCE() with false positives in evtchn delivery
+      KVM: x86/xen: inject vCPU upcall vector when local APIC is enabled
+      KVM: x86/xen: improve accuracy of Xen timers
+      ...
+
+diff --cc arch/arm64/kernel/cpufeature.c
+index d6679d8b737e,f309fd542c20..56583677c1f2
+--- a/arch/arm64/kernel/cpufeature.c
++++ b/arch/arm64/kernel/cpufeature.c
+@@@ -754,16 -752,14 +789,17 @@@ static const struct __ftr_reg_entry 
+  			       &id_aa64isar1_override),
+  	ARM64_FTR_REG_OVERRIDE(SYS_ID_AA64ISAR2_EL1, ftr_id_aa64isar2,
+  			       &id_aa64isar2_override),
+ +	ARM64_FTR_REG(SYS_ID_AA64ISAR3_EL1, ftr_id_aa64isar3),
+  
+  	/* Op1 = 0, CRn = 0, CRm = 7 */
+ -	ARM64_FTR_REG(SYS_ID_AA64MMFR0_EL1, ftr_id_aa64mmfr0),
+ +	ARM64_FTR_REG_OVERRIDE(SYS_ID_AA64MMFR0_EL1, ftr_id_aa64mmfr0,
+ +			       &id_aa64mmfr0_override),
+  	ARM64_FTR_REG_OVERRIDE(SYS_ID_AA64MMFR1_EL1, ftr_id_aa64mmfr1,
+  			       &id_aa64mmfr1_override),
+ -	ARM64_FTR_REG(SYS_ID_AA64MMFR2_EL1, ftr_id_aa64mmfr2),
+ +	ARM64_FTR_REG_OVERRIDE(SYS_ID_AA64MMFR2_EL1, ftr_id_aa64mmfr2,
+ +			       &id_aa64mmfr2_override),
+  	ARM64_FTR_REG(SYS_ID_AA64MMFR3_EL1, ftr_id_aa64mmfr3),
++ 	ARM64_FTR_REG(SYS_ID_AA64MMFR4_EL1, ftr_id_aa64mmfr4),
+  
+  	/* Op1 = 1, CRn = 0, CRm = 0 */
+  	ARM64_FTR_REG(SYS_GMID_EL1, ftr_gmid),
+@@@ -1088,12 -1084,11 +1125,13 @@@ void __init init_cpu_features(struct cp
+  	init_cpu_ftr_reg(SYS_ID_AA64MMFR1_EL1, info->reg_id_aa64mmfr1);
+  	init_cpu_ftr_reg(SYS_ID_AA64MMFR2_EL1, info->reg_id_aa64mmfr2);
+  	init_cpu_ftr_reg(SYS_ID_AA64MMFR3_EL1, info->reg_id_aa64mmfr3);
++ 	init_cpu_ftr_reg(SYS_ID_AA64MMFR4_EL1, info->reg_id_aa64mmfr4);
+  	init_cpu_ftr_reg(SYS_ID_AA64PFR0_EL1, info->reg_id_aa64pfr0);
+  	init_cpu_ftr_reg(SYS_ID_AA64PFR1_EL1, info->reg_id_aa64pfr1);
+ +	init_cpu_ftr_reg(SYS_ID_AA64PFR2_EL1, info->reg_id_aa64pfr2);
+  	init_cpu_ftr_reg(SYS_ID_AA64ZFR0_EL1, info->reg_id_aa64zfr0);
+  	init_cpu_ftr_reg(SYS_ID_AA64SMFR0_EL1, info->reg_id_aa64smfr0);
+ +	init_cpu_ftr_reg(SYS_ID_AA64FPFR0_EL1, info->reg_id_aa64fpfr0);
+  
+  	if (id_aa64pfr0_32bit_el0(info->reg_id_aa64pfr0))
+  		init_32bit_cpu_features(&info->aarch32);
+@@@ -2750,32 -2817,13 +2828,39 @@@ static const struct arm64_cpu_capabilit
+  		.type = ARM64_CPUCAP_SYSTEM_FEATURE,
+  		.matches = has_lpa2,
+  	},
+ +	{
+ +		.desc = "FPMR",
+ +		.type = ARM64_CPUCAP_SYSTEM_FEATURE,
+ +		.capability = ARM64_HAS_FPMR,
+ +		.matches = has_cpuid_feature,
+ +		.cpu_enable = cpu_enable_fpmr,
+ +		ARM64_CPUID_FIELDS(ID_AA64PFR2_EL1, FPMR, IMP)
+ +	},
+ +#ifdef CONFIG_ARM64_VA_BITS_52
+ +	{
+ +		.capability = ARM64_HAS_VA52,
+ +		.type = ARM64_CPUCAP_BOOT_CPU_FEATURE,
+ +		.matches = has_cpuid_feature,
+ +#ifdef CONFIG_ARM64_64K_PAGES
+ +		.desc = "52-bit Virtual Addressing (LVA)",
+ +		ARM64_CPUID_FIELDS(ID_AA64MMFR2_EL1, VARange, 52)
+ +#else
+ +		.desc = "52-bit Virtual Addressing (LPA2)",
+ +#ifdef CONFIG_ARM64_4K_PAGES
+ +		ARM64_CPUID_FIELDS(ID_AA64MMFR0_EL1, TGRAN4, 52_BIT)
+ +#else
+ +		ARM64_CPUID_FIELDS(ID_AA64MMFR0_EL1, TGRAN16, 52_BIT)
+ +#endif
+ +#endif
+ +	},
+ +#endif
++ 	{
++ 		.desc = "NV1",
++ 		.capability = ARM64_HAS_HCR_NV1,
++ 		.type = ARM64_CPUCAP_SYSTEM_FEATURE,
++ 		.matches = has_nv1,
++ 		ARM64_CPUID_FIELDS_NEG(ID_AA64MMFR4_EL1, E2H0, NI_NV1)
++ 	},
+  	{},
+  };

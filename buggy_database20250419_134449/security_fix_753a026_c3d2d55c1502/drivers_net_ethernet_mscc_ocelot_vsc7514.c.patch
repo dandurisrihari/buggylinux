@@ -1,0 +1,78 @@
+commit 753a026cfec1429c9e32e004ae4d4c2727cc0111
+Author: Clément Léger <clement.leger@bootlin.com>
+Date:   Thu Dec 9 16:49:11 2021 +0100
+
+    net: ocelot: add FDMA support
+    
+    Ethernet frames can be extracted or injected autonomously to or from
+    the device’s DDR3/DDR3L memory and/or PCIe memory space. Linked list
+    data structures in memory are used for injecting or extracting Ethernet
+    frames. The FDMA generates interrupts when frame extraction or
+    injection is done and when the linked lists need updating.
+    
+    The FDMA is shared between all the ethernet ports of the switch and
+    uses a linked list of descriptors (DCB) to inject and extract packets.
+    Before adding descriptors, the FDMA channels must be stopped. It would
+    be inefficient to do that each time a descriptor would be added so the
+    channels are restarted only once they stopped.
+    
+    Both channels uses ring-like structure to feed the DCBs to the FDMA.
+    head and tail are never touched by hardware and are completely handled
+    by the driver. On top of that, page recycling has been added and is
+    mostly taken from gianfar driver.
+    
+    Reviewed-by: Vladimir Oltean <vladimir.oltean@nxp.com>
+    Co-developed-by: Alexandre Belloni <alexandre.belloni@bootlin.com>
+    Signed-off-by: Alexandre Belloni <alexandre.belloni@bootlin.com>
+    Signed-off-by: Clément Léger <clement.leger@bootlin.com>
+    Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+diff --git a/drivers/net/ethernet/mscc/ocelot_vsc7514.c b/drivers/net/ethernet/mscc/ocelot_vsc7514.c
+index 2db59060f5ab..4f4a495a60ad 100644
+--- a/drivers/net/ethernet/mscc/ocelot_vsc7514.c
++++ b/drivers/net/ethernet/mscc/ocelot_vsc7514.c
+@@ -19,6 +19,7 @@
+ #include <soc/mscc/ocelot_vcap.h>
+ #include <soc/mscc/ocelot_hsio.h>
+ #include <soc/mscc/vsc7514_regs.h>
++#include "ocelot_fdma.h"
+ #include "ocelot.h"
+ 
+ #define VSC7514_VCAP_POLICER_BASE			128
+@@ -550,6 +551,7 @@ static int mscc_ocelot_probe(struct platform_device *pdev)
+ 		{ S1, "s1" },
+ 		{ S2, "s2" },
+ 		{ PTP, "ptp", 1 },
++		{ FDMA, "fdma", 1 },
+ 	};
+ 
+ 	if (!np && !pdev->dev.platform_data)
+@@ -585,6 +587,9 @@ static int mscc_ocelot_probe(struct platform_device *pdev)
+ 		ocelot->targets[io_target[i].id] = target;
+ 	}
+ 
++	if (ocelot->targets[FDMA])
++		ocelot_fdma_init(pdev, ocelot);
++
+ 	hsio = syscon_regmap_lookup_by_compatible("mscc,ocelot-hsio");
+ 	if (IS_ERR(hsio)) {
+ 		dev_err(&pdev->dev, "missing hsio syscon\n");
+@@ -648,6 +653,9 @@ static int mscc_ocelot_probe(struct platform_device *pdev)
+ 	if (err)
+ 		goto out_ocelot_devlink_unregister;
+ 
++	if (ocelot->fdma)
++		ocelot_fdma_start(ocelot);
++
+ 	err = ocelot_devlink_sb_register(ocelot);
+ 	if (err)
+ 		goto out_ocelot_release_ports;
+@@ -688,6 +696,8 @@ static int mscc_ocelot_remove(struct platform_device *pdev)
+ {
+ 	struct ocelot *ocelot = platform_get_drvdata(pdev);
+ 
++	if (ocelot->fdma)
++		ocelot_fdma_deinit(ocelot);
+ 	devlink_unregister(ocelot->devlink);
+ 	ocelot_deinit_timestamp(ocelot);
+ 	ocelot_devlink_sb_unregister(ocelot);

@@ -1,0 +1,60 @@
+commit e80b18599a39a625bc8b2e39ba3004a62f78805a
+Author: Tetsuo Handa <penguin-kernel@I-love.SAKURA.ne.jp>
+Date:   Fri Apr 12 20:04:54 2019 +0900
+
+    tomoyo: Add a kernel config option for fuzzing testing.
+    
+    syzbot is reporting kernel panic triggered by memory allocation fault
+    injection before loading TOMOYO's policy [1]. To make the fuzzing tests
+    useful, we need to assign a profile other than "disabled" (no-op) mode.
+    Therefore, let's allow syzbot to load TOMOYO's built-in policy for
+    "learning" mode using a kernel config option. This option must not be
+    enabled for kernels built for production system, for this option also
+    disables domain/program checks when modifying policy configuration via
+    /sys/kernel/security/tomoyo/ interface.
+    
+    [1] https://syzkaller.appspot.com/bug?extid=29569ed06425fcf67a95
+    
+    Reported-by: syzbot <syzbot+e1b8084e532b6ee7afab@syzkaller.appspotmail.com>
+    Reported-by: syzbot <syzbot+29569ed06425fcf67a95@syzkaller.appspotmail.com>
+    Reported-by: syzbot <syzbot+2ee3f8974c2e7dc69feb@syzkaller.appspotmail.com>
+    Signed-off-by: Tetsuo Handa <penguin-kernel@I-love.SAKURA.ne.jp>
+    Signed-off-by: James Morris <jamorris@linux.microsoft.com>
+
+diff --git a/security/tomoyo/common.c b/security/tomoyo/common.c
+index 57988d95d33d..dd3d5942e669 100644
+--- a/security/tomoyo/common.c
++++ b/security/tomoyo/common.c
+@@ -940,7 +940,7 @@ static bool tomoyo_manager(void)
+ 	const char *exe;
+ 	const struct task_struct *task = current;
+ 	const struct tomoyo_path_info *domainname = tomoyo_domain()->domainname;
+-	bool found = false;
++	bool found = IS_ENABLED(CONFIG_SECURITY_TOMOYO_INSECURE_BUILTIN_SETTING);
+ 
+ 	if (!tomoyo_policy_loaded)
+ 		return true;
+@@ -2810,6 +2810,16 @@ void tomoyo_check_profile(void)
+  */
+ void __init tomoyo_load_builtin_policy(void)
+ {
++#ifdef CONFIG_SECURITY_TOMOYO_INSECURE_BUILTIN_SETTING
++	static char tomoyo_builtin_profile[] __initdata =
++		"PROFILE_VERSION=20150505\n"
++		"0-CONFIG={ mode=learning grant_log=no reject_log=yes }\n";
++	static char tomoyo_builtin_exception_policy[] __initdata =
++		"aggregator proc:/self/exe /proc/self/exe\n";
++	static char tomoyo_builtin_domain_policy[] __initdata = "";
++	static char tomoyo_builtin_manager[] __initdata = "";
++	static char tomoyo_builtin_stat[] __initdata = "";
++#else
+ 	/*
+ 	 * This include file is manually created and contains built-in policy
+ 	 * named "tomoyo_builtin_profile", "tomoyo_builtin_exception_policy",
+@@ -2817,6 +2827,7 @@ void __init tomoyo_load_builtin_policy(void)
+ 	 * "tomoyo_builtin_stat" in the form of "static char [] __initdata".
+ 	 */
+ #include "builtin-policy.h"
++#endif
+ 	u8 i;
+ 	const int idx = tomoyo_read_lock();

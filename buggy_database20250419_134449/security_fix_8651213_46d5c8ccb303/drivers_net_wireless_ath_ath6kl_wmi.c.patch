@@ -1,0 +1,60 @@
+commit 865121361f0be55555c540c3df444ed06e090b33
+Author: Jouni Malinen <jouni@qca.qualcomm.com>
+Date:   Wed Sep 21 16:57:29 2011 +0300
+
+    ath6kl: Report PMKSA candidate events through cfg80211
+    
+    This allows RSN pre-authentication to be used when roaming decisions are
+    done in the target.
+    
+    Signed-off-by: Jouni Malinen <jouni@qca.qualcomm.com>
+    Signed-off-by: Kalle Valo <kvalo@qca.qualcomm.com>
+
+diff --git a/drivers/net/wireless/ath/ath6kl/wmi.c b/drivers/net/wireless/ath/ath6kl/wmi.c
+index b90d116c018c..47fbb8e7686b 100644
+--- a/drivers/net/wireless/ath/ath6kl/wmi.c
++++ b/drivers/net/wireless/ath/ath6kl/wmi.c
+@@ -1097,6 +1097,35 @@ static int ath6kl_wmi_scan_complete_rx(struct wmi *wmi, u8 *datap, int len)
+ 	return 0;
+ }
+ 
++static int ath6kl_wmi_neighbor_report_event_rx(struct wmi *wmi, u8 *datap,
++					       int len)
++{
++	struct wmi_neighbor_report_event *ev;
++	u8 i;
++
++	if (len < sizeof(*ev))
++		return -EINVAL;
++	ev = (struct wmi_neighbor_report_event *) datap;
++	if (sizeof(*ev) + ev->num_neighbors * sizeof(struct wmi_neighbor_info)
++	    > len) {
++		ath6kl_dbg(ATH6KL_DBG_WMI, "truncated neighbor event "
++			   "(num=%d len=%d)\n", ev->num_neighbors, len);
++		return -EINVAL;
++	}
++	for (i = 0; i < ev->num_neighbors; i++) {
++		ath6kl_dbg(ATH6KL_DBG_WMI, "neighbor %d/%d - %pM 0x%x\n",
++			   i + 1, ev->num_neighbors, ev->neighbor[i].bssid,
++			   ev->neighbor[i].bss_flags);
++		cfg80211_pmksa_candidate_notify(wmi->parent_dev->net_dev, i,
++						ev->neighbor[i].bssid,
++						!!(ev->neighbor[i].bss_flags &
++						   WMI_PREAUTH_CAPABLE_BSS),
++						GFP_ATOMIC);
++	}
++
++	return 0;
++}
++
+ /*
+  * Target is reporting a programming error.  This is for
+  * developer aid only.  Target only checks a few common violations
+@@ -2870,6 +2899,7 @@ int ath6kl_wmi_control_rx(struct wmi *wmi, struct sk_buff *skb)
+ 		break;
+ 	case WMI_NEIGHBOR_REPORT_EVENTID:
+ 		ath6kl_dbg(ATH6KL_DBG_WMI, "WMI_NEIGHBOR_REPORT_EVENTID\n");
++		ret = ath6kl_wmi_neighbor_report_event_rx(wmi, datap, len);
+ 		break;
+ 	case WMI_SCAN_COMPLETE_EVENTID:
+ 		ath6kl_dbg(ATH6KL_DBG_WMI, "WMI_SCAN_COMPLETE_EVENTID\n");

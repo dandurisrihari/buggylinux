@@ -1,0 +1,149 @@
+commit 90ff96f22426a9d1a06df97dead0a9098facb567
+Author: Inaky Perez-Gonzalez <inaky.perez-gonzalez@intel.com>
+Date:   Wed Sep 17 16:34:23 2008 +0100
+
+    wusb: add the Wireless USB core
+    
+    Add support for Ceritified Wireless USB 1.0 to the USB stack.
+    
+    This has been split into several patches for easier review.
+    
+    core (this patch):
+      - host controller infrastructure
+      - cluster reservation
+      - UWB PAL registration
+      - fake root hub
+    
+    protocol:
+      - MMC management (start/stop, managing IEs)
+      - device connection
+    
+    security:
+      - device authentication and authorization
+    
+    build-system:
+      - Kconfig and Kbuild files
+    
+    Signed-off-by: David Vrabel <david.vrabel@csr.com>
+
+diff --git a/drivers/usb/wusbcore/reservation.c b/drivers/usb/wusbcore/reservation.c
+new file mode 100644
+index 000000000000..fc63e77ded2d
+--- /dev/null
++++ b/drivers/usb/wusbcore/reservation.c
+@@ -0,0 +1,115 @@
++/*
++ * WUSB cluster reservation management
++ *
++ * Copyright (C) 2007 Cambridge Silicon Radio Ltd.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License version
++ * 2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++#include <linux/kernel.h>
++#include <linux/uwb.h>
++
++#include "wusbhc.h"
++
++/*
++ * WUSB cluster reservations are multicast reservations with the
++ * broadcast cluster ID (BCID) as the target DevAddr.
++ *
++ * FIXME: consider adjusting the reservation depending on what devices
++ * are attached.
++ */
++
++static int wusbhc_bwa_set(struct wusbhc *wusbhc, u8 stream,
++	const struct uwb_mas_bm *mas)
++{
++	if (mas == NULL)
++		mas = &uwb_mas_bm_zero;
++	return wusbhc->bwa_set(wusbhc, stream, mas);
++}
++
++/**
++ * wusbhc_rsv_complete_cb - WUSB HC reservation complete callback
++ * @rsv:    the reservation
++ *
++ * Either set or clear the HC's view of the reservation.
++ *
++ * FIXME: when a reservation is denied the HC should be stopped.
++ */
++static void wusbhc_rsv_complete_cb(struct uwb_rsv *rsv)
++{
++	struct wusbhc *wusbhc = rsv->pal_priv;
++	struct device *dev = wusbhc->dev;
++	char buf[72];
++
++	switch (rsv->state) {
++	case UWB_RSV_STATE_O_ESTABLISHED:
++		bitmap_scnprintf(buf, sizeof(buf), rsv->mas.bm, UWB_NUM_MAS);
++		dev_dbg(dev, "established reservation: %s\n", buf);
++		wusbhc_bwa_set(wusbhc, rsv->stream, &rsv->mas);
++		break;
++	case UWB_RSV_STATE_NONE:
++		dev_dbg(dev, "removed reservation\n");
++		wusbhc_bwa_set(wusbhc, 0, NULL);
++		wusbhc->rsv = NULL;
++		break;
++	default:
++		dev_dbg(dev, "unexpected reservation state: %d\n", rsv->state);
++		break;
++	}
++}
++
++
++/**
++ * wusbhc_rsv_establish - establish a reservation for the cluster
++ * @wusbhc: the WUSB HC requesting a bandwith reservation
++ */
++int wusbhc_rsv_establish(struct wusbhc *wusbhc)
++{
++	struct uwb_rc *rc = wusbhc->uwb_rc;
++	struct uwb_rsv *rsv;
++	struct uwb_dev_addr bcid;
++	int ret;
++
++	rsv = uwb_rsv_create(rc, wusbhc_rsv_complete_cb, wusbhc);
++	if (rsv == NULL)
++		return -ENOMEM;
++
++	bcid.data[0] = wusbhc->cluster_id;
++	bcid.data[1] = 0;
++
++	rsv->owner = &rc->uwb_dev;
++	rsv->target.type = UWB_RSV_TARGET_DEVADDR;
++	rsv->target.devaddr = bcid;
++	rsv->type = UWB_DRP_TYPE_PRIVATE;
++	rsv->max_mas = 256;
++	rsv->min_mas = 16;  /* one MAS per zone? */
++	rsv->sparsity = 16; /* at least one MAS in each zone? */
++	rsv->is_multicast = true;
++
++	ret = uwb_rsv_establish(rsv);
++	if (ret == 0)
++		wusbhc->rsv = rsv;
++	else
++		uwb_rsv_destroy(rsv);
++	return ret;
++}
++
++
++/**
++ * wusbhc_rsv_terminate - terminate any cluster reservation
++ * @wusbhc: the WUSB host whose reservation is to be terminated
++ */
++void wusbhc_rsv_terminate(struct wusbhc *wusbhc)
++{
++	if (wusbhc->rsv)
++		uwb_rsv_terminate(wusbhc->rsv);
++}

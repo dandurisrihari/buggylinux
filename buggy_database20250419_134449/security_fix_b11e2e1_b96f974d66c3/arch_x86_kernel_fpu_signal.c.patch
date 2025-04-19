@@ -1,0 +1,79 @@
+commit b11e2e18a7fc8eaa3d592c260d50c7129e094ded
+Author: Eric Biggers <ebiggers@google.com>
+Date:   Sun Sep 24 12:59:06 2017 +0200
+
+    x86/fpu: Use validate_xstate_header() to validate the xstate_header in __fpu__restore_sig()
+    
+    Tighten the checks in __fpu__restore_sig() and update comments.
+    
+    Signed-off-by: Eric Biggers <ebiggers@google.com>
+    Cc: Andrew Morton <akpm@linux-foundation.org>
+    Cc: Andy Lutomirski <luto@amacapital.net>
+    Cc: Andy Lutomirski <luto@kernel.org>
+    Cc: Borislav Petkov <bp@alien8.de>
+    Cc: Dave Hansen <dave.hansen@linux.intel.com>
+    Cc: Dmitry Vyukov <dvyukov@google.com>
+    Cc: Eric Biggers <ebiggers3@gmail.com>
+    Cc: Fenghua Yu <fenghua.yu@intel.com>
+    Cc: Kees Cook <keescook@chromium.org>
+    Cc: Kevin Hao <haokexin@gmail.com>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Cc: Michael Halcrow <mhalcrow@google.com>
+    Cc: Oleg Nesterov <oleg@redhat.com>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Rik van Riel <riel@redhat.com>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Wanpeng Li <wanpeng.li@hotmail.com>
+    Cc: Yu-cheng Yu <yu-cheng.yu@intel.com>
+    Cc: kernel-hardening@lists.openwall.com
+    Link: http://lkml.kernel.org/r/20170924105913.9157-4-mingo@kernel.org
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+diff --git a/arch/x86/kernel/fpu/signal.c b/arch/x86/kernel/fpu/signal.c
+index 7fa3bdb331e9..fb639e70048f 100644
+--- a/arch/x86/kernel/fpu/signal.c
++++ b/arch/x86/kernel/fpu/signal.c
+@@ -214,8 +214,11 @@ sanitize_restored_xstate(struct task_struct *tsk,
+ 	struct xstate_header *header = &xsave->header;
+ 
+ 	if (use_xsave()) {
+-		/* These bits must be zero. */
+-		memset(header->reserved, 0, 48);
++		/*
++		 * Note: we don't need to zero the reserved bits in the
++		 * xstate_header here because we either didn't copy them at all,
++		 * or we checked earlier that they aren't set.
++		 */
+ 
+ 		/*
+ 		 * Init the state that is not present in the memory
+@@ -224,7 +227,7 @@ sanitize_restored_xstate(struct task_struct *tsk,
+ 		if (fx_only)
+ 			header->xfeatures = XFEATURE_MASK_FPSSE;
+ 		else
+-			header->xfeatures &= (xfeatures_mask & xfeatures);
++			header->xfeatures &= xfeatures;
+ 	}
+ 
+ 	if (use_fxsr()) {
+@@ -308,7 +311,7 @@ static int __fpu__restore_sig(void __user *buf, void __user *buf_fx, int size)
+ 		/*
+ 		 * For 32-bit frames with fxstate, copy the user state to the
+ 		 * thread's fpu state, reconstruct fxstate from the fsave
+-		 * header. Sanitize the copied state etc.
++		 * header. Validate and sanitize the copied state.
+ 		 */
+ 		struct fpu *fpu = &tsk->thread.fpu;
+ 		struct user_i387_ia32_struct env;
+@@ -329,9 +332,8 @@ static int __fpu__restore_sig(void __user *buf, void __user *buf_fx, int size)
+ 		} else {
+ 			err = __copy_from_user(&fpu->state.xsave, buf_fx, state_size);
+ 
+-			/* xcomp_bv must be 0 when using uncompacted format */
+-			if (!err && state_size > offsetof(struct xregs_state, header) && fpu->state.xsave.header.xcomp_bv)
+-				err = -EINVAL;
++			if (!err && state_size > offsetof(struct xregs_state, header))
++				err = validate_xstate_header(&fpu->state.xsave.header);
+ 		}
+ 
+ 		if (err || __copy_from_user(&env, buf, sizeof(env))) {

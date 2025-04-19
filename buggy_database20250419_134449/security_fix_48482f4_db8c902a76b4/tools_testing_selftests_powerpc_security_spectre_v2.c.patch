@@ -1,0 +1,64 @@
+commit 48482f4dd3432e5e62873bf0f2e254cfb8ce2ac2
+Author: Russell Currey <ruscur@russell.cc>
+Date:   Tue Jun 8 16:48:09 2021 +1000
+
+    selftests/powerpc: Better reporting in spectre_v2
+    
+    In commit f3054ffd71b5 ("selftests/powerpc: Return skip code for
+    spectre_v2"), the spectre_v2 selftest is updated to be aware of cases
+    where the vulnerability status reported in sysfs is incorrect, skipping
+    the test instead.
+    
+    This happens because qemu can misrepresent the mitigation status of the
+    host to the guest. If the count cache is disabled in the host, and this
+    is correctly reported to the guest, then the guest won't apply
+    mitigations. If the guest is then migrated to a new host where
+    mitigations are necessary, it is now vulnerable because it has not
+    applied mitigations.
+    
+    Update the selftest to report when we see excessive misses, indicative of
+    the count cache being disabled. If software flushing is enabled, also
+    warn that these flushes are just wasting performance.
+    
+    Signed-off-by: Russell Currey <ruscur@russell.cc>
+    [mpe: Rebase and update change log appropriately]
+    Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+    Link: https://lore.kernel.org/r/20210608064809.199116-1-ruscur@russell.cc
+
+diff --git a/tools/testing/selftests/powerpc/security/spectre_v2.c b/tools/testing/selftests/powerpc/security/spectre_v2.c
+index 80dc97e3ec57..0e231e89bfa4 100644
+--- a/tools/testing/selftests/powerpc/security/spectre_v2.c
++++ b/tools/testing/selftests/powerpc/security/spectre_v2.c
+@@ -182,17 +182,23 @@ int spectre_v2_test(void)
+ 	case COUNT_CACHE_FLUSH_HW:
+ 		// These should all not affect userspace branch prediction
+ 		if (miss_percent > 15) {
++			if (miss_percent > 95) {
++				/*
++				 * Such a mismatch may be caused by a system being unaware
++				 * the count cache is disabled. This may be to enable
++				 * guest migration between hosts with different settings.
++				 * Return skip code to avoid detecting this as an error.
++				 * We are not vulnerable and reporting otherwise, so
++				 * missing such a mismatch is safe.
++				 */
++				printf("Branch misses > 95%% unexpected in this configuration.\n");
++				printf("Count cache likely disabled without Linux knowing.\n");
++				if (state == COUNT_CACHE_FLUSH_SW)
++					printf("WARNING: Kernel performing unnecessary flushes.\n");
++				return 4;
++			}
+ 			printf("Branch misses > 15%% unexpected in this configuration!\n");
+ 			printf("Possible mis-match between reported & actual mitigation\n");
+-			/*
+-			 * Such a mismatch may be caused by a guest system
+-			 * reporting as vulnerable when the host is mitigated.
+-			 * Return skip code to avoid detecting this as an error.
+-			 * We are not vulnerable and reporting otherwise, so
+-			 * missing such a mismatch is safe.
+-			 */
+-			if (miss_percent > 95)
+-				return 4;
+ 
+ 			return 1;
+ 		}

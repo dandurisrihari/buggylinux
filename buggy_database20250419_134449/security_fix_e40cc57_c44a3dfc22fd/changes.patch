@@ -1,0 +1,153 @@
+diff --git a/virt/kvm/arm/vgic/vgic-v2.c b/virt/kvm/arm/vgic/vgic-v2.c
+index 80897102da26..c32d7b93ffd1 100644
+--- a/virt/kvm/arm/vgic/vgic-v2.c
++++ b/virt/kvm/arm/vgic/vgic-v2.c
+@@ -105,6 +105,26 @@ void vgic_v2_fold_lr_state(struct kvm_vcpu *vcpu)
+ 				irq->pending_latch = false;
+ 		}
+ 
++		/*
++		 * Level-triggered mapped IRQs are special because we only
++		 * observe rising edges as input to the VGIC.
++		 *
++		 * If the guest never acked the interrupt we have to sample
++		 * the physical line and set the line level, because the
++		 * device state could have changed or we simply need to
++		 * process the still pending interrupt later.
++		 *
++		 * If this causes us to lower the level, we have to also clear
++		 * the physical active state, since we will otherwise never be
++		 * told when the interrupt becomes asserted again.
++		 */
++		if (vgic_irq_is_mapped_level(irq) && (val & GICH_LR_PENDING_BIT)) {
++			irq->line_level = vgic_get_phys_line_level(irq);
++
++			if (!irq->line_level)
++				vgic_irq_set_phys_active(irq, false);
++		}
++
+ 		spin_unlock_irqrestore(&irq->irq_lock, flags);
+ 		vgic_put_irq(vcpu->kvm, irq);
+ 	}
+@@ -162,6 +182,15 @@ void vgic_v2_populate_lr(struct kvm_vcpu *vcpu, struct vgic_irq *irq, int lr)
+ 			val |= GICH_LR_EOI;
+ 	}
+ 
++	/*
++	 * Level-triggered mapped IRQs are special because we only observe
++	 * rising edges as input to the VGIC.  We therefore lower the line
++	 * level here, so that we can take new virtual IRQs.  See
++	 * vgic_v2_fold_lr_state for more info.
++	 */
++	if (vgic_irq_is_mapped_level(irq) && (val & GICH_LR_PENDING_BIT))
++		irq->line_level = false;
++
+ 	/* The GICv2 LR only holds five bits of priority. */
+ 	val |= (irq->priority >> 3) << GICH_LR_PRIORITY_SHIFT;
+ 
+diff --git a/virt/kvm/arm/vgic/vgic-v3.c b/virt/kvm/arm/vgic/vgic-v3.c
+index f47e8481fa45..6b329414e57a 100644
+--- a/virt/kvm/arm/vgic/vgic-v3.c
++++ b/virt/kvm/arm/vgic/vgic-v3.c
+@@ -96,6 +96,26 @@ void vgic_v3_fold_lr_state(struct kvm_vcpu *vcpu)
+ 				irq->pending_latch = false;
+ 		}
+ 
++		/*
++		 * Level-triggered mapped IRQs are special because we only
++		 * observe rising edges as input to the VGIC.
++		 *
++		 * If the guest never acked the interrupt we have to sample
++		 * the physical line and set the line level, because the
++		 * device state could have changed or we simply need to
++		 * process the still pending interrupt later.
++		 *
++		 * If this causes us to lower the level, we have to also clear
++		 * the physical active state, since we will otherwise never be
++		 * told when the interrupt becomes asserted again.
++		 */
++		if (vgic_irq_is_mapped_level(irq) && (val & ICH_LR_PENDING_BIT)) {
++			irq->line_level = vgic_get_phys_line_level(irq);
++
++			if (!irq->line_level)
++				vgic_irq_set_phys_active(irq, false);
++		}
++
+ 		spin_unlock_irqrestore(&irq->irq_lock, flags);
+ 		vgic_put_irq(vcpu->kvm, irq);
+ 	}
+@@ -145,6 +165,15 @@ void vgic_v3_populate_lr(struct kvm_vcpu *vcpu, struct vgic_irq *irq, int lr)
+ 			val |= ICH_LR_EOI;
+ 	}
+ 
++	/*
++	 * Level-triggered mapped IRQs are special because we only observe
++	 * rising edges as input to the VGIC.  We therefore lower the line
++	 * level here, so that we can take new virtual IRQs.  See
++	 * vgic_v3_fold_lr_state for more info.
++	 */
++	if (vgic_irq_is_mapped_level(irq) && (val & ICH_LR_PENDING_BIT))
++		irq->line_level = false;
++
+ 	/*
+ 	 * We currently only support Group1 interrupts, which is a
+ 	 * known defect. This needs to be addressed at some point.
+diff --git a/virt/kvm/arm/vgic/vgic.c b/virt/kvm/arm/vgic/vgic.c
+index ecb8e25f5fe5..4318e9edd075 100644
+--- a/virt/kvm/arm/vgic/vgic.c
++++ b/virt/kvm/arm/vgic/vgic.c
+@@ -144,6 +144,29 @@ void vgic_put_irq(struct kvm *kvm, struct vgic_irq *irq)
+ 	kfree(irq);
+ }
+ 
++/* Get the input level of a mapped IRQ directly from the physical GIC */
++bool vgic_get_phys_line_level(struct vgic_irq *irq)
++{
++	bool line_level;
++
++	BUG_ON(!irq->hw);
++
++	WARN_ON(irq_get_irqchip_state(irq->host_irq,
++				      IRQCHIP_STATE_PENDING,
++				      &line_level));
++	return line_level;
++}
++
++/* Set/Clear the physical active state */
++void vgic_irq_set_phys_active(struct vgic_irq *irq, bool active)
++{
++
++	BUG_ON(!irq->hw);
++	WARN_ON(irq_set_irqchip_state(irq->host_irq,
++				      IRQCHIP_STATE_ACTIVE,
++				      active));
++}
++
+ /**
+  * kvm_vgic_target_oracle - compute the target vcpu for an irq
+  *
+diff --git a/virt/kvm/arm/vgic/vgic.h b/virt/kvm/arm/vgic/vgic.h
+index efbcf8f96f9c..d0787983a357 100644
+--- a/virt/kvm/arm/vgic/vgic.h
++++ b/virt/kvm/arm/vgic/vgic.h
+@@ -104,6 +104,11 @@ static inline bool irq_is_pending(struct vgic_irq *irq)
+ 		return irq->pending_latch || irq->line_level;
+ }
+ 
++static inline bool vgic_irq_is_mapped_level(struct vgic_irq *irq)
++{
++	return irq->config == VGIC_CONFIG_LEVEL && irq->hw;
++}
++
+ /*
+  * This struct provides an intermediate representation of the fields contained
+  * in the GICH_VMCR and ICH_VMCR registers, such that code exporting the GIC
+@@ -140,6 +145,8 @@ vgic_get_mmio_region(struct kvm_vcpu *vcpu, struct vgic_io_device *iodev,
+ struct vgic_irq *vgic_get_irq(struct kvm *kvm, struct kvm_vcpu *vcpu,
+ 			      u32 intid);
+ void vgic_put_irq(struct kvm *kvm, struct vgic_irq *irq);
++bool vgic_get_phys_line_level(struct vgic_irq *irq);
++void vgic_irq_set_phys_active(struct vgic_irq *irq, bool active);
+ bool vgic_queue_irq_unlock(struct kvm *kvm, struct vgic_irq *irq,
+ 			   unsigned long flags);
+ void vgic_kick_vcpus(struct kvm *kvm);

@@ -1,0 +1,49 @@
+commit 29165e4c8b265a415f1fd1dca947b5d4c72abc47
+Author: Johannes Berg <johannes@sipsolutions.net>
+Date:   Sat Feb 6 15:20:13 2010 +0100
+
+    mac80211: fix deauth race
+    
+    When userspace requests a deauth while the
+    authentication work is pending in the auth
+    (not probe) state, we do not properly abort
+    the work and then things get confused.
+    
+    Fix that and also improve the checks here
+    to include the correct virtual interface,
+    just in case two virtual interfaces would
+    ever try to connect to the same BSS.
+    
+    Also fix a bug -- need to use list_del_rcu
+    instead of just list_del to free a work
+    item.
+    
+    Signed-off-by: Johannes Berg <johannes@sipsolutions.net>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/mac80211/mlme.c b/net/mac80211/mlme.c
+index ac9429e8d72b..7a7921476582 100644
+--- a/net/mac80211/mlme.c
++++ b/net/mac80211/mlme.c
+@@ -1995,12 +1995,18 @@ int ieee80211_mgd_deauth(struct ieee80211_sub_if_data *sdata,
+ 
+ 		mutex_lock(&local->work_mtx);
+ 		list_for_each_entry(wk, &local->work_list, list) {
+-			if (wk->type != IEEE80211_WORK_DIRECT_PROBE)
++			if (wk->sdata != sdata)
+ 				continue;
++
++			if (wk->type != IEEE80211_WORK_DIRECT_PROBE &&
++			    wk->type != IEEE80211_WORK_AUTH)
++				continue;
++
+ 			if (memcmp(req->bss->bssid, wk->filter_ta, ETH_ALEN))
+ 				continue;
+-			not_auth_yet = true;
+-			list_del(&wk->list);
++
++			not_auth_yet = wk->type == IEEE80211_WORK_DIRECT_PROBE;
++			list_del_rcu(&wk->list);
+ 			free_work(wk);
+ 			break;
+ 		}

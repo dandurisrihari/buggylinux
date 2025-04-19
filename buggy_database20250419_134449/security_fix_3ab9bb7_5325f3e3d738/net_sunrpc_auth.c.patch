@@ -1,0 +1,55 @@
+commit 3ab9bb7243489f9db3abf3d05521ddfc6b184c0a
+Author: Trond Myklebust <Trond.Myklebust@netapp.com>
+Date:   Sat Jun 9 15:41:42 2007 -0400
+
+    SUNRPC: Fix a memory leak in the auth credcache code
+    
+    The leak only affects the RPCSEC_GSS caches, since they are the only ones
+    that are dynamically allocated...
+    Rename the existing rpcauth_free_credcache() to rpcauth_clear_credcache()
+    in order to better describe its role, then add a new function
+    rpcauth_destroy_credcache() that actually frees the cache in addition to
+    clearing it out.
+    
+    Also move the call to destroy the credcache in gss_destroy() to come before
+    the rpc upcall pipe is unlinked.
+    
+    Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+
+diff --git a/net/sunrpc/auth.c b/net/sunrpc/auth.c
+index 9527f2bb1744..f6b6c81cbc3e 100644
+--- a/net/sunrpc/auth.c
++++ b/net/sunrpc/auth.c
+@@ -137,9 +137,8 @@ void rpcauth_destroy_credlist(struct hlist_head *head)
+  * that are not referenced.
+  */
+ void
+-rpcauth_free_credcache(struct rpc_auth *auth)
++rpcauth_clear_credcache(struct rpc_cred_cache *cache)
+ {
+-	struct rpc_cred_cache *cache = auth->au_credcache;
+ 	HLIST_HEAD(free);
+ 	struct hlist_node *pos, *next;
+ 	struct rpc_cred	*cred;
+@@ -157,6 +156,21 @@ rpcauth_free_credcache(struct rpc_auth *auth)
+ 	rpcauth_destroy_credlist(&free);
+ }
+ 
++/*
++ * Destroy the RPC credential cache
++ */
++void
++rpcauth_destroy_credcache(struct rpc_auth *auth)
++{
++	struct rpc_cred_cache *cache = auth->au_credcache;
++
++	if (cache) {
++		auth->au_credcache = NULL;
++		rpcauth_clear_credcache(cache);
++		kfree(cache);
++	}
++}
++
+ static void
+ rpcauth_prune_expired(struct rpc_auth *auth, struct rpc_cred *cred, struct hlist_head *free)
+ {

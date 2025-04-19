@@ -1,0 +1,93 @@
+commit 8b41fc4454e36fbfdbb23f940d023d4dece2de29
+Author: Masahiro Yamada <masahiroy@kernel.org>
+Date:   Thu Dec 19 17:33:29 2019 +0900
+
+    kbuild: create modules.builtin without Makefile.modbuiltin or tristate.conf
+    
+    Commit bc081dd6e9f6 ("kbuild: generate modules.builtin") added
+    infrastructure to generate modules.builtin, the list of all
+    builtin modules.
+    
+    Basically, it works like this:
+    
+      - Kconfig generates include/config/tristate.conf, the list of
+        tristate CONFIG options with a value in a capital letter.
+    
+      - scripts/Makefile.modbuiltin makes Kbuild descend into
+        directories to collect the information of builtin modules.
+    
+    I am not a big fan of it because Kbuild ends up with traversing
+    the source tree twice.
+    
+    I am not sure how perfectly it should work, but this approach cannot
+    avoid false positives; even if the relevant CONFIG option is tristate,
+    some Makefiles forces obj-m to obj-y.
+    
+    Some examples are:
+    
+      arch/powerpc/platforms/powermac/Makefile:
+        obj-$(CONFIG_NVRAM:m=y)         += nvram.o
+    
+      net/ipv6/Makefile:
+        obj-$(subst m,y,$(CONFIG_IPV6)) += inet6_hashtables.o
+    
+      net/netlabel/Makefile:
+        obj-$(subst m,y,$(CONFIG_IPV6)) += netlabel_calipso.o
+    
+    Nobody has complained about (or noticed) it, so it is probably fine to
+    have false positives in modules.builtin.
+    
+    This commit simplifies the implementation. Let's exploit the fact
+    that every module has MODULE_LICENSE(). (modpost shows a warning if
+    MODULE_LICENSE is missing. If so, 0-day bot would already have blocked
+    such a module.)
+    
+    I added MODULE_FILE to <linux/module.h>. When the code is being compiled
+    as builtin, it will be filled with the file path of the module, and
+    collected into modules.builtin.info. Then, scripts/link-vmlinux.sh
+    extracts the list of builtin modules out of it.
+    
+    This new approach fixes the false-positives above, but adds another
+    type of false-positives; non-modular code may have MODULE_LICENSE()
+    by mistake. This is not a big deal, it is just the code is always
+    orphan. We can clean it up if we like. You can see cleanup examples by:
+    
+      $ git log --grep='make.* explicitly non-modular'
+    
+    To sum up, this commits deletes lots of code, but still produces almost
+    equivalent results. Please note it does not increase the vmlinux size at
+    all. As you can see in include/asm-generic/vmlinux.lds.h, the .modinfo
+    section is discarded in the link stage.
+    
+    Signed-off-by: Masahiro Yamada <masahiroy@kernel.org>
+
+diff --git a/include/linux/module.h b/include/linux/module.h
+index bd165ba68617..6877b3b191d0 100644
+--- a/include/linux/module.h
++++ b/include/linux/module.h
+@@ -169,6 +169,16 @@ extern void cleanup_module(void);
+  */
+ #define MODULE_SOFTDEP(_softdep) MODULE_INFO(softdep, _softdep)
+ 
++/*
++ * MODULE_FILE is used for generating modules.builtin
++ * So, make it no-op when this is being built as a module
++ */
++#ifdef MODULE
++#define MODULE_FILE
++#else
++#define MODULE_FILE	MODULE_INFO(file, KBUILD_MODFILE);
++#endif
++
+ /*
+  * The following license idents are currently accepted as indicating free
+  * software modules
+@@ -213,7 +223,7 @@ extern void cleanup_module(void);
+  * 2.	So the community can ignore bug reports including proprietary modules
+  * 3.	So vendors can do likewise based on their own policies
+  */
+-#define MODULE_LICENSE(_license) MODULE_INFO(license, _license)
++#define MODULE_LICENSE(_license) MODULE_FILE MODULE_INFO(license, _license)
+ 
+ /*
+  * Author(s), use "Name <email>" or just "Name", for multiple

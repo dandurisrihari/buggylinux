@@ -1,0 +1,136 @@
+commit 9facc336876f7ecf9edba4c67b90426fde4ec898
+Author: Daniel Borkmann <daniel@iogearbox.net>
+Date:   Fri Jun 15 02:30:48 2018 +0200
+
+    bpf: reject any prog that failed read-only lock
+    
+    We currently lock any JITed image as read-only via bpf_jit_binary_lock_ro()
+    as well as the BPF image as read-only through bpf_prog_lock_ro(). In
+    the case any of these would fail we throw a WARN_ON_ONCE() in order to
+    yell loudly to the log. Perhaps, to some extend, this may be comparable
+    to an allocation where __GFP_NOWARN is explicitly not set.
+    
+    Added via 65869a47f348 ("bpf: improve read-only handling"), this behavior
+    is slightly different compared to any of the other in-kernel set_memory_ro()
+    users who do not check the return code of set_memory_ro() and friends /at
+    all/ (e.g. in the case of module_enable_ro() / module_disable_ro()). Given
+    in BPF this is mandatory hardening step, we want to know whether there
+    are any issues that would leave both BPF data writable. So it happens
+    that syzkaller enabled fault injection and it triggered memory allocation
+    failure deep inside x86's change_page_attr_set_clr() which was triggered
+    from set_memory_ro().
+    
+    Now, there are two options: i) leaving everything as is, and ii) reworking
+    the image locking code in order to have a final checkpoint out of the
+    central bpf_prog_select_runtime() which probes whether any of the calls
+    during prog setup weren't successful, and then bailing out with an error.
+    Option ii) is a better approach since this additional paranoia avoids
+    altogether leaving any potential W+X pages from BPF side in the system.
+    Therefore, lets be strict about it, and reject programs in such unlikely
+    occasion. While testing I noticed also that one bpf_prog_lock_ro()
+    call was missing on the outer dummy prog in case of calls, e.g. in the
+    destructor we call bpf_prog_free_deferred() on the main prog where we
+    try to bpf_prog_unlock_free() the program, and since we go via
+    bpf_prog_select_runtime() do that as well.
+    
+    Reported-by: syzbot+3b889862e65a98317058@syzkaller.appspotmail.com
+    Reported-by: syzbot+9e762b52dd17e616a7a5@syzkaller.appspotmail.com
+    Signed-off-by: Daniel Borkmann <daniel@iogearbox.net>
+    Acked-by: Martin KaFai Lau <kafai@fb.com>
+    Signed-off-by: Alexei Starovoitov <ast@kernel.org>
+
+diff --git a/kernel/bpf/core.c b/kernel/bpf/core.c
+index 1061968adcc1..a9e6c04d0f4a 100644
+--- a/kernel/bpf/core.c
++++ b/kernel/bpf/core.c
+@@ -598,6 +598,8 @@ bpf_jit_binary_alloc(unsigned int proglen, u8 **image_ptr,
+ 	bpf_fill_ill_insns(hdr, size);
+ 
+ 	hdr->pages = size / PAGE_SIZE;
++	hdr->locked = 0;
++
+ 	hole = min_t(unsigned int, size - (proglen + sizeof(*hdr)),
+ 		     PAGE_SIZE - sizeof(*hdr));
+ 	start = (get_random_int() % hole) & ~(alignment - 1);
+@@ -1448,6 +1450,33 @@ static int bpf_check_tail_call(const struct bpf_prog *fp)
+ 	return 0;
+ }
+ 
++static int bpf_prog_check_pages_ro_locked(const struct bpf_prog *fp)
++{
++#ifdef CONFIG_ARCH_HAS_SET_MEMORY
++	int i, err;
++
++	for (i = 0; i < fp->aux->func_cnt; i++) {
++		err = bpf_prog_check_pages_ro_single(fp->aux->func[i]);
++		if (err)
++			return err;
++	}
++
++	return bpf_prog_check_pages_ro_single(fp);
++#endif
++	return 0;
++}
++
++static void bpf_prog_select_func(struct bpf_prog *fp)
++{
++#ifndef CONFIG_BPF_JIT_ALWAYS_ON
++	u32 stack_depth = max_t(u32, fp->aux->stack_depth, 1);
++
++	fp->bpf_func = interpreters[(round_up(stack_depth, 32) / 32) - 1];
++#else
++	fp->bpf_func = __bpf_prog_ret0_warn;
++#endif
++}
++
+ /**
+  *	bpf_prog_select_runtime - select exec runtime for BPF program
+  *	@fp: bpf_prog populated with internal BPF program
+@@ -1458,13 +1487,13 @@ static int bpf_check_tail_call(const struct bpf_prog *fp)
+  */
+ struct bpf_prog *bpf_prog_select_runtime(struct bpf_prog *fp, int *err)
+ {
+-#ifndef CONFIG_BPF_JIT_ALWAYS_ON
+-	u32 stack_depth = max_t(u32, fp->aux->stack_depth, 1);
++	/* In case of BPF to BPF calls, verifier did all the prep
++	 * work with regards to JITing, etc.
++	 */
++	if (fp->bpf_func)
++		goto finalize;
+ 
+-	fp->bpf_func = interpreters[(round_up(stack_depth, 32) / 32) - 1];
+-#else
+-	fp->bpf_func = __bpf_prog_ret0_warn;
+-#endif
++	bpf_prog_select_func(fp);
+ 
+ 	/* eBPF JITs can rewrite the program in case constant
+ 	 * blinding is active. However, in case of error during
+@@ -1485,6 +1514,8 @@ struct bpf_prog *bpf_prog_select_runtime(struct bpf_prog *fp, int *err)
+ 		if (*err)
+ 			return fp;
+ 	}
++
++finalize:
+ 	bpf_prog_lock_ro(fp);
+ 
+ 	/* The tail call compatibility check can only be done at
+@@ -1493,7 +1524,17 @@ struct bpf_prog *bpf_prog_select_runtime(struct bpf_prog *fp, int *err)
+ 	 * all eBPF JITs might immediately support all features.
+ 	 */
+ 	*err = bpf_check_tail_call(fp);
+-
++	if (*err)
++		return fp;
++
++	/* Checkpoint: at this point onwards any cBPF -> eBPF or
++	 * native eBPF program is read-only. If we failed to change
++	 * the page attributes (e.g. allocation failure from
++	 * splitting large pages), then reject the whole program
++	 * in order to guarantee not ending up with any W+X pages
++	 * from BPF side in kernel.
++	 */
++	*err = bpf_prog_check_pages_ro_locked(fp);
+ 	return fp;
+ }
+ EXPORT_SYMBOL_GPL(bpf_prog_select_runtime);

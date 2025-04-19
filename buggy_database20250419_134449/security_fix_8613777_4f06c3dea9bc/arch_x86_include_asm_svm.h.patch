@@ -1,0 +1,53 @@
+commit 861377730aa9db4cbaa0f3bd3f4d295c152732c4
+Author: Tom Lendacky <thomas.lendacky@amd.com>
+Date:   Thu Dec 10 11:10:07 2020 -0600
+
+    KVM: SVM: Provide support for SEV-ES vCPU loading
+    
+    An SEV-ES vCPU requires additional VMCB vCPU load/put requirements. SEV-ES
+    hardware will restore certain registers on VMEXIT, but not save them on
+    VMRUN (see Table B-3 and Table B-4 of the AMD64 APM Volume 2), so make the
+    following changes:
+    
+    General vCPU load changes:
+      - During vCPU loading, perform a VMSAVE to the per-CPU SVM save area and
+        save the current values of XCR0, XSS and PKRU to the per-CPU SVM save
+        area as these registers will be restored on VMEXIT.
+    
+    General vCPU put changes:
+      - Do not attempt to restore registers that SEV-ES hardware has already
+        restored on VMEXIT.
+    
+    Signed-off-by: Tom Lendacky <thomas.lendacky@amd.com>
+    Message-Id: <019390e9cb5e93cd73014fa5a040c17d42588733.1607620209.git.thomas.lendacky@amd.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/include/asm/svm.h b/arch/x86/include/asm/svm.h
+index a57331de59e2..1c561945b426 100644
+--- a/arch/x86/include/asm/svm.h
++++ b/arch/x86/include/asm/svm.h
+@@ -234,7 +234,8 @@ struct vmcb_save_area {
+ 	u8 cpl;
+ 	u8 reserved_2[4];
+ 	u64 efer;
+-	u8 reserved_3[112];
++	u8 reserved_3[104];
++	u64 xss;		/* Valid for SEV-ES only */
+ 	u64 cr4;
+ 	u64 cr3;
+ 	u64 cr0;
+@@ -265,9 +266,12 @@ struct vmcb_save_area {
+ 
+ 	/*
+ 	 * The following part of the save area is valid only for
+-	 * SEV-ES guests when referenced through the GHCB.
++	 * SEV-ES guests when referenced through the GHCB or for
++	 * saving to the host save area.
+ 	 */
+-	u8 reserved_7[104];
++	u8 reserved_7[80];
++	u32 pkru;
++	u8 reserved_7a[20];
+ 	u64 reserved_8;		/* rax already available at 0x01f8 */
+ 	u64 rcx;
+ 	u64 rdx;

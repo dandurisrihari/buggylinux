@@ -1,0 +1,43 @@
+commit 0ad3bed6c5ec6dbb093a26802c85088a85fb9757
+Author: Paolo Bonzini <pbonzini@redhat.com>
+Date:   Mon Dec 19 15:23:54 2016 +0100
+
+    kvm: nVMX: move nested events check to kvm_vcpu_running
+    
+    vcpu_run calls kvm_vcpu_running, not kvm_arch_vcpu_runnable,
+    and the former does not call check_nested_events.
+    
+    Once KVM_REQ_EVENT is removed from the APICv interrupt injection
+    path, however, this would leave no place to trigger a vmexit
+    from L2 to L1, causing a missed interrupt delivery while in guest
+    mode.  This is caught by the "ack interrupt on exit" test in
+    vmx.flat.
+    
+    [This does not change the calls to check_nested_events in
+     inject_pending_event.  That is material for a separate cleanup.]
+    
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 2f64e5d0ae53..204793f0f0e2 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -7023,6 +7023,9 @@ static inline int vcpu_block(struct kvm *kvm, struct kvm_vcpu *vcpu)
+ 
+ static inline bool kvm_vcpu_running(struct kvm_vcpu *vcpu)
+ {
++	if (is_guest_mode(vcpu) && kvm_x86_ops->check_nested_events)
++		kvm_x86_ops->check_nested_events(vcpu, false);
++
+ 	return (vcpu->arch.mp_state == KVM_MP_STATE_RUNNABLE &&
+ 		!vcpu->arch.apf.halted);
+ }
+@@ -8389,9 +8392,6 @@ static inline bool kvm_vcpu_has_events(struct kvm_vcpu *vcpu)
+ 
+ int kvm_arch_vcpu_runnable(struct kvm_vcpu *vcpu)
+ {
+-	if (is_guest_mode(vcpu) && kvm_x86_ops->check_nested_events)
+-		kvm_x86_ops->check_nested_events(vcpu, false);
+-
+ 	return kvm_vcpu_running(vcpu) || kvm_vcpu_has_events(vcpu);
+ }

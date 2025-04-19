@@ -1,0 +1,108 @@
+diff --git a/arch/microblaze/kernel/entry.S b/arch/microblaze/kernel/entry.S
+index 397754cd31c9..5a5cb5842938 100644
+--- a/arch/microblaze/kernel/entry.S
++++ b/arch/microblaze/kernel/entry.S
+@@ -778,19 +778,22 @@ C_ENTRY(_debug_exception):
+ 
+ 	addik	r1, r1, -STATE_SAVE_SIZE; /* Make room on the stack.  */
+ 	SAVE_REGS;
++	swi	r17, r1, PTO+PT_R17;
++	swi	r16, r1, PTO+PT_R16;
++	swi	r16, r1, PTO+PT_PC;	/* Save LP */
+ 
+ 	swi	r0, r1, PTO + PT_MODE; /* Was in user-mode.  */
+ 	lwi	r11, r0, TOPHYS(PER_CPU(ENTRY_SP));
+ 	swi	r11, r1, PTO+PT_R1; /* Store user SP.  */
+-2:
++2:	lwi	CURRENT_TASK, r0, TOPHYS(PER_CPU(CURRENT_SAVE));
+ 	tovirt(r1,r1)
+ 
+ 	set_vms;
+-	addi	r5, r0, SIGTRAP		     /* send the trap signal */
+-	add	r6, r0, CURRENT_TASK; /* Get current task ptr into r11 */
+-	addk	r7, r0, r0		     /* 3rd param zero */
+-dbtrap_call:	rtbd	r0, send_sig;
++	addik	r5, r1, PTO;
+ 	addik	r15, r0, dbtrap_call;
++dbtrap_call: /* return point for kernel/user entry */
++	rtbd	r0, sw_exception
++	nop
+ 
+ 	set_bip;			/*  Ints masked for state restore*/
+ 	lwi	r11, r1, PTO + PT_MODE;
+@@ -838,6 +841,8 @@ dbtrap_call:	rtbd	r0, send_sig;
+ 	tophys(r1,r1);
+ 
+ 	RESTORE_REGS
++	lwi	r17, r1, PTO+PT_R17;
++	lwi	r16, r1, PTO+PT_R16;
+ 	addik	r1, r1, STATE_SAVE_SIZE		/* Clean up stack space.  */
+ 
+ 
+@@ -854,11 +859,10 @@ dbtrap_call:	rtbd	r0, send_sig;
+ 	tovirt(r1,r1);
+ 6:
+ DBTRAP_return:		/* Make global symbol for debugging */
+-	rtbd	r14, 0;	/* Instructions to return from an IRQ */
++	rtbd	r16, 0;	/* Instructions to return from an IRQ */
+ 	nop;
+ 
+ 
+-
+ ENTRY(_switch_to)
+ 	/* prepare return value */
+ 	addk	r3, r0, CURRENT_TASK
+@@ -946,13 +950,6 @@ ENTRY(_switch_to)
+ ENTRY(_reset)
+ 	brai	0x70; /* Jump back to FS-boot */
+ 
+-ENTRY(_break)
+-	mfs	r5, rmsr
+-	swi	r5, r0, 0x250 + TOPHYS(r0_ram)
+-	mfs	r5, resr
+-	swi	r5, r0, 0x254 + TOPHYS(r0_ram)
+-	bri	0
+-
+ 	/* These are compiled and loaded into high memory, then
+ 	 * copied into place in mach_early_setup */
+ 	.section	.init.ivt, "ax"
+@@ -964,12 +961,9 @@ ENTRY(_break)
+ 	nop
+ 	brai	TOPHYS(_user_exception); /* syscall handler */
+ 	brai	TOPHYS(_interrupt);	/* Interrupt handler */
+-	brai	TOPHYS(_break);		/* nmi trap handler */
++	brai	TOPHYS(_debug_exception);	/* debug trap handler */
+ 	brai	TOPHYS(_hw_exception_handler);	/* HW exception handler */
+ 
+-	.org	0x60
+-	brai	TOPHYS(_debug_exception);	/* debug trap handler*/
+-
+ .section .rodata,"a"
+ #include "syscall_table.S"
+ 
+diff --git a/arch/microblaze/kernel/exceptions.c b/arch/microblaze/kernel/exceptions.c
+index 02cbdfe5aa8d..e0c6f8c2bd9d 100644
+--- a/arch/microblaze/kernel/exceptions.c
++++ b/arch/microblaze/kernel/exceptions.c
+@@ -48,6 +48,12 @@ void die(const char *str, struct pt_regs *fp, long err)
+ 	do_exit(err);
+ }
+ 
++/* for user application debugging */
++void sw_exception(struct pt_regs *regs)
++{
++	_exception(SIGTRAP, regs, TRAP_BRKPT, regs->r16);
++}
++
+ void _exception(int signr, struct pt_regs *regs, int code, unsigned long addr)
+ {
+ 	siginfo_t info;
+@@ -143,7 +149,7 @@ asmlinkage void full_exception(struct pt_regs *regs, unsigned int type,
+ #ifdef CONFIG_MMU
+ 	case MICROBLAZE_PRIVILEGED_EXCEPTION:
+ 		pr_debug(KERN_WARNING "Privileged exception\n");
+-		/* "brk r0,r0" - used as debug breakpoint */
++		/* "brk r0,r0" - used as debug breakpoint - old toolchain */
+ 		if (get_user(code, (unsigned long *)regs->pc) == 0
+ 			&& code == 0x980c0000) {
+ 			_exception(SIGTRAP, regs, TRAP_BRKPT, addr);

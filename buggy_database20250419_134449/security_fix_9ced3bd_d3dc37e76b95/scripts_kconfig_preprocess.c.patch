@@ -1,0 +1,182 @@
+commit 9ced3bddec080e974e910bf887715540a8d9d96b
+Author: Masahiro Yamada <yamada.masahiro@socionext.com>
+Date:   Mon May 28 18:21:49 2018 +0900
+
+    kconfig: support user-defined function and recursively expanded variable
+    
+    Now, we got a basic ability to test compiler capability in Kconfig.
+    
+    config CC_HAS_STACKPROTECTOR
+            def_bool $(shell,($(CC) -Werror -fstack-protector -E -x c /dev/null -o /dev/null 2>/dev/null) && echo y || echo n)
+    
+    This works, but it is ugly to repeat this long boilerplate.
+    
+    We want to describe like this:
+    
+    config CC_HAS_STACKPROTECTOR
+            bool
+            default $(cc-option,-fstack-protector)
+    
+    It is straight-forward to add a new function, but I do not like to
+    hard-code specialized functions like that.  Hence, here is another
+    feature, user-defined function.  This works as a textual shorthand
+    with parameterization.
+    
+    A user-defined function is defined by using the = operator, and can
+    be referenced in the same way as built-in functions.  A user-defined
+    function in Make is referenced like $(call my-func,arg1,arg2), but I
+    omitted the 'call' to make the syntax shorter.
+    
+    The definition of a user-defined function contains $(1), $(2), etc.
+    in its body to reference the parameters.  It is grammatically valid
+    to pass more or fewer arguments when calling it.  We already exploit
+    this feature in our makefiles; scripts/Kbuild.include defines cc-option
+    which takes two arguments at most, but most of the callers pass only
+    one argument.
+    
+    By the way, a variable is supported as a subset of this feature since
+    a variable is "a user-defined function with zero argument".  In this
+    context, I mean "variable" as recursively expanded variable.  I will
+    add a different flavored variable in the next commit.
+    
+    The code above can be written as follows:
+    
+    [Example Code]
+    
+      success = $(shell,($(1)) >/dev/null 2>&1 && echo y || echo n)
+      cc-option = $(success,$(CC) -Werror $(1) -E -x c /dev/null -o /dev/null)
+    
+      config CC_HAS_STACKPROTECTOR
+              def_bool $(cc-option,-fstack-protector)
+    
+    [Result]
+      $ make -s alldefconfig && tail -n 1 .config
+      CONFIG_CC_HAS_STACKPROTECTOR=y
+    
+    Signed-off-by: Masahiro Yamada <yamada.masahiro@socionext.com>
+
+diff --git a/scripts/kconfig/preprocess.c b/scripts/kconfig/preprocess.c
+index 528be594e1d0..46487fe6b36c 100644
+--- a/scripts/kconfig/preprocess.c
++++ b/scripts/kconfig/preprocess.c
+@@ -177,6 +177,72 @@ static char *function_expand(const char *name, int argc, char *argv[])
+ 	return NULL;
+ }
+ 
++/*
++ * Variables (and user-defined functions)
++ */
++static LIST_HEAD(variable_list);
++
++struct variable {
++	char *name;
++	char *value;
++	struct list_head node;
++};
++
++static struct variable *variable_lookup(const char *name)
++{
++	struct variable *v;
++
++	list_for_each_entry(v, &variable_list, node) {
++		if (!strcmp(name, v->name))
++			return v;
++	}
++
++	return NULL;
++}
++
++static char *variable_expand(const char *name, int argc, char *argv[])
++{
++	struct variable *v;
++
++	v = variable_lookup(name);
++	if (!v)
++		return NULL;
++
++	return expand_string_with_args(v->value, argc, argv);
++}
++
++void variable_add(const char *name, const char *value)
++{
++	struct variable *v;
++
++	v = variable_lookup(name);
++	if (v) {
++		free(v->value);
++	} else {
++		v = xmalloc(sizeof(*v));
++		v->name = xstrdup(name);
++		list_add_tail(&v->node, &variable_list);
++	}
++
++	v->value = xstrdup(value);
++}
++
++static void variable_del(struct variable *v)
++{
++	list_del(&v->node);
++	free(v->name);
++	free(v->value);
++	free(v);
++}
++
++void variable_all_del(void)
++{
++	struct variable *v, *tmp;
++
++	list_for_each_entry_safe(v, tmp, &variable_list, node)
++		variable_del(v);
++}
++
+ /*
+  * Evaluate a clause with arguments.  argc/argv are arguments from the upper
+  * function call.
+@@ -185,14 +251,26 @@ static char *function_expand(const char *name, int argc, char *argv[])
+  */
+ static char *eval_clause(const char *str, size_t len, int argc, char *argv[])
+ {
+-	char *tmp, *name, *res, *prev, *p;
++	char *tmp, *name, *res, *endptr, *prev, *p;
+ 	int new_argc = 0;
+ 	char *new_argv[FUNCTION_MAX_ARGS];
+ 	int nest = 0;
+ 	int i;
++	unsigned long n;
+ 
+ 	tmp = xstrndup(str, len);
+ 
++	/*
++	 * If variable name is '1', '2', etc.  It is generally an argument
++	 * from a user-function call (i.e. local-scope variable).  If not
++	 * available, then look-up global-scope variables.
++	 */
++	n = strtoul(tmp, &endptr, 10);
++	if (!*endptr && n > 0 && n <= argc) {
++		res = xstrdup(argv[n - 1]);
++		goto free_tmp;
++	}
++
+ 	prev = p = tmp;
+ 
+ 	/*
+@@ -238,6 +316,11 @@ static char *eval_clause(const char *str, size_t len, int argc, char *argv[])
+ 		new_argv[i] = expand_string_with_args(new_argv[i + 1],
+ 						      argc, argv);
+ 
++	/* Search for variables */
++	res = variable_expand(name, new_argc, new_argv);
++	if (res)
++		goto free;
++
+ 	/* Look for built-in functions */
+ 	res = function_expand(name, new_argc, new_argv);
+ 	if (res)
+@@ -255,6 +338,7 @@ static char *eval_clause(const char *str, size_t len, int argc, char *argv[])
+ 	for (i = 0; i < new_argc; i++)
+ 		free(new_argv[i]);
+ 	free(name);
++free_tmp:
+ 	free(tmp);
+ 
+ 	return res;

@@ -1,0 +1,65 @@
+diff --git a/Documentation/admin-guide/kernel-parameters.txt b/Documentation/admin-guide/kernel-parameters.txt
+index 05a252e5178d..835e422572eb 100644
+--- a/Documentation/admin-guide/kernel-parameters.txt
++++ b/Documentation/admin-guide/kernel-parameters.txt
+@@ -2095,6 +2095,9 @@
+ 			off
+ 				Disables hypervisor mitigations and doesn't
+ 				emit any warnings.
++				It also drops the swap size and available
++				RAM limit restriction on both hypervisor and
++				bare metal.
+ 
+ 			Default is 'flush'.
+ 
+diff --git a/Documentation/admin-guide/l1tf.rst b/Documentation/admin-guide/l1tf.rst
+index b85dd80510b0..9af977384168 100644
+--- a/Documentation/admin-guide/l1tf.rst
++++ b/Documentation/admin-guide/l1tf.rst
+@@ -405,6 +405,9 @@ time with the option "l1tf=". The valid arguments for this option are:
+ 
+   off		Disables hypervisor mitigations and doesn't emit any
+ 		warnings.
++		It also drops the swap size and available RAM limit restrictions
++		on both hypervisor and bare metal.
++
+   ============  =============================================================
+ 
+ The default is 'flush'. For details about L1D flushing see :ref:`l1d_flush`.
+@@ -576,7 +579,8 @@ Default mitigations
+   The kernel default mitigations for vulnerable processors are:
+ 
+   - PTE inversion to protect against malicious user space. This is done
+-    unconditionally and cannot be controlled.
++    unconditionally and cannot be controlled. The swap storage is limited
++    to ~16TB.
+ 
+   - L1D conditional flushing on VMENTER when EPT is enabled for
+     a guest.
+diff --git a/arch/x86/kernel/cpu/bugs.c b/arch/x86/kernel/cpu/bugs.c
+index a68b32cb845a..58689ac64440 100644
+--- a/arch/x86/kernel/cpu/bugs.c
++++ b/arch/x86/kernel/cpu/bugs.c
+@@ -1002,7 +1002,8 @@ static void __init l1tf_select_mitigation(void)
+ #endif
+ 
+ 	half_pa = (u64)l1tf_pfn_limit() << PAGE_SHIFT;
+-	if (e820__mapped_any(half_pa, ULLONG_MAX - half_pa, E820_TYPE_RAM)) {
++	if (l1tf_mitigation != L1TF_MITIGATION_OFF &&
++			e820__mapped_any(half_pa, ULLONG_MAX - half_pa, E820_TYPE_RAM)) {
+ 		pr_warn("System has more than MAX_PA/2 memory. L1TF mitigation not effective.\n");
+ 		pr_info("You may make it effective by booting the kernel with mem=%llu parameter.\n",
+ 				half_pa);
+diff --git a/arch/x86/mm/init.c b/arch/x86/mm/init.c
+index ef99f3892e1f..427a955a2cf2 100644
+--- a/arch/x86/mm/init.c
++++ b/arch/x86/mm/init.c
+@@ -931,7 +931,7 @@ unsigned long max_swapfile_size(void)
+ 
+ 	pages = generic_max_swapfile_size();
+ 
+-	if (boot_cpu_has_bug(X86_BUG_L1TF)) {
++	if (boot_cpu_has_bug(X86_BUG_L1TF) && l1tf_mitigation != L1TF_MITIGATION_OFF) {
+ 		/* Limit the swap file size to MAX_PA/2 for L1TF workaround */
+ 		unsigned long long l1tf_limit = l1tf_pfn_limit();
+ 		/*

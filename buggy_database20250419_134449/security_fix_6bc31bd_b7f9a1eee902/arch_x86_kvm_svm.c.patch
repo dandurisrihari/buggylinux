@@ -1,0 +1,57 @@
+commit 6bc31bdc55cad6609b1610b4cecad312664f2808
+Author: Andre Przywara <andre.przywara@amd.com>
+Date:   Sun Apr 11 23:07:28 2010 +0200
+
+    KVM: SVM: implement NEXTRIPsave SVM feature
+    
+    On SVM we set the instruction length of skipped instructions
+    to hard-coded, well known values, which could be wrong when (bogus,
+    but valid) prefixes (REX, segment override) are used.
+    Newer AMD processors (Fam10h 45nm and better, aka. PhenomII or
+    AthlonII) have an explicit NEXTRIP field in the VMCB containing the
+    desired information.
+    Since it is cheap to do so, we use this field to override the guessed
+    value on newer processors.
+    A fix for older CPUs would be rather expensive, as it would require
+    to fetch and partially decode the instruction. As the problem is not
+    a security issue and needs special, handcrafted code to trigger
+    (no compiler will ever generate such code), I omit a fix for older
+    CPUs.
+    If someone is interested, I have both a patch for these CPUs as well as
+    demo code triggering this issue: It segfaults under KVM, but runs
+    perfectly on native Linux.
+    
+    Signed-off-by: Andre Przywara <andre.przywara@amd.com>
+    Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
+
+diff --git a/arch/x86/kvm/svm.c b/arch/x86/kvm/svm.c
+index e9f79619e185..64b7f60dc5b8 100644
+--- a/arch/x86/kvm/svm.c
++++ b/arch/x86/kvm/svm.c
+@@ -44,11 +44,11 @@ MODULE_LICENSE("GPL");
+ #define SEG_TYPE_LDT 2
+ #define SEG_TYPE_BUSY_TSS16 3
+ 
+-#define SVM_FEATURE_NPT  (1 << 0)
+-#define SVM_FEATURE_LBRV (1 << 1)
+-#define SVM_FEATURE_SVML (1 << 2)
+-#define SVM_FEATURE_NRIP (1 << 3)
+-#define SVM_FEATURE_PAUSE_FILTER (1 << 10)
++#define SVM_FEATURE_NPT            (1 <<  0)
++#define SVM_FEATURE_LBRV           (1 <<  1)
++#define SVM_FEATURE_SVML           (1 <<  2)
++#define SVM_FEATURE_NRIP           (1 <<  3)
++#define SVM_FEATURE_PAUSE_FILTER   (1 << 10)
+ 
+ #define NESTED_EXIT_HOST	0	/* Exit handled on host level */
+ #define NESTED_EXIT_DONE	1	/* Exit caused nested vmexit  */
+@@ -320,6 +320,9 @@ static void skip_emulated_instruction(struct kvm_vcpu *vcpu)
+ {
+ 	struct vcpu_svm *svm = to_svm(vcpu);
+ 
++	if (svm->vmcb->control.next_rip != 0)
++		svm->next_rip = svm->vmcb->control.next_rip;
++
+ 	if (!svm->next_rip) {
+ 		if (emulate_instruction(vcpu, 0, 0, EMULTYPE_SKIP) !=
+ 				EMULATE_DONE)

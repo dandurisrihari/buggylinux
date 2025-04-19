@@ -1,0 +1,58 @@
+diff --git a/fs/seq_file.c b/fs/seq_file.c
+index e85664b7c7d9..19f532e7d35e 100644
+--- a/fs/seq_file.c
++++ b/fs/seq_file.c
+@@ -72,9 +72,10 @@ int seq_open(struct file *file, const struct seq_operations *op)
+ 
+ 	mutex_init(&p->lock);
+ 	p->op = op;
+-#ifdef CONFIG_USER_NS
+-	p->user_ns = file->f_cred->user_ns;
+-#endif
++
++	// No refcounting: the lifetime of 'p' is constrained
++	// to the lifetime of the file.
++	p->file = file;
+ 
+ 	/*
+ 	 * Wrappers around seq_open(e.g. swaps_open) need to be
+diff --git a/include/linux/seq_file.h b/include/linux/seq_file.h
+index dde00defbaa5..f3d45dd42695 100644
+--- a/include/linux/seq_file.h
++++ b/include/linux/seq_file.h
+@@ -7,13 +7,10 @@
+ #include <linux/mutex.h>
+ #include <linux/cpumask.h>
+ #include <linux/nodemask.h>
++#include <linux/fs.h>
++#include <linux/cred.h>
+ 
+ struct seq_operations;
+-struct file;
+-struct path;
+-struct inode;
+-struct dentry;
+-struct user_namespace;
+ 
+ struct seq_file {
+ 	char *buf;
+@@ -27,9 +24,7 @@ struct seq_file {
+ 	struct mutex lock;
+ 	const struct seq_operations *op;
+ 	int poll_event;
+-#ifdef CONFIG_USER_NS
+-	struct user_namespace *user_ns;
+-#endif
++	const struct file *file;
+ 	void *private;
+ };
+ 
+@@ -147,7 +142,7 @@ int seq_release_private(struct inode *, struct file *);
+ static inline struct user_namespace *seq_user_ns(struct seq_file *seq)
+ {
+ #ifdef CONFIG_USER_NS
+-	return seq->user_ns;
++	return seq->file->f_cred->user_ns;
+ #else
+ 	extern struct user_namespace init_user_ns;
+ 	return &init_user_ns;

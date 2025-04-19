@@ -1,0 +1,148 @@
+commit 5b0ed5964928b0aaf0d644c17c886c7f5ea4bb3f
+Merge: 553637f73c31 0aa2988e4fd2
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Mon Feb 20 14:27:21 2023 -0800
+
+    Merge tag 'for-6.3/block-2023-02-16' of git://git.kernel.dk/linux
+    
+    Pull block updates from Jens Axboe:
+    
+     - NVMe updates via Christoph:
+          - Small improvements to the logging functionality (Amit Engel)
+          - Authentication cleanups (Hannes Reinecke)
+          - Cleanup and optimize the DMA mapping cod in the PCIe driver
+            (Keith Busch)
+          - Work around the command effects for Format NVM (Keith Busch)
+          - Misc cleanups (Keith Busch, Christoph Hellwig)
+          - Fix and cleanup freeing single sgl (Keith Busch)
+    
+     - MD updates via Song:
+          - Fix a rare crash during the takeover process
+          - Don't update recovery_cp when curr_resync is ACTIVE
+          - Free writes_pending in md_stop
+          - Change active_io to percpu
+    
+     - Updates to drbd, inching us closer to unifying the out-of-tree driver
+       with the in-tree one (Andreas, Christoph, Lars, Robert)
+    
+     - BFQ update adding support for multi-actuator drives (Paolo, Federico,
+       Davide)
+    
+     - Make brd compliant with REQ_NOWAIT (me)
+    
+     - Fix for IOPOLL and queue entering, fixing stalled IO waiting on
+       timeouts (me)
+    
+     - Fix for REQ_NOWAIT with multiple bios (me)
+    
+     - Fix memory leak in blktrace cleanup (Greg)
+    
+     - Clean up sbitmap and fix a potential hang (Kemeng)
+    
+     - Clean up some bits in BFQ, and fix a bug in the request injection
+       (Kemeng)
+    
+     - Clean up the request allocation and issue code, and fix some bugs
+       related to that (Kemeng)
+    
+     - ublk updates and fixes:
+          - Add support for unprivileged ublk (Ming)
+          - Improve device deletion handling (Ming)
+          - Misc (Liu, Ziyang)
+    
+     - s390 dasd fixes (Alexander, Qiheng)
+    
+     - Improve utility of request caching and fixes (Anuj, Xiao)
+    
+     - zoned cleanups (Pankaj)
+    
+     - More constification for kobjs (Thomas)
+    
+     - blk-iocost cleanups (Yu)
+    
+     - Remove bio splitting from drivers that don't need it (Christoph)
+    
+     - Switch blk-cgroups to use struct gendisk. Some of this is now
+       incomplete as select late reverts were done. (Christoph)
+    
+     - Add bvec initialization helpers, and convert callers to use that
+       rather than open-coding it (Christoph)
+    
+     - Misc fixes and cleanups (Jinke, Keith, Arnd, Bart, Li, Martin,
+       Matthew, Ulf, Zhong)
+    
+    * tag 'for-6.3/block-2023-02-16' of git://git.kernel.dk/linux: (169 commits)
+      brd: use radix_tree_maybe_preload instead of radix_tree_preload
+      block: use proper return value from bio_failfast()
+      block: bio-integrity: Copy flags when bio_integrity_payload is cloned
+      block: Fix io statistics for cgroup in throttle path
+      brd: mark as nowait compatible
+      brd: check for REQ_NOWAIT and set correct page allocation mask
+      brd: return 0/-error from brd_insert_page()
+      block: sync mixed merged request's failfast with 1st bio's
+      Revert "blk-cgroup: pin the gendisk in struct blkcg_gq"
+      Revert "blk-cgroup: pass a gendisk to blkg_lookup"
+      Revert "blk-cgroup: delay blk-cgroup initialization until add_disk"
+      Revert "blk-cgroup: delay calling blkcg_exit_disk until disk_release"
+      Revert "blk-cgroup: move the cgroup information to struct gendisk"
+      nvme-pci: remove iod use_sgls
+      nvme-pci: fix freeing single sgl
+      block: ublk: check IO buffer based on flag need_get_data
+      s390/dasd: Fix potential memleak in dasd_eckd_init()
+      s390/dasd: sort out physical vs virtual pointers usage
+      block: Remove the ALLOC_CACHE_SLACK constant
+      block: make kobj_type structures constant
+      ...
+
+diff --cc block/bfq-cgroup.c
+index 0fbde0fc0628,ea3638e06e04..89ffb3aa992c
+--- a/block/bfq-cgroup.c
++++ b/block/bfq-cgroup.c
+@@@ -712,6 -711,46 +711,46 @@@ void bfq_bfqq_move(struct bfq_data *bfq
+  	bfq_put_queue(bfqq);
+  }
+  
++ static void bfq_sync_bfqq_move(struct bfq_data *bfqd,
++ 			       struct bfq_queue *sync_bfqq,
++ 			       struct bfq_io_cq *bic,
++ 			       struct bfq_group *bfqg,
++ 			       unsigned int act_idx)
++ {
++ 	struct bfq_queue *bfqq;
++ 
++ 	if (!sync_bfqq->new_bfqq && !bfq_bfqq_coop(sync_bfqq)) {
++ 		/* We are the only user of this bfqq, just move it */
++ 		if (sync_bfqq->entity.sched_data != &bfqg->sched_data)
++ 			bfq_bfqq_move(bfqd, sync_bfqq, bfqg);
++ 		return;
++ 	}
++ 
++ 	/*
++ 	 * The queue was merged to a different queue. Check
++ 	 * that the merge chain still belongs to the same
++ 	 * cgroup.
++ 	 */
++ 	for (bfqq = sync_bfqq; bfqq; bfqq = bfqq->new_bfqq)
++ 		if (bfqq->entity.sched_data != &bfqg->sched_data)
++ 			break;
++ 	if (bfqq) {
++ 		/*
++ 		 * Some queue changed cgroup so the merge is not valid
++ 		 * anymore. We cannot easily just cancel the merge (by
++ 		 * clearing new_bfqq) as there may be other processes
++ 		 * using this queue and holding refs to all queues
++ 		 * below sync_bfqq->new_bfqq. Similarly if the merge
++ 		 * already happened, we need to detach from bfqq now
++ 		 * so that we cannot merge bio to a request from the
++ 		 * old cgroup.
++ 		 */
++ 		bfq_put_cooperator(sync_bfqq);
+ -		bfq_release_process_ref(bfqd, sync_bfqq);
++ 		bic_set_bfqq(bic, NULL, true, act_idx);
+++		bfq_release_process_ref(bfqd, sync_bfqq);
++ 	}
++ }
++ 
+  /**
+   * __bfq_bic_change_cgroup - move @bic to @bfqg.
+   * @bfqd: the queue descriptor.

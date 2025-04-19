@@ -1,0 +1,115 @@
+commit 3e7819886281e077e82006fe4804b0d6b0f5643b
+Merge: 3a56e2417329 3c1743a685b1
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Mon Jul 15 14:20:22 2024 -0700
+
+    Merge tag 'for-6.11/block-20240710' of git://git.kernel.dk/linux
+    
+    Pull block updates from Jens Axboe:
+    
+     - NVMe updates via Keith:
+         - Device initialization memory leak fixes (Keith)
+         - More constants defined (Weiwen)
+         - Target debugfs support (Hannes)
+         - PCIe subsystem reset enhancements (Keith)
+         - Queue-depth multipath policy (Redhat and PureStorage)
+         - Implement get_unique_id (Christoph)
+         - Authentication error fixes (Gaosheng)
+    
+     - MD updates via Song
+         - sync_action fix and refactoring (Yu Kuai)
+         - Various small fixes (Christoph Hellwig, Li Nan, and Ofir Gal, Yu
+           Kuai, Benjamin Marzinski, Christophe JAILLET, Yang Li)
+    
+     - Fix loop detach/open race (Gulam)
+    
+     - Fix lower control limit for blk-throttle (Yu)
+    
+     - Add module descriptions to various drivers (Jeff)
+    
+     - Add support for atomic writes for block devices, and statx reporting
+       for same. Includes SCSI and NVMe (John, Prasad, Alan)
+    
+     - Add IO priority information to block trace points (Dongliang)
+    
+     - Various zone improvements and tweaks (Damien)
+    
+     - mq-deadline tag reservation improvements (Bart)
+    
+     - Ignore direct reclaim swap writes in writeback throttling (Baokun)
+    
+     - Block integrity improvements and fixes (Anuj)
+    
+     - Add basic support for rust based block drivers. Has a dummy null_blk
+       variant for now (Andreas)
+    
+     - Series converting driver settings to queue limits, and cleanups and
+       fixes related to that (Christoph)
+    
+     - Cleanup for poking too deeply into the bvec internals, in preparation
+       for DMA mapping API changes (Christoph)
+    
+     - Various minor tweaks and fixes (Jiapeng, John, Kanchan, Mikulas,
+       Ming, Zhu, Damien, Christophe, Chaitanya)
+    
+    * tag 'for-6.11/block-20240710' of git://git.kernel.dk/linux: (206 commits)
+      floppy: add missing MODULE_DESCRIPTION() macro
+      loop: add missing MODULE_DESCRIPTION() macro
+      ublk_drv: add missing MODULE_DESCRIPTION() macro
+      xen/blkback: add missing MODULE_DESCRIPTION() macro
+      block/rnbd: Constify struct kobj_type
+      block: take offset into account in blk_bvec_map_sg again
+      block: fix get_max_segment_size() warning
+      loop: Don't bother validating blocksize
+      virtio_blk: Don't bother validating blocksize
+      null_blk: Don't bother validating blocksize
+      block: Validate logical block size in blk_validate_limits()
+      virtio_blk: Fix default logical block size fallback
+      nvmet-auth: fix nvmet_auth hash error handling
+      nvme: implement ->get_unique_id
+      block: pass a phys_addr_t to get_max_segment_size
+      block: add a bvec_phys helper
+      blk-lib: check for kill signal in ioctl BLKZEROOUT
+      block: limit the Write Zeroes to manually writing zeroes fallback
+      block: refacto blkdev_issue_zeroout
+      block: move read-only and supported checks into (__)blkdev_issue_zeroout
+      ...
+
+diff --cc block/bdev.c
+index 353677ac49b3,1b4af2cc3b1e..c5507b6f63b8
+--- a/block/bdev.c
++++ b/block/bdev.c
+@@@ -1260,17 -1260,23 +1260,26 @@@ void sync_bdevs(bool wait
+  }
+  
+  /*
+-  * Handle STATX_DIOALIGN for block devices.
+-  *
+-  * Note that the inode passed to this is the inode of a block device node file,
+-  * not the block device's internal inode.  Therefore it is *not* valid to use
+-  * I_BDEV() here; the block device has to be looked up by i_rdev instead.
++  * Handle STATX_{DIOALIGN, WRITE_ATOMIC} for block devices.
+   */
+- void bdev_statx_dioalign(struct inode *inode, struct kstat *stat)
+ -void bdev_statx(struct inode *backing_inode, struct kstat *stat,
+++void bdev_statx(struct path *path, struct kstat *stat,
++ 		u32 request_mask)
+  {
+++	struct inode *backing_inode;
+  	struct block_device *bdev;
+  
+- 	bdev = blkdev_get_no_open(inode->i_rdev);
++ 	if (!(request_mask & (STATX_DIOALIGN | STATX_WRITE_ATOMIC)))
++ 		return;
++ 
+++	backing_inode = d_backing_inode(path->dentry);
+++
++ 	/*
++ 	 * Note that backing_inode is the inode of a block device node file,
++ 	 * not the block device's internal inode.  Therefore it is *not* valid
++ 	 * to use I_BDEV() here; the block device has to be looked up by i_rdev
++ 	 * instead.
++ 	 */
++ 	bdev = blkdev_get_no_open(backing_inode->i_rdev);
+  	if (!bdev)
+  		return;

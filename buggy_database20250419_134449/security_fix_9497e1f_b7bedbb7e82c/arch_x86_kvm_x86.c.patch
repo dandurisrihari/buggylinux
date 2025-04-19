@@ -1,0 +1,51 @@
+commit 9497e1f2ec93f0c8a7832c3c1eb3af8159800cd8
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Tue Aug 27 14:40:36 2019 -0700
+
+    KVM: x86: Move triple fault request into RM int injection
+    
+    Request triple fault in kvm_inject_realmode_interrupt() instead of
+    returning EMULATE_FAIL and deferring to the caller.  All existing
+    callers request triple fault and it's highly unlikely Real Mode is
+    going to acquire new features.  While this consolidates a small amount
+    of code, the real goal is to remove the last reference to EMULATE_FAIL.
+    
+    No functional change intended.
+    
+    Signed-off-by: Sean Christopherson <sean.j.christopherson@intel.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index bdee7e39accb..92b6690d0512 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -6273,7 +6273,7 @@ static void init_emulate_ctxt(struct kvm_vcpu *vcpu)
+ 	vcpu->arch.emulate_regs_need_sync_from_vcpu = false;
+ }
+ 
+-int kvm_inject_realmode_interrupt(struct kvm_vcpu *vcpu, int irq, int inc_eip)
++void kvm_inject_realmode_interrupt(struct kvm_vcpu *vcpu, int irq, int inc_eip)
+ {
+ 	struct x86_emulate_ctxt *ctxt = &vcpu->arch.emulate_ctxt;
+ 	int ret;
+@@ -6285,14 +6285,13 @@ int kvm_inject_realmode_interrupt(struct kvm_vcpu *vcpu, int irq, int inc_eip)
+ 	ctxt->_eip = ctxt->eip + inc_eip;
+ 	ret = emulate_int_real(ctxt, irq);
+ 
+-	if (ret != X86EMUL_CONTINUE)
+-		return EMULATE_FAIL;
+-
+-	ctxt->eip = ctxt->_eip;
+-	kvm_rip_write(vcpu, ctxt->eip);
+-	kvm_set_rflags(vcpu, ctxt->eflags);
+-
+-	return EMULATE_DONE;
++	if (ret != X86EMUL_CONTINUE) {
++		kvm_make_request(KVM_REQ_TRIPLE_FAULT, vcpu);
++	} else {
++		ctxt->eip = ctxt->_eip;
++		kvm_rip_write(vcpu, ctxt->eip);
++		kvm_set_rflags(vcpu, ctxt->eflags);
++	}
+ }
+ EXPORT_SYMBOL_GPL(kvm_inject_realmode_interrupt);

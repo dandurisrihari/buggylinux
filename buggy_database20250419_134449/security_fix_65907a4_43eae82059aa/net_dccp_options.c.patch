@@ -1,0 +1,42 @@
+commit 65907a433ac0ca450c4408080f24c6e4743386b2
+Author: Gerrit Renker <gerrit@erg.abdn.ac.uk>
+Date:   Wed Jun 11 11:19:09 2008 +0100
+
+    dccp ccid-2: Bug-Fix - Ack Vectors need to be ignored on request sockets
+    
+    This fixes an oversight from an earlier patch, ensuring that Ack Vectors
+    are not processed on request sockets.
+    
+    The issue is that Ack Vectors must not be parsed on request sockets, since
+    the Ack Vector feature depends on the selection of the (TX) CCID. During the
+    initial handshake the CCIDs are undefined, and so RFC 4340, 10.3 applies:
+    
+     "Using CCID-specific options and feature options during a negotiation
+      for the corresponding CCID feature is NOT RECOMMENDED [...]"
+    
+    And it is not even possible: when the server receives the Request from the
+    client, the CCID and Ack vector features are undefined; when the Ack finalising
+    the 3-way hanshake arrives, the request socket has not been cloned yet into a
+    full socket. (This order is necessary, since otherwise the newly created socket
+    would have to be destroyed whenever an option error occurred - a malicious
+    hacker could simply send garbage options and exploit this.)
+    
+    Signed-off-by: Gerrit Renker <gerrit@erg.abdn.ac.uk>
+
+diff --git a/net/dccp/options.c b/net/dccp/options.c
+index d2a84a2fecee..43bc24e761d0 100644
+--- a/net/dccp/options.c
++++ b/net/dccp/options.c
+@@ -107,9 +107,11 @@ int dccp_parse_options(struct sock *sk, struct dccp_request_sock *dreq,
+ 		 *
+ 		 * CCID-specific options are ignored during connection setup, as
+ 		 * negotiation may still be in progress (see RFC 4340, 10.3).
++		 * The same applies to Ack Vectors, as these depend on the CCID.
+ 		 *
+ 		 */
+-		if (dreq != NULL && opt >= 128)
++		if (dreq != NULL && (opt >= 128 ||
++		    opt == DCCPO_ACK_VECTOR_0 || opt == DCCPO_ACK_VECTOR_1))
+ 			goto ignore_option;
+ 
+ 		switch (opt) {

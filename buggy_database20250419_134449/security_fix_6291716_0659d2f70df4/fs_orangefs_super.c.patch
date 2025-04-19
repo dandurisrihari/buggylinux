@@ -1,0 +1,90 @@
+commit 629171657a2864d819a3bbecabe0a5e001d05c7a
+Author: Justin Stitt <justinstitt@google.com>
+Date:   Fri Mar 22 21:41:18 2024 +0000
+
+    orangefs: cleanup uses of strncpy
+    
+    strncpy() is deprecated for use on NUL-terminated destination strings
+    [1] and as such we should prefer more robust and less ambiguous string
+    interfaces.
+    
+    There is some care taken to ensure these destination buffers are
+    NUL-terminated by bounding the strncpy()'s by ORANGEFS_NAME_MAX - 1 or
+    ORANGEFS_MAX_SERVER_ADDR_LEN - 1. Instead, we can use the new 2-argument
+    version of strscpy() to guarantee NUL-termination on the destination
+    buffers while simplifying the code.
+    
+    Based on usage with printf-likes, we can see these buffers are expected
+    to be NUL-terminated:
+    |       gossip_debug(GOSSIP_NAME_DEBUG,
+    |                       "%s: doing lookup on %s under %pU,%d\n",
+    |                       __func__,
+    |                       new_op->upcall.req.lookup.d_name,
+    |                       &new_op->upcall.req.lookup.parent_refn.khandle,
+    |                       new_op->upcall.req.lookup.parent_refn.fs_id);
+    ...
+    |       gossip_debug(GOSSIP_SUPER_DEBUG,
+    |                       "Attempting ORANGEFS Remount via host %s\n",
+    |                       new_op->upcall.req.fs_mount.orangefs_config_server);
+    
+    NUL-padding isn't required for any of these destination buffers as
+    they've all been zero-allocated with op_alloc() or kzalloc().
+    
+    Link: https://www.kernel.org/doc/html/latest/process/deprecated.html#strncpy-on-nul-terminated-strings [1]
+    Link: https://manpages.debian.org/testing/linux-manual-4.8/strscpy.9.en.html [2]
+    Link: https://github.com/KSPP/linux/issues/90
+    Cc: linux-hardening@vger.kernel.org
+    Signed-off-by: Justin Stitt <justinstitt@google.com>
+    Link: https://lore.kernel.org/r/20240322-strncpy-fs-orangefs-dcache-c-v1-1-15d12debbf38@google.com
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Signed-off-by: Christian Brauner <brauner@kernel.org>
+
+diff --git a/fs/orangefs/super.c b/fs/orangefs/super.c
+index 34849b4a3243..fb4d09c2f531 100644
+--- a/fs/orangefs/super.c
++++ b/fs/orangefs/super.c
+@@ -253,9 +253,8 @@ int orangefs_remount(struct orangefs_sb_info_s *orangefs_sb)
+ 	new_op = op_alloc(ORANGEFS_VFS_OP_FS_MOUNT);
+ 	if (!new_op)
+ 		return -ENOMEM;
+-	strncpy(new_op->upcall.req.fs_mount.orangefs_config_server,
+-		orangefs_sb->devname,
+-		ORANGEFS_MAX_SERVER_ADDR_LEN);
++	strscpy(new_op->upcall.req.fs_mount.orangefs_config_server,
++		orangefs_sb->devname);
+ 
+ 	gossip_debug(GOSSIP_SUPER_DEBUG,
+ 		     "Attempting ORANGEFS Remount via host %s\n",
+@@ -400,8 +399,7 @@ static int orangefs_unmount(int id, __s32 fs_id, const char *devname)
+ 		return -ENOMEM;
+ 	op->upcall.req.fs_umount.id = id;
+ 	op->upcall.req.fs_umount.fs_id = fs_id;
+-	strncpy(op->upcall.req.fs_umount.orangefs_config_server,
+-	    devname, ORANGEFS_MAX_SERVER_ADDR_LEN - 1);
++	strscpy(op->upcall.req.fs_umount.orangefs_config_server, devname);
+ 	r = service_operation(op, "orangefs_fs_umount", 0);
+ 	/* Not much to do about an error here. */
+ 	if (r)
+@@ -494,9 +492,7 @@ struct dentry *orangefs_mount(struct file_system_type *fst,
+ 	if (!new_op)
+ 		return ERR_PTR(-ENOMEM);
+ 
+-	strncpy(new_op->upcall.req.fs_mount.orangefs_config_server,
+-		devname,
+-		ORANGEFS_MAX_SERVER_ADDR_LEN - 1);
++	strscpy(new_op->upcall.req.fs_mount.orangefs_config_server, devname);
+ 
+ 	gossip_debug(GOSSIP_SUPER_DEBUG,
+ 		     "Attempting ORANGEFS Mount via host %s\n",
+@@ -543,9 +539,8 @@ struct dentry *orangefs_mount(struct file_system_type *fst,
+ 	 * on successful mount, store the devname and data
+ 	 * used
+ 	 */
+-	strncpy(ORANGEFS_SB(sb)->devname,
+-		devname,
+-		ORANGEFS_MAX_SERVER_ADDR_LEN - 1);
++	strscpy(ORANGEFS_SB(sb)->devname, devname);
++
+ 
+ 	/* mount_pending must be cleared */
+ 	ORANGEFS_SB(sb)->mount_pending = 0;

@@ -1,0 +1,83 @@
+diff --git a/fs/cifs/cifsencrypt.c b/fs/cifs/cifsencrypt.c
+index 5eb04129f938..66bd7fa9b7a6 100644
+--- a/fs/cifs/cifsencrypt.c
++++ b/fs/cifs/cifsencrypt.c
+@@ -699,11 +699,15 @@ setup_ntlmv2_rsp(struct cifs_ses *ses, const struct nls_table *nls_cp)
+ 
+ 	if (ses->server->negflavor == CIFS_NEGFLAVOR_EXTENDED) {
+ 		if (!ses->domainName) {
+-			rc = find_domain_name(ses, nls_cp);
+-			if (rc) {
+-				cifs_dbg(VFS, "error %d finding domain name\n",
+-					 rc);
+-				goto setup_ntlmv2_rsp_ret;
++			if (ses->domainAuto) {
++				rc = find_domain_name(ses, nls_cp);
++				if (rc) {
++					cifs_dbg(VFS, "error %d finding domain name\n",
++						 rc);
++					goto setup_ntlmv2_rsp_ret;
++				}
++			} else {
++				ses->domainName = kstrdup("", GFP_KERNEL);
+ 			}
+ 		}
+ 	} else {
+diff --git a/fs/cifs/cifsglob.h b/fs/cifs/cifsglob.h
+index 59ab5a29d256..7ea8a3393936 100644
+--- a/fs/cifs/cifsglob.h
++++ b/fs/cifs/cifsglob.h
+@@ -514,6 +514,7 @@ struct smb_vol {
+ 	bool persistent:1;
+ 	bool nopersistent:1;
+ 	bool resilient:1; /* noresilient not required since not fored for CA */
++	bool domainauto:1;
+ 	unsigned int rsize;
+ 	unsigned int wsize;
+ 	bool sockopt_tcp_nodelay:1;
+@@ -830,6 +831,7 @@ struct cifs_ses {
+ 	enum securityEnum sectype; /* what security flavor was specified? */
+ 	bool sign;		/* is signing required? */
+ 	bool need_reconnect:1; /* connection reset, uid now invalid */
++	bool domainAuto:1;
+ #ifdef CONFIG_CIFS_SMB2
+ 	__u16 session_flags;
+ 	__u8 smb3signingkey[SMB3_SIGN_KEY_SIZE];
+diff --git a/fs/cifs/connect.c b/fs/cifs/connect.c
+index 5aaf7b1359a5..1847aa8390ff 100644
+--- a/fs/cifs/connect.c
++++ b/fs/cifs/connect.c
+@@ -91,6 +91,7 @@ enum {
+ 	Opt_multiuser, Opt_sloppy, Opt_nosharesock,
+ 	Opt_persistent, Opt_nopersistent,
+ 	Opt_resilient, Opt_noresilient,
++	Opt_domainauto,
+ 
+ 	/* Mount options which take numeric value */
+ 	Opt_backupuid, Opt_backupgid, Opt_uid,
+@@ -180,6 +181,7 @@ static const match_table_t cifs_mount_option_tokens = {
+ 	{ Opt_nopersistent, "nopersistenthandles"},
+ 	{ Opt_resilient, "resilienthandles"},
+ 	{ Opt_noresilient, "noresilienthandles"},
++	{ Opt_domainauto, "domainauto"},
+ 
+ 	{ Opt_backupuid, "backupuid=%s" },
+ 	{ Opt_backupgid, "backupgid=%s" },
+@@ -1504,6 +1506,9 @@ cifs_parse_mount_options(const char *mountdata, const char *devname,
+ 		case Opt_noresilient:
+ 			vol->resilient = false; /* already the default */
+ 			break;
++		case Opt_domainauto:
++			vol->domainauto = true;
++			break;
+ 
+ 		/* Numeric Values */
+ 		case Opt_backupuid:
+@@ -2578,6 +2583,8 @@ cifs_get_smb_ses(struct TCP_Server_Info *server, struct smb_vol *volume_info)
+ 		if (!ses->domainName)
+ 			goto get_ses_fail;
+ 	}
++	if (volume_info->domainauto)
++		ses->domainAuto = volume_info->domainauto;
+ 	ses->cred_uid = volume_info->cred_uid;
+ 	ses->linux_uid = volume_info->linux_uid;

@@ -1,0 +1,198 @@
+diff --git a/block/genhd.c b/block/genhd.c
+index 653919d50cd4..457fdac4c17d 100644
+--- a/block/genhd.c
++++ b/block/genhd.c
+@@ -417,6 +417,34 @@ static struct disk_attribute disk_attr_stat = {
+ 	.show	= disk_stats_read
+ };
+ 
++#ifdef CONFIG_FAIL_MAKE_REQUEST
++
++static ssize_t disk_fail_store(struct gendisk * disk,
++			       const char *buf, size_t count)
++{
++	int i;
++
++	if (count > 0 && sscanf(buf, "%d", &i) > 0) {
++		if (i == 0)
++			disk->flags &= ~GENHD_FL_FAIL;
++		else
++			disk->flags |= GENHD_FL_FAIL;
++	}
++
++	return count;
++}
++static ssize_t disk_fail_read(struct gendisk * disk, char *page)
++{
++	return sprintf(page, "%d\n", disk->flags & GENHD_FL_FAIL ? 1 : 0);
++}
++static struct disk_attribute disk_attr_fail = {
++	.attr = {.name = "make-it-fail", .mode = S_IRUGO | S_IWUSR },
++	.store	= disk_fail_store,
++	.show	= disk_fail_read
++};
++
++#endif
++
+ static struct attribute * default_attrs[] = {
+ 	&disk_attr_uevent.attr,
+ 	&disk_attr_dev.attr,
+@@ -424,6 +452,9 @@ static struct attribute * default_attrs[] = {
+ 	&disk_attr_removable.attr,
+ 	&disk_attr_size.attr,
+ 	&disk_attr_stat.attr,
++#ifdef CONFIG_FAIL_MAKE_REQUEST
++	&disk_attr_fail.attr,
++#endif
+ 	NULL,
+ };
+ 
+diff --git a/block/ll_rw_blk.c b/block/ll_rw_blk.c
+index 31512cd9f3ad..4f83fd922377 100644
+--- a/block/ll_rw_blk.c
++++ b/block/ll_rw_blk.c
+@@ -28,6 +28,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/cpu.h>
+ #include <linux/blktrace_api.h>
++#include <linux/fault-inject.h>
+ 
+ /*
+  * for max sense size
+@@ -3056,6 +3057,42 @@ static void handle_bad_sector(struct bio *bio)
+ 	set_bit(BIO_EOF, &bio->bi_flags);
+ }
+ 
++#ifdef CONFIG_FAIL_MAKE_REQUEST
++
++static DECLARE_FAULT_ATTR(fail_make_request);
++
++static int __init setup_fail_make_request(char *str)
++{
++	return setup_fault_attr(&fail_make_request, str);
++}
++__setup("fail_make_request=", setup_fail_make_request);
++
++static int should_fail_request(struct bio *bio)
++{
++	if ((bio->bi_bdev->bd_disk->flags & GENHD_FL_FAIL) ||
++	    (bio->bi_bdev->bd_part && bio->bi_bdev->bd_part->make_it_fail))
++		return should_fail(&fail_make_request, bio->bi_size);
++
++	return 0;
++}
++
++static int __init fail_make_request_debugfs(void)
++{
++	return init_fault_attr_dentries(&fail_make_request,
++					"fail_make_request");
++}
++
++late_initcall(fail_make_request_debugfs);
++
++#else /* CONFIG_FAIL_MAKE_REQUEST */
++
++static inline int should_fail_request(struct bio *bio)
++{
++	return 0;
++}
++
++#endif /* CONFIG_FAIL_MAKE_REQUEST */
++
+ /**
+  * generic_make_request: hand a buffer to its device driver for I/O
+  * @bio:  The bio describing the location in memory and on the device.
+@@ -3141,6 +3178,9 @@ void generic_make_request(struct bio *bio)
+ 		if (unlikely(test_bit(QUEUE_FLAG_DEAD, &q->queue_flags)))
+ 			goto end_io;
+ 
++		if (should_fail_request(bio))
++			goto end_io;
++
+ 		/*
+ 		 * If this device has partitions, remap block n
+ 		 * of partition p to block n+start(p) of the disk.
+diff --git a/fs/partitions/check.c b/fs/partitions/check.c
+index 1901137f4eca..3d73d94d93a7 100644
+--- a/fs/partitions/check.c
++++ b/fs/partitions/check.c
+@@ -276,12 +276,39 @@ static struct part_attribute part_attr_stat = {
+ 	.show	= part_stat_read
+ };
+ 
++#ifdef CONFIG_FAIL_MAKE_REQUEST
++
++static ssize_t part_fail_store(struct hd_struct * p,
++			       const char *buf, size_t count)
++{
++	int i;
++
++	if (count > 0 && sscanf(buf, "%d", &i) > 0)
++		p->make_it_fail = (i == 0) ? 0 : 1;
++
++	return count;
++}
++static ssize_t part_fail_read(struct hd_struct * p, char *page)
++{
++	return sprintf(page, "%d\n", p->make_it_fail);
++}
++static struct part_attribute part_attr_fail = {
++	.attr = {.name = "make-it-fail", .mode = S_IRUGO | S_IWUSR },
++	.store	= part_fail_store,
++	.show	= part_fail_read
++};
++
++#endif
++
+ static struct attribute * default_attrs[] = {
+ 	&part_attr_uevent.attr,
+ 	&part_attr_dev.attr,
+ 	&part_attr_start.attr,
+ 	&part_attr_size.attr,
+ 	&part_attr_stat.attr,
++#ifdef CONFIG_FAIL_MAKE_REQUEST
++	&part_attr_fail.attr,
++#endif
+ 	NULL,
+ };
+ 
+diff --git a/include/linux/genhd.h b/include/linux/genhd.h
+index 41f276fdd185..0a022b2f63fc 100644
+--- a/include/linux/genhd.h
++++ b/include/linux/genhd.h
+@@ -83,6 +83,9 @@ struct hd_struct {
+ 	struct kobject *holder_dir;
+ 	unsigned ios[2], sectors[2];	/* READs and WRITEs */
+ 	int policy, partno;
++#ifdef CONFIG_FAIL_MAKE_REQUEST
++	int make_it_fail;
++#endif
+ };
+ 
+ #define GENHD_FL_REMOVABLE			1
+@@ -90,6 +93,7 @@ struct hd_struct {
+ #define GENHD_FL_CD				8
+ #define GENHD_FL_UP				16
+ #define GENHD_FL_SUPPRESS_PARTITION_INFO	32
++#define GENHD_FL_FAIL				64
+ 
+ struct disk_stats {
+ 	unsigned long sectors[2];	/* READs and WRITEs */
+diff --git a/lib/Kconfig.debug b/lib/Kconfig.debug
+index c66b7b400c9f..336241bf0ced 100644
+--- a/lib/Kconfig.debug
++++ b/lib/Kconfig.debug
+@@ -431,6 +431,13 @@ config FAIL_PAGE_ALLOC
+ 	help
+ 	  This option provides fault-injection capabilitiy for alloc_pages().
+ 
++config FAIL_MAKE_REQUEST
++	bool "Fault-injection capabilitiy for disk IO"
++	depends on DEBUG_KERNEL
++	select FAULT_INJECTION
++	help
++	  This option provides fault-injection capabilitiy to disk IO.
++
+ config FAULT_INJECTION_DEBUG_FS
+ 	bool "Debugfs entries for fault-injection capabilities"
+ 	depends on FAULT_INJECTION && SYSFS

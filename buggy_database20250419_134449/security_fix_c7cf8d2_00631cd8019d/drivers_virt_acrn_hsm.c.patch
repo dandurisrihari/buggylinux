@@ -1,0 +1,95 @@
+commit c7cf8d27244f2ccdde30c79eb6314c943bbeac28
+Author: Shuo Liu <shuo.a.liu@intel.com>
+Date:   Sun Feb 7 11:10:34 2021 +0800
+
+    virt: acrn: Introduce interrupt injection interfaces
+    
+    ACRN userspace need to inject virtual interrupts into a User VM in
+    devices emulation.
+    
+    HSM needs provide interfaces to do so.
+    
+    Introduce following interrupt injection interfaces:
+    
+    ioctl ACRN_IOCTL_SET_IRQLINE:
+      Pass data from userspace to the hypervisor, and inform the hypervisor
+      to inject a virtual IOAPIC GSI interrupt to a User VM.
+    
+    ioctl ACRN_IOCTL_INJECT_MSI:
+      Pass data struct acrn_msi_entry from userspace to the hypervisor, and
+      inform the hypervisor to inject a virtual MSI to a User VM.
+    
+    ioctl ACRN_IOCTL_VM_INTR_MONITOR:
+      Set a 4-Kbyte aligned shared page for statistics information of
+      interrupts of a User VM.
+    
+    Cc: Zhi Wang <zhi.a.wang@intel.com>
+    Cc: Zhenyu Wang <zhenyuw@linux.intel.com>
+    Cc: Yu Wang <yu1.wang@intel.com>
+    Cc: Reinette Chatre <reinette.chatre@intel.com>
+    Cc: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+    Reviewed-by: Zhi Wang <zhi.a.wang@intel.com>
+    Reviewed-by: Reinette Chatre <reinette.chatre@intel.com>
+    Signed-off-by: Shuo Liu <shuo.a.liu@intel.com>
+    Link: https://lore.kernel.org/r/20210207031040.49576-13-shuo.a.liu@intel.com
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/virt/acrn/hsm.c b/drivers/virt/acrn/hsm.c
+index 94d70b1c1e5c..419271f32be8 100644
+--- a/drivers/virt/acrn/hsm.c
++++ b/drivers/virt/acrn/hsm.c
+@@ -51,7 +51,9 @@ static long acrn_dev_ioctl(struct file *filp, unsigned int cmd,
+ 	struct acrn_ioreq_notify notify;
+ 	struct acrn_ptdev_irq *irq_info;
+ 	struct acrn_vm_memmap memmap;
++	struct acrn_msi_entry *msi;
+ 	struct acrn_pcidev *pcidev;
++	struct page *page;
+ 	int i, ret = 0;
+ 
+ 	if (vm->vmid == ACRN_INVALID_VMID && cmd != ACRN_IOCTL_CREATE_VM) {
+@@ -198,6 +200,44 @@ static long acrn_dev_ioctl(struct file *filp, unsigned int cmd,
+ 				"Failed to reset intr for ptdev!\n");
+ 		kfree(irq_info);
+ 		break;
++	case ACRN_IOCTL_SET_IRQLINE:
++		ret = hcall_set_irqline(vm->vmid, ioctl_param);
++		if (ret < 0)
++			dev_dbg(acrn_dev.this_device,
++				"Failed to set interrupt line!\n");
++		break;
++	case ACRN_IOCTL_INJECT_MSI:
++		msi = memdup_user((void __user *)ioctl_param,
++				  sizeof(struct acrn_msi_entry));
++		if (IS_ERR(msi))
++			return PTR_ERR(msi);
++
++		ret = hcall_inject_msi(vm->vmid, virt_to_phys(msi));
++		if (ret < 0)
++			dev_dbg(acrn_dev.this_device,
++				"Failed to inject MSI!\n");
++		kfree(msi);
++		break;
++	case ACRN_IOCTL_VM_INTR_MONITOR:
++		ret = pin_user_pages_fast(ioctl_param, 1,
++					  FOLL_WRITE | FOLL_LONGTERM, &page);
++		if (unlikely(ret != 1)) {
++			dev_dbg(acrn_dev.this_device,
++				"Failed to pin intr hdr buffer!\n");
++			return -EFAULT;
++		}
++
++		ret = hcall_vm_intr_monitor(vm->vmid, page_to_phys(page));
++		if (ret < 0) {
++			unpin_user_page(page);
++			dev_dbg(acrn_dev.this_device,
++				"Failed to monitor intr data!\n");
++			return ret;
++		}
++		if (vm->monitor_page)
++			unpin_user_page(vm->monitor_page);
++		vm->monitor_page = page;
++		break;
+ 	case ACRN_IOCTL_CREATE_IOREQ_CLIENT:
+ 		if (vm->default_client)
+ 			return -EEXIST;

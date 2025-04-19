@@ -1,0 +1,88 @@
+commit 184c18471f7d0963ad5752692c4b441a546d88f1
+Author: Bryan Schumaker <bjschuma@netapp.com>
+Date:   Thu Nov 29 11:40:44 2012 -0500
+
+    NFSD: Reading a fault injection file prints a state count
+    
+    I also log basic information that I can figure out about the type of
+    state (such as number of locks for each client IP address).  This can be
+    useful for checking that state was actually dropped and later for
+    checking if the client was able to recover.
+    
+    Signed-off-by: Bryan Schumaker <bjschuma@netapp.com>
+    Signed-off-by: J. Bruce Fields <bfields@redhat.com>
+
+diff --git a/fs/nfsd/nfs4state.c b/fs/nfsd/nfs4state.c
+index ab45cdd7b3da..9fb8e52580f3 100644
+--- a/fs/nfsd/nfs4state.c
++++ b/fs/nfsd/nfs4state.c
+@@ -4611,6 +4611,22 @@ u64 nfsd_forget_client(struct nfs4_client *clp, u64 max)
+ 	return 1;
+ }
+ 
++u64 nfsd_print_client(struct nfs4_client *clp, u64 num)
++{
++	char buf[INET6_ADDRSTRLEN];
++	rpc_ntop((struct sockaddr *)&clp->cl_addr, buf, 129);
++	printk(KERN_INFO "NFS Client: %s\n", buf);
++	return 1;
++}
++
++static void nfsd_print_count(struct nfs4_client *clp, unsigned int count,
++			     const char *type)
++{
++	char buf[INET6_ADDRSTRLEN];
++	rpc_ntop((struct sockaddr *)&clp->cl_addr, buf, 129);
++	printk(KERN_INFO "NFS Client: %s has %u %s\n", buf, count, type);
++}
++
+ static u64 nfsd_foreach_client_lock(struct nfs4_client *clp, u64 max, void (*func)(struct nfs4_lockowner *))
+ {
+ 	struct nfs4_openowner *oop;
+@@ -4637,6 +4653,13 @@ u64 nfsd_forget_client_locks(struct nfs4_client *clp, u64 max)
+ 	return nfsd_foreach_client_lock(clp, max, release_lockowner);
+ }
+ 
++u64 nfsd_print_client_locks(struct nfs4_client *clp, u64 max)
++{
++	u64 count = nfsd_foreach_client_lock(clp, max, NULL);
++	nfsd_print_count(clp, count, "locked files");
++	return count;
++}
++
+ static u64 nfsd_foreach_client_open(struct nfs4_client *clp, u64 max, void (*func)(struct nfs4_openowner *))
+ {
+ 	struct nfs4_openowner *oop, *next;
+@@ -4657,6 +4680,13 @@ u64 nfsd_forget_client_openowners(struct nfs4_client *clp, u64 max)
+ 	return nfsd_foreach_client_open(clp, max, release_openowner);
+ }
+ 
++u64 nfsd_print_client_openowners(struct nfs4_client *clp, u64 max)
++{
++	u64 count = nfsd_foreach_client_open(clp, max, NULL);
++	nfsd_print_count(clp, count, "open files");
++	return count;
++}
++
+ static u64 nfsd_find_all_delegations(struct nfs4_client *clp, u64 max,
+ 				     struct list_head *victims)
+ {
+@@ -4703,6 +4733,18 @@ u64 nfsd_recall_client_delegations(struct nfs4_client *clp, u64 max)
+ 	return count;
+ }
+ 
++u64 nfsd_print_client_delegations(struct nfs4_client *clp, u64 max)
++{
++	u64 count = 0;
++
++	spin_lock(&recall_lock);
++	count = nfsd_find_all_delegations(clp, max, NULL);
++	spin_unlock(&recall_lock);
++
++	nfsd_print_count(clp, count, "delegations");
++	return count;
++}
++
+ u64 nfsd_for_n_state(u64 max, u64 (*func)(struct nfs4_client *, u64))
+ {
+ 	struct nfs4_client *clp, *next;

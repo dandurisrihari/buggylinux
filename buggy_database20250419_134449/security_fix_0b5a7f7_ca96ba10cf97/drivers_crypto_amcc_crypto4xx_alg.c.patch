@@ -1,0 +1,62 @@
+commit 0b5a7f71b4c557b15ec54a1b49023bc1b21044cc
+Author: Christian Lamparter <chunkeey@gmail.com>
+Date:   Sat Dec 23 19:45:46 2017 +0100
+
+    crypto: crypto4xx - perform aead icv check in the driver
+    
+    The ccm-aes-ppc4xx now fails one of testmgr's expected
+    failure test cases as such:
+    
+    |decryption failed on test 10 for ccm-aes-ppc4xx:
+    |ret was 0, |expected -EBADMSG
+    
+    It doesn't look like the hardware sets the authentication failure
+    flag. The original vendor source from which this was ported does
+    not have any special code or notes about why this would happen or
+    if there are any WAs.
+    
+    Hence, this patch converts the aead_done callback handler to
+    perform the icv check in the driver. And this fixes the false
+    negative and the ccm-aes-ppc4xx passes the selftests once again.
+    
+    |name         : ccm(aes)
+    |driver       : ccm-aes-ppc4xx
+    |module       : crypto4xx
+    |priority     : 300
+    |refcnt       : 1
+    |selftest     : passed
+    |internal     : no
+    |type         : aead
+    |async        : yes
+    |blocksize    : 1
+    |ivsize       : 16
+    |maxauthsize  : 16
+    |geniv        : <none>
+    
+    Signed-off-by: Christian Lamparter <chunkeey@gmail.com>
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+diff --git a/drivers/crypto/amcc/crypto4xx_alg.c b/drivers/crypto/amcc/crypto4xx_alg.c
+index eeaf27859d80..ea83d0bff0e9 100644
+--- a/drivers/crypto/amcc/crypto4xx_alg.c
++++ b/drivers/crypto/amcc/crypto4xx_alg.c
+@@ -256,10 +256,6 @@ static inline bool crypto4xx_aead_need_fallback(struct aead_request *req,
+ 	if (is_ccm && !(req->iv[0] == 1 || req->iv[0] == 3))
+ 		return true;
+ 
+-	/* CCM - fix CBC MAC mismatch in special case */
+-	if (is_ccm && decrypt && !req->assoclen)
+-		return true;
+-
+ 	return false;
+ }
+ 
+@@ -330,7 +326,7 @@ int crypto4xx_setkey_aes_ccm(struct crypto_aead *cipher, const u8 *key,
+ 	sa = (struct dynamic_sa_ctl *) ctx->sa_in;
+ 	sa->sa_contents.w = SA_AES_CCM_CONTENTS | (keylen << 2);
+ 
+-	set_dynamic_sa_command_0(sa, SA_NOT_SAVE_HASH, SA_NOT_SAVE_IV,
++	set_dynamic_sa_command_0(sa, SA_SAVE_HASH, SA_NOT_SAVE_IV,
+ 				 SA_LOAD_HASH_FROM_SA, SA_LOAD_IV_FROM_STATE,
+ 				 SA_NO_HEADER_PROC, SA_HASH_ALG_CBC_MAC,
+ 				 SA_CIPHER_ALG_AES,

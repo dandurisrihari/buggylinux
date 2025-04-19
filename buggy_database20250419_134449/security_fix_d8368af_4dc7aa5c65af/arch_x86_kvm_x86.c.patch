@@ -1,0 +1,54 @@
+commit d8368af8b46b904def42a0f341d2f4f29001fa77
+Author: Avi Kivity <avi@redhat.com>
+Date:   Mon May 14 18:07:56 2012 +0300
+
+    KVM: Fix mmu_reload() clash with nested vmx event injection
+    
+    Currently the inject_pending_event() call during guest entry happens after
+    kvm_mmu_reload().  This is for historical reasons - we used to
+    inject_pending_event() in atomic context, while kvm_mmu_reload() needs task
+    context.
+    
+    A problem is that nested vmx can cause the mmu context to be reset, if event
+    injection is intercepted and causes a #VMEXIT instead (the #VMEXIT resets
+    CR0/CR3/CR4).  If this happens, we end up with invalid root_hpa, and since
+    kvm_mmu_reload() has already run, no one will fix it and we end up entering
+    the guest this way.
+    
+    Fix by reordering event injection to be before kvm_mmu_reload().  Use
+    ->cancel_injection() to undo if kvm_mmu_reload() fails.
+    
+    https://bugzilla.kernel.org/show_bug.cgi?id=42980
+    
+    Reported-by: Luke-Jr <luke-jr+linuxbugs@utopios.org>
+    Signed-off-by: Avi Kivity <avi@redhat.com>
+    Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
+
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 4de705cdcafd..b78f89d34242 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -5279,10 +5279,6 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 			kvm_deliver_pmi(vcpu);
+ 	}
+ 
+-	r = kvm_mmu_reload(vcpu);
+-	if (unlikely(r))
+-		goto out;
+-
+ 	if (kvm_check_request(KVM_REQ_EVENT, vcpu) || req_int_win) {
+ 		inject_pending_event(vcpu);
+ 
+@@ -5298,6 +5294,12 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 		}
+ 	}
+ 
++	r = kvm_mmu_reload(vcpu);
++	if (unlikely(r)) {
++		kvm_x86_ops->cancel_injection(vcpu);
++		goto out;
++	}
++
+ 	preempt_disable();
+ 
+ 	kvm_x86_ops->prepare_guest_switch(vcpu);

@@ -1,0 +1,198 @@
+commit 7aa81cc04781b5b99a0647ec04533599d78cd219
+Author: Anthony Liguori <aliguori@us.ibm.com>
+Date:   Mon Sep 17 14:57:50 2007 -0500
+
+    KVM: Refactor hypercall infrastructure (v3)
+    
+    This patch refactors the current hypercall infrastructure to better
+    support live migration and SMP.  It eliminates the hypercall page by
+    trapping the UD exception that would occur if you used the wrong hypercall
+    instruction for the underlying architecture and replacing it with the right
+    one lazily.
+    
+    A fall-out of this patch is that the unhandled hypercalls no longer trap to
+    userspace.  There is very little reason though to use a hypercall to
+    communicate with userspace as PIO or MMIO can be used.  There is no code
+    in tree that uses userspace hypercalls.
+    
+    [avi: fix #ud injection on vmx]
+    
+    Signed-off-by: Anthony Liguori <aliguori@us.ibm.com>
+    Signed-off-by: Avi Kivity <avi@qumranet.com>
+
+diff --git a/include/linux/kvm_para.h b/include/linux/kvm_para.h
+index 3b292565a693..cc5dfb433706 100644
+--- a/include/linux/kvm_para.h
++++ b/include/linux/kvm_para.h
+@@ -1,73 +1,110 @@
+ #ifndef __LINUX_KVM_PARA_H
+ #define __LINUX_KVM_PARA_H
+ 
+-/*
+- * Guest OS interface for KVM paravirtualization
+- *
+- * Note: this interface is totally experimental, and is certain to change
+- *       as we make progress.
++/* This CPUID returns the signature 'KVMKVMKVM' in ebx, ecx, and edx.  It
++ * should be used to determine that a VM is running under KVM.
+  */
++#define KVM_CPUID_SIGNATURE	0x40000000
+ 
+-/*
+- * Per-VCPU descriptor area shared between guest and host. Writable to
+- * both guest and host. Registered with the host by the guest when
+- * a guest acknowledges paravirtual mode.
+- *
+- * NOTE: all addresses are guest-physical addresses (gpa), to make it
+- * easier for the hypervisor to map between the various addresses.
+- */
+-struct kvm_vcpu_para_state {
+-	/*
+-	 * API version information for compatibility. If there's any support
+-	 * mismatch (too old host trying to execute too new guest) then
+-	 * the host will deny entry into paravirtual mode. Any other
+-	 * combination (new host + old guest and new host + new guest)
+-	 * is supposed to work - new host versions will support all old
+-	 * guest API versions.
+-	 */
+-	u32 guest_version;
+-	u32 host_version;
+-	u32 size;
+-	u32 ret;
+-
+-	/*
+-	 * The address of the vm exit instruction (VMCALL or VMMCALL),
+-	 * which the host will patch according to the CPU model the
+-	 * VM runs on:
+-	 */
+-	u64 hypercall_gpa;
+-
+-} __attribute__ ((aligned(PAGE_SIZE)));
+-
+-#define KVM_PARA_API_VERSION 1
+-
+-/*
+- * This is used for an RDMSR's ECX parameter to probe for a KVM host.
+- * Hopefully no CPU vendor will use up this number. This is placed well
+- * out of way of the typical space occupied by CPU vendors' MSR indices,
+- * and we think (or at least hope) it wont be occupied in the future
+- * either.
++/* This CPUID returns a feature bitmap in eax.  Before enabling a particular
++ * paravirtualization, the appropriate feature bit should be checked.
+  */
+-#define MSR_KVM_API_MAGIC 0x87655678
++#define KVM_CPUID_FEATURES	0x40000001
+ 
+-#define KVM_EINVAL 1
++/* Return values for hypercalls */
++#define KVM_ENOSYS		1000
+ 
+-/*
+- * Hypercall calling convention:
+- *
+- * Each hypercall may have 0-6 parameters.
+- *
+- * 64-bit hypercall index is in RAX, goes from 0 to __NR_hypercalls-1
+- *
+- * 64-bit parameters 1-6 are in the standard gcc x86_64 calling convention
+- * order: RDI, RSI, RDX, RCX, R8, R9.
+- *
+- * 32-bit index is EBX, parameters are: EAX, ECX, EDX, ESI, EDI, EBP.
+- * (the first 3 are according to the gcc regparm calling convention)
++#ifdef __KERNEL__
++#include <asm/processor.h>
++
++/* This instruction is vmcall.  On non-VT architectures, it will generate a
++ * trap that we will then rewrite to the appropriate instruction.
++ */
++#define KVM_HYPERCALL ".byte 0x0f,0x01,0xc1"
++
++/* For KVM hypercalls, a three-byte sequence of either the vmrun or the vmmrun
++ * instruction.  The hypervisor may replace it with something else but only the
++ * instructions are guaranteed to be supported.
+  *
+- * No registers are clobbered by the hypercall, except that the
+- * return value is in RAX.
++ * Up to four arguments may be passed in rbx, rcx, rdx, and rsi respectively.
++ * The hypercall number should be placed in rax and the return value will be
++ * placed in rax.  No other registers will be clobbered unless explicited
++ * noted by the particular hypercall.
+  */
+-#define __NR_hypercalls			0
++
++static inline long kvm_hypercall0(unsigned int nr)
++{
++	long ret;
++	asm volatile(KVM_HYPERCALL
++		     : "=a"(ret)
++		     : "a"(nr));
++	return ret;
++}
++
++static inline long kvm_hypercall1(unsigned int nr, unsigned long p1)
++{
++	long ret;
++	asm volatile(KVM_HYPERCALL
++		     : "=a"(ret)
++		     : "a"(nr), "b"(p1));
++	return ret;
++}
++
++static inline long kvm_hypercall2(unsigned int nr, unsigned long p1,
++				  unsigned long p2)
++{
++	long ret;
++	asm volatile(KVM_HYPERCALL
++		     : "=a"(ret)
++		     : "a"(nr), "b"(p1), "c"(p2));
++	return ret;
++}
++
++static inline long kvm_hypercall3(unsigned int nr, unsigned long p1,
++				  unsigned long p2, unsigned long p3)
++{
++	long ret;
++	asm volatile(KVM_HYPERCALL
++		     : "=a"(ret)
++		     : "a"(nr), "b"(p1), "c"(p2), "d"(p3));
++	return ret;
++}
++
++static inline long kvm_hypercall4(unsigned int nr, unsigned long p1,
++				  unsigned long p2, unsigned long p3,
++				  unsigned long p4)
++{
++	long ret;
++	asm volatile(KVM_HYPERCALL
++		     : "=a"(ret)
++		     : "a"(nr), "b"(p1), "c"(p2), "d"(p3), "S"(p4));
++	return ret;
++}
++
++static inline int kvm_para_available(void)
++{
++	unsigned int eax, ebx, ecx, edx;
++	char signature[13];
++
++	cpuid(KVM_CPUID_SIGNATURE, &eax, &ebx, &ecx, &edx);
++	memcpy(signature + 0, &ebx, 4);
++	memcpy(signature + 4, &ecx, 4);
++	memcpy(signature + 8, &edx, 4);
++	signature[12] = 0;
++
++	if (strcmp(signature, "KVMKVMKVM") == 0)
++		return 1;
++
++	return 0;
++}
++
++static inline int kvm_para_has_feature(unsigned int feature)
++{
++	if (cpuid_eax(KVM_CPUID_FEATURES) & (1UL << feature))
++		return 1;
++	return 0;
++}
++
++#endif
+ 
+ #endif

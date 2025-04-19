@@ -1,0 +1,94 @@
+commit 5a17f040fa332e71a45ca9ff02d6979d9176a423
+Author: Kees Cook <kees@kernel.org>
+Date:   Wed Oct 26 16:31:11 2022 -0700
+
+    cred: Do not default to init_cred in prepare_kernel_cred()
+    
+    A common exploit pattern for ROP attacks is to abuse prepare_kernel_cred()
+    in order to construct escalated privileges[1]. Instead of providing a
+    short-hand argument (NULL) to the "daemon" argument to indicate using
+    init_cred as the base cred, require that "daemon" is always set to
+    an actual task. Replace all existing callers that were passing NULL
+    with &init_task.
+    
+    Future attacks will need to have sufficiently powerful read/write
+    primitives to have found an appropriately privileged task and written it
+    to the ROP stack as an argument to succeed, which is similarly difficult
+    to the prior effort needed to escalate privileges before struct cred
+    existed: locate the current cred and overwrite the uid member.
+    
+    This has the added benefit of meaning that prepare_kernel_cred() can no
+    longer exceed the privileges of the init task, which may have changed from
+    the original init_cred (e.g. dropping capabilities from the bounding set).
+    
+    [1] https://google.com/search?q=commit_creds(prepare_kernel_cred(0))
+    
+    Cc: "Eric W. Biederman" <ebiederm@xmission.com>
+    Cc: David Howells <dhowells@redhat.com>
+    Cc: "Rafael J. Wysocki" <rafael@kernel.org>
+    Cc: Steve French <sfrench@samba.org>
+    Cc: Ronnie Sahlberg <lsahlber@redhat.com>
+    Cc: Shyam Prasad N <sprasad@microsoft.com>
+    Cc: Tom Talpey <tom@talpey.com>
+    Cc: Namjae Jeon <linkinjeon@kernel.org>
+    Cc: Trond Myklebust <trond.myklebust@hammerspace.com>
+    Cc: Anna Schumaker <anna@kernel.org>
+    Cc: Chuck Lever <chuck.lever@oracle.com>
+    Cc: Jeff Layton <jlayton@kernel.org>
+    Cc: "David S. Miller" <davem@davemloft.net>
+    Cc: Eric Dumazet <edumazet@google.com>
+    Cc: Jakub Kicinski <kuba@kernel.org>
+    Cc: Paolo Abeni <pabeni@redhat.com>
+    Cc: "Michal Koutný" <mkoutny@suse.com>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: linux-cifs@vger.kernel.org
+    Cc: samba-technical@lists.samba.org
+    Cc: linux-nfs@vger.kernel.org
+    Cc: netdev@vger.kernel.org
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+    Acked-by: Luis Chamberlain <mcgrof@kernel.org>
+    Reviewed-by: Sergey Senozhatsky <senozhatsky@chromium.org>
+    Acked-by: Russ Weight <russell.h.weight@intel.com>
+    Acked-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+    Acked-by: Paulo Alcantara (SUSE) <pc@cjr.nz>
+    Link: https://lore.kernel.org/r/20221026232943.never.775-kees@kernel.org
+
+diff --git a/kernel/cred.c b/kernel/cred.c
+index e10c15f51c1f..811ad654abd1 100644
+--- a/kernel/cred.c
++++ b/kernel/cred.c
+@@ -701,9 +701,9 @@ void __init cred_init(void)
+  * override a task's own credentials so that work can be done on behalf of that
+  * task that requires a different subjective context.
+  *
+- * @daemon is used to provide a base for the security record, but can be NULL.
+- * If @daemon is supplied, then the security data will be derived from that;
+- * otherwise they'll be set to 0 and no groups, full capabilities and no keys.
++ * @daemon is used to provide a base cred, with the security data derived from
++ * that; if this is "&init_task", they'll be set to 0, no groups, full
++ * capabilities, and no keys.
+  *
+  * The caller may change these controls afterwards if desired.
+  *
+@@ -714,17 +714,16 @@ struct cred *prepare_kernel_cred(struct task_struct *daemon)
+ 	const struct cred *old;
+ 	struct cred *new;
+ 
++	if (WARN_ON_ONCE(!daemon))
++		return NULL;
++
+ 	new = kmem_cache_alloc(cred_jar, GFP_KERNEL);
+ 	if (!new)
+ 		return NULL;
+ 
+ 	kdebug("prepare_kernel_cred() alloc %p", new);
+ 
+-	if (daemon)
+-		old = get_task_cred(daemon);
+-	else
+-		old = get_cred(&init_cred);
+-
++	old = get_task_cred(daemon);
+ 	validate_creds(old);
+ 
+ 	*new = *old;

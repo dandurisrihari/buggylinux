@@ -1,0 +1,287 @@
+diff --git a/fs/xfs/libxfs/xfs_alloc.c b/fs/xfs/libxfs/xfs_alloc.c
+index 7cb9f064ac64..0c623d3c1036 100644
+--- a/fs/xfs/libxfs/xfs_alloc.c
++++ b/fs/xfs/libxfs/xfs_alloc.c
+@@ -2474,6 +2474,47 @@ xfs_defer_agfl_block(
+ 	xfs_defer_add(tp, XFS_DEFER_OPS_TYPE_AGFL_FREE, &new->xefi_list);
+ }
+ 
++#ifdef DEBUG
++/*
++ * Check if an AGF has a free extent record whose length is equal to
++ * args->minlen.
++ */
++STATIC int
++xfs_exact_minlen_extent_available(
++	struct xfs_alloc_arg	*args,
++	struct xfs_buf		*agbp,
++	int			*stat)
++{
++	struct xfs_btree_cur	*cnt_cur;
++	xfs_agblock_t		fbno;
++	xfs_extlen_t		flen;
++	int			error = 0;
++
++	cnt_cur = xfs_allocbt_init_cursor(args->mp, args->tp, agbp,
++			args->agno, XFS_BTNUM_CNT);
++	error = xfs_alloc_lookup_ge(cnt_cur, 0, args->minlen, stat);
++	if (error)
++		goto out;
++
++	if (*stat == 0) {
++		error = -EFSCORRUPTED;
++		goto out;
++	}
++
++	error = xfs_alloc_get_rec(cnt_cur, &fbno, &flen, stat);
++	if (error)
++		goto out;
++
++	if (*stat == 1 && flen != args->minlen)
++		*stat = 0;
++
++out:
++	xfs_btree_del_cursor(cnt_cur, error);
++
++	return error;
++}
++#endif
++
+ /*
+  * Decide whether to use this allocation group for this allocation.
+  * If so, fix up the btree freelist's size.
+@@ -2545,6 +2586,15 @@ xfs_alloc_fix_freelist(
+ 	if (!xfs_alloc_space_available(args, need, flags))
+ 		goto out_agbp_relse;
+ 
++#ifdef DEBUG
++	if (args->alloc_minlen_only) {
++		int stat;
++
++		error = xfs_exact_minlen_extent_available(args, agbp, &stat);
++		if (error || !stat)
++			goto out_agbp_relse;
++	}
++#endif
+ 	/*
+ 	 * Make the freelist shorter if it's too long.
+ 	 *
+diff --git a/fs/xfs/libxfs/xfs_alloc.h b/fs/xfs/libxfs/xfs_alloc.h
+index 6c22b12176b8..a4427c5775c2 100644
+--- a/fs/xfs/libxfs/xfs_alloc.h
++++ b/fs/xfs/libxfs/xfs_alloc.h
+@@ -75,6 +75,9 @@ typedef struct xfs_alloc_arg {
+ 	char		wasfromfl;	/* set if allocation is from freelist */
+ 	struct xfs_owner_info	oinfo;	/* owner of blocks being allocated */
+ 	enum xfs_ag_resv_type	resv;	/* block reservation to use */
++#ifdef DEBUG
++	bool		alloc_minlen_only; /* allocate exact minlen extent */
++#endif
+ } xfs_alloc_arg_t;
+ 
+ /*
+diff --git a/fs/xfs/libxfs/xfs_bmap.c b/fs/xfs/libxfs/xfs_bmap.c
+index bf53a0b1eff3..2cd24bb06040 100644
+--- a/fs/xfs/libxfs/xfs_bmap.c
++++ b/fs/xfs/libxfs/xfs_bmap.c
+@@ -3552,34 +3552,101 @@ xfs_bmap_process_allocated_extent(
+ 	xfs_bmap_btalloc_accounting(ap, args);
+ }
+ 
+-STATIC int
+-xfs_bmap_btalloc(
+-	struct xfs_bmalloca	*ap)	/* bmap alloc argument struct */
++#ifdef DEBUG
++static int
++xfs_bmap_exact_minlen_extent_alloc(
++	struct xfs_bmalloca	*ap)
+ {
+-	xfs_mount_t	*mp;		/* mount point structure */
+-	xfs_alloctype_t	atype = 0;	/* type for allocation routines */
+-	xfs_agnumber_t	fb_agno;	/* ag number of ap->firstblock */
+-	xfs_agnumber_t	ag;
+-	xfs_alloc_arg_t	args;
+-	xfs_fileoff_t	orig_offset;
+-	xfs_extlen_t	orig_length;
+-	xfs_extlen_t	blen;
+-	xfs_extlen_t	nextminlen = 0;
+-	int		nullfb;		/* true if ap->firstblock isn't set */
+-	int		isaligned;
+-	int		tryagain;
+-	int		error;
+-	int		stripe_align;
++	struct xfs_mount	*mp = ap->ip->i_mount;
++	struct xfs_alloc_arg	args = { .tp = ap->tp, .mp = mp };
++	xfs_fileoff_t		orig_offset;
++	xfs_extlen_t		orig_length;
++	int			error;
+ 
+ 	ASSERT(ap->length);
++
++	if (ap->minlen != 1) {
++		ap->blkno = NULLFSBLOCK;
++		ap->length = 0;
++		return 0;
++	}
++
+ 	orig_offset = ap->offset;
+ 	orig_length = ap->length;
+ 
+-	mp = ap->ip->i_mount;
++	args.alloc_minlen_only = 1;
+ 
+-	memset(&args, 0, sizeof(args));
+-	args.tp = ap->tp;
+-	args.mp = mp;
++	xfs_bmap_compute_alignments(ap, &args);
++
++	if (ap->tp->t_firstblock == NULLFSBLOCK) {
++		/*
++		 * Unlike the longest extent available in an AG, we don't track
++		 * the length of an AG's shortest extent.
++		 * XFS_ERRTAG_BMAP_ALLOC_MINLEN_EXTENT is a debug only knob and
++		 * hence we can afford to start traversing from the 0th AG since
++		 * we need not be concerned about a drop in performance in
++		 * "debug only" code paths.
++		 */
++		ap->blkno = XFS_AGB_TO_FSB(mp, 0, 0);
++	} else {
++		ap->blkno = ap->tp->t_firstblock;
++	}
++
++	args.fsbno = ap->blkno;
++	args.oinfo = XFS_RMAP_OINFO_SKIP_UPDATE;
++	args.type = XFS_ALLOCTYPE_FIRST_AG;
++	args.total = args.minlen = args.maxlen = ap->minlen;
++
++	args.alignment = 1;
++	args.minalignslop = 0;
++
++	args.minleft = ap->minleft;
++	args.wasdel = ap->wasdel;
++	args.resv = XFS_AG_RESV_NONE;
++	args.datatype = ap->datatype;
++
++	error = xfs_alloc_vextent(&args);
++	if (error)
++		return error;
++
++	if (args.fsbno != NULLFSBLOCK) {
++		xfs_bmap_process_allocated_extent(ap, &args, orig_offset,
++			orig_length);
++	} else {
++		ap->blkno = NULLFSBLOCK;
++		ap->length = 0;
++	}
++
++	return 0;
++}
++#else
++
++#define xfs_bmap_exact_minlen_extent_alloc(bma) (-EFSCORRUPTED)
++
++#endif
++
++STATIC int
++xfs_bmap_btalloc(
++	struct xfs_bmalloca	*ap)
++{
++	struct xfs_mount	*mp = ap->ip->i_mount;
++	struct xfs_alloc_arg	args = { .tp = ap->tp, .mp = mp };
++	xfs_alloctype_t		atype = 0;
++	xfs_agnumber_t		fb_agno;	/* ag number of ap->firstblock */
++	xfs_agnumber_t		ag;
++	xfs_fileoff_t		orig_offset;
++	xfs_extlen_t		orig_length;
++	xfs_extlen_t		blen;
++	xfs_extlen_t		nextminlen = 0;
++	int			nullfb; /* true if ap->firstblock isn't set */
++	int			isaligned;
++	int			tryagain;
++	int			error;
++	int			stripe_align;
++
++	ASSERT(ap->length);
++	orig_offset = ap->offset;
++	orig_length = ap->length;
+ 
+ 	stripe_align = xfs_bmap_compute_alignments(ap, &args);
+ 
+@@ -4113,6 +4180,10 @@ xfs_bmap_alloc_userdata(
+ 			return xfs_bmap_rtalloc(bma);
+ 	}
+ 
++	if (unlikely(XFS_TEST_ERROR(false, mp,
++			XFS_ERRTAG_BMAP_ALLOC_MINLEN_EXTENT)))
++		return xfs_bmap_exact_minlen_extent_alloc(bma);
++
+ 	return xfs_bmap_btalloc(bma);
+ }
+ 
+@@ -4149,10 +4220,15 @@ xfs_bmapi_allocate(
+ 	else
+ 		bma->minlen = 1;
+ 
+-	if (bma->flags & XFS_BMAPI_METADATA)
+-		error = xfs_bmap_btalloc(bma);
+-	else
++	if (bma->flags & XFS_BMAPI_METADATA) {
++		if (unlikely(XFS_TEST_ERROR(false, mp,
++				XFS_ERRTAG_BMAP_ALLOC_MINLEN_EXTENT)))
++			error = xfs_bmap_exact_minlen_extent_alloc(bma);
++		else
++			error = xfs_bmap_btalloc(bma);
++	} else {
+ 		error = xfs_bmap_alloc_userdata(bma);
++	}
+ 	if (error || bma->blkno == NULLFSBLOCK)
+ 		return error;
+ 
+diff --git a/fs/xfs/libxfs/xfs_errortag.h b/fs/xfs/libxfs/xfs_errortag.h
+index 1c56fcceeea6..6ca9084b6934 100644
+--- a/fs/xfs/libxfs/xfs_errortag.h
++++ b/fs/xfs/libxfs/xfs_errortag.h
+@@ -57,7 +57,8 @@
+ #define XFS_ERRTAG_IUNLINK_FALLBACK			34
+ #define XFS_ERRTAG_BUF_IOERROR				35
+ #define XFS_ERRTAG_REDUCE_MAX_IEXTENTS			36
+-#define XFS_ERRTAG_MAX					37
++#define XFS_ERRTAG_BMAP_ALLOC_MINLEN_EXTENT		37
++#define XFS_ERRTAG_MAX					38
+ 
+ /*
+  * Random factors for above tags, 1 means always, 2 means 1/2 time, etc.
+@@ -99,5 +100,6 @@
+ #define XFS_RANDOM_IUNLINK_FALLBACK			(XFS_RANDOM_DEFAULT/10)
+ #define XFS_RANDOM_BUF_IOERROR				XFS_RANDOM_DEFAULT
+ #define XFS_RANDOM_REDUCE_MAX_IEXTENTS			1
++#define XFS_RANDOM_BMAP_ALLOC_MINLEN_EXTENT		1
+ 
+ #endif /* __XFS_ERRORTAG_H_ */
+diff --git a/fs/xfs/xfs_error.c b/fs/xfs/xfs_error.c
+index 3780b118cc47..185b4915b7bf 100644
+--- a/fs/xfs/xfs_error.c
++++ b/fs/xfs/xfs_error.c
+@@ -55,6 +55,7 @@ static unsigned int xfs_errortag_random_default[] = {
+ 	XFS_RANDOM_IUNLINK_FALLBACK,
+ 	XFS_RANDOM_BUF_IOERROR,
+ 	XFS_RANDOM_REDUCE_MAX_IEXTENTS,
++	XFS_RANDOM_BMAP_ALLOC_MINLEN_EXTENT,
+ };
+ 
+ struct xfs_errortag_attr {
+@@ -166,6 +167,7 @@ XFS_ERRORTAG_ATTR_RW(bad_summary,	XFS_ERRTAG_FORCE_SUMMARY_RECALC);
+ XFS_ERRORTAG_ATTR_RW(iunlink_fallback,	XFS_ERRTAG_IUNLINK_FALLBACK);
+ XFS_ERRORTAG_ATTR_RW(buf_ioerror,	XFS_ERRTAG_BUF_IOERROR);
+ XFS_ERRORTAG_ATTR_RW(reduce_max_iextents,	XFS_ERRTAG_REDUCE_MAX_IEXTENTS);
++XFS_ERRORTAG_ATTR_RW(bmap_alloc_minlen_extent,	XFS_ERRTAG_BMAP_ALLOC_MINLEN_EXTENT);
+ 
+ static struct attribute *xfs_errortag_attrs[] = {
+ 	XFS_ERRORTAG_ATTR_LIST(noerror),
+@@ -205,6 +207,7 @@ static struct attribute *xfs_errortag_attrs[] = {
+ 	XFS_ERRORTAG_ATTR_LIST(iunlink_fallback),
+ 	XFS_ERRORTAG_ATTR_LIST(buf_ioerror),
+ 	XFS_ERRORTAG_ATTR_LIST(reduce_max_iextents),
++	XFS_ERRORTAG_ATTR_LIST(bmap_alloc_minlen_extent),
+ 	NULL,
+ };

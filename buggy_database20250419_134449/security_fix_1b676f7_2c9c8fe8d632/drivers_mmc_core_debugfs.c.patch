@@ -1,0 +1,67 @@
+commit 1b676f70c108cda90cf9d114d16c677584400efc
+Author: Per Forlin <per.forlin@linaro.org>
+Date:   Fri Aug 19 14:52:37 2011 +0200
+
+    mmc: core: add random fault injection
+    
+    This adds support to inject data errors after a completed host transfer.
+    The mmc core will return error even though the host transfer is successful.
+    This simple fault injection proved to be very useful to test the
+    non-blocking error handling in the mmc_blk_issue_rw_rq().
+    Random faults can also test how the host driver handles pre_req()
+    and post_req() in case of errors.
+    
+    Signed-off-by: Per Forlin <per.forlin@linaro.org>
+    Acked-by: Akinobu Mita <akinobu.mita@gmail.com>
+    Reviewed-by: Linus Walleij <linus.walleij@linaro.org>
+    Signed-off-by: Chris Ball <cjb@laptop.org>
+
+diff --git a/drivers/mmc/core/debugfs.c b/drivers/mmc/core/debugfs.c
+index 998797ed67a6..5acd707699c9 100644
+--- a/drivers/mmc/core/debugfs.c
++++ b/drivers/mmc/core/debugfs.c
+@@ -12,6 +12,7 @@
+ #include <linux/seq_file.h>
+ #include <linux/slab.h>
+ #include <linux/stat.h>
++#include <linux/fault-inject.h>
+ 
+ #include <linux/mmc/card.h>
+ #include <linux/mmc/host.h>
+@@ -158,6 +159,23 @@ static int mmc_clock_opt_set(void *data, u64 val)
+ 	return 0;
+ }
+ 
++#ifdef CONFIG_FAIL_MMC_REQUEST
++
++static DECLARE_FAULT_ATTR(fail_mmc_request);
++
++#ifdef KERNEL
++/*
++ * Internal function. Pass the boot param fail_mmc_request to
++ * the setup fault injection attributes routine.
++ */
++static int __init setup_fail_mmc_request(char *str)
++{
++	return setup_fault_attr(&fail_mmc_request, str);
++}
++__setup("fail_mmc_request=", setup_fail_mmc_request);
++#endif /* KERNEL */
++#endif /* CONFIG_FAIL_MMC_REQUEST */
++
+ DEFINE_SIMPLE_ATTRIBUTE(mmc_clock_fops, mmc_clock_opt_get, mmc_clock_opt_set,
+ 	"%llu\n");
+ 
+@@ -187,6 +205,13 @@ void mmc_add_host_debugfs(struct mmc_host *host)
+ 	if (!debugfs_create_u32("clk_delay", (S_IRUSR | S_IWUSR),
+ 				root, &host->clk_delay))
+ 		goto err_node;
++#endif
++#ifdef CONFIG_FAIL_MMC_REQUEST
++	host->fail_mmc_request = fail_mmc_request;
++	if (IS_ERR(fault_create_debugfs_attr("fail_mmc_request",
++					     root,
++					     &host->fail_mmc_request)))
++		goto err_node;
+ #endif
+ 	return;

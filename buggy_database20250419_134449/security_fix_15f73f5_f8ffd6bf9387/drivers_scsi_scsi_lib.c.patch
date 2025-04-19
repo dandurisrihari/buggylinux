@@ -1,0 +1,43 @@
+commit 15f73f5b3e5958f2d169fe13c420eeeeae07bbf2
+Author: Christoph Hellwig <hch@lst.de>
+Date:   Thu Jun 11 08:44:47 2020 +0200
+
+    blk-mq: move failure injection out of blk_mq_complete_request
+    
+    Move the call to blk_should_fake_timeout out of blk_mq_complete_request
+    and into the drivers, skipping call sites that are obvious error
+    handlers, and remove the now superflous blk_mq_force_complete_rq helper.
+    This ensures we don't keep injecting errors into completions that just
+    terminate the Linux request after the hardware has been reset or the
+    command has been aborted.
+    
+    Reviewed-by: Daniel Wagner <dwagner@suse.de>
+    Signed-off-by: Christoph Hellwig <hch@lst.de>
+    Signed-off-by: Jens Axboe <axboe@kernel.dk>
+
+diff --git a/drivers/scsi/scsi_lib.c b/drivers/scsi/scsi_lib.c
+index 0ba7a65e7c8d..6ca91d09eca1 100644
+--- a/drivers/scsi/scsi_lib.c
++++ b/drivers/scsi/scsi_lib.c
+@@ -1589,18 +1589,12 @@ static blk_status_t scsi_mq_prep_fn(struct request *req)
+ 
+ static void scsi_mq_done(struct scsi_cmnd *cmd)
+ {
++	if (unlikely(blk_should_fake_timeout(cmd->request->q)))
++		return;
+ 	if (unlikely(test_and_set_bit(SCMD_STATE_COMPLETE, &cmd->state)))
+ 		return;
+ 	trace_scsi_dispatch_cmd_done(cmd);
+-
+-	/*
+-	 * If the block layer didn't complete the request due to a timeout
+-	 * injection, scsi must clear its internal completed state so that the
+-	 * timeout handler will see it needs to escalate its own error
+-	 * recovery.
+-	 */
+-	if (unlikely(!blk_mq_complete_request(cmd->request)))
+-		clear_bit(SCMD_STATE_COMPLETE, &cmd->state);
++	blk_mq_complete_request(cmd->request);
+ }
+ 
+ static void scsi_mq_put_budget(struct blk_mq_hw_ctx *hctx)

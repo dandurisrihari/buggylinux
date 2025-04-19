@@ -1,0 +1,64 @@
+commit a58ce43f2fb17b728395ff530f019ca53c80145f
+Author: Johannes Berg <johannes@sipsolutions.net>
+Date:   Thu Nov 19 12:45:42 2009 +0100
+
+    mac80211: avoid spurious deauth frames/messages
+    
+    With WEXT, it happens frequently that the SME
+    requests an authentication but then deauthenticates
+    right away because some new parameters came along.
+    Every time this happens we print a deauth message
+    and send a deauth frame, but both of that is rather
+    confusing. Avoid it by aborting the authentication
+    process silently, and telling cfg80211 about that.
+    
+    The patch looks larger than it really is:
+    __cfg80211_auth_remove() is split out from
+    cfg80211_send_auth_timeout(), there's no new code
+    except __cfg80211_auth_canceled() (a one-liner) and
+    the mac80211 bits (7 new lines of code).
+    
+    Signed-off-by: Johannes Berg <johannes@sipsolutions.net>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/mac80211/mlme.c b/net/mac80211/mlme.c
+index f399547306c3..6dc7b5ad9a41 100644
+--- a/net/mac80211/mlme.c
++++ b/net/mac80211/mlme.c
+@@ -2508,6 +2508,7 @@ int ieee80211_mgd_deauth(struct ieee80211_sub_if_data *sdata,
+ 	struct ieee80211_if_managed *ifmgd = &sdata->u.mgd;
+ 	struct ieee80211_mgd_work *wk;
+ 	const u8 *bssid = NULL;
++	bool not_auth_yet = false;
+ 
+ 	mutex_lock(&ifmgd->mtx);
+ 
+@@ -2517,12 +2518,28 @@ int ieee80211_mgd_deauth(struct ieee80211_sub_if_data *sdata,
+ 	} else list_for_each_entry(wk, &ifmgd->work_list, list) {
+ 		if (&wk->bss->cbss == req->bss) {
+ 			bssid = req->bss->bssid;
++			if (wk->state == IEEE80211_MGD_STATE_PROBE)
++				not_auth_yet = true;
+ 			list_del(&wk->list);
+ 			kfree(wk);
+ 			break;
+ 		}
+ 	}
+ 
++	/*
++	 * If somebody requests authentication and we haven't
++	 * sent out an auth frame yet there's no need to send
++	 * out a deauth frame either. If the state was PROBE,
++	 * then this is the case. If it's AUTH we have sent a
++	 * frame, and if it's IDLE we have completed the auth
++	 * process already.
++	 */
++	if (not_auth_yet) {
++		mutex_unlock(&ifmgd->mtx);
++		__cfg80211_auth_canceled(sdata->dev, bssid);
++		return 0;
++	}
++
+ 	/*
+ 	 * cfg80211 should catch this ... but it's racy since
+ 	 * we can receive a deauth frame, process it, hand it

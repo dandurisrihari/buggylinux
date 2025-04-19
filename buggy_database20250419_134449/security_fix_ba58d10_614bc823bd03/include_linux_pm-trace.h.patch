@@ -1,0 +1,68 @@
+commit ba58d1020a54933c6b087a3107661c8513556cb8
+Author: Chen Yu <yu.c.chen@intel.com>
+Date:   Mon Nov 28 14:35:19 2016 -0800
+
+    timekeeping: Ignore the bogus sleep time if pm_trace is enabled
+    
+    Power management suspend/resume tracing (ab)uses the RTC to store
+    suspend/resume information persistently. As a consequence the RTC value is
+    clobbered when timekeeping is resumed and tries to inject the sleep time.
+    
+    Commit a4f8f6667f09 ("timekeeping: Cap array access in timekeeping_debug")
+    plugged a out of bounds array access in the timekeeping debug code which
+    was caused by the clobbered RTC value, but we still use the clobbered RTC
+    value for sleep time injection into kernel timekeeping, which will result
+    in random adjustments depending on the stored "hash" value.
+    
+    To prevent this keep track of the RTC clobbering and ignore the invalid RTC
+    timestamp at resume. If the system resumed successfully clear the flag,
+    which marks the RTC as unusable, warn the user about the RTC clobber and
+    recommend to adjust the RTC with 'ntpdate' or 'rdate'.
+    
+    [jstultz: Fixed up pr_warn formating, and implemented suggestions from Ingo]
+    [ tglx: Rewrote changelog ]
+    
+    Originally-from: Thomas Gleixner <tglx@linutronix.de>
+    Signed-off-by: Chen Yu <yu.c.chen@intel.com>
+    Signed-off-by: John Stultz <john.stultz@linaro.org>
+    Acked-by: Pavel Machek <pavel@ucw.cz>
+    Acked-by: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Prarit Bhargava <prarit@redhat.com>
+    Cc: "Rafael J. Wysocki" <rjw@rjwysocki.net>
+    Cc: Richard Cochran <richardcochran@gmail.com>
+    Cc: Xunlei Pang <xlpang@redhat.com>
+    Cc: Len Brown <lenb@kernel.org>
+    Link: http://lkml.kernel.org/r/1480372524-15181-3-git-send-email-john.stultz@linaro.org
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+
+diff --git a/include/linux/pm-trace.h b/include/linux/pm-trace.h
+index ecbde7a5548e..7b78793f07d7 100644
+--- a/include/linux/pm-trace.h
++++ b/include/linux/pm-trace.h
+@@ -1,11 +1,17 @@
+ #ifndef PM_TRACE_H
+ #define PM_TRACE_H
+ 
++#include <linux/types.h>
+ #ifdef CONFIG_PM_TRACE
+ #include <asm/pm-trace.h>
+-#include <linux/types.h>
+ 
+ extern int pm_trace_enabled;
++extern bool pm_trace_rtc_abused;
++
++static inline bool pm_trace_rtc_valid(void)
++{
++	return !pm_trace_rtc_abused;
++}
+ 
+ static inline int pm_trace_is_enabled(void)
+ {
+@@ -24,6 +30,7 @@ extern int show_trace_dev_match(char *buf, size_t size);
+ 
+ #else
+ 
++static inline bool pm_trace_rtc_valid(void) { return true; }
+ static inline int pm_trace_is_enabled(void) { return 0; }
+ 
+ #define TRACE_DEVICE(dev) do { } while (0)

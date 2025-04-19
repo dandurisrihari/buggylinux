@@ -1,0 +1,126 @@
+commit ba17674fe02909fef049fd4b620a2805bdb8c693
+Author: Latchesar Ionkov <lucho@ionkov.net>
+Date:   Wed Oct 17 14:31:07 2007 -0500
+
+    9p: attach-per-user
+    
+    The 9P2000 protocol requires the authentication and permission checks to be
+    done in the file server. For that reason every user that accesses the file
+    server tree has to authenticate and attach to the server separately.
+    Multiple users can share the same connection to the server.
+    
+    Currently v9fs does a single attach and executes all I/O operations as a
+    single user. This makes using v9fs in multiuser environment unsafe as it
+    depends on the client doing the permission checking.
+    
+    This patch improves the 9P2000 support by allowing every user to attach
+    separately. The patch defines three modes of access (new mount option
+    'access'):
+    
+    - attach-per-user (access=user) (default mode for 9P2000.u)
+     If a user tries to access a file served by v9fs for the first time, v9fs
+     sends an attach command to the server (Tattach) specifying the user. If
+     the attach succeeds, the user can access the v9fs tree.
+     As there is no uname->uid (string->integer) mapping yet, this mode works
+     only with the 9P2000.u dialect.
+    
+    - allow only one user to access the tree (access=<uid>)
+     Only the user with uid can access the v9fs tree. Other users that attempt
+     to access it will get EPERM error.
+    
+    - do all operations as a single user (access=any) (default for 9P2000)
+     V9fs does a single attach and all operations are done as a single user.
+     If this mode is selected, the v9fs behavior is identical with the current
+     one.
+    
+    Signed-off-by: Latchesar Ionkov <lucho@ionkov.net>
+    Signed-off-by: Eric Van Hensbergen <ericvh@gmail.com>
+
+diff --git a/fs/9p/vfs_inode.c b/fs/9p/vfs_inode.c
+index f08a35d2973a..175b4d9bf3f8 100644
+--- a/fs/9p/vfs_inode.c
++++ b/fs/9p/vfs_inode.c
+@@ -364,7 +364,7 @@ static int v9fs_remove(struct inode *dir, struct dentry *file, int rmdir)
+ 	file_inode = file->d_inode;
+ 	v9ses = v9fs_inode2v9ses(file_inode);
+ 	v9fid = v9fs_fid_clone(file);
+-	if(IS_ERR(v9fid))
++	if (IS_ERR(v9fid))
+ 		return PTR_ERR(v9fid);
+ 
+ 	return p9_client_remove(v9fid);
+@@ -398,7 +398,7 @@ v9fs_create(struct v9fs_session_info *v9ses, struct inode *dir,
+ 	fid = NULL;
+ 	name = (char *) dentry->d_name.name;
+ 	dfid = v9fs_fid_clone(dentry->d_parent);
+-	if(IS_ERR(dfid)) {
++	if (IS_ERR(dfid)) {
+ 		err = PTR_ERR(dfid);
+ 		dfid = NULL;
+ 		goto error;
+@@ -432,7 +432,7 @@ v9fs_create(struct v9fs_session_info *v9ses, struct inode *dir,
+ 		goto error;
+ 	}
+ 
+-	if(v9ses->cache)
++	if (v9ses->cache)
+ 		dentry->d_op = &v9fs_cached_dentry_operations;
+ 	else
+ 		dentry->d_op = &v9fs_dentry_operations;
+@@ -593,7 +593,7 @@ static struct dentry *v9fs_vfs_lookup(struct inode *dir, struct dentry *dentry,
+ 	if (result < 0)
+ 		goto error;
+ 
+-	if((fid->qid.version)&&(v9ses->cache))
++	if ((fid->qid.version) && (v9ses->cache))
+ 		dentry->d_op = &v9fs_cached_dentry_operations;
+ 	else
+ 		dentry->d_op = &v9fs_dentry_operations;
+@@ -658,17 +658,17 @@ v9fs_vfs_rename(struct inode *old_dir, struct dentry *old_dentry,
+ 	old_inode = old_dentry->d_inode;
+ 	v9ses = v9fs_inode2v9ses(old_inode);
+ 	oldfid = v9fs_fid_lookup(old_dentry);
+-	if(IS_ERR(oldfid))
++	if (IS_ERR(oldfid))
+ 		return PTR_ERR(oldfid);
+ 
+ 	olddirfid = v9fs_fid_clone(old_dentry->d_parent);
+-	if(IS_ERR(olddirfid)) {
++	if (IS_ERR(olddirfid)) {
+ 		retval = PTR_ERR(olddirfid);
+ 		goto done;
+ 	}
+ 
+ 	newdirfid = v9fs_fid_clone(new_dentry->d_parent);
+-	if(IS_ERR(newdirfid)) {
++	if (IS_ERR(newdirfid)) {
+ 		retval = PTR_ERR(newdirfid);
+ 		goto clunk_olddir;
+ 	}
+@@ -682,7 +682,7 @@ v9fs_vfs_rename(struct inode *old_dir, struct dentry *old_dentry,
+ 	}
+ 
+ 	v9fs_blank_wstat(&wstat);
+-	wstat.muid = v9ses->name;
++	wstat.muid = v9ses->uname;
+ 	wstat.name = (char *) new_dentry->d_name.name;
+ 	retval = p9_client_wstat(oldfid, &wstat);
+ 
+@@ -887,7 +887,7 @@ static int v9fs_readlink(struct dentry *dentry, char *buffer, int buflen)
+ 	retval = -EPERM;
+ 	v9ses = v9fs_inode2v9ses(dentry->d_inode);
+ 	fid = v9fs_fid_lookup(dentry);
+-	if(IS_ERR(fid))
++	if (IS_ERR(fid))
+ 		return PTR_ERR(fid);
+ 
+ 	if (!v9fs_extended(v9ses))
+@@ -1070,7 +1070,7 @@ v9fs_vfs_link(struct dentry *old_dentry, struct inode *dir,
+ 		old_dentry->d_name.name);
+ 
+ 	oldfid = v9fs_fid_clone(old_dentry);
+-	if(IS_ERR(oldfid))
++	if (IS_ERR(oldfid))
+ 		return PTR_ERR(oldfid);
+ 
+ 	name = __getname();

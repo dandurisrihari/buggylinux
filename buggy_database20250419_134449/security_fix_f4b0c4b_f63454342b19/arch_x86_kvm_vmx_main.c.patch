@@ -1,0 +1,376 @@
+commit f4b0c4b508364fde023e4f7b9f23f7e38c663dfe
+Merge: 2e9250022e9f cba23f333fed
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Wed May 15 14:46:43 2024 -0700
+
+    Merge tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm
+    
+    Pull KVM updates from Paolo Bonzini:
+     "ARM:
+    
+       - Move a lot of state that was previously stored on a per vcpu basis
+         into a per-CPU area, because it is only pertinent to the host while
+         the vcpu is loaded. This results in better state tracking, and a
+         smaller vcpu structure.
+    
+       - Add full handling of the ERET/ERETAA/ERETAB instructions in nested
+         virtualisation. The last two instructions also require emulating
+         part of the pointer authentication extension. As a result, the trap
+         handling of pointer authentication has been greatly simplified.
+    
+       - Turn the global (and not very scalable) LPI translation cache into
+         a per-ITS, scalable cache, making non directly injected LPIs much
+         cheaper to make visible to the vcpu.
+    
+       - A batch of pKVM patches, mostly fixes and cleanups, as the
+         upstreaming process seems to be resuming. Fingers crossed!
+    
+       - Allocate PPIs and SGIs outside of the vcpu structure, allowing for
+         smaller EL2 mapping and some flexibility in implementing more or
+         less than 32 private IRQs.
+    
+       - Purge stale mpidr_data if a vcpu is created after the MPIDR map has
+         been created.
+    
+       - Preserve vcpu-specific ID registers across a vcpu reset.
+    
+       - Various minor cleanups and improvements.
+    
+      LoongArch:
+    
+       - Add ParaVirt IPI support
+    
+       - Add software breakpoint support
+    
+       - Add mmio trace events support
+    
+      RISC-V:
+    
+       - Support guest breakpoints using ebreak
+    
+       - Introduce per-VCPU mp_state_lock and reset_cntx_lock
+    
+       - Virtualize SBI PMU snapshot and counter overflow interrupts
+    
+       - New selftests for SBI PMU and Guest ebreak
+    
+       - Some preparatory work for both TDX and SNP page fault handling.
+    
+         This also cleans up the page fault path, so that the priorities of
+         various kinds of fauls (private page, no memory, write to read-only
+         slot, etc.) are easier to follow.
+    
+      x86:
+    
+       - Minimize amount of time that shadow PTEs remain in the special
+         REMOVED_SPTE state.
+    
+         This is a state where the mmu_lock is held for reading but
+         concurrent accesses to the PTE have to spin; shortening its use
+         allows other vCPUs to repopulate the zapped region while the zapper
+         finishes tearing down the old, defunct page tables.
+    
+       - Advertise the max mappable GPA in the "guest MAXPHYADDR" CPUID
+         field, which is defined by hardware but left for software use.
+    
+         This lets KVM communicate its inability to map GPAs that set bits
+         51:48 on hosts without 5-level nested page tables. Guest firmware
+         is expected to use the information when mapping BARs; this avoids
+         that they end up at a legal, but unmappable, GPA.
+    
+       - Fixed a bug where KVM would not reject accesses to MSR that aren't
+         supposed to exist given the vCPU model and/or KVM configuration.
+    
+       - As usual, a bunch of code cleanups.
+    
+      x86 (AMD):
+    
+       - Implement a new and improved API to initialize SEV and SEV-ES VMs,
+         which will also be extendable to SEV-SNP.
+    
+         The new API specifies the desired encryption in KVM_CREATE_VM and
+         then separately initializes the VM. The new API also allows
+         customizing the desired set of VMSA features; the features affect
+         the measurement of the VM's initial state, and therefore enabling
+         them cannot be done tout court by the hypervisor.
+    
+         While at it, the new API includes two bugfixes that couldn't be
+         applied to the old one without a flag day in userspace or without
+         affecting the initial measurement. When a SEV-ES VM is created with
+         the new VM type, KVM_GET_REGS/KVM_SET_REGS and friends are rejected
+         once the VMSA has been encrypted. Also, the FPU and AVX state will
+         be synchronized and encrypted too.
+    
+       - Support for GHCB version 2 as applicable to SEV-ES guests.
+    
+         This, once more, is only accessible when using the new
+         KVM_SEV_INIT2 flow for initialization of SEV-ES VMs.
+    
+      x86 (Intel):
+    
+       - An initial bunch of prerequisite patches for Intel TDX were merged.
+    
+         They generally don't do anything interesting. The only somewhat
+         user visible change is a new debugging mode that checks that KVM's
+         MMU never triggers a #VE virtualization exception in the guest.
+    
+       - Clear vmcs.EXIT_QUALIFICATION when synthesizing an EPT Misconfig
+         VM-Exit to L1, as per the SDM.
+    
+      Generic:
+    
+       - Use vfree() instead of kvfree() for allocations that always use
+         vcalloc() or __vcalloc().
+    
+       - Remove .change_pte() MMU notifier - the changes to non-KVM code are
+         small and Andrew Morton asked that I also take those through the
+         KVM tree.
+    
+         The callback was only ever implemented by KVM (which was also the
+         original user of MMU notifiers) but it had been nonfunctional ever
+         since calls to set_pte_at_notify were wrapped with
+         invalidate_range_start and invalidate_range_end... in 2012.
+    
+      Selftests:
+    
+       - Enhance the demand paging test to allow for better reporting and
+         stressing of UFFD performance.
+    
+       - Convert the steal time test to generate TAP-friendly output.
+    
+       - Fix a flaky false positive in the xen_shinfo_test due to comparing
+         elapsed time across two different clock domains.
+    
+       - Skip the MONITOR/MWAIT test if the host doesn't actually support
+         MWAIT.
+    
+       - Avoid unnecessary use of "sudo" in the NX hugepage test wrapper
+         shell script, to play nice with running in a minimal userspace
+         environment.
+    
+       - Allow skipping the RSEQ test's sanity check that the vCPU was able
+         to complete a reasonable number of KVM_RUNs, as the assert can fail
+         on a completely valid setup.
+    
+         If the test is run on a large-ish system that is otherwise idle,
+         and the test isn't affined to a low-ish number of CPUs, the vCPU
+         task can be repeatedly migrated to CPUs that are in deep sleep
+         states, which results in the vCPU having very little net runtime
+         before the next migration due to high wakeup latencies.
+    
+       - Define _GNU_SOURCE for all selftests to fix a warning that was
+         introduced by a change to kselftest_harness.h late in the 6.9
+         cycle, and because forcing every test to #define _GNU_SOURCE is
+         painful.
+    
+       - Provide a global pseudo-RNG instance for all tests, so that library
+         code can generate random, but determinstic numbers.
+    
+       - Use the global pRNG to randomly force emulation of select writes
+         from guest code on x86, e.g. to help validate KVM's emulation of
+         locked accesses.
+    
+       - Allocate and initialize x86's GDT, IDT, TSS, segments, and default
+         exception handlers at VM creation, instead of forcing tests to
+         manually trigger the related setup.
+    
+      Documentation:
+    
+       - Fix a goof in the KVM_CREATE_GUEST_MEMFD documentation"
+    
+    * tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm: (225 commits)
+      selftests/kvm: remove dead file
+      KVM: selftests: arm64: Test vCPU-scoped feature ID registers
+      KVM: selftests: arm64: Test that feature ID regs survive a reset
+      KVM: selftests: arm64: Store expected register value in set_id_regs
+      KVM: selftests: arm64: Rename helper in set_id_regs to imply VM scope
+      KVM: arm64: Only reset vCPU-scoped feature ID regs once
+      KVM: arm64: Reset VM feature ID regs from kvm_reset_sys_regs()
+      KVM: arm64: Rename is_id_reg() to imply VM scope
+      KVM: arm64: Destroy mpidr_data for 'late' vCPU creation
+      KVM: arm64: Use hVHE in pKVM by default on CPUs with VHE support
+      KVM: arm64: Fix hvhe/nvhe early alias parsing
+      KVM: SEV: Allow per-guest configuration of GHCB protocol version
+      KVM: SEV: Add GHCB handling for termination requests
+      KVM: SEV: Add GHCB handling for Hypervisor Feature Support requests
+      KVM: SEV: Add support to handle AP reset MSR protocol
+      KVM: x86: Explicitly zero kvm_caps during vendor module load
+      KVM: x86: Fully re-initialize supported_mce_cap on vendor module load
+      KVM: x86: Fully re-initialize supported_vm_types on vendor module load
+      KVM: x86/mmu: Sanity check that __kvm_faultin_pfn() doesn't create noslot pfns
+      KVM: x86/mmu: Initialize kvm_page_fault's pfn and hva to error values
+      ...
+
+diff --cc arch/x86/kvm/vmx/main.c
+index 000000000000,7c546ad3e4c9..d4ed681785fd
+mode 000000,100644..100644
+--- a/arch/x86/kvm/vmx/main.c
++++ b/arch/x86/kvm/vmx/main.c
+@@@ -1,0 -1,166 +1,167 @@@
++ // SPDX-License-Identifier: GPL-2.0
++ #include <linux/moduleparam.h>
++ 
++ #include "x86_ops.h"
++ #include "vmx.h"
++ #include "nested.h"
++ #include "pmu.h"
+++#include "posted_intr.h"
++ 
++ #define VMX_REQUIRED_APICV_INHIBITS				\
++ 	(BIT(APICV_INHIBIT_REASON_DISABLE)|			\
++ 	 BIT(APICV_INHIBIT_REASON_ABSENT) |			\
++ 	 BIT(APICV_INHIBIT_REASON_HYPERV) |			\
++ 	 BIT(APICV_INHIBIT_REASON_BLOCKIRQ) |			\
++ 	 BIT(APICV_INHIBIT_REASON_PHYSICAL_ID_ALIASED) |	\
++ 	 BIT(APICV_INHIBIT_REASON_APIC_ID_MODIFIED) |		\
++ 	 BIT(APICV_INHIBIT_REASON_APIC_BASE_MODIFIED))
++ 
++ struct kvm_x86_ops vt_x86_ops __initdata = {
++ 	.name = KBUILD_MODNAME,
++ 
++ 	.check_processor_compatibility = vmx_check_processor_compat,
++ 
++ 	.hardware_unsetup = vmx_hardware_unsetup,
++ 
++ 	.hardware_enable = vmx_hardware_enable,
++ 	.hardware_disable = vmx_hardware_disable,
++ 	.has_emulated_msr = vmx_has_emulated_msr,
++ 
++ 	.vm_size = sizeof(struct kvm_vmx),
++ 	.vm_init = vmx_vm_init,
++ 	.vm_destroy = vmx_vm_destroy,
++ 
++ 	.vcpu_precreate = vmx_vcpu_precreate,
++ 	.vcpu_create = vmx_vcpu_create,
++ 	.vcpu_free = vmx_vcpu_free,
++ 	.vcpu_reset = vmx_vcpu_reset,
++ 
++ 	.prepare_switch_to_guest = vmx_prepare_switch_to_guest,
++ 	.vcpu_load = vmx_vcpu_load,
++ 	.vcpu_put = vmx_vcpu_put,
++ 
++ 	.update_exception_bitmap = vmx_update_exception_bitmap,
++ 	.get_msr_feature = vmx_get_msr_feature,
++ 	.get_msr = vmx_get_msr,
++ 	.set_msr = vmx_set_msr,
++ 	.get_segment_base = vmx_get_segment_base,
++ 	.get_segment = vmx_get_segment,
++ 	.set_segment = vmx_set_segment,
++ 	.get_cpl = vmx_get_cpl,
++ 	.get_cs_db_l_bits = vmx_get_cs_db_l_bits,
++ 	.is_valid_cr0 = vmx_is_valid_cr0,
++ 	.set_cr0 = vmx_set_cr0,
++ 	.is_valid_cr4 = vmx_is_valid_cr4,
++ 	.set_cr4 = vmx_set_cr4,
++ 	.set_efer = vmx_set_efer,
++ 	.get_idt = vmx_get_idt,
++ 	.set_idt = vmx_set_idt,
++ 	.get_gdt = vmx_get_gdt,
++ 	.set_gdt = vmx_set_gdt,
++ 	.set_dr7 = vmx_set_dr7,
++ 	.sync_dirty_debug_regs = vmx_sync_dirty_debug_regs,
++ 	.cache_reg = vmx_cache_reg,
++ 	.get_rflags = vmx_get_rflags,
++ 	.set_rflags = vmx_set_rflags,
++ 	.get_if_flag = vmx_get_if_flag,
++ 
++ 	.flush_tlb_all = vmx_flush_tlb_all,
++ 	.flush_tlb_current = vmx_flush_tlb_current,
++ 	.flush_tlb_gva = vmx_flush_tlb_gva,
++ 	.flush_tlb_guest = vmx_flush_tlb_guest,
++ 
++ 	.vcpu_pre_run = vmx_vcpu_pre_run,
++ 	.vcpu_run = vmx_vcpu_run,
++ 	.handle_exit = vmx_handle_exit,
++ 	.skip_emulated_instruction = vmx_skip_emulated_instruction,
++ 	.update_emulated_instruction = vmx_update_emulated_instruction,
++ 	.set_interrupt_shadow = vmx_set_interrupt_shadow,
++ 	.get_interrupt_shadow = vmx_get_interrupt_shadow,
++ 	.patch_hypercall = vmx_patch_hypercall,
++ 	.inject_irq = vmx_inject_irq,
++ 	.inject_nmi = vmx_inject_nmi,
++ 	.inject_exception = vmx_inject_exception,
++ 	.cancel_injection = vmx_cancel_injection,
++ 	.interrupt_allowed = vmx_interrupt_allowed,
++ 	.nmi_allowed = vmx_nmi_allowed,
++ 	.get_nmi_mask = vmx_get_nmi_mask,
++ 	.set_nmi_mask = vmx_set_nmi_mask,
++ 	.enable_nmi_window = vmx_enable_nmi_window,
++ 	.enable_irq_window = vmx_enable_irq_window,
++ 	.update_cr8_intercept = vmx_update_cr8_intercept,
++ 	.set_virtual_apic_mode = vmx_set_virtual_apic_mode,
++ 	.set_apic_access_page_addr = vmx_set_apic_access_page_addr,
++ 	.refresh_apicv_exec_ctrl = vmx_refresh_apicv_exec_ctrl,
++ 	.load_eoi_exitmap = vmx_load_eoi_exitmap,
++ 	.apicv_pre_state_restore = vmx_apicv_pre_state_restore,
++ 	.required_apicv_inhibits = VMX_REQUIRED_APICV_INHIBITS,
++ 	.hwapic_irr_update = vmx_hwapic_irr_update,
++ 	.hwapic_isr_update = vmx_hwapic_isr_update,
++ 	.guest_apic_has_interrupt = vmx_guest_apic_has_interrupt,
++ 	.sync_pir_to_irr = vmx_sync_pir_to_irr,
++ 	.deliver_interrupt = vmx_deliver_interrupt,
++ 	.dy_apicv_has_pending_interrupt = pi_has_pending_interrupt,
++ 
++ 	.set_tss_addr = vmx_set_tss_addr,
++ 	.set_identity_map_addr = vmx_set_identity_map_addr,
++ 	.get_mt_mask = vmx_get_mt_mask,
++ 
++ 	.get_exit_info = vmx_get_exit_info,
++ 
++ 	.vcpu_after_set_cpuid = vmx_vcpu_after_set_cpuid,
++ 
++ 	.has_wbinvd_exit = cpu_has_vmx_wbinvd_exit,
++ 
++ 	.get_l2_tsc_offset = vmx_get_l2_tsc_offset,
++ 	.get_l2_tsc_multiplier = vmx_get_l2_tsc_multiplier,
++ 	.write_tsc_offset = vmx_write_tsc_offset,
++ 	.write_tsc_multiplier = vmx_write_tsc_multiplier,
++ 
++ 	.load_mmu_pgd = vmx_load_mmu_pgd,
++ 
++ 	.check_intercept = vmx_check_intercept,
++ 	.handle_exit_irqoff = vmx_handle_exit_irqoff,
++ 
++ 	.sched_in = vmx_sched_in,
++ 
++ 	.cpu_dirty_log_size = PML_ENTITY_NUM,
++ 	.update_cpu_dirty_logging = vmx_update_cpu_dirty_logging,
++ 
++ 	.nested_ops = &vmx_nested_ops,
++ 
++ 	.pi_update_irte = vmx_pi_update_irte,
++ 	.pi_start_assignment = vmx_pi_start_assignment,
++ 
++ #ifdef CONFIG_X86_64
++ 	.set_hv_timer = vmx_set_hv_timer,
++ 	.cancel_hv_timer = vmx_cancel_hv_timer,
++ #endif
++ 
++ 	.setup_mce = vmx_setup_mce,
++ 
++ #ifdef CONFIG_KVM_SMM
++ 	.smi_allowed = vmx_smi_allowed,
++ 	.enter_smm = vmx_enter_smm,
++ 	.leave_smm = vmx_leave_smm,
++ 	.enable_smi_window = vmx_enable_smi_window,
++ #endif
++ 
++ 	.check_emulate_instruction = vmx_check_emulate_instruction,
++ 	.apic_init_signal_blocked = vmx_apic_init_signal_blocked,
++ 	.migrate_timers = vmx_migrate_timers,
++ 
++ 	.msr_filter_changed = vmx_msr_filter_changed,
++ 	.complete_emulated_msr = kvm_complete_insn_gp,
++ 
++ 	.vcpu_deliver_sipi_vector = kvm_vcpu_deliver_sipi_vector,
++ 
++ 	.get_untagged_addr = vmx_get_untagged_addr,
++ };
++ 
++ struct kvm_x86_init_ops vt_init_ops __initdata = {
++ 	.hardware_setup = vmx_hardware_setup,
++ 	.handle_intel_pt_intr = NULL,
++ 
++ 	.runtime_ops = &vt_x86_ops,
++ 	.pmu_ops = &intel_pmu_ops,
++ };

@@ -1,0 +1,75 @@
+commit ac0488ef59a54e42ad744ae1a91fafbcb2566a06
+Author: Jakub Kicinski <kuba@kernel.org>
+Date:   Tue Mar 21 17:59:21 2017 -0700
+
+    nfp: disable FW on reconfiguration errors
+    
+    Since we no longer need to keep the FW enabled for .ndo_close()
+    to work we can always stop FW after reconfiguration failure.
+    This seems to make most FWs more resilient to faults (at least
+    in error injection scenarios).
+    
+    Signed-off-by: Jakub Kicinski <jakub.kicinski@netronome.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/netronome/nfp/nfp_net_common.c b/drivers/net/ethernet/netronome/nfp/nfp_net_common.c
+index e12353a7c83c..8f2da128ce0f 100644
+--- a/drivers/net/ethernet/netronome/nfp/nfp_net_common.c
++++ b/drivers/net/ethernet/netronome/nfp/nfp_net_common.c
+@@ -2127,7 +2127,11 @@ nfp_net_tx_ring_hw_cfg_write(struct nfp_net *nn,
+ 	nn_writeb(nn, NFP_NET_CFG_TXR_VEC(idx), tx_ring->r_vec->irq_entry);
+ }
+ 
+-static int __nfp_net_set_config_and_enable(struct nfp_net *nn)
++/**
++ * nfp_net_set_config_and_enable() - Write control BAR and enable NFP
++ * @nn:      NFP Net device to reconfigure
++ */
++static int nfp_net_set_config_and_enable(struct nfp_net *nn)
+ {
+ 	u32 new_ctrl, update = 0;
+ 	unsigned int r;
+@@ -2176,6 +2180,10 @@ static int __nfp_net_set_config_and_enable(struct nfp_net *nn)
+ 
+ 	nn_writel(nn, NFP_NET_CFG_CTRL, new_ctrl);
+ 	err = nfp_net_reconfig(nn, update);
++	if (err) {
++		nfp_net_clear_config_and_disable(nn);
++		return err;
++	}
+ 
+ 	nn->dp.ctrl = new_ctrl;
+ 
+@@ -2191,22 +2199,7 @@ static int __nfp_net_set_config_and_enable(struct nfp_net *nn)
+ 		udp_tunnel_get_rx_info(nn->dp.netdev);
+ 	}
+ 
+-	return err;
+-}
+-
+-/**
+- * nfp_net_set_config_and_enable() - Write control BAR and enable NFP
+- * @nn:      NFP Net device to reconfigure
+- */
+-static int nfp_net_set_config_and_enable(struct nfp_net *nn)
+-{
+-	int err;
+-
+-	err = __nfp_net_set_config_and_enable(nn);
+-	if (err)
+-		nfp_net_clear_config_and_disable(nn);
+-
+-	return err;
++	return 0;
+ }
+ 
+ /**
+@@ -2447,7 +2440,7 @@ static int nfp_net_dp_swap_enable(struct nfp_net *nn, struct nfp_net_dp *dp)
+ 			return err;
+ 	}
+ 
+-	return __nfp_net_set_config_and_enable(nn);
++	return nfp_net_set_config_and_enable(nn);
+ }
+ 
+ struct nfp_net_dp *nfp_net_clone_dp(struct nfp_net *nn)

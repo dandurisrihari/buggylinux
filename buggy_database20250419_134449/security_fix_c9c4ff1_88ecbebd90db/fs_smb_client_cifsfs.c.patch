@@ -1,0 +1,48 @@
+commit c9c4ff12df110feb1b91951010f673f4b16e49e8
+Author: David Howells <dhowells@redhat.com>
+Date:   Mon Nov 27 13:58:07 2023 +0000
+
+    netfs: Move pinning-for-writeback from fscache to netfs
+    
+    Move the resource pinning-for-writeback from fscache code to netfslib code.
+    This is used to keep a cache backing object pinned whilst we have dirty
+    pages on the netfs inode in the pagecache such that VM writeback will be
+    able to reach it.
+    
+    Whilst we're at it, switch the parameters of netfs_unpin_writeback() to
+    match ->write_inode() so that it can be used for that directly.
+    
+    Note that this mechanism could be more generically useful than that for
+    network filesystems.  Quite often they have to keep around other resources
+    (e.g. authentication tokens or network connections) until the writeback is
+    complete.
+    
+    Signed-off-by: David Howells <dhowells@redhat.com>
+    Reviewed-by: Jeff Layton <jlayton@kernel.org>
+    cc: linux-cachefs@redhat.com
+    cc: linux-fsdevel@vger.kernel.org
+    cc: linux-mm@kvack.org
+
+diff --git a/fs/smb/client/cifsfs.c b/fs/smb/client/cifsfs.c
+index 2131638f26d0..96a65cf9b5ec 100644
+--- a/fs/smb/client/cifsfs.c
++++ b/fs/smb/client/cifsfs.c
+@@ -429,7 +429,7 @@ static void
+ cifs_evict_inode(struct inode *inode)
+ {
+ 	truncate_inode_pages_final(&inode->i_data);
+-	if (inode->i_state & I_PINNING_FSCACHE_WB)
++	if (inode->i_state & I_PINNING_NETFS_WB)
+ 		cifs_fscache_unuse_inode_cookie(inode, true);
+ 	cifs_fscache_release_inode_cookie(inode);
+ 	clear_inode(inode);
+@@ -792,8 +792,7 @@ static int cifs_show_stats(struct seq_file *s, struct dentry *root)
+ 
+ static int cifs_write_inode(struct inode *inode, struct writeback_control *wbc)
+ {
+-	fscache_unpin_writeback(wbc, cifs_inode_cookie(inode));
+-	return 0;
++	return netfs_unpin_writeback(inode, wbc);
+ }
+ 
+ static int cifs_drop_inode(struct inode *inode)

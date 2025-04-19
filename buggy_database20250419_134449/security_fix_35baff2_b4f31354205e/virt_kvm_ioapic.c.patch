@@ -1,0 +1,47 @@
+commit 35baff256d8fe1eec0b8988fcb5cde80df7bfa1a
+Author: Mark McLoughlin <markmc@redhat.com>
+Date:   Fri Jul 4 18:23:15 2008 +0100
+
+    KVM: IOAPIC: Fix level-triggered irq injection hang
+    
+    The "remote_irr" variable is used to indicate an interrupt
+    which has been received by the LAPIC, but not acked.
+    
+    In our EOI handler, we unset remote_irr and re-inject the
+    interrupt if the interrupt line is still asserted.
+    
+    However, we do not set remote_irr here, leading to a
+    situation where if kvm_ioapic_set_irq() is called, then we go
+    ahead and call ioapic_service(). This means that IRR is
+    re-asserted even though the interrupt is currently in service
+    (i.e. LAPIC IRR is cleared and ISR/TMR set)
+    
+    The issue with this is that when the currently executing
+    interrupt handler finishes and writes LAPIC EOI, then TMR is
+    unset and EOI sent to the IOAPIC. Since IRR is now asserted,
+    but TMR is not, then when the second interrupt is handled,
+    no EOI is sent and if there is any pending interrupt, it is
+    not re-injected.
+    
+    This fixes a hang only seen while running mke2fs -j on an
+    8Gb virtio disk backed by a fully sparse raw file, with
+    aliguori "avoid fragmented virtio-blk transfers by copying"
+    changes.
+    
+    Signed-off-by: Mark McLoughlin <markmc@redhat.com>
+    Acked-by: Marcelo Tosatti <mtosatti@redhat.com>
+    Signed-off-by: Avi Kivity <avi@qumranet.com>
+
+diff --git a/virt/kvm/ioapic.c b/virt/kvm/ioapic.c
+index 1dcf9f3d1107..44589088941f 100644
+--- a/virt/kvm/ioapic.c
++++ b/virt/kvm/ioapic.c
+@@ -278,7 +278,7 @@ static void __kvm_ioapic_update_eoi(struct kvm_ioapic *ioapic, int gsi)
+ 
+ 	ent->fields.remote_irr = 0;
+ 	if (!ent->fields.mask && (ioapic->irr & (1 << gsi)))
+-		ioapic_deliver(ioapic, gsi);
++		ioapic_service(ioapic, gsi);
+ }
+ 
+ void kvm_ioapic_update_eoi(struct kvm *kvm, int vector)

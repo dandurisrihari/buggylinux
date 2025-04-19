@@ -1,0 +1,71 @@
+commit b14d067e850c19921cec2200bd8d179edf6a1aa6
+Author: Dan Williams <dan.j.williams@intel.com>
+Date:   Fri Aug 26 10:17:54 2022 -0700
+
+    xfs: quiet notify_failure EOPNOTSUPP cases
+    
+    Patch series "mm, xfs, dax: Fixes for memory_failure() handling".
+    
+    I failed to run the memory error injection section of the ndctl test suite
+    on linux-next prior to the merge window and as a result some bugs were
+    missed.  While the new enabling targeted reflink enabled XFS filesystems
+    the bugs cropped up in the surrounding cases of DAX error injection on
+    ext4-fsdax and device-dax.
+    
+    One new assumption / clarification in this set is the notion that if a
+    filesystem's ->notify_failure() handler returns -EOPNOTSUPP, then it must
+    be the case that the fsdax usage of page->index and page->mapping are
+    valid.  I am fairly certain this is true for xfs_dax_notify_failure(), but
+    would appreciate another set of eyes.
+    
+    
+    This patch (of 4):
+    
+    XFS always registers dax_holder_operations regardless of whether the
+    filesystem is capable of handling the notifications.  The expectation is
+    that if the notify_failure handler cannot run then there are no scenarios
+    where it needs to run.  In other words the expected semantic is that
+    page->index and page->mapping are valid for memory_failure() when the
+    conditions that cause -EOPNOTSUPP in xfs_dax_notify_failure() are present.
+    
+    A fallback to the generic memory_failure() path is expected so do not warn
+    when that happens.
+    
+    Link: https://lkml.kernel.org/r/166153426798.2758201.15108211981034512993.stgit@dwillia2-xfh.jf.intel.com
+    Link: https://lkml.kernel.org/r/166153427440.2758201.6709480562966161512.stgit@dwillia2-xfh.jf.intel.com
+    Fixes: 6f643c57d57c ("xfs: implement ->notify_failure() for XFS")
+    Signed-off-by: Dan Williams <dan.j.williams@intel.com>
+    Reviewed-by: Christoph Hellwig <hch@lst.de>
+    Cc: Shiyang Ruan <ruansy.fnst@fujitsu.com>
+    Cc: Darrick J. Wong <djwong@kernel.org>
+    Cc: Al Viro <viro@zeniv.linux.org.uk>
+    Cc: Dave Chinner <david@fromorbit.com>
+    Cc: Goldwyn Rodrigues <rgoldwyn@suse.de>
+    Cc: Jane Chu <jane.chu@oracle.com>
+    Cc: Matthew Wilcox <willy@infradead.org>
+    Cc: Miaohe Lin <linmiaohe@huawei.com>
+    Cc: Naoya Horiguchi <naoya.horiguchi@nec.com>
+    Cc: Ritesh Harjani <riteshh@linux.ibm.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+
+diff --git a/fs/xfs/xfs_notify_failure.c b/fs/xfs/xfs_notify_failure.c
+index 69d9c83ea4b2..01e2721589c4 100644
+--- a/fs/xfs/xfs_notify_failure.c
++++ b/fs/xfs/xfs_notify_failure.c
+@@ -181,7 +181,7 @@ xfs_dax_notify_failure(
+ 	}
+ 
+ 	if (mp->m_rtdev_targp && mp->m_rtdev_targp->bt_daxdev == dax_dev) {
+-		xfs_warn(mp,
++		xfs_debug(mp,
+ 			 "notify_failure() not supported on realtime device!");
+ 		return -EOPNOTSUPP;
+ 	}
+@@ -194,7 +194,7 @@ xfs_dax_notify_failure(
+ 	}
+ 
+ 	if (!xfs_has_rmapbt(mp)) {
+-		xfs_warn(mp, "notify_failure() needs rmapbt enabled!");
++		xfs_debug(mp, "notify_failure() needs rmapbt enabled!");
+ 		return -EOPNOTSUPP;
+ 	}

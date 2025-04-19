@@ -1,0 +1,163 @@
+commit 7beaa24ba49717419e24d1f6321e8b3c265a719c
+Merge: 07b75260ebc2 9842df62004f
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Thu May 19 11:27:09 2016 -0700
+
+    Merge tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm
+    
+    Pull KVM updates from Paolo Bonzini:
+     "Small release overall.
+    
+      x86:
+       - miscellaneous fixes
+       - AVIC support (local APIC virtualization, AMD version)
+    
+      s390:
+       - polling for interrupts after a VCPU goes to halted state is now
+         enabled for s390
+       - use hardware provided information about facility bits that do not
+         need any hypervisor activity, and other fixes for cpu models and
+         facilities
+       - improve perf output
+       - floating interrupt controller improvements.
+    
+      MIPS:
+       - miscellaneous fixes
+    
+      PPC:
+       - bugfixes only
+    
+      ARM:
+       - 16K page size support
+       - generic firmware probing layer for timer and GIC
+    
+      Christoffer Dall (KVM-ARM maintainer) says:
+        "There are a few changes in this pull request touching things
+         outside KVM, but they should all carry the necessary acks and it
+         made the merge process much easier to do it this way."
+    
+      though actually the irqchip maintainers' acks didn't make it into the
+      patches.  Marc Zyngier, who is both irqchip and KVM-ARM maintainer,
+      later acked at http://mid.gmane.org/573351D1.4060303@arm.com ('more
+      formally and for documentation purposes')"
+    
+    * tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm: (82 commits)
+      KVM: MTRR: remove MSR 0x2f8
+      KVM: x86: make hwapic_isr_update and hwapic_irr_update look the same
+      svm: Manage vcpu load/unload when enable AVIC
+      svm: Do not intercept CR8 when enable AVIC
+      svm: Do not expose x2APIC when enable AVIC
+      KVM: x86: Introducing kvm_x86_ops.apicv_post_state_restore
+      svm: Add VMEXIT handlers for AVIC
+      svm: Add interrupt injection via AVIC
+      KVM: x86: Detect and Initialize AVIC support
+      svm: Introduce new AVIC VMCB registers
+      KVM: split kvm_vcpu_wake_up from kvm_vcpu_kick
+      KVM: x86: Introducing kvm_x86_ops VCPU blocking/unblocking hooks
+      KVM: x86: Introducing kvm_x86_ops VM init/destroy hooks
+      KVM: x86: Rename kvm_apic_get_reg to kvm_lapic_get_reg
+      KVM: x86: Misc LAPIC changes to expose helper functions
+      KVM: shrink halt polling even more for invalid wakeups
+      KVM: s390: set halt polling to 80 microseconds
+      KVM: halt_polling: provide a way to qualify wakeups during poll
+      KVM: PPC: Book3S HV: Re-enable XICS fast path for irqfd-generated interrupts
+      kvm: Conditionally register IRQ bypass consumer
+      ...
+
+diff --cc drivers/irqchip/irq-gic.c
+index 1de20e14a721,3f1d9fd3a462..b4e647179346
+--- a/drivers/irqchip/irq-gic.c
++++ b/drivers/irqchip/irq-gic.c
+@@@ -1248,30 -1191,29 +1250,53 @@@ static bool gic_check_eoimode(struct de
+  	return true;
+  }
+  
+- static int gic_of_setup(struct gic_chip_data *gic, struct device_node *node)
+++static int __init gic_of_setup(struct gic_chip_data *gic, struct device_node *node)
+ +{
+ +	if (!gic || !node)
+ +		return -EINVAL;
+ +
+ +	gic->raw_dist_base = of_iomap(node, 0);
+ +	if (WARN(!gic->raw_dist_base, "unable to map gic dist registers\n"))
+ +		goto error;
+ +
+ +	gic->raw_cpu_base = of_iomap(node, 1);
+ +	if (WARN(!gic->raw_cpu_base, "unable to map gic cpu registers\n"))
+ +		goto error;
+ +
+ +	if (of_property_read_u32(node, "cpu-offset", &gic->percpu_offset))
+ +		gic->percpu_offset = 0;
+ +
+ +	return 0;
+ +
+ +error:
+ +	gic_teardown(gic);
+ +
+ +	return -ENOMEM;
+ +}
+ +
++ static void __init gic_of_setup_kvm_info(struct device_node *node)
++ {
++ 	int ret;
++ 	struct resource *vctrl_res = &gic_v2_kvm_info.vctrl;
++ 	struct resource *vcpu_res = &gic_v2_kvm_info.vcpu;
++ 
++ 	gic_v2_kvm_info.type = GIC_V2;
++ 
++ 	gic_v2_kvm_info.maint_irq = irq_of_parse_and_map(node, 0);
++ 	if (!gic_v2_kvm_info.maint_irq)
++ 		return;
++ 
++ 	ret = of_address_to_resource(node, 2, vctrl_res);
++ 	if (ret)
++ 		return;
++ 
++ 	ret = of_address_to_resource(node, 3, vcpu_res);
++ 	if (ret)
++ 		return;
++ 
++ 	gic_set_kvm_info(&gic_v2_kvm_info);
++ }
++ 
+  int __init
+  gic_of_init(struct device_node *node, struct device_node *parent)
+  {
+@@@ -1294,17 -1235,18 +1319,19 @@@
+  	 * Disable split EOI/Deactivate if either HYP is not available
+  	 * or the CPU interface is too small.
+  	 */
+ -	if (gic_cnt == 0 && !gic_check_eoimode(node, &cpu_base))
+ +	if (gic_cnt == 0 && !gic_check_eoimode(node, &gic->raw_cpu_base))
+  		static_key_slow_dec(&supports_deactivate);
+  
+ -	if (of_property_read_u32(node, "cpu-offset", &percpu_offset))
+ -		percpu_offset = 0;
+ +	ret = __gic_init_bases(gic, -1, &node->fwnode);
+ +	if (ret) {
+ +		gic_teardown(gic);
+ +		return ret;
+ +	}
+  
+- 	if (!gic_cnt)
+ -	__gic_init_bases(gic_cnt, -1, dist_base, cpu_base, percpu_offset,
+ -			 &node->fwnode);
++ 	if (!gic_cnt) {
+  		gic_init_physaddr(node);
++ 		gic_of_setup_kvm_info(node);
++ 	}
+  
+  	if (parent) {
+  		irq = irq_of_parse_and_map(node, 0);
+@@@ -1401,8 -1391,8 +1476,8 @@@ static int __init gic_v2_acpi_init(stru
+  		return -EINVAL;
+  	}
+  
+- 	gic->raw_cpu_base = ioremap(cpu_phy_base, ACPI_GIC_CPU_IF_MEM_SIZE);
+ -	cpu_base = ioremap(acpi_data.cpu_phys_base, ACPI_GIC_CPU_IF_MEM_SIZE);
+ -	if (!cpu_base) {
+++	gic->raw_cpu_base = ioremap(acpi_data.cpu_phys_base, ACPI_GIC_CPU_IF_MEM_SIZE);
+ +	if (!gic->raw_cpu_base) {
+  		pr_err("Unable to map GICC registers\n");
+  		return -ENOMEM;
+  	}

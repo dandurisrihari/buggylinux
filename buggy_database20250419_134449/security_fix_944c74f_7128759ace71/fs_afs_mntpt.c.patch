@@ -1,0 +1,86 @@
+commit 944c74f472f926785b1948efa0e73e2f1b3b539b
+Author: David Howells <dhowells@redhat.com>
+Date:   Thu Mar 16 16:27:45 2017 +0000
+
+    afs: Distinguish mountpoints from symlinks by file mode alone
+    
+    In AFS, mountpoints appear as symlinks with mode 0644 and normal symlinks
+    have mode 0777, so use this to distinguish them rather than reading the
+    content and parsing it.  In the case of a mountpoint, the symlink body is a
+    formatted string indicating the location of the target volume.
+    
+    Note that with this, kAFS no longer 'pre-fetches' the contents of symlinks,
+    so afs_readpage() may fail with an access-denial because when the VFS calls
+    d_automount(), it wraps the call in an credentials override that sets the
+    initial creds - thereby preventing access to the caller's keyrings and the
+    authentication keys held therein.
+    
+    To this end, a patch reverting that change to the VFS is required also.
+    
+    Reported-by: Jeffrey Altman <jaltman@auristor.com>
+    Signed-off-by: David Howells <dhowells@redhat.com>
+
+diff --git a/fs/afs/mntpt.c b/fs/afs/mntpt.c
+index d4fb0afc0097..bd3b65cde282 100644
+--- a/fs/afs/mntpt.c
++++ b/fs/afs/mntpt.c
+@@ -46,59 +46,6 @@ static DECLARE_DELAYED_WORK(afs_mntpt_expiry_timer, afs_mntpt_expiry_timed_out);
+ 
+ static unsigned long afs_mntpt_expiry_timeout = 10 * 60;
+ 
+-/*
+- * check a symbolic link to see whether it actually encodes a mountpoint
+- * - sets the AFS_VNODE_MOUNTPOINT flag on the vnode appropriately
+- */
+-int afs_mntpt_check_symlink(struct afs_vnode *vnode, struct key *key)
+-{
+-	struct page *page;
+-	size_t size;
+-	char *buf;
+-	int ret;
+-
+-	_enter("{%x:%u,%u}",
+-	       vnode->fid.vid, vnode->fid.vnode, vnode->fid.unique);
+-
+-	/* read the contents of the symlink into the pagecache */
+-	page = read_cache_page(AFS_VNODE_TO_I(vnode)->i_mapping, 0,
+-			       afs_page_filler, key);
+-	if (IS_ERR(page)) {
+-		ret = PTR_ERR(page);
+-		goto out;
+-	}
+-
+-	ret = -EIO;
+-	if (PageError(page))
+-		goto out_free;
+-
+-	buf = kmap(page);
+-
+-	/* examine the symlink's contents */
+-	size = vnode->status.size;
+-	_debug("symlink to %*.*s", (int) size, (int) size, buf);
+-
+-	if (size > 2 &&
+-	    (buf[0] == '%' || buf[0] == '#') &&
+-	    buf[size - 1] == '.'
+-	    ) {
+-		_debug("symlink is a mountpoint");
+-		spin_lock(&vnode->lock);
+-		set_bit(AFS_VNODE_MOUNTPOINT, &vnode->flags);
+-		vnode->vfs_inode.i_flags |= S_AUTOMOUNT;
+-		spin_unlock(&vnode->lock);
+-	}
+-
+-	ret = 0;
+-
+-	kunmap(page);
+-out_free:
+-	put_page(page);
+-out:
+-	_leave(" = %d", ret);
+-	return ret;
+-}
+-
+ /*
+  * no valid lookup procedure on this sort of dir
+  */

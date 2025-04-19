@@ -1,0 +1,69 @@
+commit 79741dd35713ff4f6fd0eafd59fa94e8a4ba922d
+Author: Martin Schwidefsky <schwidefsky@de.ibm.com>
+Date:   Wed Dec 31 15:11:38 2008 +0100
+
+    [PATCH] idle cputime accounting
+    
+    The cpu time spent by the idle process actually doing something is
+    currently accounted as idle time. This is plain wrong, the architectures
+    that support VIRT_CPU_ACCOUNTING=y can do better: distinguish between the
+    time spent doing nothing and the time spent by idle doing work. The first
+    is accounted with account_idle_time and the second with account_system_time.
+    The architectures that use the account_xxx_time interface directly and not
+    the account_xxx_ticks interface now need to do the check for the idle
+    process in their arch code. In particular to improve the system vs true
+    idle time accounting the arch code needs to measure the true idle time
+    instead of just testing for the idle process.
+    To improve the tick based accounting as well we would need an architecture
+    primitive that can tell us if the pt_regs of the interrupted context
+    points to the magic instruction that halts the cpu.
+    
+    In addition idle time is no more added to the stime of the idle process.
+    This field now contains the system time of the idle process as it should
+    be. On systems without VIRT_CPU_ACCOUNTING this will always be zero as
+    every tick that occurs while idle is running will be accounted as idle
+    time.
+    
+    This patch contains the necessary common code changes to be able to
+    distinguish idle system time and true idle time. The architectures with
+    support for VIRT_CPU_ACCOUNTING need some changes to exploit this.
+    
+    Signed-off-by: Martin Schwidefsky <schwidefsky@de.ibm.com>
+
+diff --git a/arch/x86/xen/time.c b/arch/x86/xen/time.c
+index c9f7cda48ed7..732e52dc991a 100644
+--- a/arch/x86/xen/time.c
++++ b/arch/x86/xen/time.c
+@@ -132,8 +132,7 @@ static void do_stolen_accounting(void)
+ 	*snap = state;
+ 
+ 	/* Add the appropriate number of ticks of stolen time,
+-	   including any left-overs from last time.  Passing NULL to
+-	   account_steal_time accounts the time as stolen. */
++	   including any left-overs from last time. */
+ 	stolen = runnable + offline + __get_cpu_var(residual_stolen);
+ 
+ 	if (stolen < 0)
+@@ -141,11 +140,10 @@ static void do_stolen_accounting(void)
+ 
+ 	ticks = iter_div_u64_rem(stolen, NS_PER_TICK, &stolen);
+ 	__get_cpu_var(residual_stolen) = stolen;
+-	account_steal_time(NULL, ticks);
++	account_steal_ticks(ticks);
+ 
+ 	/* Add the appropriate number of ticks of blocked time,
+-	   including any left-overs from last time.  Passing idle to
+-	   account_steal_time accounts the time as idle/wait. */
++	   including any left-overs from last time. */
+ 	blocked += __get_cpu_var(residual_blocked);
+ 
+ 	if (blocked < 0)
+@@ -153,7 +151,7 @@ static void do_stolen_accounting(void)
+ 
+ 	ticks = iter_div_u64_rem(blocked, NS_PER_TICK, &blocked);
+ 	__get_cpu_var(residual_blocked) = blocked;
+-	account_steal_time(idle_task(smp_processor_id()), ticks);
++	account_idle_ticks(ticks);
+ }
+ 
+ /*

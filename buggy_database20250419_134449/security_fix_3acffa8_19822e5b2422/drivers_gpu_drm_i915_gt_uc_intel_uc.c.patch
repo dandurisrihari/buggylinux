@@ -1,0 +1,79 @@
+commit 3acffa8cba757a60c0fe24874e0456df8e494778
+Author: Daniele Ceraolo Spurio <daniele.ceraolospurio@intel.com>
+Date:   Tue Feb 18 14:33:25 2020 -0800
+
+    drm/i915/uc: Abort early on uc_init failure
+    
+    Now that we can differentiate wants vs uses GuC/HuC, intel_uc_init is
+    restricted to running only if we have successfully fetched the required
+    blob(s) and are committed to using the microcontroller(s).
+    The only remaining thing that can go wrong in uc_init is the allocation
+    of GuC/HuC related objects; if we get such a failure better to bail out
+    immediately instead of wedging later, like we do for e.g.
+    intel_engines_init, since without objects we can't use the HW, including
+    not being able to attempt the firmware load.
+    
+    While at it, remove the unneeded fw_cleanup call (this is handled
+    outside of gt_init) and add a probe failure injection point for testing.
+    Also, update the logs for <g/h>uc_init failures to probe_failure() since
+    they will cause the driver load to fail.
+    
+    Signed-off-by: Daniele Ceraolo Spurio <daniele.ceraolospurio@intel.com>
+    Cc: Michal Wajdeczko <michal.wajdeczko@intel.com>
+    Cc: John Harrison <John.C.Harrison@Intel.com>
+    Cc: Matthew Brost <matthew.brost@intel.com>
+    Reviewed-by: Fernando Pacheco <fernando.pacheco@intel.com>
+    Reviewed-by: Michal Wajdeczko <michal.wajdeczko@intel.com>
+    Reviewed-by: Andi Shyti <andi.shyti@intel.com>
+    Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Link: https://patchwork.freedesktop.org/patch/msgid/20200218223327.11058-8-daniele.ceraolospurio@intel.com
+
+diff --git a/drivers/gpu/drm/i915/gt/uc/intel_uc.c b/drivers/gpu/drm/i915/gt/uc/intel_uc.c
+index f81b4d40bc90..1c74518c2459 100644
+--- a/drivers/gpu/drm/i915/gt/uc/intel_uc.c
++++ b/drivers/gpu/drm/i915/gt/uc/intel_uc.c
+@@ -273,7 +273,7 @@ static void __uc_cleanup_firmwares(struct intel_uc *uc)
+ 	intel_uc_fw_cleanup_fetch(&uc->guc.fw);
+ }
+ 
+-static void __uc_init(struct intel_uc *uc)
++static int __uc_init(struct intel_uc *uc)
+ {
+ 	struct intel_guc *guc = &uc->guc;
+ 	struct intel_huc *huc = &uc->huc;
+@@ -282,19 +282,29 @@ static void __uc_init(struct intel_uc *uc)
+ 	GEM_BUG_ON(!intel_uc_wants_guc(uc));
+ 
+ 	if (!intel_uc_uses_guc(uc))
+-		return;
++		return 0;
++
++	if (i915_inject_probe_failure(uc_to_gt(uc)->i915))
++		return -ENOMEM;
+ 
+ 	/* XXX: GuC submission is unavailable for now */
+ 	GEM_BUG_ON(intel_uc_uses_guc_submission(uc));
+ 
+ 	ret = intel_guc_init(guc);
+-	if (ret) {
+-		intel_uc_fw_cleanup_fetch(&huc->fw);
+-		return;
++	if (ret)
++		return ret;
++
++	if (intel_uc_uses_huc(uc)) {
++		ret = intel_huc_init(huc);
++		if (ret)
++			goto out_guc;
+ 	}
+ 
+-	if (intel_uc_uses_huc(uc))
+-		intel_huc_init(huc);
++	return 0;
++
++out_guc:
++	intel_guc_fini(guc);
++	return ret;
+ }
+ 
+ static void __uc_fini(struct intel_uc *uc)

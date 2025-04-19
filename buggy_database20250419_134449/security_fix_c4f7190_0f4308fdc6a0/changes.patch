@@ -1,0 +1,112 @@
+diff --cc Documentation/virt/kvm/api.rst
+index 56c6fca6219f,3f210953c135..94804c2f45ac
+--- a/Documentation/virt/kvm/api.rst
++++ b/Documentation/virt/kvm/api.rst
+@@@ -6844,28 -6738,12 +6857,37 @@@ The KVM_XEN_HVM_CONFIG_RUNSTATE flag in
+  features KVM_XEN_VCPU_ATTR_TYPE_RUNSTATE_ADDR/_CURRENT/_DATA/_ADJUST are
+  supported by the KVM_XEN_VCPU_SET_ATTR/KVM_XEN_VCPU_GET_ATTR ioctls.
+  
+ -8.31 KVM_CAP_PTP_KVM
+ +8.31 KVM_CAP_PPC_MULTITCE
+ +-------------------------
+ +
+ +:Capability: KVM_CAP_PPC_MULTITCE
+ +:Architectures: ppc
+ +:Type: vm
+ +
+ +This capability means the kernel is capable of handling hypercalls
+ +H_PUT_TCE_INDIRECT and H_STUFF_TCE without passing those into the user
+ +space. This significantly accelerates DMA operations for PPC KVM guests.
+ +User space should expect that its handlers for these hypercalls
+ +are not going to be called if user space previously registered LIOBN
+ +in KVM (via KVM_CREATE_SPAPR_TCE or similar calls).
+ +
+ +In order to enable H_PUT_TCE_INDIRECT and H_STUFF_TCE use in the guest,
+ +user space might have to advertise it for the guest. For example,
+ +IBM pSeries (sPAPR) guest starts using them if "hcall-multi-tce" is
+ +present in the "ibm,hypertas-functions" device-tree property.
+ +
+ +The hypercalls mentioned above may or may not be processed successfully
+ +in the kernel based fast path. If they can not be handled by the kernel,
+ +they will get passed on to user space. So user space still has to have
+ +an implementation for these despite the in kernel acceleration.
+ +
+ +This capability is always enabled.
+++
+++8.32 KVM_CAP_PTP_KVM
++ --------------------
++ 
++ :Architectures: arm64
++ 
++ This capability indicates that the KVM virtual PTP service is
++ supported in the host. A VMM can check whether the service is
++ available to the guest on migration.
+ -
+diff --cc arch/arm64/include/asm/kvm_host.h
+index 3a708be3ed71,0b926f027895..7cd7d5c8c4bc
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@@ -400,11 -404,9 +404,13 @@@ struct kvm_vcpu_arch 
+  #define KVM_ARM64_GUEST_HAS_PTRAUTH	(1 << 7) /* PTRAUTH exposed to guest */
+  #define KVM_ARM64_PENDING_EXCEPTION	(1 << 8) /* Exception pending */
+  #define KVM_ARM64_EXCEPT_MASK		(7 << 9) /* Target EL/MODE */
++ #define KVM_ARM64_DEBUG_STATE_SAVE_SPE	(1 << 12) /* Save SPE context if active  */
++ #define KVM_ARM64_DEBUG_STATE_SAVE_TRBE	(1 << 13) /* Save TRBE context if active  */
+  
+ +#define KVM_GUESTDBG_VALID_MASK (KVM_GUESTDBG_ENABLE | \
+ +				 KVM_GUESTDBG_USE_SW_BP | \
+ +				 KVM_GUESTDBG_USE_HW | \
+ +				 KVM_GUESTDBG_SINGLESTEP)
+  /*
+   * When KVM_ARM64_PENDING_EXCEPTION is set, KVM_ARM64_EXCEPT_MASK can
+   * take the following values:
+diff --cc arch/arm64/kvm/arm.c
+index 0d92a4e5fe80,4808aca8c87c..1cb39c0803a4
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@@ -206,10 -206,9 +206,11 @@@ int kvm_vm_ioctl_check_extension(struc
+  	case KVM_CAP_ARM_INJECT_EXT_DABT:
+  	case KVM_CAP_SET_GUEST_DEBUG:
+  	case KVM_CAP_VCPU_ATTRIBUTES:
++ 	case KVM_CAP_PTP_KVM:
+  		r = 1;
+  		break;
+ +	case KVM_CAP_SET_GUEST_DEBUG2:
+ +		return KVM_GUESTDBG_VALID_MASK;
+  	case KVM_CAP_ARM_SET_DEVICE_ADDR:
+  		r = 1;
+  		break;
+diff --cc arch/arm64/kvm/mmu.c
+index 35728231e9a0,cd4d51ae3d4a..c5d1f3c87dbd
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@@ -839,9 -923,13 +923,13 @@@ static int user_mem_abort(struct kvm_vc
+  	 * gfn_to_pfn_prot (which calls get_user_pages), so that we don't risk
+  	 * the page we just got a reference to gets unmapped before we have a
+  	 * chance to grab the mmu_lock, which ensure that if the page gets
+ -	 * unmapped afterwards, the call to kvm_unmap_hva will take it away
+ +	 * unmapped afterwards, the call to kvm_unmap_gfn will take it away
+  	 * from us again properly. This smp_rmb() interacts with the smp_wmb()
+  	 * in kvm_mmu_notifier_invalidate_<page|range_end>.
++ 	 *
++ 	 * Besides, __gfn_to_pfn_memslot() instead of gfn_to_pfn_prot() is
++ 	 * used to avoid unnecessary overhead introduced to locate the memory
++ 	 * slot because it's always fixed even @gfn is adjusted for huge pages.
+  	 */
+  	smp_rmb();
+  
+diff --cc include/uapi/linux/kvm.h
+index d76533498543,0e0f70c0d0dc..3fd9a7e9d90c
+--- a/include/uapi/linux/kvm.h
++++ b/include/uapi/linux/kvm.h
+@@@ -1078,9 -1078,7 +1078,10 @@@ struct kvm_ppc_resize_hpt 
+  #define KVM_CAP_DIRTY_LOG_RING 192
+  #define KVM_CAP_X86_BUS_LOCK_EXIT 193
+  #define KVM_CAP_PPC_DAWR1 194
+ -#define KVM_CAP_PTP_KVM 195
+ +#define KVM_CAP_SET_GUEST_DEBUG2 195
+ +#define KVM_CAP_SGX_ATTRIBUTE 196
+ +#define KVM_CAP_VM_COPY_ENC_CONTEXT_FROM 197
+++#define KVM_CAP_PTP_KVM 198
+  
+  #ifdef KVM_CAP_IRQ_ROUTING

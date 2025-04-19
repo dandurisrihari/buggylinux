@@ -1,0 +1,56 @@
+commit 67f2df3b82d091ed095d0e47e1f3a9d3e18e4e41
+Author: Kees Cook <kees@kernel.org>
+Date:   Mon Jul 1 12:12:59 2024 -0700
+
+    mm/slab: Plumb kmem_buckets into __do_kmalloc_node()
+    
+    Introduce CONFIG_SLAB_BUCKETS which provides the infrastructure to
+    support separated kmalloc buckets (in the following kmem_buckets_create()
+    patches and future codetag-based separation). Since this will provide
+    a mitigation for a very common case of exploits, it is recommended to
+    enable this feature for general purpose distros. By default, the new
+    Kconfig will be enabled if CONFIG_SLAB_FREELIST_HARDENED is enabled (and
+    it is added to the hardening.config Kconfig fragment).
+    
+    To be able to choose which buckets to allocate from, make the buckets
+    available to the internal kmalloc interfaces by adding them as the
+    second argument, rather than depending on the buckets being chosen from
+    the fixed set of global buckets. Where the bucket is not available,
+    pass NULL, which means "use the default system kmalloc bucket set"
+    (the prior existing behavior), as implemented in kmalloc_slab().
+    
+    To avoid adding the extra argument when !CONFIG_SLAB_BUCKETS, only the
+    top-level macros and static inlines use the buckets argument (where
+    they are stripped out and compiled out respectively). The actual extern
+    functions can then be built without the argument, and the internals
+    fall back to the global kmalloc buckets unconditionally.
+    
+    Co-developed-by: Vlastimil Babka <vbabka@suse.cz>
+    Signed-off-by: Kees Cook <kees@kernel.org>
+    Signed-off-by: Vlastimil Babka <vbabka@suse.cz>
+
+diff --git a/mm/slab.h b/mm/slab.h
+index b16e63191578..d5e8034af9d5 100644
+--- a/mm/slab.h
++++ b/mm/slab.h
+@@ -403,16 +403,18 @@ static inline unsigned int size_index_elem(unsigned int bytes)
+  * KMALLOC_MAX_CACHE_SIZE and the caller must check that.
+  */
+ static inline struct kmem_cache *
+-kmalloc_slab(size_t size, gfp_t flags, unsigned long caller)
++kmalloc_slab(size_t size, kmem_buckets *b, gfp_t flags, unsigned long caller)
+ {
+ 	unsigned int index;
+ 
++	if (!b)
++		b = &kmalloc_caches[kmalloc_type(flags, caller)];
+ 	if (size <= 192)
+ 		index = kmalloc_size_index[size_index_elem(size)];
+ 	else
+ 		index = fls(size - 1);
+ 
+-	return kmalloc_caches[kmalloc_type(flags, caller)][index];
++	return (*b)[index];
+ }
+ 
+ gfp_t kmalloc_fix_flags(gfp_t flags);

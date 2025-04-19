@@ -1,0 +1,62 @@
+diff --git a/arch/x86/kvm/svm/svm.c b/arch/x86/kvm/svm/svm.c
+index a713c803a3a3..0d299f3f921e 100644
+--- a/arch/x86/kvm/svm/svm.c
++++ b/arch/x86/kvm/svm/svm.c
+@@ -4189,6 +4189,18 @@ static noinstr void svm_vcpu_enter_exit(struct kvm_vcpu *vcpu, bool spec_ctrl_in
+ 
+ 	guest_state_enter_irqoff();
+ 
++	/*
++	 * Set RFLAGS.IF prior to VMRUN, as the host's RFLAGS.IF at the time of
++	 * VMRUN controls whether or not physical IRQs are masked (KVM always
++	 * runs with V_INTR_MASKING_MASK).  Toggle RFLAGS.IF here to avoid the
++	 * temptation to do STI+VMRUN+CLI, as AMD CPUs bleed the STI shadow
++	 * into guest state if delivery of an event during VMRUN triggers a
++	 * #VMEXIT, and the guest_state transitions already tell lockdep that
++	 * IRQs are being enabled/disabled.  Note!  GIF=0 for the entirety of
++	 * this path, so IRQs aren't actually unmasked while running host code.
++	 */
++	raw_local_irq_enable();
++
+ 	amd_clear_divider();
+ 
+ 	if (sev_es_guest(vcpu->kvm))
+@@ -4197,6 +4209,8 @@ static noinstr void svm_vcpu_enter_exit(struct kvm_vcpu *vcpu, bool spec_ctrl_in
+ 	else
+ 		__svm_vcpu_run(svm, spec_ctrl_intercepted);
+ 
++	raw_local_irq_disable();
++
+ 	guest_state_exit_irqoff();
+ }
+ 
+diff --git a/arch/x86/kvm/svm/vmenter.S b/arch/x86/kvm/svm/vmenter.S
+index 2ed80aea3bb1..0c61153b275f 100644
+--- a/arch/x86/kvm/svm/vmenter.S
++++ b/arch/x86/kvm/svm/vmenter.S
+@@ -170,12 +170,8 @@ SYM_FUNC_START(__svm_vcpu_run)
+ 	mov VCPU_RDI(%_ASM_DI), %_ASM_DI
+ 
+ 	/* Enter guest mode */
+-	sti
+-
+ 3:	vmrun %_ASM_AX
+ 4:
+-	cli
+-
+ 	/* Pop @svm to RAX while it's the only available register. */
+ 	pop %_ASM_AX
+ 
+@@ -340,12 +336,8 @@ SYM_FUNC_START(__svm_sev_es_vcpu_run)
+ 	mov KVM_VMCB_pa(%rax), %rax
+ 
+ 	/* Enter guest mode */
+-	sti
+-
+ 1:	vmrun %rax
+-
+-2:	cli
+-
++2:
+ 	/* IMPORTANT: Stuff the RSB immediately after VM-Exit, before RET! */
+ 	FILL_RETURN_BUFFER %rax, RSB_CLEAR_LOOPS, X86_FEATURE_RSB_VMEXIT

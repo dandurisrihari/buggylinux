@@ -1,0 +1,73 @@
+commit 2d31c684a053b46f75b230899d00c0f56708243d
+Author: Davide Zini <davidezini2@gmail.com>
+Date:   Tue Jan 3 15:55:02 2023 +0100
+
+    block, bfq: inject I/O to underutilized actuators
+    
+    The main service scheme of BFQ for sync I/O is serving one sync
+    bfq_queue at a time, for a while. In particular, BFQ enforces this
+    scheme when it deems the latter necessary to boost throughput or
+    to preserve service guarantees. Unfortunately, when BFQ enforces
+    this policy, only one actuator at a time gets served for a while,
+    because each bfq_queue contains I/O only for one actuator. The
+    other actuators may remain underutilized.
+    
+    Actually, BFQ may serve (inject) extra I/O, taken from other
+    bfq_queues, in parallel with that of the in-service queue. This
+    injection mechanism may provide the ground for dealing also with
+    the above actuator-underutilization problem. Yet BFQ does not take
+    the actuator load into account when choosing which queue to pick
+    extra I/O from. In addition, BFQ may happen to inject extra I/O
+    only when the in-service queue is temporarily empty.
+    
+    In view of these facts, this commit extends the
+    injection mechanism in such a way that the latter:
+    (1) takes into account also the actuator load;
+    (2) checks such a load on each dispatch, and injects I/O for an
+        underutilized actuator, if there is one and there is I/O for it.
+    
+    To perform the check in (2), this commit introduces a load
+    threshold, currently set to 4.  A linear scan of each actuator is
+    performed, until an actuator is found for which the following two
+    conditions hold: the load of the actuator is below the threshold,
+    and there is at least one non-in-service queue that contains I/O
+    for that actuator. If such a pair (actuator, queue) is found, then
+    the head request of that queue is returned for dispatch, instead
+    of the head request of the in-service queue.
+    
+    We have set the threshold, empirically, to the minimum possible
+    value for which an actuator is fully utilized, or close to be
+    fully utilized. By doing so, injected I/O 'steals' as few
+    drive-queue slots as possibile to the in-service queue. This
+    reduces as much as possible the probability that the service of
+    I/O from the in-service bfq_queue gets delayed because of slot
+    exhaustion, i.e., because all the slots of the drive queue are
+    filled with I/O injected from other queues (NCQ provides for 32
+    slots).
+    
+    This new mechanism also counters actuator underutilization in the
+    case of asymmetric configurations of bfq_queues. Namely if there
+    are few bfq_queues containing I/O for some actuators and many
+    bfq_queues containing I/O for other actuators. Or if the
+    bfq_queues containing I/O for some actuators have lower weights
+    than the other bfq_queues.
+    
+    Reviewed-by: Damien Le Moal <damien.lemoal@opensource.wdc.com>
+    Signed-off-by: Paolo Valente <paolo.valente@linaro.org>
+    Signed-off-by: Davide Zini <davidezini2@gmail.com>
+    Link: https://lore.kernel.org/r/20230103145503.71712-8-paolo.valente@linaro.org
+    Signed-off-by: Jens Axboe <axboe@kernel.dk>
+
+diff --git a/block/bfq-wf2q.c b/block/bfq-wf2q.c
+index ea4c3d757fdd..7941b6f07391 100644
+--- a/block/bfq-wf2q.c
++++ b/block/bfq-wf2q.c
+@@ -493,7 +493,7 @@ static void bfq_active_insert(struct bfq_service_tree *st,
+ 	bfq_update_active_tree(node);
+ 
+ 	if (bfqq)
+-		list_add(&bfqq->bfqq_list, &bfqq->bfqd->active_list);
++		list_add(&bfqq->bfqq_list, &bfqq->bfqd->active_list[bfqq->actuator_idx]);
+ 
+ 	bfq_inc_active_entities(entity);
+ }

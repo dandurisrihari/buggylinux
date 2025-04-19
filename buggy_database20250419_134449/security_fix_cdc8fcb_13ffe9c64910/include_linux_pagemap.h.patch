@@ -1,0 +1,146 @@
+commit cdc8fcb49905c0b67e355e027cb462ee168ffaa3
+Merge: 382625d0d432 fa15bafb71fd
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Mon Aug 3 13:01:22 2020 -0700
+
+    Merge tag 'for-5.9/io_uring-20200802' of git://git.kernel.dk/linux-block
+    
+    Pull io_uring updates from Jens Axboe:
+     "Lots of cleanups in here, hardening the code and/or making it easier
+      to read and fixing bugs, but a core feature/change too adding support
+      for real async buffered reads. With the latter in place, we just need
+      buffered write async support and we're done relying on kthreads for
+      the fast path. In detail:
+    
+       - Cleanup how memory accounting is done on ring setup/free (Bijan)
+    
+       - sq array offset calculation fixup (Dmitry)
+    
+       - Consistently handle blocking off O_DIRECT submission path (me)
+    
+       - Support proper async buffered reads, instead of relying on kthread
+         offload for that. This uses the page waitqueue to drive retries
+         from task_work, like we handle poll based retry. (me)
+    
+       - IO completion optimizations (me)
+    
+       - Fix race with accounting and ring fd install (me)
+    
+       - Support EPOLLEXCLUSIVE (Jiufei)
+    
+       - Get rid of the io_kiocb unionizing, made possible by shrinking
+         other bits (Pavel)
+    
+       - Completion side cleanups (Pavel)
+    
+       - Cleanup REQ_F_ flags handling, and kill off many of them (Pavel)
+    
+       - Request environment grabbing cleanups (Pavel)
+    
+       - File and socket read/write cleanups (Pavel)
+    
+       - Improve kiocb_set_rw_flags() (Pavel)
+    
+       - Tons of fixes and cleanups (Pavel)
+    
+       - IORING_SQ_NEED_WAKEUP clear fix (Xiaoguang)"
+    
+    * tag 'for-5.9/io_uring-20200802' of git://git.kernel.dk/linux-block: (127 commits)
+      io_uring: flip if handling after io_setup_async_rw
+      fs: optimise kiocb_set_rw_flags()
+      io_uring: don't touch 'ctx' after installing file descriptor
+      io_uring: get rid of atomic FAA for cq_timeouts
+      io_uring: consolidate *_check_overflow accounting
+      io_uring: fix stalled deferred requests
+      io_uring: fix racy overflow count reporting
+      io_uring: deduplicate __io_complete_rw()
+      io_uring: de-unionise io_kiocb
+      io-wq: update hash bits
+      io_uring: fix missing io_queue_linked_timeout()
+      io_uring: mark ->work uninitialised after cleanup
+      io_uring: deduplicate io_grab_files() calls
+      io_uring: don't do opcode prep twice
+      io_uring: clear IORING_SQ_NEED_WAKEUP after executing task works
+      io_uring: batch put_task_struct()
+      tasks: add put_task_struct_many()
+      io_uring: return locked and pinned page accounting
+      io_uring: don't miscount pinned memory
+      io_uring: don't open-code recv kbuf managment
+      ...
+
+diff --cc include/linux/pagemap.h
+index cf2468da68e9,7386bc67cc5a..d1f4eff605ad
+--- a/include/linux/pagemap.h
++++ b/include/linux/pagemap.h
+@@@ -496,8 -496,67 +496,35 @@@ static inline pgoff_t linear_page_index
+  	return pgoff;
+  }
+  
++ /* This has the same layout as wait_bit_key - see fs/cachefiles/rdwr.c */
++ struct wait_page_key {
++ 	struct page *page;
++ 	int bit_nr;
++ 	int page_match;
++ };
++ 
++ struct wait_page_queue {
++ 	struct page *page;
++ 	int bit_nr;
++ 	wait_queue_entry_t wait;
++ };
++ 
+ -static inline int wake_page_match(struct wait_page_queue *wait_page,
+++static inline bool wake_page_match(struct wait_page_queue *wait_page,
++ 				  struct wait_page_key *key)
++ {
++ 	if (wait_page->page != key->page)
+ -	       return 0;
+++	       return false;
++ 	key->page_match = 1;
++ 
++ 	if (wait_page->bit_nr != key->bit_nr)
+ -		return 0;
+ -
+ -	/*
+ -	 * Stop walking if it's locked.
+ -	 * Is this safe if put_and_wait_on_page_locked() is in use?
+ -	 * Yes: the waker must hold a reference to this page, and if PG_locked
+ -	 * has now already been set by another task, that task must also hold
+ -	 * a reference to the *same usage* of this page; so there is no need
+ -	 * to walk on to wake even the put_and_wait_on_page_locked() callers.
+ -	 */
+ -	if (test_bit(key->bit_nr, &key->page->flags))
+ -		return -1;
+ -
+ -	return 1;
+ -}
+ -
+ -static inline int kiocb_wait_page_queue_init(struct kiocb *kiocb,
+ -					     struct wait_page_queue *wait,
+ -					     wait_queue_func_t func,
+ -					     void *data)
+ -{
+ -	/* Can't support async wakeup with polled IO */
+ -	if (kiocb->ki_flags & IOCB_HIPRI)
+ -		return -EINVAL;
+ -	if (kiocb->ki_filp->f_mode & FMODE_BUF_RASYNC) {
+ -		wait->wait.func = func;
+ -		wait->wait.private = data;
+ -		wait->wait.flags = 0;
+ -		INIT_LIST_HEAD(&wait->wait.entry);
+ -		kiocb->ki_flags |= IOCB_WAITQ;
+ -		kiocb->ki_waitq = wait;
+ -		return 0;
+ -	}
+++		return false;
++ 
+ -	return -EOPNOTSUPP;
+++	return true;
++ }
++ 
+  extern void __lock_page(struct page *page);
+  extern int __lock_page_killable(struct page *page);
++ extern int __lock_page_async(struct page *page, struct wait_page_queue *wait);
+  extern int __lock_page_or_retry(struct page *page, struct mm_struct *mm,
+  				unsigned int flags);
+  extern void unlock_page(struct page *page);

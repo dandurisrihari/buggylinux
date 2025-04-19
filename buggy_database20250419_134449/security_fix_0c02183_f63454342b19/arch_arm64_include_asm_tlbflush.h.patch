@@ -1,0 +1,214 @@
+commit 0c02183427b4d2002992f26d4917c1263c5d4a7f
+Merge: 4a0fc73da97e d011151616e7
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Thu Sep 7 13:52:20 2023 -0700
+
+    Merge tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm
+    
+    Pull kvm updates from Paolo Bonzini:
+     "ARM:
+    
+       - Clean up vCPU targets, always returning generic v8 as the preferred
+         target
+    
+       - Trap forwarding infrastructure for nested virtualization (used for
+         traps that are taken from an L2 guest and are needed by the L1
+         hypervisor)
+    
+       - FEAT_TLBIRANGE support to only invalidate specific ranges of
+         addresses when collapsing a table PTE to a block PTE. This avoids
+         that the guest refills the TLBs again for addresses that aren't
+         covered by the table PTE.
+    
+       - Fix vPMU issues related to handling of PMUver.
+    
+       - Don't unnecessary align non-stack allocations in the EL2 VA space
+    
+       - Drop HCR_VIRT_EXCP_MASK, which was never used...
+    
+       - Don't use smp_processor_id() in kvm_arch_vcpu_load(), but the cpu
+         parameter instead
+    
+       - Drop redundant call to kvm_set_pfn_accessed() in user_mem_abort()
+    
+       - Remove prototypes without implementations
+    
+      RISC-V:
+    
+       - Zba, Zbs, Zicntr, Zicsr, Zifencei, and Zihpm support for guest
+    
+       - Added ONE_REG interface for SATP mode
+    
+       - Added ONE_REG interface to enable/disable multiple ISA extensions
+    
+       - Improved error codes returned by ONE_REG interfaces
+    
+       - Added KVM_GET_REG_LIST ioctl() implementation for KVM RISC-V
+    
+       - Added get-reg-list selftest for KVM RISC-V
+    
+      s390:
+    
+       - PV crypto passthrough enablement (Tony, Steffen, Viktor, Janosch)
+    
+         Allows a PV guest to use crypto cards. Card access is governed by
+         the firmware and once a crypto queue is "bound" to a PV VM every
+         other entity (PV or not) looses access until it is not bound
+         anymore. Enablement is done via flags when creating the PV VM.
+    
+       - Guest debug fixes (Ilya)
+    
+      x86:
+    
+       - Clean up KVM's handling of Intel architectural events
+    
+       - Intel bugfixes
+    
+       - Add support for SEV-ES DebugSwap, allowing SEV-ES guests to use
+         debug registers and generate/handle #DBs
+    
+       - Clean up LBR virtualization code
+    
+       - Fix a bug where KVM fails to set the target pCPU during an IRTE
+         update
+    
+       - Fix fatal bugs in SEV-ES intrahost migration
+    
+       - Fix a bug where the recent (architecturally correct) change to
+         reinject #BP and skip INT3 broke SEV guests (can't decode INT3 to
+         skip it)
+    
+       - Retry APIC map recalculation if a vCPU is added/enabled
+    
+       - Overhaul emergency reboot code to bring SVM up to par with VMX, tie
+         the "emergency disabling" behavior to KVM actually being loaded,
+         and move all of the logic within KVM
+    
+       - Fix user triggerable WARNs in SVM where KVM incorrectly assumes the
+         TSC ratio MSR cannot diverge from the default when TSC scaling is
+         disabled up related code
+    
+       - Add a framework to allow "caching" feature flags so that KVM can
+         check if the guest can use a feature without needing to search
+         guest CPUID
+    
+       - Rip out the ancient MMU_DEBUG crud and replace the useful bits with
+         CONFIG_KVM_PROVE_MMU
+    
+       - Fix KVM's handling of !visible guest roots to avoid premature
+         triple fault injection
+    
+       - Overhaul KVM's page-track APIs, and KVMGT's usage, to reduce the
+         API surface that is needed by external users (currently only
+         KVMGT), and fix a variety of issues in the process
+    
+      Generic:
+    
+       - Wrap kvm_{gfn,hva}_range.pte in a union to allow mmu_notifier
+         events to pass action specific data without needing to constantly
+         update the main handlers.
+    
+       - Drop unused function declarations
+    
+      Selftests:
+    
+       - Add testcases to x86's sync_regs_test for detecting KVM TOCTOU bugs
+    
+       - Add support for printf() in guest code and covert all guest asserts
+         to use printf-based reporting
+    
+       - Clean up the PMU event filter test and add new testcases
+    
+       - Include x86 selftests in the KVM x86 MAINTAINERS entry"
+    
+    * tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm: (279 commits)
+      KVM: x86/mmu: Include mmu.h in spte.h
+      KVM: x86/mmu: Use dummy root, backed by zero page, for !visible guest roots
+      KVM: x86/mmu: Disallow guest from using !visible slots for page tables
+      KVM: x86/mmu: Harden TDP MMU iteration against root w/o shadow page
+      KVM: x86/mmu: Harden new PGD against roots without shadow pages
+      KVM: x86/mmu: Add helper to convert root hpa to shadow page
+      drm/i915/gvt: Drop final dependencies on KVM internal details
+      KVM: x86/mmu: Handle KVM bookkeeping in page-track APIs, not callers
+      KVM: x86/mmu: Drop @slot param from exported/external page-track APIs
+      KVM: x86/mmu: Bug the VM if write-tracking is used but not enabled
+      KVM: x86/mmu: Assert that correct locks are held for page write-tracking
+      KVM: x86/mmu: Rename page-track APIs to reflect the new reality
+      KVM: x86/mmu: Drop infrastructure for multiple page-track modes
+      KVM: x86/mmu: Use page-track notifiers iff there are external users
+      KVM: x86/mmu: Move KVM-only page-track declarations to internal header
+      KVM: x86: Remove the unused page-track hook track_flush_slot()
+      drm/i915/gvt: switch from ->track_flush_slot() to ->track_remove_region()
+      KVM: x86: Add a new page-track hook to handle memslot deletion
+      drm/i915/gvt: Don't bother removing write-protection on to-be-deleted slot
+      KVM: x86: Reject memslot MOVE operations if KVMGT is attached
+      ...
+
+diff --cc arch/arm64/include/asm/tlbflush.h
+index 55b50e1d4a84,93f4b397f9a1..b149cf9f91bc
+--- a/arch/arm64/include/asm/tlbflush.h
++++ b/arch/arm64/include/asm/tlbflush.h
+@@@ -364,58 -370,12 +427,13 @@@ static inline void __flush_tlb_range(st
+  	dsb(ishst);
+  	asid = ASID(vma->vm_mm);
+  
+- 	/*
+- 	 * When the CPU does not support TLB range operations, flush the TLB
+- 	 * entries one by one at the granularity of 'stride'. If the TLB
+- 	 * range ops are supported, then:
+- 	 *
+- 	 * 1. If 'pages' is odd, flush the first page through non-range
+- 	 *    operations;
+- 	 *
+- 	 * 2. For remaining pages: the minimum range granularity is decided
+- 	 *    by 'scale', so multiple range TLBI operations may be required.
+- 	 *    Start from scale = 0, flush the corresponding number of pages
+- 	 *    ((num+1)*2^(5*scale+1) starting from 'addr'), then increase it
+- 	 *    until no pages left.
+- 	 *
+- 	 * Note that certain ranges can be represented by either num = 31 and
+- 	 * scale or num = 0 and scale + 1. The loop below favours the latter
+- 	 * since num is limited to 30 by the __TLBI_RANGE_NUM() macro.
+- 	 */
+- 	while (pages > 0) {
+- 		if (!system_supports_tlb_range() ||
+- 		    pages % 2 == 1) {
+- 			addr = __TLBI_VADDR(start, asid);
+- 			if (last_level) {
+- 				__tlbi_level(vale1is, addr, tlb_level);
+- 				__tlbi_user_level(vale1is, addr, tlb_level);
+- 			} else {
+- 				__tlbi_level(vae1is, addr, tlb_level);
+- 				__tlbi_user_level(vae1is, addr, tlb_level);
+- 			}
+- 			start += stride;
+- 			pages -= stride >> PAGE_SHIFT;
+- 			continue;
+- 		}
+- 
+- 		num = __TLBI_RANGE_NUM(pages, scale);
+- 		if (num >= 0) {
+- 			addr = __TLBI_VADDR_RANGE(start, asid, scale,
+- 						  num, tlb_level);
+- 			if (last_level) {
+- 				__tlbi(rvale1is, addr);
+- 				__tlbi_user(rvale1is, addr);
+- 			} else {
+- 				__tlbi(rvae1is, addr);
+- 				__tlbi_user(rvae1is, addr);
+- 			}
+- 			start += __TLBI_RANGE_PAGES(num, scale) << PAGE_SHIFT;
+- 			pages -= __TLBI_RANGE_PAGES(num, scale);
+- 		}
+- 		scale++;
+- 	}
++ 	if (last_level)
++ 		__flush_tlb_range_op(vale1is, start, pages, stride, asid, tlb_level, true);
++ 	else
++ 		__flush_tlb_range_op(vae1is, start, pages, stride, asid, tlb_level, true);
++ 
+  	dsb(ish);
+ +	mmu_notifier_arch_invalidate_secondary_tlbs(vma->vm_mm, start, end);
+  }
+  
+  static inline void flush_tlb_range(struct vm_area_struct *vma,

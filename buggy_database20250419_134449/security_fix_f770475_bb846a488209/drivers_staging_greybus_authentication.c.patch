@@ -1,0 +1,80 @@
+commit f7704755723813e1be87518899282c9801e9fd3a
+Author: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Date:   Thu Oct 5 15:58:35 2023 +0200
+
+    staging: greybus: authentication: make cap_class constant
+    
+    Now that the driver core allows for struct class to be in read-only
+    memory, making all 'class' structures to be declared at build time
+    placing them into read-only memory, instead of having to be dynamically
+    allocated at load time.
+    
+    Cc: Alex Elder <elder@kernel.org>
+    Cc: greybus-dev@lists.linaro.org
+    Reviewed-by: Johan Hovold <johan@kernel.org>
+    Link: https://lore.kernel.org/r/2023100534-showoff-alright-6c95@gregkh
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/staging/greybus/authentication.c b/drivers/staging/greybus/authentication.c
+index 7e01790a4659..b67315641d18 100644
+--- a/drivers/staging/greybus/authentication.c
++++ b/drivers/staging/greybus/authentication.c
+@@ -36,7 +36,10 @@ struct gb_cap {
+ 	dev_t			dev_num;
+ };
+ 
+-static struct class *cap_class;
++static const struct class cap_class = {
++	.name = "gb_authenticate",
++};
++
+ static dev_t cap_dev_num;
+ static DEFINE_IDA(cap_minors_map);
+ static LIST_HEAD(cap_list);
+@@ -336,7 +339,7 @@ int gb_cap_connection_init(struct gb_connection *connection)
+ 		goto err_remove_ida;
+ 
+ 	/* Add a soft link to the previously added char-dev within the bundle */
+-	cap->class_device = device_create(cap_class, cap->parent, cap->dev_num,
++	cap->class_device = device_create(&cap_class, cap->parent, cap->dev_num,
+ 					  NULL, "gb-authenticate-%d", minor);
+ 	if (IS_ERR(cap->class_device)) {
+ 		ret = PTR_ERR(cap->class_device);
+@@ -370,7 +373,7 @@ void gb_cap_connection_exit(struct gb_connection *connection)
+ 
+ 	cap = gb_connection_get_data(connection);
+ 
+-	device_destroy(cap_class, cap->dev_num);
++	device_destroy(&cap_class, cap->dev_num);
+ 	cdev_del(&cap->cdev);
+ 	ida_simple_remove(&cap_minors_map, MINOR(cap->dev_num));
+ 
+@@ -402,9 +405,9 @@ int cap_init(void)
+ {
+ 	int ret;
+ 
+-	cap_class = class_create("gb_authenticate");
+-	if (IS_ERR(cap_class))
+-		return PTR_ERR(cap_class);
++	ret = class_register(&cap_class);
++	if (ret)
++		return ret;
+ 
+ 	ret = alloc_chrdev_region(&cap_dev_num, 0, NUM_MINORS,
+ 				  "gb_authenticate");
+@@ -414,13 +417,13 @@ int cap_init(void)
+ 	return 0;
+ 
+ err_remove_class:
+-	class_destroy(cap_class);
++	class_unregister(&cap_class);
+ 	return ret;
+ }
+ 
+ void cap_exit(void)
+ {
+ 	unregister_chrdev_region(cap_dev_num, NUM_MINORS);
+-	class_destroy(cap_class);
++	class_unregister(&cap_class);
+ 	ida_destroy(&cap_minors_map);
+ }

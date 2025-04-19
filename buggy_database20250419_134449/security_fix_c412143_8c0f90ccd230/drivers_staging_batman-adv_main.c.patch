@@ -1,0 +1,103 @@
+commit c41214328a7635dc35aa81d89ea579c8a2eb2769
+Author: Sven Eckelmann <sven@narfation.org>
+Date:   Tue Jun 22 01:25:42 2010 +0200
+
+    Staging: batman-adv: Move device for icmp injection to debugfs
+    
+    batctl uses /dev/batman-adv to send special batman-adv icmp packets to
+    other nodes in the mesh. To get it working with multiple batX devices we
+    must ensure that every mesh device can have their own socket which is
+    used to inject those packets in exactly one mesh.
+    
+    The current implementation still doesn't allow to use complete separated
+    meshes as we rely on structures which are not part of the private data
+    of a batman device.
+    
+    Signed-off-by: Sven Eckelmann <sven.eckelmann@gmx.de>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+diff --git a/drivers/staging/batman-adv/main.c b/drivers/staging/batman-adv/main.c
+index 14ab4a0a8805..ed18b08e704b 100644
+--- a/drivers/staging/batman-adv/main.c
++++ b/drivers/staging/batman-adv/main.c
+@@ -21,11 +21,12 @@
+ 
+ #include "main.h"
+ #include "bat_sysfs.h"
++#include "bat_debugfs.h"
+ #include "routing.h"
+ #include "send.h"
+ #include "originator.h"
+ #include "soft-interface.h"
+-#include "device.h"
++#include "icmp_socket.h"
+ #include "translation-table.h"
+ #include "hard-interface.h"
+ #include "types.h"
+@@ -89,7 +90,8 @@ int init_module(void)
+ 	if (!bat_event_workqueue)
+ 		return -ENOMEM;
+ 
+-	bat_device_init();
++	bat_socket_init();
++	debugfs_init();
+ 
+ 	/* initialize layer 2 interface */
+ 	soft_device = alloc_netdev(sizeof(struct bat_priv) , "bat%d",
+@@ -114,6 +116,11 @@ int init_module(void)
+ 	if (retval < 0)
+ 		goto unreg_soft_device;
+ 
++	retval = debugfs_add_meshif(soft_device);
++
++	if (retval < 0)
++		goto unreg_sysfs;
++
+ 	register_netdevice_notifier(&hard_if_notifier);
+ 	dev_add_pack(&batman_adv_packet_type);
+ 
+@@ -123,6 +130,8 @@ int init_module(void)
+ 
+ 	return 0;
+ 
++unreg_sysfs:
++	sysfs_del_meshif(soft_device);
+ unreg_soft_device:
+ 	unregister_netdev(soft_device);
+ 	soft_device = NULL;
+@@ -143,6 +152,7 @@ void cleanup_module(void)
+ 	hardif_remove_interfaces();
+ 
+ 	if (soft_device) {
++		debugfs_del_meshif(soft_device);
+ 		sysfs_del_meshif(soft_device);
+ 		unregister_netdev(soft_device);
+ 		soft_device = NULL;
+@@ -154,7 +164,7 @@ void cleanup_module(void)
+ 	bat_event_workqueue = NULL;
+ }
+ 
+-/* activates the module, creates bat device, starts timer ... */
++/* activates the module, starts timer ... */
+ void activate_module(void)
+ {
+ 	if (originator_init() < 1)
+@@ -168,9 +178,6 @@ void activate_module(void)
+ 
+ 	hna_local_add(soft_device->dev_addr);
+ 
+-	if (bat_device_setup() < 1)
+-		goto end;
+-
+ 	if (vis_init() < 1)
+ 		goto err;
+ 
+@@ -205,7 +212,7 @@ void deactivate_module(void)
+ 	hna_global_free();
+ 
+ 	synchronize_net();
+-	bat_device_destroy();
++	debugfs_destroy();
+ 
+ 	synchronize_rcu();
+ 	atomic_set(&module_state, MODULE_INACTIVE);

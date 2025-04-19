@@ -1,0 +1,109 @@
+diff --git a/arch/arm/include/asm/kvm_mmu.h b/arch/arm/include/asm/kvm_mmu.h
+index 8c5643e2eea4..a2d176a308bd 100644
+--- a/arch/arm/include/asm/kvm_mmu.h
++++ b/arch/arm/include/asm/kvm_mmu.h
+@@ -226,6 +226,16 @@ static inline unsigned int kvm_get_vmid_bits(void)
+ 	return 8;
+ }
+ 
++static inline void *kvm_get_hyp_vector(void)
++{
++	return kvm_ksym_ref(__kvm_hyp_vector);
++}
++
++static inline int kvm_map_vectors(void)
++{
++	return 0;
++}
++
+ #define kvm_phys_to_vttbr(addr)		(addr)
+ 
+ #endif	/* !__ASSEMBLY__ */
+diff --git a/arch/arm64/include/asm/kvm_mmu.h b/arch/arm64/include/asm/kvm_mmu.h
+index b33bdb5eeb3d..72e279dbae5f 100644
+--- a/arch/arm64/include/asm/kvm_mmu.h
++++ b/arch/arm64/include/asm/kvm_mmu.h
+@@ -322,6 +322,44 @@ static inline unsigned int kvm_get_vmid_bits(void)
+ 	return (cpuid_feature_extract_unsigned_field(reg, ID_AA64MMFR1_VMIDBITS_SHIFT) == 2) ? 16 : 8;
+ }
+ 
++#ifdef CONFIG_HARDEN_BRANCH_PREDICTOR
++#include <asm/mmu.h>
++
++static inline void *kvm_get_hyp_vector(void)
++{
++	struct bp_hardening_data *data = arm64_get_bp_hardening_data();
++	void *vect = kvm_ksym_ref(__kvm_hyp_vector);
++
++	if (data->fn) {
++		vect = __bp_harden_hyp_vecs_start +
++		       data->hyp_vectors_slot * SZ_2K;
++
++		if (!has_vhe())
++			vect = lm_alias(vect);
++	}
++
++	return vect;
++}
++
++static inline int kvm_map_vectors(void)
++{
++	return create_hyp_mappings(kvm_ksym_ref(__bp_harden_hyp_vecs_start),
++				   kvm_ksym_ref(__bp_harden_hyp_vecs_end),
++				   PAGE_HYP_EXEC);
++}
++
++#else
++static inline void *kvm_get_hyp_vector(void)
++{
++	return kvm_ksym_ref(__kvm_hyp_vector);
++}
++
++static inline int kvm_map_vectors(void)
++{
++	return 0;
++}
++#endif
++
+ #define kvm_phys_to_vttbr(addr)		phys_to_ttbr(addr)
+ 
+ #endif /* __ASSEMBLY__ */
+diff --git a/arch/arm64/kvm/hyp/switch.c b/arch/arm64/kvm/hyp/switch.c
+index f7c651f3a8c0..8d4f3c9d6dc4 100644
+--- a/arch/arm64/kvm/hyp/switch.c
++++ b/arch/arm64/kvm/hyp/switch.c
+@@ -52,7 +52,7 @@ static void __hyp_text __activate_traps_vhe(void)
+ 	val &= ~(CPACR_EL1_FPEN | CPACR_EL1_ZEN);
+ 	write_sysreg(val, cpacr_el1);
+ 
+-	write_sysreg(__kvm_hyp_vector, vbar_el1);
++	write_sysreg(kvm_get_hyp_vector(), vbar_el1);
+ }
+ 
+ static void __hyp_text __activate_traps_nvhe(void)
+diff --git a/virt/kvm/arm/arm.c b/virt/kvm/arm/arm.c
+index c8d49879307f..2df6a5c42f77 100644
+--- a/virt/kvm/arm/arm.c
++++ b/virt/kvm/arm/arm.c
+@@ -1158,7 +1158,7 @@ static void cpu_init_hyp_mode(void *dummy)
+ 	pgd_ptr = kvm_mmu_get_httbr();
+ 	stack_page = __this_cpu_read(kvm_arm_hyp_stack_page);
+ 	hyp_stack_ptr = stack_page + PAGE_SIZE;
+-	vector_ptr = (unsigned long)kvm_ksym_ref(__kvm_hyp_vector);
++	vector_ptr = (unsigned long)kvm_get_hyp_vector();
+ 
+ 	__cpu_init_hyp_mode(pgd_ptr, hyp_stack_ptr, vector_ptr);
+ 	__cpu_init_stage2();
+@@ -1403,6 +1403,12 @@ static int init_hyp_mode(void)
+ 		goto out_err;
+ 	}
+ 
++	err = kvm_map_vectors();
++	if (err) {
++		kvm_err("Cannot map vectors\n");
++		goto out_err;
++	}
++
+ 	/*
+ 	 * Map the Hyp stack pages
+ 	 */

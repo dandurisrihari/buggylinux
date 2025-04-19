@@ -1,0 +1,329 @@
+diff --git a/drivers/s390/crypto/ap_bus.h b/drivers/s390/crypto/ap_bus.h
+index 03fd95b5a0e8..5029b80132aa 100644
+--- a/drivers/s390/crypto/ap_bus.h
++++ b/drivers/s390/crypto/ap_bus.h
+@@ -200,12 +200,37 @@ struct ap_queue {
+ 
+ typedef enum ap_sm_wait (ap_func_t)(struct ap_queue *queue);
+ 
++/* failure injection cmd struct */
++struct ap_fi {
++	union {
++		u16 cmd;		/* fi flags + action */
++		struct {
++			u8 flags;	/* fi flags only */
++			u8 action;	/* fi action only */
++		};
++	};
++};
++
++/* all currently known fi actions */
++enum ap_fi_actions {
++	AP_FI_ACTION_CCA_AGENT_FF   = 0x01,
++	AP_FI_ACTION_CCA_DOM_INVAL  = 0x02,
++	AP_FI_ACTION_NQAP_QID_INVAL = 0x03,
++};
++
++/* all currently known fi flags */
++enum ap_fi_flags {
++	AP_FI_FLAG_NO_RETRY	  = 0x01,
++	AP_FI_FLAG_TOGGLE_SPECIAL = 0x02,
++};
++
+ struct ap_message {
+ 	struct list_head list;		/* Request queueing. */
+ 	unsigned long long psmid;	/* Message id. */
+ 	void *msg;			/* Pointer to message buffer. */
+ 	unsigned int len;		/* Message length. */
+-	u32 flags;			/* Flags, see AP_MSG_FLAG_xxx */
++	u16 flags;			/* Flags, see AP_MSG_FLAG_xxx */
++	struct ap_fi fi;		/* Failure Injection cmd */
+ 	int rc;				/* Return code for this message */
+ 	void *private;			/* ap driver private pointer. */
+ 	/* receive is called from tasklet context */
+@@ -213,7 +238,7 @@ struct ap_message {
+ 			struct ap_message *);
+ };
+ 
+-#define AP_MSG_FLAG_SPECIAL  (1 << 16)	/* flag msg as 'special' with NQAP */
++#define AP_MSG_FLAG_SPECIAL  1		/* flag msg as 'special' with NQAP */
+ 
+ /**
+  * ap_init_message() - Initialize ap_message.
+diff --git a/drivers/s390/crypto/ap_queue.c b/drivers/s390/crypto/ap_queue.c
+index ada37f1c7ac7..13d4fe2c6127 100644
+--- a/drivers/s390/crypto/ap_queue.c
++++ b/drivers/s390/crypto/ap_queue.c
+@@ -214,12 +214,20 @@ static enum ap_sm_wait ap_sm_write(struct ap_queue *aq)
+ {
+ 	struct ap_queue_status status;
+ 	struct ap_message *ap_msg;
++	ap_qid_t qid = aq->qid;
+ 
+ 	if (aq->requestq_count <= 0)
+ 		return AP_SM_WAIT_NONE;
+ 	/* Start the next request on the queue. */
+ 	ap_msg = list_entry(aq->requestq.next, struct ap_message, list);
+-	status = __ap_send(aq->qid, ap_msg->psmid,
++#ifdef CONFIG_ZCRYPT_DEBUG
++	if (ap_msg->fi.action == AP_FI_ACTION_NQAP_QID_INVAL) {
++		AP_DBF_WARN("%s fi cmd 0x%04x: forcing invalid qid 0xFF00\n",
++			    __func__, ap_msg->fi.cmd);
++		qid = 0xFF00;
++	}
++#endif
++	status = __ap_send(qid, ap_msg->psmid,
+ 			   ap_msg->msg, ap_msg->len,
+ 			   ap_msg->flags & AP_MSG_FLAG_SPECIAL);
+ 	switch (status.response_code) {
+diff --git a/drivers/s390/crypto/zcrypt_api.c b/drivers/s390/crypto/zcrypt_api.c
+index d642be65a3a0..08bb0f60c4b0 100644
+--- a/drivers/s390/crypto/zcrypt_api.c
++++ b/drivers/s390/crypto/zcrypt_api.c
+@@ -25,6 +25,7 @@
+ #include <linux/debugfs.h>
+ #include <linux/cdev.h>
+ #include <linux/ctype.h>
++#include <linux/capability.h>
+ #include <asm/debug.h>
+ 
+ #define CREATE_TRACE_POINTS
+@@ -645,6 +646,11 @@ static long zcrypt_rsa_modexpo(struct ap_perms *perms,
+ 
+ 	ap_init_message(&ap_msg);
+ 
++#ifdef CONFIG_ZCRYPT_DEBUG
++	if (tr && tr->fi.cmd)
++		ap_msg.fi.cmd = tr->fi.cmd;
++#endif
++
+ 	if (mex->outputdatalength < mex->inputdatalength) {
+ 		func_code = 0;
+ 		rc = -EINVAL;
+@@ -748,6 +754,11 @@ static long zcrypt_rsa_crt(struct ap_perms *perms,
+ 
+ 	ap_init_message(&ap_msg);
+ 
++#ifdef CONFIG_ZCRYPT_DEBUG
++	if (tr && tr->fi.cmd)
++		ap_msg.fi.cmd = tr->fi.cmd;
++#endif
++
+ 	if (crt->outputdatalength < crt->inputdatalength) {
+ 		func_code = 0;
+ 		rc = -EINVAL;
+@@ -852,6 +863,17 @@ static long _zcrypt_send_cprb(bool userspace, struct ap_perms *perms,
+ 
+ 	xcRB->status = 0;
+ 	ap_init_message(&ap_msg);
++
++#ifdef CONFIG_ZCRYPT_DEBUG
++	if (tr && tr->fi.cmd)
++		ap_msg.fi.cmd = tr->fi.cmd;
++	if (tr && tr->fi.action == AP_FI_ACTION_CCA_AGENT_FF) {
++		ZCRYPT_DBF_WARN("%s fi cmd 0x%04x: forcing invalid agent_ID 'FF'\n",
++				__func__, tr->fi.cmd);
++		xcRB->agent_ID = 0x4646;
++	}
++#endif
++
+ 	rc = get_cprb_fc(userspace, xcRB, &ap_msg, &func_code, &domain);
+ 	if (rc)
+ 		goto out;
+@@ -927,6 +949,14 @@ static long _zcrypt_send_cprb(bool userspace, struct ap_perms *perms,
+ 	if (*domain == AUTOSEL_DOM)
+ 		*domain = AP_QID_QUEUE(qid);
+ 
++#ifdef CONFIG_ZCRYPT_DEBUG
++	if (tr && tr->fi.action == AP_FI_ACTION_CCA_DOM_INVAL) {
++		ZCRYPT_DBF_WARN("%s fi cmd 0x%04x: forcing invalid domain\n",
++				__func__, tr->fi.cmd);
++		*domain = 99;
++	}
++#endif
++
+ 	rc = pref_zq->ops->send_cprb(userspace, pref_zq, xcRB, &ap_msg);
+ 
+ 	spin_lock(&zcrypt_list_lock);
+@@ -995,6 +1025,11 @@ static long _zcrypt_send_ep11_cprb(bool userspace, struct ap_perms *perms,
+ 
+ 	ap_init_message(&ap_msg);
+ 
++#ifdef CONFIG_ZCRYPT_DEBUG
++	if (tr && tr->fi.cmd)
++		ap_msg.fi.cmd = tr->fi.cmd;
++#endif
++
+ 	target_num = (unsigned short) xcrb->targets_num;
+ 
+ 	/* empty list indicates autoselect (all available targets) */
+@@ -1377,10 +1412,24 @@ static int icarsamodexpo_ioctl(struct ap_perms *perms, unsigned long arg)
+ 	memset(&tr, 0, sizeof(tr));
+ 	if (copy_from_user(&mex, umex, sizeof(mex)))
+ 		return -EFAULT;
++
++#ifdef CONFIG_ZCRYPT_DEBUG
++	if (mex.inputdatalength & (1U << 31)) {
++		if (!capable(CAP_SYS_ADMIN))
++			return -EPERM;
++		tr.fi.cmd = (u16)(mex.inputdatalength >> 16);
++	}
++	mex.inputdatalength &= 0x0000FFFF;
++#endif
++
+ 	do {
+ 		rc = zcrypt_rsa_modexpo(perms, &tr, &mex);
+ 		if (rc == -EAGAIN)
+ 			tr.again_counter++;
++#ifdef CONFIG_ZCRYPT_DEBUG
++		if (rc == -EAGAIN && (tr.fi.flags & AP_FI_FLAG_NO_RETRY))
++			break;
++#endif
+ 	} while (rc == -EAGAIN && tr.again_counter < TRACK_AGAIN_MAX);
+ 	/* on failure: retry once again after a requested rescan */
+ 	if ((rc == -ENODEV) && (zcrypt_process_rescan()))
+@@ -1406,10 +1455,24 @@ static int icarsacrt_ioctl(struct ap_perms *perms, unsigned long arg)
+ 	memset(&tr, 0, sizeof(tr));
+ 	if (copy_from_user(&crt, ucrt, sizeof(crt)))
+ 		return -EFAULT;
++
++#ifdef CONFIG_ZCRYPT_DEBUG
++	if (crt.inputdatalength & (1U << 31)) {
++		if (!capable(CAP_SYS_ADMIN))
++			return -EPERM;
++		tr.fi.cmd = (u16)(crt.inputdatalength >> 16);
++	}
++	crt.inputdatalength &= 0x0000FFFF;
++#endif
++
+ 	do {
+ 		rc = zcrypt_rsa_crt(perms, &tr, &crt);
+ 		if (rc == -EAGAIN)
+ 			tr.again_counter++;
++#ifdef CONFIG_ZCRYPT_DEBUG
++		if (rc == -EAGAIN && (tr.fi.flags & AP_FI_FLAG_NO_RETRY))
++			break;
++#endif
+ 	} while (rc == -EAGAIN && tr.again_counter < TRACK_AGAIN_MAX);
+ 	/* on failure: retry once again after a requested rescan */
+ 	if ((rc == -ENODEV) && (zcrypt_process_rescan()))
+@@ -1435,10 +1498,24 @@ static int zsecsendcprb_ioctl(struct ap_perms *perms, unsigned long arg)
+ 	memset(&tr, 0, sizeof(tr));
+ 	if (copy_from_user(&xcRB, uxcRB, sizeof(xcRB)))
+ 		return -EFAULT;
++
++#ifdef CONFIG_ZCRYPT_DEBUG
++	if (xcRB.status & (1U << 31)) {
++		if (!capable(CAP_SYS_ADMIN))
++			return -EPERM;
++		tr.fi.cmd = (u16)(xcRB.status >> 16);
++	}
++	xcRB.status &= 0x0000FFFF;
++#endif
++
+ 	do {
+ 		rc = _zcrypt_send_cprb(true, perms, &tr, &xcRB);
+ 		if (rc == -EAGAIN)
+ 			tr.again_counter++;
++#ifdef CONFIG_ZCRYPT_DEBUG
++		if (rc == -EAGAIN && (tr.fi.flags & AP_FI_FLAG_NO_RETRY))
++			break;
++#endif
+ 	} while (rc == -EAGAIN && tr.again_counter < TRACK_AGAIN_MAX);
+ 	/* on failure: retry once again after a requested rescan */
+ 	if ((rc == -ENODEV) && (zcrypt_process_rescan()))
+@@ -1465,10 +1542,24 @@ static int zsendep11cprb_ioctl(struct ap_perms *perms, unsigned long arg)
+ 	memset(&tr, 0, sizeof(tr));
+ 	if (copy_from_user(&xcrb, uxcrb, sizeof(xcrb)))
+ 		return -EFAULT;
++
++#ifdef CONFIG_ZCRYPT_DEBUG
++	if (xcrb.req_len & (1ULL << 63)) {
++		if (!capable(CAP_SYS_ADMIN))
++			return -EPERM;
++		tr.fi.cmd = (u16)(xcrb.req_len >> 48);
++	}
++	xcrb.req_len &= 0x0000FFFFFFFFFFFFULL;
++#endif
++
+ 	do {
+ 		rc = _zcrypt_send_ep11_cprb(true, perms, &tr, &xcrb);
+ 		if (rc == -EAGAIN)
+ 			tr.again_counter++;
++#ifdef CONFIG_ZCRYPT_DEBUG
++		if (rc == -EAGAIN && (tr.fi.flags & AP_FI_FLAG_NO_RETRY))
++			break;
++#endif
+ 	} while (rc == -EAGAIN && tr.again_counter < TRACK_AGAIN_MAX);
+ 	/* on failure: retry once again after a requested rescan */
+ 	if ((rc == -ENODEV) && (zcrypt_process_rescan()))
+diff --git a/drivers/s390/crypto/zcrypt_api.h b/drivers/s390/crypto/zcrypt_api.h
+index 03804f03b5d0..51c0b8bdef50 100644
+--- a/drivers/s390/crypto/zcrypt_api.h
++++ b/drivers/s390/crypto/zcrypt_api.h
+@@ -60,6 +60,9 @@ struct zcrypt_track {
+ 	int again_counter;		/* retry attempts counter */
+ 	int last_qid;			/* last qid used */
+ 	int last_rc;			/* last return code */
++#ifdef CONFIG_ZCRYPT_DEBUG
++	struct ap_fi fi;		/* failure injection cmd */
++#endif
+ };
+ 
+ /* defines related to message tracking */
+diff --git a/drivers/s390/crypto/zcrypt_msgtype50.c b/drivers/s390/crypto/zcrypt_msgtype50.c
+index c543b5959509..bf14ee445f89 100644
+--- a/drivers/s390/crypto/zcrypt_msgtype50.c
++++ b/drivers/s390/crypto/zcrypt_msgtype50.c
+@@ -246,6 +246,12 @@ static int ICAMEX_msg_to_type50MEX_msg(struct zcrypt_queue *zq,
+ 	    copy_from_user(exp, mex->b_key, mod_len) ||
+ 	    copy_from_user(inp, mex->inputdata, mod_len))
+ 		return -EFAULT;
++
++#ifdef CONFIG_ZCRYPT_DEBUG
++	if (ap_msg->fi.flags & AP_FI_FLAG_TOGGLE_SPECIAL)
++		ap_msg->flags ^= AP_MSG_FLAG_SPECIAL;
++#endif
++
+ 	return 0;
+ }
+ 
+@@ -332,6 +338,11 @@ static int ICACRT_msg_to_type50CRT_msg(struct zcrypt_queue *zq,
+ 	    copy_from_user(inp, crt->inputdata, mod_len))
+ 		return -EFAULT;
+ 
++#ifdef CONFIG_ZCRYPT_DEBUG
++	if (ap_msg->fi.flags & AP_FI_FLAG_TOGGLE_SPECIAL)
++		ap_msg->flags ^= AP_MSG_FLAG_SPECIAL;
++#endif
++
+ 	return 0;
+ }
+ 
+diff --git a/drivers/s390/crypto/zcrypt_msgtype6.c b/drivers/s390/crypto/zcrypt_msgtype6.c
+index aab7f0692035..307f90657d1d 100644
+--- a/drivers/s390/crypto/zcrypt_msgtype6.c
++++ b/drivers/s390/crypto/zcrypt_msgtype6.c
+@@ -482,6 +482,11 @@ static int XCRB_msg_to_type6CPRB_msgX(bool userspace, struct ap_message *ap_msg,
+ 	    || memcmp(function_code, "AU", 2) == 0)
+ 		ap_msg->flags |= AP_MSG_FLAG_SPECIAL;
+ 
++#ifdef CONFIG_ZCRYPT_DEBUG
++	if (ap_msg->fi.flags & AP_FI_FLAG_TOGGLE_SPECIAL)
++		ap_msg->flags ^= AP_MSG_FLAG_SPECIAL;
++#endif
++
+ 	/* copy data block */
+ 	if (xcRB->request_data_length &&
+ 	    z_copy_from_user(userspace, req_data, xcRB->request_data_address,
+@@ -569,6 +574,11 @@ static int xcrb_msg_to_type6_ep11cprb_msgx(bool userspace, struct ap_message *ap
+ 	if (msg->cprbx.flags & 0x20)
+ 		ap_msg->flags |= AP_MSG_FLAG_SPECIAL;
+ 
++#ifdef CONFIG_ZCRYPT_DEBUG
++	if (ap_msg->fi.flags & AP_FI_FLAG_TOGGLE_SPECIAL)
++		ap_msg->flags ^= AP_MSG_FLAG_SPECIAL;
++#endif
++
+ 	return 0;
+ }

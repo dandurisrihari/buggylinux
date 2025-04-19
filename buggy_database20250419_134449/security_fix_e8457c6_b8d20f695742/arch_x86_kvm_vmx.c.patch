@@ -1,0 +1,55 @@
+commit e8457c67a4ec1268ec616bd8be1d9f1cc20f1493
+Author: Jan Kiszka <jan.kiszka@siemens.com>
+Date:   Sun Apr 14 12:12:48 2013 +0200
+
+    KVM: nVMX: Fix conditions for interrupt injection
+    
+    If we are entering guest mode, we do not want L0 to interrupt this
+    vmentry with all its side effects on the vmcs. Therefore, injection
+    shall be disallowed during L1->L2 transitions, as in the previous
+    version. However, this check is conceptually independent of
+    nested_exit_on_intr, so decouple it.
+    
+    If L1 traps external interrupts, we can kick the guest from L2 to L1,
+    also just like the previous code worked. But we no longer need to
+    consider L1's idt_vectoring_info_field. It will always be empty at this
+    point. Instead, if L2 has pending events, those are now found in the
+    architectural queues and will, thus, prevent vmx_interrupt_allowed from
+    being called at all.
+    
+    Signed-off-by: Jan Kiszka <jan.kiszka@siemens.com>
+    Signed-off-by: Gleb Natapov <gleb@redhat.com>
+
+diff --git a/arch/x86/kvm/vmx.c b/arch/x86/kvm/vmx.c
+index 4fb72a764dbd..5e6391112275 100644
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -4325,16 +4325,20 @@ static void vmx_set_nmi_mask(struct kvm_vcpu *vcpu, bool masked)
+ 
+ static int vmx_interrupt_allowed(struct kvm_vcpu *vcpu)
+ {
+-	if (is_guest_mode(vcpu) && nested_exit_on_intr(vcpu)) {
++	if (is_guest_mode(vcpu)) {
+ 		struct vmcs12 *vmcs12 = get_vmcs12(vcpu);
+-		if (to_vmx(vcpu)->nested.nested_run_pending ||
+-		    (vmcs12->idt_vectoring_info_field &
+-		     VECTORING_INFO_VALID_MASK))
++
++		if (to_vmx(vcpu)->nested.nested_run_pending)
+ 			return 0;
+-		nested_vmx_vmexit(vcpu);
+-		vmcs12->vm_exit_reason = EXIT_REASON_EXTERNAL_INTERRUPT;
+-		vmcs12->vm_exit_intr_info = 0;
+-		/* fall through to normal code, but now in L1, not L2 */
++		if (nested_exit_on_intr(vcpu)) {
++			nested_vmx_vmexit(vcpu);
++			vmcs12->vm_exit_reason =
++				EXIT_REASON_EXTERNAL_INTERRUPT;
++			vmcs12->vm_exit_intr_info = 0;
++			/*
++			 * fall through to normal code, but now in L1, not L2
++			 */
++		}
+ 	}
+ 
+ 	return (vmcs_readl(GUEST_RFLAGS) & X86_EFLAGS_IF) &&

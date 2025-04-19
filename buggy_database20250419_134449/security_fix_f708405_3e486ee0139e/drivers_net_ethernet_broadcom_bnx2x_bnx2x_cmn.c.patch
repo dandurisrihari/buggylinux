@@ -1,0 +1,52 @@
+commit f7084059a9cb9e56a186e1677b1dcffd76c2cd24
+Author: Guilherme G. Piccoli <kernel@gpiccoli.net>
+Date:   Fri Dec 22 13:01:39 2017 -0200
+
+    bnx2x: Improve reliability in case of nested PCI errors
+    
+    While in recovery process of PCI error (called EEH on PowerPC arch),
+    another PCI transaction could be corrupted causing a situation of
+    nested PCI errors. Also, this scenario could be reproduced with
+    error injection mechanisms (for debug purposes).
+    
+    We observe that in case of nested PCI errors, bnx2x might attempt to
+    initialize its shmem and cause a kernel crash due to bad addresses
+    read from MCP. Multiple different stack traces were observed depending
+    on the point the second PCI error happens.
+    
+    This patch avoids the crashes by:
+    
+     * failing PCI recovery in case of nested errors (since multiple
+     PCI errors in a row are not expected to lead to a functional
+     adapter anyway), and by,
+    
+     * preventing access to adapter FW when MCP is failed (we mark it as
+     failed when shmem cannot get initialized properly).
+    
+    Reported-by: Abdul Haleem <abdhalee@linux.vnet.ibm.com>
+    Signed-off-by: Guilherme G. Piccoli <gpiccoli@linux.vnet.ibm.com>
+    Acked-by: Shahed Shaikh <Shahed.Shaikh@cavium.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_cmn.c b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_cmn.c
+index 4c739d5355d2..8ae269ec17a1 100644
+--- a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_cmn.c
++++ b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_cmn.c
+@@ -3030,7 +3030,7 @@ int bnx2x_nic_unload(struct bnx2x *bp, int unload_mode, bool keep_link)
+ 
+ 	del_timer_sync(&bp->timer);
+ 
+-	if (IS_PF(bp)) {
++	if (IS_PF(bp) && !BP_NOMCP(bp)) {
+ 		/* Set ALWAYS_ALIVE bit in shmem */
+ 		bp->fw_drv_pulse_wr_seq |= DRV_PULSE_ALWAYS_ALIVE;
+ 		bnx2x_drv_pulse(bp);
+@@ -3116,7 +3116,7 @@ int bnx2x_nic_unload(struct bnx2x *bp, int unload_mode, bool keep_link)
+ 	bp->cnic_loaded = false;
+ 
+ 	/* Clear driver version indication in shmem */
+-	if (IS_PF(bp))
++	if (IS_PF(bp) && !BP_NOMCP(bp))
+ 		bnx2x_update_mng_version(bp);
+ 
+ 	/* Check if there are pending parity attentions. If there are - set

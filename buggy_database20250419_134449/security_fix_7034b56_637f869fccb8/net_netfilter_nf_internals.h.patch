@@ -1,0 +1,39 @@
+commit 7034b566a4e7d550621c2dfafd380b77b3787cd9
+Author: Pablo Neira Ayuso <pablo@netfilter.org>
+Date:   Mon Oct 17 18:05:32 2016 +0100
+
+    netfilter: fix nf_queue handling
+    
+    nf_queue handling is broken since e3b37f11e6e4 ("netfilter: replace
+    list_head with single linked list") for two reasons:
+    
+    1) If the bypass flag is set on, there are no userspace listeners and
+       we still have more hook entries to iterate over, then jump to the
+       next hook. Otherwise accept the packet. On nf_reinject() path, the
+       okfn() needs to be invoked.
+    
+    2) We should not re-enter the same hook on packet reinjection. If the
+       packet is accepted, we have to skip the current hook from where the
+       packet was enqueued, otherwise the packets gets enqueued over and
+       over again.
+    
+    This restores the previous list_for_each_entry_continue() behaviour
+    happening from nf_iterate() that was dealing with these two cases.
+    This patch introduces a new nf_queue() wrapper function so this fix
+    becomes simpler.
+    
+    Fixes: e3b37f11e6e4 ("netfilter: replace list_head with single linked list")
+    Signed-off-by: Pablo Neira Ayuso <pablo@netfilter.org>
+
+diff --git a/net/netfilter/nf_internals.h b/net/netfilter/nf_internals.h
+index e0adb5959342..9fdb655f85bc 100644
+--- a/net/netfilter/nf_internals.h
++++ b/net/netfilter/nf_internals.h
+@@ -18,7 +18,7 @@ unsigned int nf_iterate(struct sk_buff *skb, struct nf_hook_state *state,
+ 
+ /* nf_queue.c */
+ int nf_queue(struct sk_buff *skb, struct nf_hook_state *state,
+-	     unsigned int queuenum);
++	     struct nf_hook_entry **entryp, unsigned int verdict);
+ void nf_queue_nf_hook_drop(struct net *net, const struct nf_hook_entry *entry);
+ int __init netfilter_queue_init(void);

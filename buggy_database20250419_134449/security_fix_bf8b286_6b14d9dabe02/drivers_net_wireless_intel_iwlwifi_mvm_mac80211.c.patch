@@ -1,0 +1,54 @@
+commit bf8b286f86fcc66d138fd992acfa37839340218d
+Author: Johannes Berg <johannes.berg@intel.com>
+Date:   Fri Jun 30 10:48:28 2017 +0200
+
+    iwlwifi: mvm: defer setting IWL_MVM_STATUS_IN_HW_RESTART
+    
+    A hardware/firmware error may happen at any point in time. In
+    particular, it might happen while mac80211 is in the middle of
+    a flow. We observed the following situation:
+     * mac80211 is in authentication flow, in ieee80211_prep_connection()
+     * iwlwifi firmware crashes, but no error can be reported at this
+       precise point (mostly because the driver method is void, but even
+       if it wasn't we'd just shift to a race condition)
+     * mac80211 continues the flow, trying to add the AP station
+     * iwlwifi has already set its internal restart flag, and so thinks
+       that adding the station is part of the restart and already set up,
+       so it uses the information that's supposed to already be in the
+       struct
+    
+    This can happen with any flow in mac80211 and with any information
+    we try to preserve across hardware restarts.
+    
+    To fix this, only set a new HW_RESTART_REQUESTED flag and translate
+    that to IN_HW_RESTART once mac80211 actually starts the restart by
+    calling our start() method. As a consequence, any mac80211 flow in
+    progress at the time of the restart will properly finish (certainly
+    with errors), before the restart is attempted.
+    
+    This fixes https://bugzilla.kernel.org/show_bug.cgi?id=195299.
+    
+    Reported-by: djagoo <dev@djagoo.io>
+    Reported-by: Łukasz Siudut <lsiudut@gmail.com>
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+    Signed-off-by: Luca Coelho <luciano.coelho@intel.com>
+
+diff --git a/drivers/net/wireless/intel/iwlwifi/mvm/mac80211.c b/drivers/net/wireless/intel/iwlwifi/mvm/mac80211.c
+index bcde1ba0f1c8..c7b1e58e3384 100644
+--- a/drivers/net/wireless/intel/iwlwifi/mvm/mac80211.c
++++ b/drivers/net/wireless/intel/iwlwifi/mvm/mac80211.c
+@@ -1084,7 +1084,13 @@ int __iwl_mvm_mac_start(struct iwl_mvm *mvm)
+ 
+ 	lockdep_assert_held(&mvm->mutex);
+ 
+-	if (test_bit(IWL_MVM_STATUS_IN_HW_RESTART, &mvm->status)) {
++	if (test_bit(IWL_MVM_STATUS_HW_RESTART_REQUESTED, &mvm->status)) {
++		/*
++		 * Now convert the HW_RESTART_REQUESTED flag to IN_HW_RESTART
++		 * so later code will - from now on - see that we're doing it.
++		 */
++		set_bit(IWL_MVM_STATUS_IN_HW_RESTART, &mvm->status);
++		clear_bit(IWL_MVM_STATUS_HW_RESTART_REQUESTED, &mvm->status);
+ 		/* Clean up some internal and mac80211 state on restart */
+ 		iwl_mvm_restart_cleanup(mvm);
+ 	} else {

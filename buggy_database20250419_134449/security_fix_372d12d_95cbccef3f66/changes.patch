@@ -1,0 +1,170 @@
+diff --git a/include/trace/events/rxrpc.h b/include/trace/events/rxrpc.h
+index 326a4c257aea..d79623fff746 100644
+--- a/include/trace/events/rxrpc.h
++++ b/include/trace/events/rxrpc.h
+@@ -302,6 +302,11 @@
+ 	EM(rxrpc_txqueue_rotate_last,		"RLS") \
+ 	E_(rxrpc_txqueue_wait,			"WAI")
+ 
++#define rxrpc_txdata_traces \
++	EM(rxrpc_txdata_inject_loss,		" *INJ-LOSS*") \
++	EM(rxrpc_txdata_new_data,		" ") \
++	E_(rxrpc_txdata_retransmit,		" *RETRANS*")
++
+ #define rxrpc_receive_traces \
+ 	EM(rxrpc_receive_end,			"END") \
+ 	EM(rxrpc_receive_front,			"FRN") \
+@@ -534,6 +539,7 @@ enum rxrpc_timer_trace		{ rxrpc_timer_traces } __mode(byte);
+ enum rxrpc_tq_trace		{ rxrpc_tq_traces } __mode(byte);
+ enum rxrpc_tx_point		{ rxrpc_tx_points } __mode(byte);
+ enum rxrpc_txbuf_trace		{ rxrpc_txbuf_traces } __mode(byte);
++enum rxrpc_txdata_trace		{ rxrpc_txdata_traces } __mode(byte);
+ enum rxrpc_txqueue_trace	{ rxrpc_txqueue_traces } __mode(byte);
+ 
+ #endif /* end __RXRPC_DECLARE_TRACE_ENUMS_ONCE_ONLY */
+@@ -572,6 +578,7 @@ rxrpc_timer_traces;
+ rxrpc_tq_traces;
+ rxrpc_tx_points;
+ rxrpc_txbuf_traces;
++rxrpc_txdata_traces;
+ rxrpc_txqueue_traces;
+ 
+ /*
+@@ -1222,9 +1229,10 @@ TRACE_EVENT(rxrpc_tx_packet,
+ 
+ TRACE_EVENT(rxrpc_tx_data,
+ 	    TP_PROTO(struct rxrpc_call *call, rxrpc_seq_t seq,
+-		     rxrpc_serial_t serial, unsigned int flags, bool lose),
++		     rxrpc_serial_t serial, unsigned int flags,
++		     enum rxrpc_txdata_trace trace),
+ 
+-	    TP_ARGS(call, seq, serial, flags, lose),
++	    TP_ARGS(call, seq, serial, flags, trace),
+ 
+ 	    TP_STRUCT__entry(
+ 		    __field(unsigned int,	call)
+@@ -1233,7 +1241,7 @@ TRACE_EVENT(rxrpc_tx_data,
+ 		    __field(u32,		cid)
+ 		    __field(u32,		call_id)
+ 		    __field(u16,		flags)
+-		    __field(bool,		lose)
++		    __field(enum rxrpc_txdata_trace, trace)
+ 			     ),
+ 
+ 	    TP_fast_assign(
+@@ -1243,18 +1251,17 @@ TRACE_EVENT(rxrpc_tx_data,
+ 		    __entry->seq = seq;
+ 		    __entry->serial = serial;
+ 		    __entry->flags = flags;
+-		    __entry->lose = lose;
++		    __entry->trace = trace;
+ 			   ),
+ 
+-	    TP_printk("c=%08x DATA %08x:%08x %08x q=%08x fl=%02x%s%s",
++	    TP_printk("c=%08x DATA %08x:%08x %08x q=%08x fl=%02x%s",
+ 		      __entry->call,
+ 		      __entry->cid,
+ 		      __entry->call_id,
+ 		      __entry->serial,
+ 		      __entry->seq,
+ 		      __entry->flags & RXRPC_TXBUF_WIRE_FLAGS,
+-		      __entry->flags & RXRPC_TXBUF_RESENT ? " *RETRANS*" : "",
+-		      __entry->lose ? " *LOSE*" : "")
++		      __print_symbolic(__entry->trace, rxrpc_txdata_traces))
+ 	    );
+ 
+ TRACE_EVENT(rxrpc_tx_ack,
+diff --git a/net/rxrpc/ar-internal.h b/net/rxrpc/ar-internal.h
+index aa240b4b4bec..139575032ae2 100644
+--- a/net/rxrpc/ar-internal.h
++++ b/net/rxrpc/ar-internal.h
+@@ -883,6 +883,7 @@ struct rxrpc_send_data_req {
+ 	rxrpc_seq_t		seq;		/* Sequence of first data */
+ 	int			n;		/* Number of DATA packets to glue into jumbo */
+ 	bool			did_send;	/* T if did actually send */
++	int /* enum rxrpc_txdata_trace */ trace;
+ };
+ 
+ #include <trace/events/rxrpc.h>
+diff --git a/net/rxrpc/call_event.c b/net/rxrpc/call_event.c
+index 39772459426b..99d9502564cc 100644
+--- a/net/rxrpc/call_event.c
++++ b/net/rxrpc/call_event.c
+@@ -101,6 +101,7 @@ void rxrpc_resend(struct rxrpc_call *call, rxrpc_serial_t ack_serial, bool ping_
+ {
+ 	struct rxrpc_send_data_req req = {
+ 		.now	= ktime_get_real(),
++		.trace	= rxrpc_txdata_retransmit,
+ 	};
+ 	struct rxrpc_txqueue *tq = call->tx_queue;
+ 	ktime_t lowest_xmit_ts = KTIME_MAX;
+@@ -269,7 +270,8 @@ static unsigned int rxrpc_tx_window_space(struct rxrpc_call *call)
+ /*
+  * Transmit some as-yet untransmitted data.
+  */
+-static void rxrpc_transmit_fresh_data(struct rxrpc_call *call)
++static void rxrpc_transmit_fresh_data(struct rxrpc_call *call,
++				      enum rxrpc_txdata_trace trace)
+ {
+ 	int space = rxrpc_tx_window_space(call);
+ 
+@@ -284,6 +286,7 @@ static void rxrpc_transmit_fresh_data(struct rxrpc_call *call)
+ 			.now	= ktime_get_real(),
+ 			.seq	= call->tx_transmitted + 1,
+ 			.n	= 0,
++			.trace	= trace,
+ 		};
+ 		struct rxrpc_txqueue *tq;
+ 		struct rxrpc_txbuf *txb;
+@@ -332,7 +335,8 @@ static void rxrpc_transmit_fresh_data(struct rxrpc_call *call)
+ 	}
+ }
+ 
+-static void rxrpc_transmit_some_data(struct rxrpc_call *call)
++static void rxrpc_transmit_some_data(struct rxrpc_call *call,
++				     enum rxrpc_txdata_trace trace)
+ {
+ 	switch (__rxrpc_call_state(call)) {
+ 	case RXRPC_CALL_SERVER_ACK_REQUEST:
+@@ -349,7 +353,7 @@ static void rxrpc_transmit_some_data(struct rxrpc_call *call)
+ 			rxrpc_inc_stat(call->rxnet, stat_tx_data_underflow);
+ 			return;
+ 		}
+-		rxrpc_transmit_fresh_data(call);
++		rxrpc_transmit_fresh_data(call, trace);
+ 		break;
+ 	default:
+ 		return;
+@@ -463,7 +467,7 @@ bool rxrpc_input_call_event(struct rxrpc_call *call)
+ 		resend = true;
+ 	}
+ 
+-	rxrpc_transmit_some_data(call);
++	rxrpc_transmit_some_data(call, rxrpc_txdata_new_data);
+ 
+ 	now = ktime_get_real();
+ 	t = ktime_sub(call->keepalive_at, now);
+diff --git a/net/rxrpc/output.c b/net/rxrpc/output.c
+index a7de8a02f419..2633f955d1d0 100644
+--- a/net/rxrpc/output.c
++++ b/net/rxrpc/output.c
+@@ -511,7 +511,7 @@ static size_t rxrpc_prepare_data_subpacket(struct rxrpc_call *call,
+ 		len += sizeof(*jumbo);
+ 	}
+ 
+-	trace_rxrpc_tx_data(call, txb->seq, txb->serial, txb->flags | flags, false);
++	trace_rxrpc_tx_data(call, txb->seq, txb->serial, flags, req->trace);
+ 	kv->iov_len = len;
+ 	return len;
+ }
+@@ -655,8 +655,8 @@ void rxrpc_send_data_packet(struct rxrpc_call *call, struct rxrpc_send_data_req
+ 
+ 		if ((lose++ & 7) == 7) {
+ 			ret = 0;
+-			trace_rxrpc_tx_data(call, txb->seq, txb->serial,
+-					    txb->flags, true);
++			trace_rxrpc_tx_data(call, txb->seq, txb->serial, txb->flags,
++					    rxrpc_txdata_inject_loss);
+ 			conn->peer->last_tx_at = ktime_get_seconds();
+ 			goto done;
+ 		}

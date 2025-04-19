@@ -1,0 +1,78 @@
+commit 838c4f3d7515efe9d0e32c846fb5d102b6d8a29d
+Author: Christoph Hellwig <hch@lst.de>
+Date:   Thu Sep 19 15:32:45 2019 -0700
+
+    iomap: move the iomap_dio_rw ->end_io callback into a structure
+    
+    Add a new iomap_dio_ops structure that for now just contains the end_io
+    handler.  This avoid storing the function pointer in a mutable structure,
+    which is a possible exploit vector for kernel code execution, and prepares
+    for adding a submit_io handler that btrfs needs.
+    
+    Signed-off-by: Christoph Hellwig <hch@lst.de>
+    Reviewed-by: Darrick J. Wong <darrick.wong@oracle.com>
+    Signed-off-by: Darrick J. Wong <darrick.wong@oracle.com>
+
+diff --git a/fs/iomap/direct-io.c b/fs/iomap/direct-io.c
+index 2ccf1c6460d4..1fc28c2da279 100644
+--- a/fs/iomap/direct-io.c
++++ b/fs/iomap/direct-io.c
+@@ -24,7 +24,7 @@
+ 
+ struct iomap_dio {
+ 	struct kiocb		*iocb;
+-	iomap_dio_end_io_t	*end_io;
++	const struct iomap_dio_ops *dops;
+ 	loff_t			i_size;
+ 	loff_t			size;
+ 	atomic_t		ref;
+@@ -72,15 +72,14 @@ static void iomap_dio_submit_bio(struct iomap_dio *dio, struct iomap *iomap,
+ 
+ static ssize_t iomap_dio_complete(struct iomap_dio *dio)
+ {
++	const struct iomap_dio_ops *dops = dio->dops;
+ 	struct kiocb *iocb = dio->iocb;
+ 	struct inode *inode = file_inode(iocb->ki_filp);
+ 	loff_t offset = iocb->ki_pos;
+-	ssize_t ret;
++	ssize_t ret = dio->error;
+ 
+-	if (dio->end_io)
+-		ret = dio->end_io(iocb, dio->size, dio->error, dio->flags);
+-	else
+-		ret = dio->error;
++	if (dops && dops->end_io)
++		ret = dops->end_io(iocb, dio->size, ret, dio->flags);
+ 
+ 	if (likely(!ret)) {
+ 		ret = dio->size;
+@@ -98,9 +97,9 @@ static ssize_t iomap_dio_complete(struct iomap_dio *dio)
+ 	 * one is a pretty crazy thing to do, so we don't support it 100%.  If
+ 	 * this invalidation fails, tough, the write still worked...
+ 	 *
+-	 * And this page cache invalidation has to be after dio->end_io(), as
+-	 * some filesystems convert unwritten extents to real allocations in
+-	 * end_io() when necessary, otherwise a racing buffer read would cache
++	 * And this page cache invalidation has to be after ->end_io(), as some
++	 * filesystems convert unwritten extents to real allocations in
++	 * ->end_io() when necessary, otherwise a racing buffer read would cache
+ 	 * zeros from unwritten extents.
+ 	 */
+ 	if (!dio->error &&
+@@ -393,7 +392,7 @@ iomap_dio_actor(struct inode *inode, loff_t pos, loff_t length,
+  */
+ ssize_t
+ iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
+-		const struct iomap_ops *ops, iomap_dio_end_io_t end_io)
++		const struct iomap_ops *ops, const struct iomap_dio_ops *dops)
+ {
+ 	struct address_space *mapping = iocb->ki_filp->f_mapping;
+ 	struct inode *inode = file_inode(iocb->ki_filp);
+@@ -418,7 +417,7 @@ iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
+ 	atomic_set(&dio->ref, 1);
+ 	dio->size = 0;
+ 	dio->i_size = i_size_read(inode);
+-	dio->end_io = end_io;
++	dio->dops = dops;
+ 	dio->error = 0;
+ 	dio->flags = 0;

@@ -1,0 +1,75 @@
+diff --git a/crypto/skcipher.c b/crypto/skcipher.c
+index 5367f817b40e..aca07c643d41 100644
+--- a/crypto/skcipher.c
++++ b/crypto/skcipher.c
+@@ -500,8 +500,8 @@ int skcipher_walk_async(struct skcipher_walk *walk,
+ }
+ EXPORT_SYMBOL_GPL(skcipher_walk_async);
+ 
+-int skcipher_walk_aead(struct skcipher_walk *walk, struct aead_request *req,
+-		       bool atomic)
++static int skcipher_walk_aead_common(struct skcipher_walk *walk,
++				     struct aead_request *req, bool atomic)
+ {
+ 	struct crypto_aead *tfm = crypto_aead_reqtfm(req);
+ 	int err;
+@@ -514,7 +514,6 @@ int skcipher_walk_aead(struct skcipher_walk *walk, struct aead_request *req,
+ 	scatterwalk_copychunks(NULL, &walk->in, req->assoclen, 2);
+ 	scatterwalk_copychunks(NULL, &walk->out, req->assoclen, 2);
+ 
+-	walk->total = req->cryptlen;
+ 	walk->iv = req->iv;
+ 	walk->oiv = req->iv;
+ 
+@@ -535,8 +534,36 @@ int skcipher_walk_aead(struct skcipher_walk *walk, struct aead_request *req,
+ 
+ 	return err;
+ }
++
++int skcipher_walk_aead(struct skcipher_walk *walk, struct aead_request *req,
++		       bool atomic)
++{
++	walk->total = req->cryptlen;
++
++	return skcipher_walk_aead_common(walk, req, atomic);
++}
+ EXPORT_SYMBOL_GPL(skcipher_walk_aead);
+ 
++int skcipher_walk_aead_encrypt(struct skcipher_walk *walk,
++			       struct aead_request *req, bool atomic)
++{
++	walk->total = req->cryptlen;
++
++	return skcipher_walk_aead_common(walk, req, atomic);
++}
++EXPORT_SYMBOL_GPL(skcipher_walk_aead_encrypt);
++
++int skcipher_walk_aead_decrypt(struct skcipher_walk *walk,
++			       struct aead_request *req, bool atomic)
++{
++	struct crypto_aead *tfm = crypto_aead_reqtfm(req);
++
++	walk->total = req->cryptlen - crypto_aead_authsize(tfm);
++
++	return skcipher_walk_aead_common(walk, req, atomic);
++}
++EXPORT_SYMBOL_GPL(skcipher_walk_aead_decrypt);
++
+ static unsigned int crypto_skcipher_extsize(struct crypto_alg *alg)
+ {
+ 	if (alg->cra_type == &crypto_blkcipher_type)
+diff --git a/include/crypto/internal/skcipher.h b/include/crypto/internal/skcipher.h
+index d55041f45899..8735979ed341 100644
+--- a/include/crypto/internal/skcipher.h
++++ b/include/crypto/internal/skcipher.h
+@@ -149,6 +149,10 @@ int skcipher_walk_async(struct skcipher_walk *walk,
+ 			struct skcipher_request *req);
+ int skcipher_walk_aead(struct skcipher_walk *walk, struct aead_request *req,
+ 		       bool atomic);
++int skcipher_walk_aead_encrypt(struct skcipher_walk *walk,
++			       struct aead_request *req, bool atomic);
++int skcipher_walk_aead_decrypt(struct skcipher_walk *walk,
++			       struct aead_request *req, bool atomic);
+ void skcipher_walk_complete(struct skcipher_walk *walk, int err);
+ 
+ static inline void ablkcipher_request_complete(struct ablkcipher_request *req,

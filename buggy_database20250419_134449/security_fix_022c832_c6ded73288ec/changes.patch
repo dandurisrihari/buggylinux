@@ -1,0 +1,46 @@
+diff --git a/arch/arm64/kvm/mmio.c b/arch/arm64/kvm/mmio.c
+index 4e0366759726..58de2ae4f6bb 100644
+--- a/arch/arm64/kvm/mmio.c
++++ b/arch/arm64/kvm/mmio.c
+@@ -145,12 +145,6 @@ int io_mem_abort(struct kvm_vcpu *vcpu, struct kvm_run *run,
+ 		return -ENOSYS;
+ 	}
+ 
+-	/* Page table accesses IO mem: tell guest to fix its TTBR */
+-	if (kvm_vcpu_dabt_iss1tw(vcpu)) {
+-		kvm_inject_dabt(vcpu, kvm_vcpu_get_hfar(vcpu));
+-		return 1;
+-	}
+-
+ 	/*
+ 	 * Prepare MMIO operation. First decode the syndrome data we get
+ 	 * from the CPU. Then try if some in-kernel emulation feels
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index 85b0ec9dd9ef..dc8464669efd 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -2105,12 +2105,23 @@ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu, struct kvm_run *run)
+ 	hva = gfn_to_hva_memslot_prot(memslot, gfn, &writable);
+ 	write_fault = kvm_is_write_fault(vcpu);
+ 	if (kvm_is_error_hva(hva) || (write_fault && !writable)) {
++		/*
++		 * The guest has put either its instructions or its page-tables
++		 * somewhere it shouldn't have. Userspace won't be able to do
++		 * anything about this (there's no syndrome for a start), so
++		 * re-inject the abort back into the guest.
++		 */
+ 		if (is_iabt) {
+-			/* Prefetch Abort on I/O address */
+ 			ret = -ENOEXEC;
+ 			goto out;
+ 		}
+ 
++		if (kvm_vcpu_dabt_iss1tw(vcpu)) {
++			kvm_inject_dabt(vcpu, kvm_vcpu_get_hfar(vcpu));
++			ret = 1;
++			goto out_unlock;
++		}
++
+ 		/*
+ 		 * Check for a cache maintenance operation. Since we
+ 		 * ended-up here, we know it is outside of any memory

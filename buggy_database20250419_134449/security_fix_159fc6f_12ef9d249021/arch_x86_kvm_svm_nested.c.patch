@@ -1,0 +1,53 @@
+commit 159fc6fa3b7db24db85598115cc43dc47196919e
+Author: Maciej S. Szmigiero <maciej.szmigiero@oracle.com>
+Date:   Mon May 2 00:07:34 2022 +0200
+
+    KVM: nSVM: Transparently handle L1 -> L2 NMI re-injection
+    
+    A NMI that L1 wants to inject into its L2 should be directly re-injected,
+    without causing L0 side effects like engaging NMI blocking for L1.
+    
+    It's also worth noting that in this case it is L1 responsibility
+    to track the NMI window status for its L2 guest.
+    
+    Signed-off-by: Maciej S. Szmigiero <maciej.szmigiero@oracle.com>
+    Message-Id: <f894d13501cd48157b3069a4b4c7369575ddb60e.1651440202.git.maciej.szmigiero@oracle.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/svm/nested.c b/arch/x86/kvm/svm/nested.c
+index 0d25dea40796..688f86b9202a 100644
+--- a/arch/x86/kvm/svm/nested.c
++++ b/arch/x86/kvm/svm/nested.c
+@@ -623,6 +623,16 @@ static inline bool is_evtinj_soft(u32 evtinj)
+ 	return type == SVM_EVTINJ_TYPE_EXEPT && kvm_exception_is_soft(vector);
+ }
+ 
++static bool is_evtinj_nmi(u32 evtinj)
++{
++	u32 type = evtinj & SVM_EVTINJ_TYPE_MASK;
++
++	if (!(evtinj & SVM_EVTINJ_VALID))
++		return false;
++
++	return type == SVM_EVTINJ_TYPE_NMI;
++}
++
+ static void nested_vmcb02_prepare_control(struct vcpu_svm *svm,
+ 					  unsigned long vmcb12_rip)
+ {
+@@ -691,6 +701,7 @@ static void nested_vmcb02_prepare_control(struct vcpu_svm *svm,
+ 	else if (boot_cpu_has(X86_FEATURE_NRIPS))
+ 		vmcb02->control.next_rip    = vmcb12_rip;
+ 
++	svm->nmi_l1_to_l2 = is_evtinj_nmi(vmcb02->control.event_inj);
+ 	if (is_evtinj_soft(vmcb02->control.event_inj)) {
+ 		svm->soft_int_injected = true;
+ 		svm->soft_int_csbase = svm->vmcb->save.cs.base;
+@@ -873,6 +884,7 @@ int nested_svm_vmrun(struct kvm_vcpu *vcpu)
+ 
+ out_exit_err:
+ 	svm->nested.nested_run_pending = 0;
++	svm->nmi_l1_to_l2 = false;
+ 	svm->soft_int_injected = false;
+ 
+ 	svm->vmcb->control.exit_code    = SVM_EXIT_ERR;

@@ -1,0 +1,250 @@
+diff --git a/fs/nfsd/Makefile b/fs/nfsd/Makefile
+index b8736a82e57c..18cbd3fa7691 100644
+--- a/fs/nfsd/Makefile
++++ b/fs/nfsd/Makefile
+@@ -23,3 +23,4 @@ nfsd-$(CONFIG_NFSD_PNFS) += nfs4layouts.o
+ nfsd-$(CONFIG_NFSD_BLOCKLAYOUT) += blocklayout.o blocklayoutxdr.o
+ nfsd-$(CONFIG_NFSD_SCSILAYOUT) += blocklayout.o blocklayoutxdr.o
+ nfsd-$(CONFIG_NFSD_FLEXFILELAYOUT) += flexfilelayout.o flexfilelayoutxdr.o
++nfsd-$(CONFIG_NFS_LOCALIO) += localio.o
+diff --git a/fs/nfsd/filecache.c b/fs/nfsd/filecache.c
+index 414b5bf738df..19bb88c7eebd 100644
+--- a/fs/nfsd/filecache.c
++++ b/fs/nfsd/filecache.c
+@@ -52,7 +52,7 @@
+ #define NFSD_FILE_CACHE_UP		     (0)
+ 
+ /* We only care about NFSD_MAY_READ/WRITE for this cache */
+-#define NFSD_FILE_MAY_MASK	(NFSD_MAY_READ|NFSD_MAY_WRITE)
++#define NFSD_FILE_MAY_MASK	(NFSD_MAY_READ|NFSD_MAY_WRITE|NFSD_MAY_LOCALIO)
+ 
+ static DEFINE_PER_CPU(unsigned long, nfsd_file_cache_hits);
+ static DEFINE_PER_CPU(unsigned long, nfsd_file_acquisitions);
+diff --git a/fs/nfsd/localio.c b/fs/nfsd/localio.c
+new file mode 100644
+index 000000000000..9fa10a80b2da
+--- /dev/null
++++ b/fs/nfsd/localio.c
+@@ -0,0 +1,92 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * NFS server support for local clients to bypass network stack
++ *
++ * Copyright (C) 2014 Weston Andros Adamson <dros@primarydata.com>
++ * Copyright (C) 2019 Trond Myklebust <trond.myklebust@hammerspace.com>
++ * Copyright (C) 2024 Mike Snitzer <snitzer@hammerspace.com>
++ * Copyright (C) 2024 NeilBrown <neilb@suse.de>
++ */
++
++#include <linux/exportfs.h>
++#include <linux/sunrpc/svcauth.h>
++#include <linux/sunrpc/clnt.h>
++#include <linux/nfs.h>
++#include <linux/nfs_common.h>
++#include <linux/nfslocalio.h>
++#include <linux/string.h>
++
++#include "nfsd.h"
++#include "vfs.h"
++#include "netns.h"
++#include "filecache.h"
++
++static const struct nfsd_localio_operations nfsd_localio_ops = {
++	.nfsd_serv_try_get  = nfsd_serv_try_get,
++	.nfsd_serv_put  = nfsd_serv_put,
++	.nfsd_open_local_fh = nfsd_open_local_fh,
++	.nfsd_file_put_local = nfsd_file_put_local,
++	.nfsd_file_file = nfsd_file_file,
++};
++
++void nfsd_localio_ops_init(void)
++{
++	nfs_to = &nfsd_localio_ops;
++}
++
++/**
++ * nfsd_open_local_fh - lookup a local filehandle @nfs_fh and map to nfsd_file
++ *
++ * @net: 'struct net' to get the proper nfsd_net required for LOCALIO access
++ * @dom: 'struct auth_domain' required for LOCALIO access
++ * @rpc_clnt: rpc_clnt that the client established
++ * @cred: cred that the client established
++ * @nfs_fh: filehandle to lookup
++ * @fmode: fmode_t to use for open
++ *
++ * This function maps a local fh to a path on a local filesystem.
++ * This is useful when the nfs client has the local server mounted - it can
++ * avoid all the NFS overhead with reads, writes and commits.
++ *
++ * On successful return, returned nfsd_file will have its nf_net member
++ * set. Caller (NFS client) is responsible for calling nfsd_serv_put and
++ * nfsd_file_put (via nfs_to->nfsd_file_put_local).
++ */
++struct nfsd_file *
++nfsd_open_local_fh(struct net *net, struct auth_domain *dom,
++		   struct rpc_clnt *rpc_clnt, const struct cred *cred,
++		   const struct nfs_fh *nfs_fh, const fmode_t fmode)
++{
++	int mayflags = NFSD_MAY_LOCALIO;
++	struct svc_cred rq_cred;
++	struct svc_fh fh;
++	struct nfsd_file *localio;
++	__be32 beres;
++
++	if (nfs_fh->size > NFS4_FHSIZE)
++		return ERR_PTR(-EINVAL);
++
++	/* nfs_fh -> svc_fh */
++	fh_init(&fh, NFS4_FHSIZE);
++	fh.fh_handle.fh_size = nfs_fh->size;
++	memcpy(fh.fh_handle.fh_raw, nfs_fh->data, nfs_fh->size);
++
++	if (fmode & FMODE_READ)
++		mayflags |= NFSD_MAY_READ;
++	if (fmode & FMODE_WRITE)
++		mayflags |= NFSD_MAY_WRITE;
++
++	svcauth_map_clnt_to_svc_cred_local(rpc_clnt, cred, &rq_cred);
++
++	beres = nfsd_file_acquire_local(net, &rq_cred, dom,
++					&fh, mayflags, &localio);
++	if (beres)
++		localio = ERR_PTR(nfs_stat_to_errno(be32_to_cpu(beres)));
++
++	fh_put(&fh);
++	if (rq_cred.cr_group_info)
++		put_group_info(rq_cred.cr_group_info);
++
++	return localio;
++}
++EXPORT_SYMBOL_GPL(nfsd_open_local_fh);
+diff --git a/fs/nfsd/netns.h b/fs/nfsd/netns.h
+index a228b9d6a6e1..26f7b34d1a03 100644
+--- a/fs/nfsd/netns.h
++++ b/fs/nfsd/netns.h
+@@ -217,6 +217,10 @@ struct nfsd_net {
+ 	/* last time an admin-revoke happened for NFSv4.0 */
+ 	time64_t		nfs40_last_revoke;
+ 
++#if IS_ENABLED(CONFIG_NFS_LOCALIO)
++	/* Local clients to be invalidated when net is shut down */
++	struct list_head	local_clients;
++#endif
+ };
+ 
+ /* Simple check to find out if a given net was properly initialized */
+diff --git a/fs/nfsd/nfsctl.c b/fs/nfsd/nfsctl.c
+index 64c1b4d649bc..3adbc05ebaac 100644
+--- a/fs/nfsd/nfsctl.c
++++ b/fs/nfsd/nfsctl.c
+@@ -18,6 +18,7 @@
+ #include <linux/sunrpc/svc.h>
+ #include <linux/module.h>
+ #include <linux/fsnotify.h>
++#include <linux/nfslocalio.h>
+ 
+ #include "idmap.h"
+ #include "nfsd.h"
+@@ -2257,7 +2258,9 @@ static __net_init int nfsd_net_init(struct net *net)
+ 	get_random_bytes(&nn->siphash_key, sizeof(nn->siphash_key));
+ 	seqlock_init(&nn->writeverf_lock);
+ 	nfsd_proc_stat_init(net);
+-
++#if IS_ENABLED(CONFIG_NFS_LOCALIO)
++	INIT_LIST_HEAD(&nn->local_clients);
++#endif
+ 	return 0;
+ 
+ out_repcache_error:
+@@ -2268,6 +2271,22 @@ static __net_init int nfsd_net_init(struct net *net)
+ 	return retval;
+ }
+ 
++#if IS_ENABLED(CONFIG_NFS_LOCALIO)
++/**
++ * nfsd_net_pre_exit - Disconnect localio clients from net namespace
++ * @net: a network namespace that is about to be destroyed
++ *
++ * This invalidated ->net pointers held by localio clients
++ * while they can still safely access nn->counter.
++ */
++static __net_exit void nfsd_net_pre_exit(struct net *net)
++{
++	struct nfsd_net *nn = net_generic(net, nfsd_net_id);
++
++	nfs_uuid_invalidate_clients(&nn->local_clients);
++}
++#endif
++
+ /**
+  * nfsd_net_exit - Release the nfsd_net portion of a net namespace
+  * @net: a network namespace that is about to be destroyed
+@@ -2285,6 +2304,9 @@ static __net_exit void nfsd_net_exit(struct net *net)
+ 
+ static struct pernet_operations nfsd_net_ops = {
+ 	.init = nfsd_net_init,
++#if IS_ENABLED(CONFIG_NFS_LOCALIO)
++	.pre_exit = nfsd_net_pre_exit,
++#endif
+ 	.exit = nfsd_net_exit,
+ 	.id   = &nfsd_net_id,
+ 	.size = sizeof(struct nfsd_net),
+@@ -2322,6 +2344,7 @@ static int __init init_nfsd(void)
+ 	retval = genl_register_family(&nfsd_nl_family);
+ 	if (retval)
+ 		goto out_free_all;
++	nfsd_localio_ops_init();
+ 
+ 	return 0;
+ out_free_all:
+diff --git a/fs/nfsd/trace.h b/fs/nfsd/trace.h
+index e339d04ff32f..c625966cfcf3 100644
+--- a/fs/nfsd/trace.h
++++ b/fs/nfsd/trace.h
+@@ -86,7 +86,8 @@ DEFINE_NFSD_XDR_ERR_EVENT(cant_encode);
+ 		{ NFSD_MAY_NOT_BREAK_LEASE,	"NOT_BREAK_LEASE" },	\
+ 		{ NFSD_MAY_BYPASS_GSS,		"BYPASS_GSS" },		\
+ 		{ NFSD_MAY_READ_IF_EXEC,	"READ_IF_EXEC" },	\
+-		{ NFSD_MAY_64BIT_COOKIE,	"64BIT_COOKIE" })
++		{ NFSD_MAY_64BIT_COOKIE,	"64BIT_COOKIE" },	\
++		{ NFSD_MAY_LOCALIO,		"LOCALIO" })
+ 
+ TRACE_EVENT(nfsd_compound,
+ 	TP_PROTO(
+diff --git a/fs/nfsd/vfs.h b/fs/nfsd/vfs.h
+index 01947561d375..3ff146522556 100644
+--- a/fs/nfsd/vfs.h
++++ b/fs/nfsd/vfs.h
+@@ -33,6 +33,8 @@
+ 
+ #define NFSD_MAY_64BIT_COOKIE		0x1000 /* 64 bit readdir cookies for >= NFSv3 */
+ 
++#define NFSD_MAY_LOCALIO		0x2000 /* for tracing, reflects when localio used */
++
+ #define NFSD_MAY_CREATE		(NFSD_MAY_EXEC|NFSD_MAY_WRITE)
+ #define NFSD_MAY_REMOVE		(NFSD_MAY_EXEC|NFSD_MAY_WRITE|NFSD_MAY_TRUNC)
+ 
+diff --git a/include/linux/nfslocalio.h b/include/linux/nfslocalio.h
+index 1a39d7d727bd..546f46b4e46f 100644
+--- a/include/linux/nfslocalio.h
++++ b/include/linux/nfslocalio.h
+@@ -6,6 +6,8 @@
+ #ifndef __LINUX_NFSLOCALIO_H
+ #define __LINUX_NFSLOCALIO_H
+ 
++#if IS_ENABLED(CONFIG_NFS_LOCALIO)
++
+ #include <linux/module.h>
+ #include <linux/list.h>
+ #include <linux/uuid.h>
+@@ -58,4 +60,10 @@ struct nfsd_localio_operations {
+ extern void nfsd_localio_ops_init(void);
+ extern const struct nfsd_localio_operations *nfs_to;
+ 
++#else   /* CONFIG_NFS_LOCALIO */
++static inline void nfsd_localio_ops_init(void)
++{
++}
++#endif  /* CONFIG_NFS_LOCALIO */
++
+ #endif  /* __LINUX_NFSLOCALIO_H */

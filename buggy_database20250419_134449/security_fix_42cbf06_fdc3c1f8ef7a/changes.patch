@@ -1,0 +1,102 @@
+diff --git a/arch/x86/include/asm/kvm_host.h b/arch/x86/include/asm/kvm_host.h
+index 13b35f94dec4..80071d02b87d 100644
+--- a/arch/x86/include/asm/kvm_host.h
++++ b/arch/x86/include/asm/kvm_host.h
+@@ -1325,8 +1325,7 @@ enum emulation_result {
+ #define EMULTYPE_TRAP_UD	    (1 << 1)
+ #define EMULTYPE_SKIP		    (1 << 2)
+ #define EMULTYPE_ALLOW_RETRY	    (1 << 3)
+-#define EMULTYPE_NO_UD_ON_FAIL	    (1 << 4)
+-#define EMULTYPE_VMWARE		    (1 << 5)
++#define EMULTYPE_VMWARE_GP	    (1 << 5)
+ int kvm_emulate_instruction(struct kvm_vcpu *vcpu, int emulation_type);
+ int kvm_emulate_instruction_from_buffer(struct kvm_vcpu *vcpu,
+ 					void *insn, int insn_len);
+diff --git a/arch/x86/kvm/svm.c b/arch/x86/kvm/svm.c
+index 00ec27bc2946..c7aa55e192c0 100644
+--- a/arch/x86/kvm/svm.c
++++ b/arch/x86/kvm/svm.c
+@@ -2768,7 +2768,6 @@ static int gp_interception(struct vcpu_svm *svm)
+ {
+ 	struct kvm_vcpu *vcpu = &svm->vcpu;
+ 	u32 error_code = svm->vmcb->control.exit_info_1;
+-	int er;
+ 
+ 	WARN_ON_ONCE(!enable_vmware_backdoor);
+ 
+@@ -2780,13 +2779,8 @@ static int gp_interception(struct vcpu_svm *svm)
+ 		kvm_queue_exception_e(vcpu, GP_VECTOR, error_code);
+ 		return 1;
+ 	}
+-	er = kvm_emulate_instruction(vcpu,
+-		EMULTYPE_VMWARE | EMULTYPE_NO_UD_ON_FAIL);
+-	if (er == EMULATE_USER_EXIT)
+-		return 0;
+-	else if (er != EMULATE_DONE)
+-		kvm_queue_exception_e(vcpu, GP_VECTOR, 0);
+-	return 1;
++	return kvm_emulate_instruction(vcpu, EMULTYPE_VMWARE_GP) !=
++						EMULATE_USER_EXIT;
+ }
+ 
+ static bool is_erratum_383(void)
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index d1bac3cb2440..d4371599abe3 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -4522,7 +4522,6 @@ static int handle_exception_nmi(struct kvm_vcpu *vcpu)
+ 	u32 intr_info, ex_no, error_code;
+ 	unsigned long cr2, rip, dr6;
+ 	u32 vect_info;
+-	enum emulation_result er;
+ 
+ 	vect_info = vmx->idt_vectoring_info;
+ 	intr_info = vmx->exit_intr_info;
+@@ -4549,13 +4548,8 @@ static int handle_exception_nmi(struct kvm_vcpu *vcpu)
+ 			kvm_queue_exception_e(vcpu, GP_VECTOR, error_code);
+ 			return 1;
+ 		}
+-		er = kvm_emulate_instruction(vcpu,
+-			EMULTYPE_VMWARE | EMULTYPE_NO_UD_ON_FAIL);
+-		if (er == EMULATE_USER_EXIT)
+-			return 0;
+-		else if (er != EMULATE_DONE)
+-			kvm_queue_exception_e(vcpu, GP_VECTOR, 0);
+-		return 1;
++		return kvm_emulate_instruction(vcpu, EMULTYPE_VMWARE_GP) !=
++							EMULATE_USER_EXIT;
+ 	}
+ 
+ 	/*
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index e6063f20259e..09753b699d81 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -6307,8 +6307,10 @@ static int handle_emulation_failure(struct kvm_vcpu *vcpu, int emulation_type)
+ 	++vcpu->stat.insn_emulation_fail;
+ 	trace_kvm_emulate_insn_failed(vcpu);
+ 
+-	if (emulation_type & EMULTYPE_NO_UD_ON_FAIL)
+-		return EMULATE_FAIL;
++	if (emulation_type & EMULTYPE_VMWARE_GP) {
++		kvm_queue_exception_e(vcpu, GP_VECTOR, 0);
++		return EMULATE_DONE;
++	}
+ 
+ 	kvm_queue_exception(vcpu, UD_VECTOR);
+ 
+@@ -6648,9 +6650,11 @@ int x86_emulate_instruction(struct kvm_vcpu *vcpu,
+ 		}
+ 	}
+ 
+-	if ((emulation_type & EMULTYPE_VMWARE) &&
+-	    !is_vmware_backdoor_opcode(ctxt))
+-		return EMULATE_FAIL;
++	if ((emulation_type & EMULTYPE_VMWARE_GP) &&
++	    !is_vmware_backdoor_opcode(ctxt)) {
++		kvm_queue_exception_e(vcpu, GP_VECTOR, 0);
++		return EMULATE_DONE;
++	}
+ 
+ 	if (emulation_type & EMULTYPE_SKIP) {
+ 		kvm_rip_write(vcpu, ctxt->_eip);

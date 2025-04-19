@@ -1,0 +1,80 @@
+diff --cc drivers/staging/erofs/data.c
+index c64ec76643d4,9f04d7466c55..746685f90564
+--- a/drivers/staging/erofs/data.c
++++ b/drivers/staging/erofs/data.c
+@@@ -17,18 -17,11 +17,17 @@@
+  
+  static inline void read_endio(struct bio *bio)
+  {
+ +	struct super_block *const sb = bio->bi_private;
+- 	int i;
+  	struct bio_vec *bvec;
+ -	const blk_status_t err = bio->bi_status;
+ +	blk_status_t err = bio->bi_status;
+  	struct bvec_iter_all iter_all;
+  
+ +	if (time_to_inject(EROFS_SB(sb), FAULT_READ_IO)) {
+ +		erofs_show_injection_info(FAULT_READ_IO);
+ +		err = BLK_STS_IOERR;
+ +	}
+ +
+- 	bio_for_each_segment_all(bvec, bio, i, iter_all) {
++ 	bio_for_each_segment_all(bvec, bio, iter_all) {
+  		struct page *page = bvec->bv_page;
+  
+  		/* page is already locked */
+diff --cc drivers/staging/erofs/unzip_vle.c
+index a2e03c932102,59b9f37d5c00..9ecaa872bae8
+--- a/drivers/staging/erofs/unzip_vle.c
++++ b/drivers/staging/erofs/unzip_vle.c
+@@@ -844,13 -843,14 +844,12 @@@ static void z_erofs_vle_unzip_kickoff(v
+  
+  static inline void z_erofs_vle_read_endio(struct bio *bio)
+  {
+ -	const blk_status_t err = bio->bi_status;
+ +	struct erofs_sb_info *sbi = NULL;
+ +	blk_status_t err = bio->bi_status;
+- 	unsigned int i;
+  	struct bio_vec *bvec;
+ -#ifdef EROFS_FS_HAS_MANAGED_CACHE
+ -	struct address_space *mc = NULL;
+ -#endif
+  	struct bvec_iter_all iter_all;
+  
+- 	bio_for_each_segment_all(bvec, bio, i, iter_all) {
++ 	bio_for_each_segment_all(bvec, bio, iter_all) {
+  		struct page *page = bvec->bv_page;
+  		bool cachemngd = false;
+  
+diff --cc fs/block_dev.c
+index 9ee3117ee0bf,8abc6570d29f..500aaa3e5990
+--- a/fs/block_dev.c
++++ b/fs/block_dev.c
+@@@ -261,11 -260,10 +260,11 @@@ __blkdev_direct_IO_simple(struct kiocb 
+  	}
+  	__set_current_state(TASK_RUNNING);
+  
+- 	bio_for_each_segment_all(bvec, &bio, i, iter_all) {
++ 	bio_for_each_segment_all(bvec, &bio, iter_all) {
+  		if (should_dirty && !PageCompound(bvec->bv_page))
+  			set_page_dirty_lock(bvec->bv_page);
+ -		put_page(bvec->bv_page);
+ +		if (!bio_flagged(&bio, BIO_NO_PAGE_REF))
+ +			put_page(bvec->bv_page);
+  	}
+  
+  	if (unlikely(bio.bi_status))
+diff --cc lib/Kconfig.debug
+index 4c54a89f06ee,caedd54fa545..971c6c70891e
+--- a/lib/Kconfig.debug
++++ b/lib/Kconfig.debug
+@@@ -1930,9 -1927,7 +1930,8 @@@ config TEST_STATIC_KEY
+  config TEST_KMOD
+  	tristate "kmod stress tester"
+  	depends on m
+- 	depends on BLOCK && (64BIT || LBDAF)	  # for XFS, BTRFS
+  	depends on NETDEVICES && NET_CORE && INET # for TUN
+ +	depends on BLOCK
+  	select TEST_LKM
+  	select XFS_FS
+  	select TUN

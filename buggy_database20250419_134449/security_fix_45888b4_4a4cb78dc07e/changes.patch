@@ -1,0 +1,120 @@
+diff --git a/include/linux/rslib.h b/include/linux/rslib.h
+index 6703311beea3..5974cedd008c 100644
+--- a/include/linux/rslib.h
++++ b/include/linux/rslib.h
+@@ -50,9 +50,11 @@ struct rs_codec {
+ /**
+  * struct rs_control - rs control structure per instance
+  * @codec:	The codec used for this instance
++ * @buffers:	Internal scratch buffers used in calls to decode_rs()
+  */
+ struct rs_control {
+ 	struct rs_codec	*codec;
++	uint16_t	buffers[0];
+ };
+ 
+ /* General purpose RS codec, 8-bit data width, symbol width 1-15 bit  */
+diff --git a/lib/reed_solomon/decode_rs.c b/lib/reed_solomon/decode_rs.c
+index 794cced31c75..1db74eb098d0 100644
+--- a/lib/reed_solomon/decode_rs.c
++++ b/lib/reed_solomon/decode_rs.c
+@@ -21,16 +21,22 @@
+ 	uint16_t *alpha_to = rs->alpha_to;
+ 	uint16_t *index_of = rs->index_of;
+ 	uint16_t u, q, tmp, num1, num2, den, discr_r, syn_error;
+-	/* Err+Eras Locator poly and syndrome poly The maximum value
+-	 * of nroots is 8. So the necessary stack size will be about
+-	 * 220 bytes max.
+-	 */
+-	uint16_t lambda[nroots + 1], syn[nroots];
+-	uint16_t b[nroots + 1], t[nroots + 1], omega[nroots + 1];
+-	uint16_t root[nroots], reg[nroots + 1], loc[nroots];
+ 	int count = 0;
+ 	uint16_t msk = (uint16_t) rs->nn;
+ 
++	/*
++	 * The decoder buffers are in the rs control struct. They are
++	 * arrays sized [nroots + 1]
++	 */
++	uint16_t *lambda = rsc->buffers + RS_DECODE_LAMBDA * (nroots + 1);
++	uint16_t *syn = rsc->buffers + RS_DECODE_SYN * (nroots + 1);
++	uint16_t *b = rsc->buffers + RS_DECODE_B * (nroots + 1);
++	uint16_t *t = rsc->buffers + RS_DECODE_T * (nroots + 1);
++	uint16_t *omega = rsc->buffers + RS_DECODE_OMEGA * (nroots + 1);
++	uint16_t *root = rsc->buffers + RS_DECODE_ROOT * (nroots + 1);
++	uint16_t *reg = rsc->buffers + RS_DECODE_REG * (nroots + 1);
++	uint16_t *loc = rsc->buffers + RS_DECODE_LOC * (nroots + 1);
++
+ 	/* Check length parameter for validity */
+ 	pad = nn - nroots - len;
+ 	BUG_ON(pad < 0 || pad >= nn);
+diff --git a/lib/reed_solomon/reed_solomon.c b/lib/reed_solomon/reed_solomon.c
+index cb21e8b5a4e0..dfcf54242fb9 100644
+--- a/lib/reed_solomon/reed_solomon.c
++++ b/lib/reed_solomon/reed_solomon.c
+@@ -37,6 +37,18 @@
+ #include <linux/slab.h>
+ #include <linux/mutex.h>
+ 
++enum {
++	RS_DECODE_LAMBDA,
++	RS_DECODE_SYN,
++	RS_DECODE_B,
++	RS_DECODE_T,
++	RS_DECODE_OMEGA,
++	RS_DECODE_ROOT,
++	RS_DECODE_REG,
++	RS_DECODE_LOC,
++	RS_DECODE_NUM_BUFFERS
++};
++
+ /* This list holds all currently allocated rs codec structures */
+ static LIST_HEAD(codec_list);
+ /* Protection for the list */
+@@ -204,6 +216,7 @@ static struct rs_control *init_rs_internal(int symsize, int gfpoly,
+ {
+ 	struct list_head *tmp;
+ 	struct rs_control *rs;
++	unsigned int bsize;
+ 
+ 	/* Sanity checks */
+ 	if (symsize < 1)
+@@ -215,7 +228,13 @@ static struct rs_control *init_rs_internal(int symsize, int gfpoly,
+ 	if (nroots < 0 || nroots >= (1<<symsize))
+ 		return NULL;
+ 
+-	rs = kzalloc(sizeof(*rs), GFP_KERNEL);
++	/*
++	 * The decoder needs buffers in each control struct instance to
++	 * avoid variable size or large fixed size allocations on
++	 * stack. Size the buffers to arrays of [nroots + 1].
++	 */
++	bsize = sizeof(uint16_t) * RS_DECODE_NUM_BUFFERS * (nroots + 1);
++	rs = kzalloc(sizeof(*rs) + bsize, gfp);
+ 	if (!rs)
+ 		return NULL;
+ 
+@@ -330,6 +349,11 @@ EXPORT_SYMBOL_GPL(encode_rs8);
+  *  The syndrome and parity uses a uint16_t data type to enable
+  *  symbol size > 8. The calling code must take care of decoding of the
+  *  syndrome result and the received parity before calling this code.
++ *
++ *  Note: The rs_control struct @rsc contains buffers which are used for
++ *  decoding, so the caller has to ensure that decoder invocations are
++ *  serialized.
++ *
+  *  Returns the number of corrected bits or -EBADMSG for uncorrectable errors.
+  */
+ int decode_rs8(struct rs_control *rsc, uint8_t *data, uint16_t *par, int len,
+@@ -374,6 +398,11 @@ EXPORT_SYMBOL_GPL(encode_rs16);
+  *  @corr:	buffer to store correction bitmask on eras_pos
+  *
+  *  Each field in the data array contains up to symbol size bits of valid data.
++ *
++ *  Note: The rc_control struct @rsc contains buffers which are used for
++ *  decoding, so the caller has to ensure that decoder invocations are
++ *  serialized.
++ *
+  *  Returns the number of corrected bits or -EBADMSG for uncorrectable errors.
+  */
+ int decode_rs16(struct rs_control *rsc, uint16_t *data, uint16_t *par, int len,

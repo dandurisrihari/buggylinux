@@ -1,0 +1,75 @@
+commit 66933b78e3204057bfc26343afcd0d463c0e8e55
+Author: David Hildenbrand <dahi@linux.vnet.ibm.com>
+Date:   Thu Nov 20 13:49:32 2014 +0100
+
+    KVM: s390: simplify in-kernel program irq injection
+    
+    The main reason to keep program injection in kernel separated until now
+    was that we were able to do some checking, if really only the owning
+    thread injects program interrupts (via waitqueue_active(li->wq)).
+    
+    This BUG_ON was never triggered and the chances of really hitting it, if
+    another thread injected a program irq to another vcpu, were very small.
+    
+    Let's drop this check and turn kvm_s390_inject_program_int() and
+    kvm_s390_inject_prog_irq() into simple inline functions that makes use of
+    kvm_s390_inject_vcpu().
+    
+    __must_check can be dropped as they are implicitely given by
+    kvm_s390_inject_vcpu(), to avoid ugly long function prototypes.
+    
+    Reviewed-by: Jens Freimann <jfrei@linux.vnet.ibm.com>
+    Acked-by: Cornelia Huck <cornelia.huck@de.ibm.com>
+    Reviewed-by: Christian Borntraeger <borntraeger@de.ibm.com>
+    Signed-off-by: David Hildenbrand <dahi@linux.vnet.ibm.com>
+    Signed-off-by: Christian Borntraeger <borntraeger@de.ibm.com>
+
+diff --git a/arch/s390/kvm/kvm-s390.h b/arch/s390/kvm/kvm-s390.h
+index c446aabf60d3..3a368d2a6114 100644
+--- a/arch/s390/kvm/kvm-s390.h
++++ b/arch/s390/kvm/kvm-s390.h
+@@ -175,6 +175,7 @@ static inline int kvm_s390_user_cpu_state_ctrl(struct kvm *kvm)
+ 	return kvm->arch.user_cpu_state_ctrl != 0;
+ }
+ 
++/* implemented in interrupt.c */
+ int kvm_s390_handle_wait(struct kvm_vcpu *vcpu);
+ void kvm_s390_vcpu_wakeup(struct kvm_vcpu *vcpu);
+ enum hrtimer_restart kvm_s390_idle_wakeup(struct hrtimer *timer);
+@@ -185,7 +186,25 @@ int __must_check kvm_s390_inject_vm(struct kvm *kvm,
+ 				    struct kvm_s390_interrupt *s390int);
+ int __must_check kvm_s390_inject_vcpu(struct kvm_vcpu *vcpu,
+ 				      struct kvm_s390_irq *irq);
+-int __must_check kvm_s390_inject_program_int(struct kvm_vcpu *vcpu, u16 code);
++static inline int kvm_s390_inject_prog_irq(struct kvm_vcpu *vcpu,
++					   struct kvm_s390_pgm_info *pgm_info)
++{
++	struct kvm_s390_irq irq = {
++		.type = KVM_S390_PROGRAM_INT,
++		.u.pgm = *pgm_info,
++	};
++
++	return kvm_s390_inject_vcpu(vcpu, &irq);
++}
++static inline int kvm_s390_inject_program_int(struct kvm_vcpu *vcpu, u16 code)
++{
++	struct kvm_s390_irq irq = {
++		.type = KVM_S390_PROGRAM_INT,
++		.u.pgm.code = code,
++	};
++
++	return kvm_s390_inject_vcpu(vcpu, &irq);
++}
+ struct kvm_s390_interrupt_info *kvm_s390_get_io_int(struct kvm *kvm,
+ 						    u64 isc_mask, u32 schid);
+ int kvm_s390_reinject_io_int(struct kvm *kvm,
+@@ -231,9 +250,6 @@ extern unsigned long kvm_s390_fac_list_mask[];
+ 
+ /* implemented in diag.c */
+ int kvm_s390_handle_diag(struct kvm_vcpu *vcpu);
+-/* implemented in interrupt.c */
+-int kvm_s390_inject_prog_irq(struct kvm_vcpu *vcpu,
+-			     struct kvm_s390_pgm_info *pgm_info);
+ 
+ static inline void kvm_s390_vcpu_block_all(struct kvm *kvm)
+ {

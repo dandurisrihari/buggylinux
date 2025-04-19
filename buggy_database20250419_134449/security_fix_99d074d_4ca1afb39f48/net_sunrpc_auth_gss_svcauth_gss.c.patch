@@ -1,0 +1,74 @@
+commit 99d074d6b135ae2927b6130d448f5b7159f8dbe1
+Author: Chuck Lever <chuck.lever@oracle.com>
+Date:   Sun Jan 8 11:29:26 2023 -0500
+
+    SUNRPC: Check rq_auth_stat when preparing to wrap a response
+    
+    Commit 5b304bc5bfcc ("[PATCH] knfsd: svcrpc: gss: fix failure on
+    SVC_DENIED in integrity case") added a check to prevent wrapping an
+    RPC response if reply_stat == MSG_DENIED, assuming that the only way
+    to get to svcauth_gss_release() with that reply_stat value was if
+    the reject_stat was AUTH_ERROR (reject_stat == MISMATCH is handled
+    earlier in svc_process_common()).
+    
+    The code there is somewhat confusing. For one thing, rpc_success is
+    an accept_stat value, not a reply_stat value. The correct reply_stat
+    value to look for is RPC_MSG_DENIED. It happens to be the same value
+    as rpc_success, so it all works out, but it's not terribly readable.
+    
+    Since commit 438623a06bac ("SUNRPC: Add svc_rqst::rq_auth_stat"),
+    the actual auth_stat value is stored in the svc_rqst, so that value
+    is now available to svcauth_gss_prepare_to_wrap() to make its
+    decision to wrap, based on direct information about the
+    authentication status of the RPC caller.
+    
+    No behavior change is intended, this simply replaces some old code
+    with something that should be more self-documenting.
+    
+    Reviewed-by: Jeff Layton <jlayton@kernel.org>
+    Signed-off-by: Chuck Lever <chuck.lever@oracle.com>
+
+diff --git a/net/sunrpc/auth_gss/svcauth_gss.c b/net/sunrpc/auth_gss/svcauth_gss.c
+index c9bbf4ddf3ab..6ef4f1ecbeec 100644
+--- a/net/sunrpc/auth_gss/svcauth_gss.c
++++ b/net/sunrpc/auth_gss/svcauth_gss.c
+@@ -1732,17 +1732,19 @@ svcauth_gss_accept(struct svc_rqst *rqstp)
+ }
+ 
+ static __be32 *
+-svcauth_gss_prepare_to_wrap(struct xdr_buf *resbuf, struct gss_svc_data *gsd)
++svcauth_gss_prepare_to_wrap(struct svc_rqst *rqstp, struct gss_svc_data *gsd)
+ {
++	struct xdr_buf *resbuf = &rqstp->rq_res;
+ 	__be32 *p;
+ 	u32 verf_len;
+ 
+ 	p = gsd->verf_start;
+ 	gsd->verf_start = NULL;
+ 
+-	/* If the reply stat is nonzero, don't wrap: */
+-	if (*(p-1) != rpc_success)
++	/* AUTH_ERROR replies are not wrapped. */
++	if (rqstp->rq_auth_stat != rpc_auth_ok)
+ 		return NULL;
++
+ 	/* Skip the verifier: */
+ 	p += 1;
+ 	verf_len = ntohl(*p++);
+@@ -1786,7 +1788,7 @@ static int svcauth_gss_wrap_integ(struct svc_rqst *rqstp)
+ 	u32 offset, len, maj_stat;
+ 	__be32 *p;
+ 
+-	p = svcauth_gss_prepare_to_wrap(buf, gsd);
++	p = svcauth_gss_prepare_to_wrap(rqstp, gsd);
+ 	if (p == NULL)
+ 		goto out;
+ 
+@@ -1846,7 +1848,7 @@ static int svcauth_gss_wrap_priv(struct svc_rqst *rqstp)
+ 	u32 offset, pad, maj_stat;
+ 	__be32 *p, *lenp;
+ 
+-	p = svcauth_gss_prepare_to_wrap(buf, gsd);
++	p = svcauth_gss_prepare_to_wrap(rqstp, gsd);
+ 	if (p == NULL)
+ 		return 0;

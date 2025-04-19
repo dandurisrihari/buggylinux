@@ -1,0 +1,55 @@
+commit 6761a718263a0cff8b31c30b61c92acc14db853f
+Author: Krishnanand Prabhu <krishnanand.prabhu@intel.com>
+Date:   Sun Jan 17 16:52:30 2021 +0200
+
+    iwlwifi: mvm: add explicit check for non-data frames in get Tx rate
+    
+    In roaming flows and during reassociation, its possible that data frames
+    such as EAPOLs for 4 way handshake/ 802.1x authentication are initially set
+    to higher MCS rate. Though these are pruned down to a lower legacy rate
+    before sending to the FW, driver also emits a kernel warning - intended for
+    non-data frames. Add checks to avoid such warnings for data frames, while
+    also enhancing the debug data printed.
+    
+    Signed-off-by: Krishnanand Prabhu <krishnanand.prabhu@intel.com>
+    Signed-off-by: Luca Coelho <luciano.coelho@intel.com>
+    Link: https://lore.kernel.org/r/iwlwifi.20210117164916.d9ded010c4ce.Ie1d5a33d7175c0bcb35c10b5729748646671da31@changeid
+    Signed-off-by: Luca Coelho <luciano.coelho@intel.com>
+
+diff --git a/drivers/net/wireless/intel/iwlwifi/mvm/tx.c b/drivers/net/wireless/intel/iwlwifi/mvm/tx.c
+index c8c07b7fe0ad..b102fe116f04 100644
+--- a/drivers/net/wireless/intel/iwlwifi/mvm/tx.c
++++ b/drivers/net/wireless/intel/iwlwifi/mvm/tx.c
+@@ -263,17 +263,20 @@ static u32 iwl_mvm_get_tx_ant(struct iwl_mvm *mvm,
+ 
+ static u32 iwl_mvm_get_tx_rate(struct iwl_mvm *mvm,
+ 			       struct ieee80211_tx_info *info,
+-			       struct ieee80211_sta *sta)
++			       struct ieee80211_sta *sta, __le16 fc)
+ {
+ 	int rate_idx;
+ 	u8 rate_plcp;
+ 	u32 rate_flags = 0;
++	struct iwl_mvm_sta *mvmsta = iwl_mvm_sta_from_mac80211(sta);
+ 
+ 	/* HT rate doesn't make sense for a non data frame */
+-	WARN_ONCE(info->control.rates[0].flags & IEEE80211_TX_RC_MCS,
+-		  "Got an HT rate (flags:0x%x/mcs:%d) for a non data frame\n",
++	WARN_ONCE(info->control.rates[0].flags & IEEE80211_TX_RC_MCS &&
++		  !ieee80211_is_data(fc),
++		  "Got a HT rate (flags:0x%x/mcs:%d/fc:0x%x/state:%d) for a non data frame\n",
+ 		  info->control.rates[0].flags,
+-		  info->control.rates[0].idx);
++		  info->control.rates[0].idx,
++		  le16_to_cpu(fc), mvmsta->sta_state);
+ 
+ 	rate_idx = info->control.rates[0].idx;
+ 	/* if the rate isn't a well known legacy rate, take the lowest one */
+@@ -305,7 +308,7 @@ static u32 iwl_mvm_get_tx_rate_n_flags(struct iwl_mvm *mvm,
+ 				       struct ieee80211_tx_info *info,
+ 				       struct ieee80211_sta *sta, __le16 fc)
+ {
+-	return iwl_mvm_get_tx_rate(mvm, info, sta) |
++	return iwl_mvm_get_tx_rate(mvm, info, sta, fc) |
+ 		iwl_mvm_get_tx_ant(mvm, info, sta, fc);
+ }

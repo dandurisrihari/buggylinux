@@ -1,0 +1,63 @@
+commit 71f3ca408fd43b586c02480768a503af075b247e
+Author: David Howells <dhowells@redhat.com>
+Date:   Sat Sep 17 10:49:14 2016 +0100
+
+    rxrpc: Improve skb tracing
+    
+    Improve sk_buff tracing within AF_RXRPC by the following means:
+    
+     (1) Use an enum to note the event type rather than plain integers and use
+         an array of event names rather than a big multi ?: list.
+    
+     (2) Distinguish Rx from Tx packets and account them separately.  This
+         requires the call phase to be tracked so that we know what we might
+         find in rxtx_buffer[].
+    
+     (3) Add a parameter to rxrpc_{new,see,get,free}_skb() to indicate the
+         event type.
+    
+     (4) A pair of 'rotate' events are added to indicate packets that are about
+         to be rotated out of the Rx and Tx windows.
+    
+     (5) A pair of 'lost' events are added, along with rxrpc_lose_skb() for
+         packet loss injection recording.
+    
+    Signed-off-by: David Howells <dhowells@redhat.com>
+
+diff --git a/net/rxrpc/call_object.c b/net/rxrpc/call_object.c
+index 54f30482a7fd..f50a6094e198 100644
+--- a/net/rxrpc/call_object.c
++++ b/net/rxrpc/call_object.c
+@@ -182,6 +182,7 @@ static struct rxrpc_call *rxrpc_alloc_client_call(struct sockaddr_rxrpc *srx,
+ 		return ERR_PTR(-ENOMEM);
+ 	call->state = RXRPC_CALL_CLIENT_AWAIT_CONN;
+ 	call->service_id = srx->srx_service;
++	call->tx_phase = true;
+ 
+ 	_leave(" = %p", call);
+ 	return call;
+@@ -458,7 +459,9 @@ void rxrpc_release_call(struct rxrpc_sock *rx, struct rxrpc_call *call)
+ 		rxrpc_disconnect_call(call);
+ 
+ 	for (i = 0; i < RXRPC_RXTX_BUFF_SIZE; i++) {
+-		rxrpc_free_skb(call->rxtx_buffer[i]);
++		rxrpc_free_skb(call->rxtx_buffer[i],
++			       (call->tx_phase ? rxrpc_skb_tx_cleaned :
++				rxrpc_skb_rx_cleaned));
+ 		call->rxtx_buffer[i] = NULL;
+ 	}
+ 
+@@ -552,9 +555,11 @@ void rxrpc_cleanup_call(struct rxrpc_call *call)
+ 
+ 	/* Clean up the Rx/Tx buffer */
+ 	for (i = 0; i < RXRPC_RXTX_BUFF_SIZE; i++)
+-		rxrpc_free_skb(call->rxtx_buffer[i]);
++		rxrpc_free_skb(call->rxtx_buffer[i],
++			       (call->tx_phase ? rxrpc_skb_tx_cleaned :
++				rxrpc_skb_rx_cleaned));
+ 
+-	rxrpc_free_skb(call->tx_pending);
++	rxrpc_free_skb(call->tx_pending, rxrpc_skb_tx_cleaned);
+ 
+ 	call_rcu(&call->rcu, rxrpc_rcu_destroy_call);
+ }

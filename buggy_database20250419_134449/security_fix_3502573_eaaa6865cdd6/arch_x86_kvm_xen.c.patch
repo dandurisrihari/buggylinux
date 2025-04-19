@@ -1,0 +1,66 @@
+commit 35025735a79eaa894c43837b94fd33c9d6b122df
+Author: David Woodhouse <dwmw@amazon.co.uk>
+Date:   Thu Mar 3 15:41:18 2022 +0000
+
+    KVM: x86/xen: Support direct injection of event channel events
+    
+    This adds a KVM_XEN_HVM_EVTCHN_SEND ioctl which allows direct injection
+    of events given an explicit { vcpu, port, priority } in precisely the
+    same form that those fields are given in the IRQ routing table.
+    
+    Userspace is currently able to inject 2-level events purely by setting
+    the bits in the shared_info and vcpu_info, but FIFO event channels are
+    harder to deal with; we will need the kernel to take sole ownership of
+    delivery when we support those.
+    
+    A patch advertising this feature with a new bit in the KVM_CAP_XEN_HVM
+    ioctl will be added in a subsequent patch.
+    
+    Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+    Message-Id: <20220303154127.202856-9-dwmw2@infradead.org>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/xen.c b/arch/x86/kvm/xen.c
+index 9c87263a5be2..f0f0011c4617 100644
+--- a/arch/x86/kvm/xen.c
++++ b/arch/x86/kvm/xen.c
+@@ -1086,6 +1086,38 @@ int kvm_xen_setup_evtchn(struct kvm *kvm,
+ 	return 0;
+ }
+ 
++/*
++ * Explicit event sending from userspace with KVM_XEN_HVM_EVTCHN_SEND ioctl.
++ */
++int kvm_xen_hvm_evtchn_send(struct kvm *kvm, struct kvm_irq_routing_xen_evtchn *uxe)
++{
++	struct kvm_xen_evtchn e;
++	int ret;
++
++	if (!uxe->port || uxe->port >= max_evtchn_port(kvm))
++		return -EINVAL;
++
++	/* We only support 2 level event channels for now */
++	if (uxe->priority != KVM_IRQ_ROUTING_XEN_EVTCHN_PRIO_2LEVEL)
++		return -EINVAL;
++
++	e.port = uxe->port;
++	e.vcpu_id = uxe->vcpu;
++	e.vcpu_idx = -1;
++	e.priority = uxe->priority;
++
++	ret = kvm_xen_set_evtchn(&e, kvm);
++
++	/*
++	 * None of that 'return 1 if it actually got delivered' nonsense.
++	 * We don't care if it was masked (-ENOTCONN) either.
++	 */
++	if (ret > 0 || ret == -ENOTCONN)
++		ret = 0;
++
++	return ret;
++}
++
+ void kvm_xen_destroy_vcpu(struct kvm_vcpu *vcpu)
+ {
+ 	kvm_gfn_to_pfn_cache_destroy(vcpu->kvm,

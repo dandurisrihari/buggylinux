@@ -1,0 +1,68 @@
+commit 2c810ccdbac434ae38f4ec5331d3f047dc90f98a
+Author: Johannes Berg <johannes.berg@intel.com>
+Date:   Thu Apr 29 00:53:29 2010 -0700
+
+    iwlwifi: rework broadcast station management
+    
+    Currently, the broadcast station is managed along
+    with the interface type, rather than always being
+    present. That leads to a bug with injection -- it
+    is currently not possible to inject frames when
+    the only virtual interface is a monitor, because
+    in that the required broadcast station is missing.
+    
+    Additionally, allocating and deallocating the
+    broadcast station's LQ all the time is wasteful,
+    and the code to support this is fairly complex.
+    
+    So this changes completely the way we manage the
+    broadcast station. Rather than manage it along
+    with any interface, we now allocate it when we
+    bring the device up, and remove it again when we
+    bring the device down. When we bring the device
+    up, we don't immediately program the broadcast
+    station into it, instead we just mark it active
+    and rely on the next restore cycle to upload it
+    to the device. This works because an unassociated
+    RXON is always required at least once to set up
+    device parameters, which implies a reprogramming
+    of stations into the device.
+    
+    As we now manage all stations properly, there no
+    longer is a need for forcing a clearing of them
+    via iwl_clear_ucode_stations(), which can become
+    a lot simpler.
+    
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+    Signed-off-by: Reinette Chatre <reinette.chatre@intel.com>
+
+diff --git a/drivers/net/wireless/iwlwifi/iwl-3945.c b/drivers/net/wireless/iwlwifi/iwl-3945.c
+index 05d808b28777..7fb159565f68 100644
+--- a/drivers/net/wireless/iwlwifi/iwl-3945.c
++++ b/drivers/net/wireless/iwlwifi/iwl-3945.c
+@@ -1992,7 +1992,7 @@ static int iwl3945_commit_rxon(struct iwl_priv *priv)
+ 				  "configuration (%d).\n", rc);
+ 			return rc;
+ 		}
+-		iwl_clear_ucode_stations(priv, false);
++		iwl_clear_ucode_stations(priv);
+ 		iwl_restore_stations(priv);
+ 	}
+ 
+@@ -2025,7 +2025,7 @@ static int iwl3945_commit_rxon(struct iwl_priv *priv)
+ 	memcpy(active_rxon, staging_rxon, sizeof(*active_rxon));
+ 
+ 	if (!new_assoc) {
+-		iwl_clear_ucode_stations(priv, false);
++		iwl_clear_ucode_stations(priv);
+ 		iwl_restore_stations(priv);
+ 	}
+ 
+@@ -2853,7 +2853,6 @@ static struct iwl_lib_ops iwl3945_lib = {
+ 	.isr = iwl_isr_legacy,
+ 	.config_ap = iwl3945_config_ap,
+ 	.manage_ibss_station = iwl3945_manage_ibss_station,
+-	.add_bcast_station = iwl3945_add_bcast_station,
+ 	.check_plcp_health = iwl3945_good_plcp_health,
+ 
+ 	.debugfs_ops = {

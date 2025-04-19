@@ -1,0 +1,87 @@
+commit b59db45d7eba9894e7834d768ec4236fca39bd7d
+Author: Shachar Kagan <skagan@nvidia.com>
+Date:   Tue Jan 2 11:00:57 2024 +0200
+
+    tcp: Revert no longer abort SYN_SENT when receiving some ICMP
+    
+    This reverts commit 0a8de364ff7a14558e9676f424283148110384d6.
+    
+    Shachar reported that Vagrant (https://www.vagrantup.com/), which is
+    very popular tool to manage fleet of VMs stopped to work after commit
+    citied in Fixes line.
+    
+    The issue appears while using Vagrant to manage nested VMs.
+    The steps are:
+    * create vagrant file
+    * vagrant up
+    * vagrant halt (VM is created but shut down)
+    * vagrant up - fail
+    
+    Vagrant up stdout:
+    Bringing machine 'player1' up with 'libvirt' provider...
+    ==> player1: Creating shared folders metadata...
+    ==> player1: Starting domain.
+    ==> player1: Domain launching with graphics connection settings...
+    ==> player1:  -- Graphics Port:      5900
+    ==> player1:  -- Graphics IP:        127.0.0.1
+    ==> player1:  -- Graphics Password:  Not defined
+    ==> player1:  -- Graphics Websocket: 5700
+    ==> player1: Waiting for domain to get an IP address...
+    ==> player1: Waiting for machine to boot. This may take a few minutes...
+        player1: SSH address: 192.168.123.61:22
+        player1: SSH username: vagrant
+        player1: SSH auth method: private key
+    ==> player1: Attempting graceful shutdown of VM...
+    ==> player1: Attempting graceful shutdown of VM...
+    ==> player1: Attempting graceful shutdown of VM...
+        player1: Guest communication could not be established! This is usually because
+        player1: SSH is not running, the authentication information was changed,
+        player1: or some other networking issue. Vagrant will force halt, if
+        player1: capable.
+    ==> player1: Attempting direct shutdown of domain...
+    
+    Fixes: 0a8de364ff7a ("tcp: no longer abort SYN_SENT when receiving some ICMP")
+    Closes: https://lore.kernel.org/all/MN2PR12MB44863139E562A59329E89DBEB982A@MN2PR12MB4486.namprd12.prod.outlook.com
+    Signed-off-by: Shachar Kagan <skagan@nvidia.com>
+    Signed-off-by: Leon Romanovsky <leonro@nvidia.com>
+    Reviewed-by: Eric Dumazet <edumazet@google.com>
+    Link: https://lore.kernel.org/r/14459261ea9f9c7d7dfb28eb004ce8734fa83ade.1704185904.git.leonro@nvidia.com
+    Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+diff --git a/net/ipv4/tcp_ipv4.c b/net/ipv4/tcp_ipv4.c
+index 4bac6e319aca..0c50c5a32b84 100644
+--- a/net/ipv4/tcp_ipv4.c
++++ b/net/ipv4/tcp_ipv4.c
+@@ -482,7 +482,6 @@ int tcp_v4_err(struct sk_buff *skb, u32 info)
+ 	const int code = icmp_hdr(skb)->code;
+ 	struct sock *sk;
+ 	struct request_sock *fastopen;
+-	bool harderr = false;
+ 	u32 seq, snd_una;
+ 	int err;
+ 	struct net *net = dev_net(skb->dev);
+@@ -556,7 +555,6 @@ int tcp_v4_err(struct sk_buff *skb, u32 info)
+ 		goto out;
+ 	case ICMP_PARAMETERPROB:
+ 		err = EPROTO;
+-		harderr = true;
+ 		break;
+ 	case ICMP_DEST_UNREACH:
+ 		if (code > NR_ICMP_UNREACH)
+@@ -581,7 +579,6 @@ int tcp_v4_err(struct sk_buff *skb, u32 info)
+ 		}
+ 
+ 		err = icmp_err_convert[code].errno;
+-		harderr = icmp_err_convert[code].fatal;
+ 		/* check if this ICMP message allows revert of backoff.
+ 		 * (see RFC 6069)
+ 		 */
+@@ -607,9 +604,6 @@ int tcp_v4_err(struct sk_buff *skb, u32 info)
+ 
+ 		ip_icmp_error(sk, skb, err, th->dest, info, (u8 *)th);
+ 
+-		if (!harderr)
+-			break;
+-
+ 		if (!sock_owned_by_user(sk)) {
+ 			WRITE_ONCE(sk->sk_err, err);

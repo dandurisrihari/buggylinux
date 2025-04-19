@@ -1,0 +1,75 @@
+commit 0ef0fd351550130129bbdb77362488befd7b69d2
+Merge: 4489da718309 c011d23ba046
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Fri May 17 10:33:30 2019 -0700
+
+    Merge tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm
+    
+    Pull KVM updates from Paolo Bonzini:
+     "ARM:
+       - support for SVE and Pointer Authentication in guests
+       - PMU improvements
+    
+      POWER:
+       - support for direct access to the POWER9 XIVE interrupt controller
+       - memory and performance optimizations
+    
+      x86:
+       - support for accessing memory not backed by struct page
+       - fixes and refactoring
+    
+      Generic:
+       - dirty page tracking improvements"
+    
+    * tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm: (155 commits)
+      kvm: fix compilation on aarch64
+      Revert "KVM: nVMX: Expose RDPMC-exiting only when guest supports PMU"
+      kvm: x86: Fix L1TF mitigation for shadow MMU
+      KVM: nVMX: Disable intercept for FS/GS base MSRs in vmcs02 when possible
+      KVM: PPC: Book3S: Remove useless checks in 'release' method of KVM device
+      KVM: PPC: Book3S HV: XIVE: Fix spelling mistake "acessing" -> "accessing"
+      KVM: PPC: Book3S HV: Make sure to load LPID for radix VCPUs
+      kvm: nVMX: Set nested_run_pending in vmx_set_nested_state after checks complete
+      tests: kvm: Add tests for KVM_SET_NESTED_STATE
+      KVM: nVMX: KVM_SET_NESTED_STATE - Tear down old EVMCS state before setting new state
+      tests: kvm: Add tests for KVM_CAP_MAX_VCPUS and KVM_CAP_MAX_CPU_ID
+      tests: kvm: Add tests to .gitignore
+      KVM: Introduce KVM_CAP_MANUAL_DIRTY_LOG_PROTECT2
+      KVM: Fix kvm_clear_dirty_log_protect off-by-(minus-)one
+      KVM: Fix the bitmap range to copy during clear dirty
+      KVM: arm64: Fix ptrauth ID register masking logic
+      KVM: x86: use direct accessors for RIP and RSP
+      KVM: VMX: Use accessors for GPRs outside of dedicated caching logic
+      KVM: x86: Omit caching logic for always-available GPRs
+      kvm, x86: Properly check whether a pfn is an MMIO or not
+      ...
+
+diff --cc arch/x86/kvm/x86.c
+index b9591abde62a,dc621f73e96b..536b78c4af6e
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@@ -6558,22 -6586,11 +6596,22 @@@ static int complete_fast_pio_out(struc
+  static int kvm_fast_pio_out(struct kvm_vcpu *vcpu, int size,
+  			    unsigned short port)
+  {
+- 	unsigned long val = kvm_register_read(vcpu, VCPU_REGS_RAX);
++ 	unsigned long val = kvm_rax_read(vcpu);
+  	int ret = emulator_pio_out_emulated(&vcpu->arch.emulate_ctxt,
+  					    size, port, &val, 1);
+ +	if (ret)
+ +		return ret;
+  
+ -	if (!ret) {
+ +	/*
+ +	 * Workaround userspace that relies on old KVM behavior of %rip being
+ +	 * incremented prior to exiting to userspace to handle "OUT 0x7e".
+ +	 */
+ +	if (port == 0x7e &&
+ +	    kvm_check_has_quirk(vcpu->kvm, KVM_X86_QUIRK_OUT_7E_INC_RIP)) {
+ +		vcpu->arch.complete_userspace_io =
+ +			complete_fast_pio_out_port_0x7e;
+ +		kvm_skip_emulated_instruction(vcpu);
+ +	} else {
+  		vcpu->arch.pio.linear_rip = kvm_get_linear_rip(vcpu);
+  		vcpu->arch.complete_userspace_io = complete_fast_pio_out;
+  	}

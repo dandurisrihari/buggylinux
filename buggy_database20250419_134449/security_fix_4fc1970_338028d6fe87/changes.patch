@@ -1,0 +1,123 @@
+diff --git a/arch/x86/include/asm/pgtable.h b/arch/x86/include/asm/pgtable.h
+index 2779ace16d23..702db5904753 100644
+--- a/arch/x86/include/asm/pgtable.h
++++ b/arch/x86/include/asm/pgtable.h
+@@ -1021,6 +1021,9 @@ static inline void __meminit init_trampoline_default(void)
+ 	/* Default trampoline pgd value */
+ 	trampoline_pgd_entry = init_top_pgt[pgd_index(__PAGE_OFFSET)];
+ }
++
++void __init poking_init(void);
++
+ # ifdef CONFIG_RANDOMIZE_MEMORY
+ void __meminit init_trampoline(void);
+ # else
+diff --git a/arch/x86/include/asm/text-patching.h b/arch/x86/include/asm/text-patching.h
+index f8fc8e86cf01..a75eed841eed 100644
+--- a/arch/x86/include/asm/text-patching.h
++++ b/arch/x86/include/asm/text-patching.h
+@@ -39,5 +39,7 @@ extern void *text_poke_kgdb(void *addr, const void *opcode, size_t len);
+ extern int poke_int3_handler(struct pt_regs *regs);
+ extern void *text_poke_bp(void *addr, const void *opcode, size_t len, void *handler);
+ extern int after_bootmem;
++extern __ro_after_init struct mm_struct *poking_mm;
++extern __ro_after_init unsigned long poking_addr;
+ 
+ #endif /* _ASM_X86_TEXT_PATCHING_H */
+diff --git a/arch/x86/kernel/alternative.c b/arch/x86/kernel/alternative.c
+index 0a814d73547a..11d5c710a94f 100644
+--- a/arch/x86/kernel/alternative.c
++++ b/arch/x86/kernel/alternative.c
+@@ -679,6 +679,9 @@ void *__init_or_module text_poke_early(void *addr, const void *opcode,
+ 	return addr;
+ }
+ 
++__ro_after_init struct mm_struct *poking_mm;
++__ro_after_init unsigned long poking_addr;
++
+ static void *__text_poke(void *addr, const void *opcode, size_t len)
+ {
+ 	unsigned long flags;
+diff --git a/arch/x86/mm/init.c b/arch/x86/mm/init.c
+index 8dacdb96899e..fd10d91a6115 100644
+--- a/arch/x86/mm/init.c
++++ b/arch/x86/mm/init.c
+@@ -6,6 +6,7 @@
+ #include <linux/swapfile.h>
+ #include <linux/swapops.h>
+ #include <linux/kmemleak.h>
++#include <linux/sched/task.h>
+ 
+ #include <asm/set_memory.h>
+ #include <asm/e820/api.h>
+@@ -23,6 +24,7 @@
+ #include <asm/hypervisor.h>
+ #include <asm/cpufeature.h>
+ #include <asm/pti.h>
++#include <asm/text-patching.h>
+ 
+ /*
+  * We need to define the tracepoints somewhere, and tlb.c
+@@ -701,6 +703,41 @@ void __init init_mem_mapping(void)
+ 	early_memtest(0, max_pfn_mapped << PAGE_SHIFT);
+ }
+ 
++/*
++ * Initialize an mm_struct to be used during poking and a pointer to be used
++ * during patching.
++ */
++void __init poking_init(void)
++{
++	spinlock_t *ptl;
++	pte_t *ptep;
++
++	poking_mm = copy_init_mm();
++	BUG_ON(!poking_mm);
++
++	/*
++	 * Randomize the poking address, but make sure that the following page
++	 * will be mapped at the same PMD. We need 2 pages, so find space for 3,
++	 * and adjust the address if the PMD ends after the first one.
++	 */
++	poking_addr = TASK_UNMAPPED_BASE;
++	if (IS_ENABLED(CONFIG_RANDOMIZE_BASE))
++		poking_addr += (kaslr_get_random_long("Poking") & PAGE_MASK) %
++			(TASK_SIZE - TASK_UNMAPPED_BASE - 3 * PAGE_SIZE);
++
++	if (((poking_addr + PAGE_SIZE) & ~PMD_MASK) == 0)
++		poking_addr += PAGE_SIZE;
++
++	/*
++	 * We need to trigger the allocation of the page-tables that will be
++	 * needed for poking now. Later, poking may be performed in an atomic
++	 * section, which might cause allocation to fail.
++	 */
++	ptep = get_locked_pte(poking_mm, poking_addr, &ptl);
++	BUG_ON(!ptep);
++	pte_unmap_unlock(ptep, ptl);
++}
++
+ /*
+  * devmem_is_allowed() checks to see if /dev/mem access to a certain address
+  * is valid. The argument is a physical page number.
+diff --git a/init/main.c b/init/main.c
+index 7d4025d665eb..95dd9406ee31 100644
+--- a/init/main.c
++++ b/init/main.c
+@@ -504,6 +504,8 @@ void __init __weak thread_stack_cache_init(void)
+ 
+ void __init __weak mem_encrypt_init(void) { }
+ 
++void __init __weak poking_init(void) { }
++
+ bool initcall_debug;
+ core_param(initcall_debug, initcall_debug, bool, 0644);
+ 
+@@ -737,6 +739,7 @@ asmlinkage __visible void __init start_kernel(void)
+ 	taskstats_init_early();
+ 	delayacct_init();
+ 
++	poking_init();
+ 	check_bugs();
+ 
+ 	acpi_subsystem_init();

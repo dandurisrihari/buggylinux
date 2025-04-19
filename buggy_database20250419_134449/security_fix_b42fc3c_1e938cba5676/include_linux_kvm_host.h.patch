@@ -1,0 +1,43 @@
+commit b42fc3cbc3d6e284463e93896679379443e19d56
+Author: Jeff Mahoney <jeffm@suse.com>
+Date:   Tue Apr 12 21:30:17 2011 -0400
+
+    KVM: Fix off by one in kvm_for_each_vcpu iteration
+    
+    This patch avoids gcc issuing the following warning when KVM_MAX_VCPUS=1:
+    warning: array subscript is above array bounds
+    
+    kvm_for_each_vcpu currently checks to see if the index for the vcpu is
+    valid /after/ loading it. We don't run into problems because the address
+    is still inside the enclosing struct kvm and we never deference or write
+    to it, so this isn't a security issue.
+    
+    The warning occurs when KVM_MAX_VCPUS=1 because the increment portion of
+    the loop will *always* cause the loop to load an invalid location since
+    ++idx will always be > 0.
+    
+    This patch moves the load so that the check occurs before the load and
+    we don't run into the compiler warning.
+    
+    Signed-off-by: Neil Brown <neilb@suse.de>
+    Signed-off-by: Jeff Mahoney <jeffm@suse.com>
+    Signed-off-by: Avi Kivity <avi@redhat.com>
+
+diff --git a/include/linux/kvm_host.h b/include/linux/kvm_host.h
+index d1f507567068..0bc3d372e3cb 100644
+--- a/include/linux/kvm_host.h
++++ b/include/linux/kvm_host.h
+@@ -296,9 +296,10 @@ static inline struct kvm_vcpu *kvm_get_vcpu(struct kvm *kvm, int i)
+ }
+ 
+ #define kvm_for_each_vcpu(idx, vcpup, kvm) \
+-	for (idx = 0, vcpup = kvm_get_vcpu(kvm, idx); \
+-	     idx < atomic_read(&kvm->online_vcpus) && vcpup; \
+-	     vcpup = kvm_get_vcpu(kvm, ++idx))
++	for (idx = 0; \
++	     idx < atomic_read(&kvm->online_vcpus) && \
++	     (vcpup = kvm_get_vcpu(kvm, idx)) != NULL; \
++	     idx++)
+ 
+ int kvm_vcpu_init(struct kvm_vcpu *vcpu, struct kvm *kvm, unsigned id);
+ void kvm_vcpu_uninit(struct kvm_vcpu *vcpu);

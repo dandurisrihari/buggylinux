@@ -1,0 +1,109 @@
+commit 8974eb588283b7d44a7c91fa09fcbaf380339f3a
+Author: Daniel Sneddon <daniel.sneddon@linux.intel.com>
+Date:   Wed Jul 12 19:43:11 2023 -0700
+
+    x86/speculation: Add Gather Data Sampling mitigation
+    
+    Gather Data Sampling (GDS) is a hardware vulnerability which allows
+    unprivileged speculative access to data which was previously stored in
+    vector registers.
+    
+    Intel processors that support AVX2 and AVX512 have gather instructions
+    that fetch non-contiguous data elements from memory. On vulnerable
+    hardware, when a gather instruction is transiently executed and
+    encounters a fault, stale data from architectural or internal vector
+    registers may get transiently stored to the destination vector
+    register allowing an attacker to infer the stale data using typical
+    side channel techniques like cache timing attacks.
+    
+    This mitigation is different from many earlier ones for two reasons.
+    First, it is enabled by default and a bit must be set to *DISABLE* it.
+    This is the opposite of normal mitigation polarity. This means GDS can
+    be mitigated simply by updating microcode and leaving the new control
+    bit alone.
+    
+    Second, GDS has a "lock" bit. This lock bit is there because the
+    mitigation affects the hardware security features KeyLocker and SGX.
+    It needs to be enabled and *STAY* enabled for these features to be
+    mitigated against GDS.
+    
+    The mitigation is enabled in the microcode by default. Disable it by
+    setting gather_data_sampling=off or by disabling all mitigations with
+    mitigations=off. The mitigation status can be checked by reading:
+    
+        /sys/devices/system/cpu/vulnerabilities/gather_data_sampling
+    
+    Signed-off-by: Daniel Sneddon <daniel.sneddon@linux.intel.com>
+    Signed-off-by: Dave Hansen <dave.hansen@linux.intel.com>
+    Acked-by: Josh Poimboeuf <jpoimboe@kernel.org>
+
+diff --git a/arch/x86/kernel/cpu/common.c b/arch/x86/kernel/cpu/common.c
+index 52683fddafaf..53224fe3ca6f 100644
+--- a/arch/x86/kernel/cpu/common.c
++++ b/arch/x86/kernel/cpu/common.c
+@@ -1250,6 +1250,8 @@ static const __initconst struct x86_cpu_id cpu_vuln_whitelist[] = {
+ #define RETBLEED	BIT(3)
+ /* CPU is affected by SMT (cross-thread) return predictions */
+ #define SMT_RSB		BIT(4)
++/* CPU is affected by GDS */
++#define GDS		BIT(5)
+ 
+ static const struct x86_cpu_id cpu_vuln_blacklist[] __initconst = {
+ 	VULNBL_INTEL_STEPPINGS(IVYBRIDGE,	X86_STEPPING_ANY,		SRBDS),
+@@ -1262,19 +1264,21 @@ static const struct x86_cpu_id cpu_vuln_blacklist[] __initconst = {
+ 	VULNBL_INTEL_STEPPINGS(BROADWELL_X,	X86_STEPPING_ANY,		MMIO),
+ 	VULNBL_INTEL_STEPPINGS(BROADWELL,	X86_STEPPING_ANY,		SRBDS),
+ 	VULNBL_INTEL_STEPPINGS(SKYLAKE_L,	X86_STEPPING_ANY,		SRBDS | MMIO | RETBLEED),
+-	VULNBL_INTEL_STEPPINGS(SKYLAKE_X,	X86_STEPPING_ANY,		MMIO | RETBLEED),
++	VULNBL_INTEL_STEPPINGS(SKYLAKE_X,	X86_STEPPING_ANY,		MMIO | RETBLEED | GDS),
+ 	VULNBL_INTEL_STEPPINGS(SKYLAKE,		X86_STEPPING_ANY,		SRBDS | MMIO | RETBLEED),
+-	VULNBL_INTEL_STEPPINGS(KABYLAKE_L,	X86_STEPPING_ANY,		SRBDS | MMIO | RETBLEED),
+-	VULNBL_INTEL_STEPPINGS(KABYLAKE,	X86_STEPPING_ANY,		SRBDS | MMIO | RETBLEED),
++	VULNBL_INTEL_STEPPINGS(KABYLAKE_L,	X86_STEPPING_ANY,		SRBDS | MMIO | RETBLEED | GDS),
++	VULNBL_INTEL_STEPPINGS(KABYLAKE,	X86_STEPPING_ANY,		SRBDS | MMIO | RETBLEED | GDS),
+ 	VULNBL_INTEL_STEPPINGS(CANNONLAKE_L,	X86_STEPPING_ANY,		RETBLEED),
+-	VULNBL_INTEL_STEPPINGS(ICELAKE_L,	X86_STEPPING_ANY,		MMIO | MMIO_SBDS | RETBLEED),
+-	VULNBL_INTEL_STEPPINGS(ICELAKE_D,	X86_STEPPING_ANY,		MMIO),
+-	VULNBL_INTEL_STEPPINGS(ICELAKE_X,	X86_STEPPING_ANY,		MMIO),
+-	VULNBL_INTEL_STEPPINGS(COMETLAKE,	X86_STEPPING_ANY,		MMIO | MMIO_SBDS | RETBLEED),
++	VULNBL_INTEL_STEPPINGS(ICELAKE_L,	X86_STEPPING_ANY,		MMIO | MMIO_SBDS | RETBLEED | GDS),
++	VULNBL_INTEL_STEPPINGS(ICELAKE_D,	X86_STEPPING_ANY,		MMIO | GDS),
++	VULNBL_INTEL_STEPPINGS(ICELAKE_X,	X86_STEPPING_ANY,		MMIO | GDS),
++	VULNBL_INTEL_STEPPINGS(COMETLAKE,	X86_STEPPING_ANY,		MMIO | MMIO_SBDS | RETBLEED | GDS),
+ 	VULNBL_INTEL_STEPPINGS(COMETLAKE_L,	X86_STEPPINGS(0x0, 0x0),	MMIO | RETBLEED),
+-	VULNBL_INTEL_STEPPINGS(COMETLAKE_L,	X86_STEPPING_ANY,		MMIO | MMIO_SBDS | RETBLEED),
++	VULNBL_INTEL_STEPPINGS(COMETLAKE_L,	X86_STEPPING_ANY,		MMIO | MMIO_SBDS | RETBLEED | GDS),
++	VULNBL_INTEL_STEPPINGS(TIGERLAKE_L,	X86_STEPPING_ANY,		GDS),
++	VULNBL_INTEL_STEPPINGS(TIGERLAKE,	X86_STEPPING_ANY,		GDS),
+ 	VULNBL_INTEL_STEPPINGS(LAKEFIELD,	X86_STEPPING_ANY,		MMIO | MMIO_SBDS | RETBLEED),
+-	VULNBL_INTEL_STEPPINGS(ROCKETLAKE,	X86_STEPPING_ANY,		MMIO | RETBLEED),
++	VULNBL_INTEL_STEPPINGS(ROCKETLAKE,	X86_STEPPING_ANY,		MMIO | RETBLEED | GDS),
+ 	VULNBL_INTEL_STEPPINGS(ATOM_TREMONT,	X86_STEPPING_ANY,		MMIO | MMIO_SBDS),
+ 	VULNBL_INTEL_STEPPINGS(ATOM_TREMONT_D,	X86_STEPPING_ANY,		MMIO),
+ 	VULNBL_INTEL_STEPPINGS(ATOM_TREMONT_L,	X86_STEPPING_ANY,		MMIO | MMIO_SBDS),
+@@ -1406,6 +1410,16 @@ static void __init cpu_set_bug_bits(struct cpuinfo_x86 *c)
+ 	if (cpu_matches(cpu_vuln_blacklist, SMT_RSB))
+ 		setup_force_cpu_bug(X86_BUG_SMT_RSB);
+ 
++	/*
++	 * Check if CPU is vulnerable to GDS. If running in a virtual machine on
++	 * an affected processor, the VMM may have disabled the use of GATHER by
++	 * disabling AVX2. The only way to do this in HW is to clear XCR0[2],
++	 * which means that AVX will be disabled.
++	 */
++	if (cpu_matches(cpu_vuln_blacklist, GDS) && !(ia32_cap & ARCH_CAP_GDS_NO) &&
++	    boot_cpu_has(X86_FEATURE_AVX))
++		setup_force_cpu_bug(X86_BUG_GDS);
++
+ 	if (cpu_matches(cpu_vuln_whitelist, NO_MELTDOWN))
+ 		return;
+ 
+@@ -1962,6 +1976,8 @@ void identify_secondary_cpu(struct cpuinfo_x86 *c)
+ 	validate_apic_and_package_id(c);
+ 	x86_spec_ctrl_setup_ap();
+ 	update_srbds_msr();
++	if (boot_cpu_has_bug(X86_BUG_GDS))
++		update_gds_msr();
+ 
+ 	tsx_ap_init();
+ }

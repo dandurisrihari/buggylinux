@@ -1,0 +1,82 @@
+commit 6548f4e7a3babf9fd6c52e02da419458e19e2db9
+Author: Simona Vetter <simona.vetter@ffwll.ch>
+Date:   Tue Jun 14 20:50:59 2016 +0200
+
+    drm: Move master functions into drm_auth.c
+    
+    For modern drivers pretty much the only thing drm_master does is
+    handling authentication for the primary/legacy drm_minor node. Instead
+    of having it all over drm files, move it all together into drm_auth.c.
+    
+    This patch just does code-motion, follow up patches will also extract
+    the master logic from file open&release paths.
+    
+    Reviewed-by: Chris Wilson Mchris@chris-wilson.co.uk>
+    Signed-off-by: Daniel Vetter <daniel.vetter@intel.com>
+    Link: http://patchwork.freedesktop.org/patch/msgid/1465930269-7883-5-git-send-email-daniel.vetter@ffwll.ch
+
+diff --git a/drivers/gpu/drm/drm_fops.c b/drivers/gpu/drm/drm_fops.c
+index bfbf1381f55d..50b3de990aee 100644
+--- a/drivers/gpu/drm/drm_fops.c
++++ b/drivers/gpu/drm/drm_fops.c
+@@ -167,60 +167,6 @@ static int drm_cpu_valid(void)
+ 	return 1;
+ }
+ 
+-/*
+- * drm_new_set_master - Allocate a new master object and become master for the
+- * associated master realm.
+- *
+- * @dev: The associated device.
+- * @fpriv: File private identifying the client.
+- *
+- * This function must be called with dev::struct_mutex held.
+- * Returns negative error code on failure. Zero on success.
+- */
+-int drm_new_set_master(struct drm_device *dev, struct drm_file *fpriv)
+-{
+-	struct drm_master *old_master;
+-	int ret;
+-
+-	lockdep_assert_held_once(&dev->master_mutex);
+-
+-	/* create a new master */
+-	fpriv->minor->master = drm_master_create(fpriv->minor->dev);
+-	if (!fpriv->minor->master)
+-		return -ENOMEM;
+-
+-	/* take another reference for the copy in the local file priv */
+-	old_master = fpriv->master;
+-	fpriv->master = drm_master_get(fpriv->minor->master);
+-
+-	if (dev->driver->master_create) {
+-		ret = dev->driver->master_create(dev, fpriv->master);
+-		if (ret)
+-			goto out_err;
+-	}
+-	if (dev->driver->master_set) {
+-		ret = dev->driver->master_set(dev, fpriv, true);
+-		if (ret)
+-			goto out_err;
+-	}
+-
+-	fpriv->is_master = 1;
+-	fpriv->allowed_master = 1;
+-	fpriv->authenticated = 1;
+-	if (old_master)
+-		drm_master_put(&old_master);
+-
+-	return 0;
+-
+-out_err:
+-	/* drop both references and restore old master on failure */
+-	drm_master_put(&fpriv->minor->master);
+-	drm_master_put(&fpriv->master);
+-	fpriv->master = old_master;
+-
+-	return ret;
+-}
+-
+ /*
+  * Called whenever a process opens /dev/drm.
+  *

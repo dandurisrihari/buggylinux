@@ -1,0 +1,104 @@
+commit 9cf514ccfacb301f3b1b4509a8ce25dffad55880
+Author: Christoph Hellwig <hch@lst.de>
+Date:   Mon May 5 13:11:59 2014 +0200
+
+    nfsd: implement pNFS operations
+    
+    Add support for the GETDEVICEINFO, LAYOUTGET, LAYOUTCOMMIT and
+    LAYOUTRETURN NFSv4.1 operations, as well as backing code to manage
+    outstanding layouts and devices.
+    
+    Layout management is very straight forward, with a nfs4_layout_stateid
+    structure that extends nfs4_stid to manage layout stateids as the
+    top-level structure.  It is linked into the nfs4_file and nfs4_client
+    structures like the other stateids, and contains a linked list of
+    layouts that hang of the stateid.  The actual layout operations are
+    implemented in layout drivers that are not part of this commit, but
+    will be added later.
+    
+    The worst part of this commit is the management of the pNFS device IDs,
+    which suffers from a specification that is not sanely implementable due
+    to the fact that the device-IDs are global and not bound to an export,
+    and have a small enough size so that we can't store the fsid portion of
+    a file handle, and must never be reused.  As we still do need perform all
+    export authentication and validation checks on a device ID passed to
+    GETDEVICEINFO we are caught between a rock and a hard place.  To work
+    around this issue we add a new hash that maps from a 64-bit integer to a
+    fsid so that we can look up the export to authenticate against it,
+    a 32-bit integer as a generation that we can bump when changing the device,
+    and a currently unused 32-bit integer that could be used in the future
+    to handle more than a single device per export.  Entries in this hash
+    table are never deleted as we can't reuse the ids anyway, and would have
+    a severe lifetime problem anyway as Linux export structures are temporary
+    structures that can go away under load.
+    
+    Parts of the XDR data, structures and marshaling/unmarshaling code, as
+    well as many concepts are derived from the old pNFS server implementation
+    from Andy Adamson, Benny Halevy, Dean Hildebrand, Marc Eshel, Fred Isaman,
+    Mike Sager, Ricardo Labiaga and many others.
+    
+    Signed-off-by: Christoph Hellwig <hch@lst.de>
+
+diff --git a/fs/nfsd/nfs4state.c b/fs/nfsd/nfs4state.c
+index eefd29ec43f2..c89f79dc69e2 100644
+--- a/fs/nfsd/nfs4state.c
++++ b/fs/nfsd/nfs4state.c
+@@ -48,6 +48,7 @@
+ #include "current_stateid.h"
+ 
+ #include "netns.h"
++#include "pnfs.h"
+ 
+ #define NFSDDBG_FACILITY                NFSDDBG_PROC
+ 
+@@ -1539,6 +1540,9 @@ static struct nfs4_client *alloc_client(struct xdr_netobj name)
+ 	INIT_LIST_HEAD(&clp->cl_lru);
+ 	INIT_LIST_HEAD(&clp->cl_callbacks);
+ 	INIT_LIST_HEAD(&clp->cl_revoked);
++#ifdef CONFIG_NFSD_PNFS
++	INIT_LIST_HEAD(&clp->cl_lo_states);
++#endif
+ 	spin_lock_init(&clp->cl_lock);
+ 	rpc_init_wait_queue(&clp->cl_cb_waitq, "Backchannel slot table");
+ 	return clp;
+@@ -1643,6 +1647,7 @@ __destroy_client(struct nfs4_client *clp)
+ 		nfs4_get_stateowner(&oo->oo_owner);
+ 		release_openowner(oo);
+ 	}
++	nfsd4_return_all_client_layouts(clp);
+ 	nfsd4_shutdown_callback(clp);
+ 	if (clp->cl_cb_conn.cb_xprt)
+ 		svc_xprt_put(clp->cl_cb_conn.cb_xprt);
+@@ -2126,8 +2131,11 @@ nfsd4_replay_cache_entry(struct nfsd4_compoundres *resp,
+ static void
+ nfsd4_set_ex_flags(struct nfs4_client *new, struct nfsd4_exchange_id *clid)
+ {
+-	/* pNFS is not supported */
++#ifdef CONFIG_NFSD_PNFS
++	new->cl_exchange_flags |= EXCHGID4_FLAG_USE_PNFS_MDS;
++#else
+ 	new->cl_exchange_flags |= EXCHGID4_FLAG_USE_NON_PNFS;
++#endif
+ 
+ 	/* Referrals are supported, Migration is not. */
+ 	new->cl_exchange_flags |= EXCHGID4_FLAG_SUPP_MOVED_REFER;
+@@ -3055,6 +3063,9 @@ static void nfsd4_init_file(struct knfsd_fh *fh, unsigned int hashval,
+ 	fp->fi_share_deny = 0;
+ 	memset(fp->fi_fds, 0, sizeof(fp->fi_fds));
+ 	memset(fp->fi_access, 0, sizeof(fp->fi_access));
++#ifdef CONFIG_NFSD_PNFS
++	INIT_LIST_HEAD(&fp->fi_lo_states);
++#endif
+ 	hlist_add_head_rcu(&fp->fi_hash, &file_hashtbl[hashval]);
+ }
+ 
+@@ -4841,6 +4852,9 @@ nfsd4_close(struct svc_rqst *rqstp, struct nfsd4_compound_state *cstate,
+ 	update_stateid(&stp->st_stid.sc_stateid);
+ 	memcpy(&close->cl_stateid, &stp->st_stid.sc_stateid, sizeof(stateid_t));
+ 
++	nfsd4_return_all_file_layouts(stp->st_stateowner->so_client,
++				      stp->st_stid.sc_file);
++
+ 	nfsd4_close_open_stateid(stp);
+ 
+ 	/* put reference from nfs4_preprocess_seqid_op */

@@ -1,0 +1,270 @@
+diff --git a/include/linux/sunrpc/xprt.h b/include/linux/sunrpc/xprt.h
+index b6096592b1d4..0fb9acbb4780 100644
+--- a/include/linux/sunrpc/xprt.h
++++ b/include/linux/sunrpc/xprt.h
+@@ -135,6 +135,7 @@ struct rpc_xprt_ops {
+ 	void		(*print_stats)(struct rpc_xprt *xprt, struct seq_file *seq);
+ 	int		(*enable_swap)(struct rpc_xprt *xprt);
+ 	void		(*disable_swap)(struct rpc_xprt *xprt);
++	void		(*inject_disconnect)(struct rpc_xprt *xprt);
+ };
+ 
+ /*
+@@ -244,6 +245,7 @@ struct rpc_xprt {
+ 	const char		*address_strings[RPC_DISPLAY_MAX];
+ #if IS_ENABLED(CONFIG_SUNRPC_DEBUG)
+ 	struct dentry		*debugfs;		/* debugfs directory */
++	atomic_t		inject_disconnect;
+ #endif
+ };
+ 
+@@ -445,6 +447,23 @@ static inline int xprt_test_and_set_binding(struct rpc_xprt *xprt)
+ 	return test_and_set_bit(XPRT_BINDING, &xprt->state);
+ }
+ 
++#if IS_ENABLED(CONFIG_SUNRPC_DEBUG)
++extern unsigned int rpc_inject_disconnect;
++static inline void xprt_inject_disconnect(struct rpc_xprt *xprt)
++{
++	if (!rpc_inject_disconnect)
++		return;
++	if (atomic_dec_return(&xprt->inject_disconnect))
++		return;
++	atomic_set(&xprt->inject_disconnect, rpc_inject_disconnect);
++	xprt->ops->inject_disconnect(xprt);
++}
++#else
++static inline void xprt_inject_disconnect(struct rpc_xprt *xprt)
++{
++}
++#endif
++
+ #endif /* __KERNEL__*/
+ 
+ #endif /* _LINUX_SUNRPC_XPRT_H */
+diff --git a/net/sunrpc/clnt.c b/net/sunrpc/clnt.c
+index 576d6ae39f25..f41ed882ed3c 100644
+--- a/net/sunrpc/clnt.c
++++ b/net/sunrpc/clnt.c
+@@ -1605,6 +1605,7 @@ call_allocate(struct rpc_task *task)
+ 					req->rq_callsize + req->rq_rcvsize);
+ 	if (req->rq_buffer != NULL)
+ 		return;
++	xprt_inject_disconnect(xprt);
+ 
+ 	dprintk("RPC: %5u rpc_buffer allocation failed\n", task->tk_pid);
+ 
+diff --git a/net/sunrpc/debugfs.c b/net/sunrpc/debugfs.c
+index 82962f7e6e88..7cc1b8a6ef6d 100644
+--- a/net/sunrpc/debugfs.c
++++ b/net/sunrpc/debugfs.c
+@@ -10,9 +10,12 @@
+ #include "netns.h"
+ 
+ static struct dentry *topdir;
++static struct dentry *rpc_fault_dir;
+ static struct dentry *rpc_clnt_dir;
+ static struct dentry *rpc_xprt_dir;
+ 
++unsigned int rpc_inject_disconnect;
++
+ struct rpc_clnt_iter {
+ 	struct rpc_clnt	*clnt;
+ 	loff_t		pos;
+@@ -257,6 +260,8 @@ rpc_xprt_debugfs_register(struct rpc_xprt *xprt)
+ 		debugfs_remove_recursive(xprt->debugfs);
+ 		xprt->debugfs = NULL;
+ 	}
++
++	atomic_set(&xprt->inject_disconnect, rpc_inject_disconnect);
+ }
+ 
+ void
+@@ -266,11 +271,78 @@ rpc_xprt_debugfs_unregister(struct rpc_xprt *xprt)
+ 	xprt->debugfs = NULL;
+ }
+ 
++static int
++fault_open(struct inode *inode, struct file *filp)
++{
++	filp->private_data = kmalloc(128, GFP_KERNEL);
++	if (!filp->private_data)
++		return -ENOMEM;
++	return 0;
++}
++
++static int
++fault_release(struct inode *inode, struct file *filp)
++{
++	kfree(filp->private_data);
++	return 0;
++}
++
++static ssize_t
++fault_disconnect_read(struct file *filp, char __user *user_buf,
++		      size_t len, loff_t *offset)
++{
++	char *buffer = (char *)filp->private_data;
++	size_t size;
++
++	size = sprintf(buffer, "%u\n", rpc_inject_disconnect);
++	return simple_read_from_buffer(user_buf, len, offset, buffer, size);
++}
++
++static ssize_t
++fault_disconnect_write(struct file *filp, const char __user *user_buf,
++		       size_t len, loff_t *offset)
++{
++	char buffer[16];
++
++	len = min(len, sizeof(buffer) - 1);
++	if (copy_from_user(buffer, user_buf, len))
++		return -EFAULT;
++	buffer[len] = '\0';
++	if (kstrtouint(buffer, 10, &rpc_inject_disconnect))
++		return -EINVAL;
++	return len;
++}
++
++static const struct file_operations fault_disconnect_fops = {
++	.owner		= THIS_MODULE,
++	.open		= fault_open,
++	.read		= fault_disconnect_read,
++	.write		= fault_disconnect_write,
++	.release	= fault_release,
++};
++
++static struct dentry *
++inject_fault_dir(struct dentry *topdir)
++{
++	struct dentry *faultdir;
++
++	faultdir = debugfs_create_dir("inject_fault", topdir);
++	if (!faultdir)
++		return NULL;
++
++	if (!debugfs_create_file("disconnect", S_IFREG | S_IRUSR, faultdir,
++				 NULL, &fault_disconnect_fops))
++		return NULL;
++
++	return faultdir;
++}
++
+ void __exit
+ sunrpc_debugfs_exit(void)
+ {
+ 	debugfs_remove_recursive(topdir);
+ 	topdir = NULL;
++	rpc_fault_dir = NULL;
+ 	rpc_clnt_dir = NULL;
+ 	rpc_xprt_dir = NULL;
+ }
+@@ -282,6 +354,10 @@ sunrpc_debugfs_init(void)
+ 	if (!topdir)
+ 		return;
+ 
++	rpc_fault_dir = inject_fault_dir(topdir);
++	if (!rpc_fault_dir)
++		goto out_remove;
++
+ 	rpc_clnt_dir = debugfs_create_dir("rpc_clnt", topdir);
+ 	if (!rpc_clnt_dir)
+ 		goto out_remove;
+@@ -294,5 +370,6 @@ sunrpc_debugfs_init(void)
+ out_remove:
+ 	debugfs_remove_recursive(topdir);
+ 	topdir = NULL;
++	rpc_fault_dir = NULL;
+ 	rpc_clnt_dir = NULL;
+ }
+diff --git a/net/sunrpc/xprt.c b/net/sunrpc/xprt.c
+index 1d4fe24af06a..e1fb538e10e0 100644
+--- a/net/sunrpc/xprt.c
++++ b/net/sunrpc/xprt.c
+@@ -967,6 +967,7 @@ void xprt_transmit(struct rpc_task *task)
+ 		task->tk_status = status;
+ 		return;
+ 	}
++	xprt_inject_disconnect(xprt);
+ 
+ 	dprintk("RPC: %5u xmit complete\n", task->tk_pid);
+ 	task->tk_flags |= RPC_TASK_SENT;
+@@ -1285,6 +1286,7 @@ void xprt_release(struct rpc_task *task)
+ 	spin_unlock_bh(&xprt->transport_lock);
+ 	if (req->rq_buffer)
+ 		xprt->ops->buf_free(req->rq_buffer);
++	xprt_inject_disconnect(xprt);
+ 	if (req->rq_cred != NULL)
+ 		put_rpccred(req->rq_cred);
+ 	task->tk_rqstp = NULL;
+diff --git a/net/sunrpc/xprtrdma/transport.c b/net/sunrpc/xprtrdma/transport.c
+index ebf6fe759f0e..b8aac23b1b0c 100644
+--- a/net/sunrpc/xprtrdma/transport.c
++++ b/net/sunrpc/xprtrdma/transport.c
+@@ -246,6 +246,16 @@ xprt_rdma_connect_worker(struct work_struct *work)
+ 	xprt_clear_connecting(xprt);
+ }
+ 
++static void
++xprt_rdma_inject_disconnect(struct rpc_xprt *xprt)
++{
++	struct rpcrdma_xprt *r_xprt = container_of(xprt, struct rpcrdma_xprt,
++						   rx_xprt);
++
++	pr_info("rpcrdma: injecting transport disconnect on xprt=%p\n", xprt);
++	rdma_disconnect(r_xprt->rx_ia.ri_id);
++}
++
+ /*
+  * xprt_rdma_destroy
+  *
+@@ -714,6 +724,7 @@ static struct rpc_xprt_ops xprt_rdma_procs = {
+ 	.print_stats		= xprt_rdma_print_stats,
+ 	.enable_swap		= xprt_rdma_enable_swap,
+ 	.disable_swap		= xprt_rdma_disable_swap,
++	.inject_disconnect	= xprt_rdma_inject_disconnect
+ };
+ 
+ static struct xprt_class xprt_rdma = {
+diff --git a/net/sunrpc/xprtsock.c b/net/sunrpc/xprtsock.c
+index bf20726d4ab5..fda8ec8c74c0 100644
+--- a/net/sunrpc/xprtsock.c
++++ b/net/sunrpc/xprtsock.c
+@@ -866,6 +866,13 @@ static void xs_close(struct rpc_xprt *xprt)
+ 	xprt_disconnect_done(xprt);
+ }
+ 
++static void xs_inject_disconnect(struct rpc_xprt *xprt)
++{
++	dprintk("RPC:       injecting transport disconnect on xprt=%p\n",
++		xprt);
++	xprt_disconnect_done(xprt);
++}
++
+ static void xs_xprt_free(struct rpc_xprt *xprt)
+ {
+ 	xs_free_peer_addresses(xprt);
+@@ -2522,6 +2529,7 @@ static struct rpc_xprt_ops xs_udp_ops = {
+ 	.print_stats		= xs_udp_print_stats,
+ 	.enable_swap		= xs_enable_swap,
+ 	.disable_swap		= xs_disable_swap,
++	.inject_disconnect	= xs_inject_disconnect,
+ };
+ 
+ static struct rpc_xprt_ops xs_tcp_ops = {
+@@ -2540,6 +2548,7 @@ static struct rpc_xprt_ops xs_tcp_ops = {
+ 	.print_stats		= xs_tcp_print_stats,
+ 	.enable_swap		= xs_enable_swap,
+ 	.disable_swap		= xs_disable_swap,
++	.inject_disconnect	= xs_inject_disconnect,
+ };
+ 
+ /*
+@@ -2559,6 +2568,7 @@ static struct rpc_xprt_ops bc_tcp_ops = {
+ 	.print_stats		= xs_tcp_print_stats,
+ 	.enable_swap		= xs_enable_swap,
+ 	.disable_swap		= xs_disable_swap,
++	.inject_disconnect	= xs_inject_disconnect,
+ };
+ 
+ static int xs_init_anyaddr(const int family, struct sockaddr *sap)

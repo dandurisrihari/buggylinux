@@ -1,0 +1,41 @@
+commit 91f0abfda1709131edbd62ad3515da2b8e6c0261
+Author: Nicholas Bellinger <nab@linux-iscsi.org>
+Date:   Wed May 28 12:07:40 2014 -0700
+
+    iscsi-target: Reject zero-length payloads during SecurityNegotiation
+    
+    This patch changes iscsi_target_handle_csg_zero() to explicitly
+    reject login requests in SecurityNegotiation with a zero-length
+    payload, following the language in RFC-3720 Section 8.2:
+    
+      Whenever an iSCSI target gets a response whose keys, or their
+      values, are not according to the step definition, it MUST answer
+      with a Login reject with the "Initiator Error" or "Missing Parameter"
+      status.
+    
+    Previously when a zero-length login request in CSG=0 was received,
+    the target would send a login response with CSG=0 + T_BIT=0 asking
+    the initiator to complete authentication, and not fail the login
+    until MAX_LOGIN_PDUS was reached.  This change will now immediately
+    fail the login attempt with ISCSI_STATUS_CLS_INITIATOR_ERR status.
+    
+    Reported-by: Tejas Vaykole <tejas.vaykole@calsoftinc.com>
+    Signed-off-by: Nicholas Bellinger <nab@linux-iscsi.org>
+
+diff --git a/drivers/target/iscsi/iscsi_target_nego.c b/drivers/target/iscsi/iscsi_target_nego.c
+index 75b685960e80..fcffd0412d83 100644
+--- a/drivers/target/iscsi/iscsi_target_nego.c
++++ b/drivers/target/iscsi/iscsi_target_nego.c
+@@ -773,6 +773,12 @@ static int iscsi_target_handle_csg_zero(
+ 		}
+ 
+ 		goto do_auth;
++	} else if (!payload_length) {
++		pr_err("Initiator sent zero length security payload,"
++		       " login failed\n");
++		iscsit_tx_login_rsp(conn, ISCSI_STATUS_CLS_INITIATOR_ERR,
++				    ISCSI_LOGIN_STATUS_AUTH_FAILED);
++		return -1;
+ 	}
+ 
+ 	if (login->first_request)

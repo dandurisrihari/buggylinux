@@ -1,0 +1,57 @@
+diff --git a/include/net/cfg80211.h b/include/net/cfg80211.h
+index 5224f885a99a..58c2cd417e89 100644
+--- a/include/net/cfg80211.h
++++ b/include/net/cfg80211.h
+@@ -5760,7 +5760,7 @@ unsigned int ieee80211_get_mesh_hdrlen(struct ieee80211s_hdr *meshhdr);
+  */
+ int ieee80211_data_to_8023_exthdr(struct sk_buff *skb, struct ethhdr *ehdr,
+ 				  const u8 *addr, enum nl80211_iftype iftype,
+-				  u8 data_offset);
++				  u8 data_offset, bool is_amsdu);
+ 
+ /**
+  * ieee80211_data_to_8023 - convert an 802.11 data frame to 802.3
+@@ -5772,7 +5772,7 @@ int ieee80211_data_to_8023_exthdr(struct sk_buff *skb, struct ethhdr *ehdr,
+ static inline int ieee80211_data_to_8023(struct sk_buff *skb, const u8 *addr,
+ 					 enum nl80211_iftype iftype)
+ {
+-	return ieee80211_data_to_8023_exthdr(skb, NULL, addr, iftype, 0);
++	return ieee80211_data_to_8023_exthdr(skb, NULL, addr, iftype, 0, false);
+ }
+ 
+ /**
+diff --git a/net/mac80211/rx.c b/net/mac80211/rx.c
+index 531232b91bc4..f14d32a5001d 100644
+--- a/net/mac80211/rx.c
++++ b/net/mac80211/rx.c
+@@ -2682,7 +2682,7 @@ __ieee80211_rx_h_amsdu(struct ieee80211_rx_data *rx, u8 data_offset)
+ 	if (ieee80211_data_to_8023_exthdr(skb, &ethhdr,
+ 					  rx->sdata->vif.addr,
+ 					  rx->sdata->vif.type,
+-					  data_offset))
++					  data_offset, true))
+ 		return RX_DROP_UNUSABLE;
+ 
+ 	ieee80211_amsdu_to_8023s(skb, &frame_list, dev->dev_addr,
+diff --git a/net/wireless/util.c b/net/wireless/util.c
+index 382c5262d997..39966a873e40 100644
+--- a/net/wireless/util.c
++++ b/net/wireless/util.c
+@@ -542,7 +542,7 @@ EXPORT_SYMBOL(ieee80211_get_mesh_hdrlen);
+ 
+ int ieee80211_data_to_8023_exthdr(struct sk_buff *skb, struct ethhdr *ehdr,
+ 				  const u8 *addr, enum nl80211_iftype iftype,
+-				  u8 data_offset)
++				  u8 data_offset, bool is_amsdu)
+ {
+ 	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *) skb->data;
+ 	struct {
+@@ -629,7 +629,7 @@ int ieee80211_data_to_8023_exthdr(struct sk_buff *skb, struct ethhdr *ehdr,
+ 	skb_copy_bits(skb, hdrlen, &payload, sizeof(payload));
+ 	tmp.h_proto = payload.proto;
+ 
+-	if (likely((ether_addr_equal(payload.hdr, rfc1042_header) &&
++	if (likely((!is_amsdu && ether_addr_equal(payload.hdr, rfc1042_header) &&
+ 		    tmp.h_proto != htons(ETH_P_AARP) &&
+ 		    tmp.h_proto != htons(ETH_P_IPX)) ||
+ 		   ether_addr_equal(payload.hdr, bridge_tunnel_header)))

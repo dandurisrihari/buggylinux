@@ -1,0 +1,59 @@
+commit 087968974fcd9e8c910bba73f3393a49b7380ca6
+Author: Sheng Yong <shengyong1@huawei.com>
+Date:   Mon May 16 12:38:50 2016 +0800
+
+    f2fs: add fault injection to sysfs
+    
+    This patch introduces a new struct f2fs_fault_info and a global f2fs_fault
+    to save fault injection status. Fault injection entries are created in
+    /sys/fs/f2fs/fault_injection/ during initializing f2fs module.
+    
+    Signed-off-by: Sheng Yong <shengyong1@huawei.com>
+    Signed-off-by: Jaegeuk Kim <jaegeuk@kernel.org>
+
+diff --git a/fs/f2fs/f2fs.h b/fs/f2fs/f2fs.h
+index ec978b44d546..1351178b2b58 100644
+--- a/fs/f2fs/f2fs.h
++++ b/fs/f2fs/f2fs.h
+@@ -48,15 +48,36 @@ enum {
+ 	FAULT_MAX,
+ };
+ 
+-extern u32 f2fs_fault_rate;
+-extern atomic_t f2fs_ops;
++struct f2fs_fault_info {
++	atomic_t inject_ops;
++	unsigned int inject_rate;
++	unsigned int inject_type;
++};
++
++extern struct f2fs_fault_info f2fs_fault;
+ extern char *fault_name[FAULT_MAX];
++#define IS_FAULT_SET(type) (f2fs_fault.inject_type & (1 << (type)))
+ 
+ static inline bool time_to_inject(int type)
+ {
+-	atomic_inc(&f2fs_ops);
+-	if (f2fs_fault_rate && (atomic_read(&f2fs_ops) >= f2fs_fault_rate)) {
+-		atomic_set(&f2fs_ops, 0);
++	if (!f2fs_fault.inject_rate)
++		return false;
++	if (type == FAULT_KMALLOC && !IS_FAULT_SET(type))
++		return false;
++	else if (type == FAULT_PAGE_ALLOC && !IS_FAULT_SET(type))
++		return false;
++	else if (type == FAULT_ALLOC_NID && !IS_FAULT_SET(type))
++		return false;
++	else if (type == FAULT_ORPHAN && !IS_FAULT_SET(type))
++		return false;
++	else if (type == FAULT_BLOCK && !IS_FAULT_SET(type))
++		return false;
++	else if (type == FAULT_DIR_DEPTH && !IS_FAULT_SET(type))
++		return false;
++
++	atomic_inc(&f2fs_fault.inject_ops);
++	if (atomic_read(&f2fs_fault.inject_ops) >= f2fs_fault.inject_rate) {
++		atomic_set(&f2fs_fault.inject_ops, 0);
+ 		printk("%sF2FS-fs : inject %s in %pF\n",
+ 				KERN_INFO,
+ 				fault_name[type],

@@ -1,0 +1,68 @@
+commit e74e1d55728509b352e4eec4283dd5b2781b2070
+Author: Boyan Karatotev <boyan.karatotev@arm.com>
+Date:   Fri Sep 18 11:47:12 2020 +0100
+
+    kselftests/arm64: add a basic Pointer Authentication test
+    
+    PAuth signs and verifies return addresses on the stack. It does so by
+    inserting a Pointer Authentication code (PAC) into some of the unused top
+    bits of an address. This is achieved by adding paciasp/autiasp instructions
+    at the beginning and end of a function.
+    
+    This feature is partially backwards compatible with earlier versions of the
+    ARM architecture. To coerce the compiler into emitting fully backwards
+    compatible code the main file is compiled to target an earlier ARM version.
+    This allows the tests to check for the feature and print meaningful error
+    messages instead of crashing.
+    
+    Add a test to verify that corrupting the return address results in a
+    SIGSEGV on return.
+    
+    Signed-off-by: Boyan Karatotev <boyan.karatotev@arm.com>
+    Reviewed-by: Vincenzo Frascino <Vincenzo.Frascino@arm.com>
+    Reviewed-by: Amit Daniel Kachhap <amit.kachhap@arm.com>
+    Acked-by: Shuah Khan <skhan@linuxfoundation.org>
+    Cc: Shuah Khan <shuah@kernel.org>
+    Cc: Catalin Marinas <catalin.marinas@arm.com>
+    Cc: Will Deacon <will@kernel.org>
+    Link: https://lore.kernel.org/r/20200918104715.182310-2-boian4o1@gmail.com
+    Signed-off-by: Will Deacon <will@kernel.org>
+
+diff --git a/tools/testing/selftests/arm64/pauth/Makefile b/tools/testing/selftests/arm64/pauth/Makefile
+new file mode 100644
+index 000000000000..01d35aaa610a
+--- /dev/null
++++ b/tools/testing/selftests/arm64/pauth/Makefile
+@@ -0,0 +1,32 @@
++# SPDX-License-Identifier: GPL-2.0
++# Copyright (C) 2020 ARM Limited
++
++# preserve CC value from top level Makefile
++ifeq ($(CC),cc)
++CC := $(CROSS_COMPILE)gcc
++endif
++
++CFLAGS += -mbranch-protection=pac-ret
++# check if the compiler supports ARMv8.3 and branch protection with PAuth
++pauth_cc_support := $(shell if ($(CC) $(CFLAGS) -march=armv8.3-a -E -x c /dev/null -o /dev/null 2>&1) then echo "1"; fi)
++
++ifeq ($(pauth_cc_support),1)
++TEST_GEN_PROGS := pac
++TEST_GEN_FILES := pac_corruptor.o
++endif
++
++include ../../lib.mk
++
++ifeq ($(pauth_cc_support),1)
++# pac* and aut* instructions are not available on architectures berfore
++# ARMv8.3. Therefore target ARMv8.3 wherever they are used directly
++$(OUTPUT)/pac_corruptor.o: pac_corruptor.S
++	$(CC) -c $^ -o $@ $(CFLAGS) -march=armv8.3-a
++
++# when -mbranch-protection is enabled and the target architecture is ARMv8.3 or
++# greater, gcc emits pac* instructions which are not in HINT NOP space,
++# preventing the tests from occurring at all. Compile for ARMv8.2 so tests can
++# run on earlier targets and print a meaningful error messages
++$(OUTPUT)/pac: pac.c $(OUTPUT)/pac_corruptor.o
++	$(CC) $^ -o $@ $(CFLAGS) -march=armv8.2-a
++endif

@@ -1,0 +1,46 @@
+commit d8c6d1886c8f436da96c0d91010040ca7caae9ac
+Author: Ard Biesheuvel <ardb@kernel.org>
+Date:   Tue Jul 7 09:31:58 2020 +0300
+
+    crypto: chelsio - permit asynchronous skcipher as fallback
+    
+    Even though the chelsio driver implements asynchronous versions of
+    cbc(aes) and xts(aes), the fallbacks it allocates are required to be
+    synchronous. Given that SIMD based software implementations are usually
+    asynchronous as well, even though they rarely complete asynchronously
+    (this typically only happens in cases where the request was made from
+    softirq context, while SIMD was already in use in the task context that
+    it interrupted), these implementations are disregarded, and either the
+    generic C version or another table based version implemented in assembler
+    is selected instead.
+    
+    Since falling back to synchronous AES is not only a performance issue, but
+    potentially a security issue as well (due to the fact that table based AES
+    is not time invariant), let's fix this, by allocating an ordinary skcipher
+    as the fallback, and invoke it with the completion routine that was given
+    to the outer request.
+    
+    Signed-off-by: Ard Biesheuvel <ardb@kernel.org>
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+diff --git a/drivers/crypto/chelsio/chcr_crypto.h b/drivers/crypto/chelsio/chcr_crypto.h
+index b3fdbdc25acb..55a6631cdbee 100644
+--- a/drivers/crypto/chelsio/chcr_crypto.h
++++ b/drivers/crypto/chelsio/chcr_crypto.h
+@@ -171,7 +171,7 @@ static inline struct chcr_context *h_ctx(struct crypto_ahash *tfm)
+ }
+ 
+ struct ablk_ctx {
+-	struct crypto_sync_skcipher *sw_cipher;
++	struct crypto_skcipher *sw_cipher;
+ 	__be32 key_ctx_hdr;
+ 	unsigned int enckey_len;
+ 	unsigned char ciph_mode;
+@@ -305,6 +305,7 @@ struct chcr_skcipher_req_ctx {
+ 	u8 init_iv[CHCR_MAX_CRYPTO_IV_LEN];
+ 	u16 txqidx;
+ 	u16 rxqidx;
++	struct skcipher_request fallback_req;	// keep at the end
+ };
+ 
+ struct chcr_alg_template {

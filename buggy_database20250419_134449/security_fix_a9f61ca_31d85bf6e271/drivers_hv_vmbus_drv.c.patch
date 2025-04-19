@@ -1,0 +1,60 @@
+commit a9f61ca793becabdefab03b77568d6c6f8c1bc79
+Author: Vitaly Kuznetsov <vkuznets@redhat.com>
+Date:   Fri Jun 3 17:09:22 2016 -0700
+
+    Drivers: hv: avoid vfree() on crash
+    
+    When we crash from NMI context (e.g. after NMI injection from host when
+    'sysctl -w kernel.unknown_nmi_panic=1' is set) we hit
+    
+        kernel BUG at mm/vmalloc.c:1530!
+    
+    as vfree() is denied. While the issue could be solved with in_nmi() check
+    instead I opted for skipping vfree on all sorts of crashes to reduce the
+    amount of work which can cause consequent crashes. We don't really need to
+    free anything on crash.
+    
+    Signed-off-by: Vitaly Kuznetsov <vkuznets@redhat.com>
+    Signed-off-by: K. Y. Srinivasan <kys@microsoft.com>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/hv/vmbus_drv.c b/drivers/hv/vmbus_drv.c
+index e82f7e1c217c..fedf6298ec0b 100644
+--- a/drivers/hv/vmbus_drv.c
++++ b/drivers/hv/vmbus_drv.c
+@@ -874,7 +874,7 @@ static int vmbus_bus_init(void)
+ 	bus_unregister(&hv_bus);
+ 
+ err_cleanup:
+-	hv_cleanup();
++	hv_cleanup(false);
+ 
+ 	return ret;
+ }
+@@ -1326,7 +1326,7 @@ static void hv_kexec_handler(void)
+ 	vmbus_initiate_unload(false);
+ 	for_each_online_cpu(cpu)
+ 		smp_call_function_single(cpu, hv_synic_cleanup, NULL, 1);
+-	hv_cleanup();
++	hv_cleanup(false);
+ };
+ 
+ static void hv_crash_handler(struct pt_regs *regs)
+@@ -1338,7 +1338,7 @@ static void hv_crash_handler(struct pt_regs *regs)
+ 	 * for kdump.
+ 	 */
+ 	hv_synic_cleanup(NULL);
+-	hv_cleanup();
++	hv_cleanup(true);
+ };
+ 
+ static int __init hv_acpi_init(void)
+@@ -1398,7 +1398,7 @@ static void __exit vmbus_exit(void)
+ 						 &hyperv_panic_block);
+ 	}
+ 	bus_unregister(&hv_bus);
+-	hv_cleanup();
++	hv_cleanup(false);
+ 	for_each_online_cpu(cpu) {
+ 		tasklet_kill(hv_context.event_dpc[cpu]);
+ 		smp_call_function_single(cpu, hv_synic_cleanup, NULL, 1);

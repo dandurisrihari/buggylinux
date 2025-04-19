@@ -1,0 +1,77 @@
+commit 7911d3f7af14a614617e38245fedf98a724e46a9
+Author: Andy Lutomirski <luto@amacapital.net>
+Date:   Fri Oct 24 15:58:12 2014 -0700
+
+    perf/x86: Only allow rdpmc if a perf_event is mapped
+    
+    We currently allow any process to use rdpmc.  This significantly
+    weakens the protection offered by PR_TSC_DISABLED, and it could be
+    helpful to users attempting to exploit timing attacks.
+    
+    Since we can't enable access to individual counters, use a very
+    coarse heuristic to limit access to rdpmc: allow access only when
+    a perf_event is mmapped.  This protects seccomp sandboxes.
+    
+    There is plenty of room to further tighen these restrictions.  For
+    example, this allows rdpmc for any x86_pmu event, but it's only
+    useful for self-monitoring tasks.
+    
+    As a side effect, cap_user_rdpmc will now be false for AMD uncore
+    events.  This isn't a real regression, since .event_idx is disabled
+    for these events anyway for the time being.  Whenever that gets
+    re-added, the cap_user_rdpmc code can be adjusted or refactored
+    accordingly.
+    
+    Signed-off-by: Andy Lutomirski <luto@amacapital.net>
+    Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+    Cc: Arnaldo Carvalho de Melo <acme@kernel.org>
+    Cc: Kees Cook <keescook@chromium.org>
+    Cc: Andrea Arcangeli <aarcange@redhat.com>
+    Cc: Vince Weaver <vince@deater.net>
+    Cc: "hillf.zj" <hillf.zj@alibaba-inc.com>
+    Cc: Valdis Kletnieks <Valdis.Kletnieks@vt.edu>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Link: http://lkml.kernel.org/r/a2bdb3cf3a1d70c26980d7c6dddfbaa69f3182bf.1414190806.git.luto@amacapital.net
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+diff --git a/arch/x86/include/asm/mmu_context.h b/arch/x86/include/asm/mmu_context.h
+index 52c18359f1dc..89c1fece224e 100644
+--- a/arch/x86/include/asm/mmu_context.h
++++ b/arch/x86/include/asm/mmu_context.h
+@@ -18,6 +18,18 @@ static inline void paravirt_activate_mm(struct mm_struct *prev,
+ }
+ #endif	/* !CONFIG_PARAVIRT */
+ 
++#ifdef CONFIG_PERF_EVENTS
++static inline void load_mm_cr4(struct mm_struct *mm)
++{
++	if (atomic_read(&mm->context.perf_rdpmc_allowed))
++		cr4_set_bits(X86_CR4_PCE);
++	else
++		cr4_clear_bits(X86_CR4_PCE);
++}
++#else
++static inline void load_mm_cr4(struct mm_struct *mm) {}
++#endif
++
+ /*
+  * Used for LDT copy/destruction.
+  */
+@@ -52,6 +64,9 @@ static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next,
+ 		/* Stop flush ipis for the previous mm */
+ 		cpumask_clear_cpu(cpu, mm_cpumask(prev));
+ 
++		/* Load per-mm CR4 state */
++		load_mm_cr4(next);
++
+ 		/*
+ 		 * Load the LDT, if the LDT is different.
+ 		 *
+@@ -87,6 +102,7 @@ static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next,
+ 			 */
+ 			load_cr3(next->pgd);
+ 			trace_tlb_flush(TLB_FLUSH_ON_TASK_SWITCH, TLB_FLUSH_ALL);
++			load_mm_cr4(next);
+ 			load_LDT_nolock(&next->context);
+ 		}
+ 	}

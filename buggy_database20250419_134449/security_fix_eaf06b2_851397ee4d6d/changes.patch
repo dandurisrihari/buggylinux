@@ -1,0 +1,117 @@
+diff --git a/Documentation/sysctl/kernel.txt b/Documentation/sysctl/kernel.txt
+index 3894eaa23486..209e1584c3dc 100644
+--- a/Documentation/sysctl/kernel.txt
++++ b/Documentation/sysctl/kernel.txt
+@@ -28,6 +28,7 @@ show up in /proc/sys/kernel:
+ - core_uses_pid
+ - ctrl-alt-del
+ - dentry-state
++- dmesg_restrict
+ - domainname
+ - hostname
+ - hotplug
+@@ -213,6 +214,19 @@ to decide what to do with it.
+ 
+ ==============================================================
+ 
++dmesg_restrict:
++
++This toggle indicates whether unprivileged users are prevented from using
++dmesg(8) to view messages from the kernel's log buffer.  When
++dmesg_restrict is set to (0) there are no restrictions.  When
++dmesg_restrict is set set to (1), users must have CAP_SYS_ADMIN to use
++dmesg(8).
++
++The kernel config option CONFIG_SECURITY_DMESG_RESTRICT sets the default
++value of dmesg_restrict.
++
++==============================================================
++
+ domainname & hostname:
+ 
+ These files can be used to set the NIS/YP domainname and the
+diff --git a/include/linux/kernel.h b/include/linux/kernel.h
+index b526947bdf48..fc3da9e4da19 100644
+--- a/include/linux/kernel.h
++++ b/include/linux/kernel.h
+@@ -293,6 +293,7 @@ extern bool printk_timed_ratelimit(unsigned long *caller_jiffies,
+ 				   unsigned int interval_msec);
+ 
+ extern int printk_delay_msec;
++extern int dmesg_restrict;
+ 
+ /*
+  * Print a one-time message (analogous to WARN_ONCE() et al):
+diff --git a/kernel/printk.c b/kernel/printk.c
+index b2ebaee8c377..38e7d5868d60 100644
+--- a/kernel/printk.c
++++ b/kernel/printk.c
+@@ -261,6 +261,12 @@ static inline void boot_delay_msec(void)
+ }
+ #endif
+ 
++#ifdef CONFIG_SECURITY_DMESG_RESTRICT
++int dmesg_restrict = 1;
++#else
++int dmesg_restrict;
++#endif
++
+ int do_syslog(int type, char __user *buf, int len, bool from_file)
+ {
+ 	unsigned i, j, limit, count;
+diff --git a/kernel/sysctl.c b/kernel/sysctl.c
+index c33a1edb799f..b65bf634035e 100644
+--- a/kernel/sysctl.c
++++ b/kernel/sysctl.c
+@@ -703,6 +703,15 @@ static struct ctl_table kern_table[] = {
+ 		.extra2		= &ten_thousand,
+ 	},
+ #endif
++	{
++		.procname	= "dmesg_restrict",
++		.data		= &dmesg_restrict,
++		.maxlen		= sizeof(int),
++		.mode		= 0644,
++		.proc_handler	= proc_dointvec_minmax,
++		.extra1		= &zero,
++		.extra2		= &one,
++	},
+ 	{
+ 		.procname	= "ngroups_max",
+ 		.data		= &ngroups_max,
+diff --git a/security/Kconfig b/security/Kconfig
+index bd72ae623494..e80da955e687 100644
+--- a/security/Kconfig
++++ b/security/Kconfig
+@@ -39,6 +39,18 @@ config KEYS_DEBUG_PROC_KEYS
+ 
+ 	  If you are unsure as to whether this is required, answer N.
+ 
++config SECURITY_DMESG_RESTRICT
++	bool "Restrict unprivileged access to the kernel syslog"
++	default n
++	help
++	  This enforces restrictions on unprivileged users reading the kernel
++	  syslog via dmesg(8).
++
++	  If this option is not selected, no restrictions will be enforced
++	  unless the dmesg_restrict sysctl is explicitly set to (1).
++
++	  If you are unsure how to answer this question, answer N.
++
+ config SECURITY
+ 	bool "Enable different security models"
+ 	depends on SYSFS
+diff --git a/security/commoncap.c b/security/commoncap.c
+index 5e632b4857e4..04b80f9912bf 100644
+--- a/security/commoncap.c
++++ b/security/commoncap.c
+@@ -895,6 +895,8 @@ int cap_syslog(int type, bool from_file)
+ {
+ 	if (type != SYSLOG_ACTION_OPEN && from_file)
+ 		return 0;
++	if (dmesg_restrict && !capable(CAP_SYS_ADMIN))
++		return -EPERM;
+ 	if ((type != SYSLOG_ACTION_READ_ALL &&
+ 	     type != SYSLOG_ACTION_SIZE_BUFFER) && !capable(CAP_SYS_ADMIN))
+ 		return -EPERM;

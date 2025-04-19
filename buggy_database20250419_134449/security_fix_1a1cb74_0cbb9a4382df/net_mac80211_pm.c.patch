@@ -1,0 +1,45 @@
+commit 1a1cb744de160ee70086a77afff605bbc275d291
+Author: Johannes Berg <johannes.berg@intel.com>
+Date:   Wed Mar 19 09:55:55 2014 +0100
+
+    mac80211: fix suspend vs. authentication race
+    
+    Since Stanislaw's patch removing the quiescing code, mac80211 had
+    a race regarding suspend vs. authentication: as cfg80211 doesn't
+    track authentication attempts, it can't abort them. Therefore the
+    attempts may be kept running while suspending, which can lead to
+    all kinds of issues, in at least some cases causing an error in
+    iwlmvm firmware.
+    
+    Fix this by aborting the authentication attempt when suspending.
+    
+    Cc: stable@vger.kernel.org
+    Fixes: 12e7f517029d ("mac80211: cleanup generic suspend/resume procedures")
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+diff --git a/net/mac80211/pm.c b/net/mac80211/pm.c
+index af64fb8e8add..d478b880a0af 100644
+--- a/net/mac80211/pm.c
++++ b/net/mac80211/pm.c
+@@ -100,10 +100,18 @@ int __ieee80211_suspend(struct ieee80211_hw *hw, struct cfg80211_wowlan *wowlan)
+ 
+ 	/* remove all interfaces that were created in the driver */
+ 	list_for_each_entry(sdata, &local->interfaces, list) {
+-		if (!ieee80211_sdata_running(sdata) ||
+-		    sdata->vif.type == NL80211_IFTYPE_AP_VLAN ||
+-		    sdata->vif.type == NL80211_IFTYPE_MONITOR)
++		if (!ieee80211_sdata_running(sdata))
+ 			continue;
++		switch (sdata->vif.type) {
++		case NL80211_IFTYPE_AP_VLAN:
++		case NL80211_IFTYPE_MONITOR:
++			continue;
++		case NL80211_IFTYPE_STATION:
++			ieee80211_mgd_quiesce(sdata);
++			break;
++		default:
++			break;
++		}
+ 
+ 		drv_remove_interface(local, sdata);
+ 	}

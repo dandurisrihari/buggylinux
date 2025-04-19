@@ -1,0 +1,47 @@
+commit ed5cc702d311c14b653323d76062b0294effa66e
+Author: Jan Kara <jack@suse.cz>
+Date:   Wed Nov 1 18:43:08 2023 +0100
+
+    block: Add config option to not allow writing to mounted devices
+    
+    Writing to mounted devices is dangerous and can lead to filesystem
+    corruption as well as crashes. Furthermore syzbot comes with more and
+    more involved examples how to corrupt block device under a mounted
+    filesystem leading to kernel crashes and reports we can do nothing
+    about. Add tracking of writers to each block device and a kernel cmdline
+    argument which controls whether other writeable opens to block devices
+    open with BLK_OPEN_RESTRICT_WRITES flag are allowed. We will make
+    filesystems use this flag for used devices.
+    
+    Note that this effectively only prevents modification of the particular
+    block device's page cache by other writers. The actual device content
+    can still be modified by other means - e.g. by issuing direct scsi
+    commands, by doing writes through devices lower in the storage stack
+    (e.g. in case loop devices, DM, or MD are involved) etc. But blocking
+    direct modifications of the block device page cache is enough to give
+    filesystems a chance to perform data validation when loading data from
+    the underlying storage and thus prevent kernel crashes.
+    
+    Syzbot can use this cmdline argument option to avoid uninteresting
+    crashes. Also users whose userspace setup does not need writing to
+    mounted block devices can set this option for hardening.
+    
+    Link: https://lore.kernel.org/all/60788e5d-5c7c-1142-e554-c21d709acfd9@linaro.org
+    Signed-off-by: Jan Kara <jack@suse.cz>
+    Link: https://lore.kernel.org/r/20231101174325.10596-3-jack@suse.cz
+    Reviewed-by: Jens Axboe <axboe@kernel.dk>
+    Signed-off-by: Christian Brauner <brauner@kernel.org>
+
+diff --git a/include/linux/blkdev.h b/include/linux/blkdev.h
+index 7afc10315dd5..0e0c0186aa32 100644
+--- a/include/linux/blkdev.h
++++ b/include/linux/blkdev.h
+@@ -124,6 +124,8 @@ typedef unsigned int __bitwise blk_mode_t;
+ #define BLK_OPEN_NDELAY		((__force blk_mode_t)(1 << 3))
+ /* open for "writes" only for ioctls (specialy hack for floppy.c) */
+ #define BLK_OPEN_WRITE_IOCTL	((__force blk_mode_t)(1 << 4))
++/* open is exclusive wrt all other BLK_OPEN_WRITE opens to the device */
++#define BLK_OPEN_RESTRICT_WRITES	((__force blk_mode_t)(1 << 5))
+ 
+ struct gendisk {
+ 	/*

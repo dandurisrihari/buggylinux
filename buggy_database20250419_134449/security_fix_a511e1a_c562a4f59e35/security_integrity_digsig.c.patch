@@ -1,0 +1,97 @@
+commit a511e1af8b12f44c6e55786c463c9f093c214fb6
+Author: David Howells <dhowells@redhat.com>
+Date:   Wed Apr 6 16:14:26 2016 +0100
+
+    KEYS: Move the point of trust determination to __key_link()
+    
+    Move the point at which a key is determined to be trustworthy to
+    __key_link() so that we use the contents of the keyring being linked in to
+    to determine whether the key being linked in is trusted or not.
+    
+    What is 'trusted' then becomes a matter of what's in the keyring.
+    
+    Currently, the test is done when the key is parsed, but given that at that
+    point we can only sensibly refer to the contents of the system trusted
+    keyring, we can only use that as the basis for working out the
+    trustworthiness of a new key.
+    
+    With this change, a trusted keyring is a set of keys that once the
+    trusted-only flag is set cannot be added to except by verification through
+    one of the contained keys.
+    
+    Further, adding a key into a trusted keyring, whilst it might grant
+    trustworthiness in the context of that keyring, does not automatically
+    grant trustworthiness in the context of a second keyring to which it could
+    be secondarily linked.
+    
+    To accomplish this, the authentication data associated with the key source
+    must now be retained.  For an X.509 cert, this means the contents of the
+    AuthorityKeyIdentifier and the signature data.
+    
+    
+    If system keyrings are disabled then restrict_link_by_builtin_trusted()
+    resolves to restrict_link_reject().  The integrity digital signature code
+    still works correctly with this as it was previously using
+    KEY_FLAG_TRUSTED_ONLY, which doesn't permit anything to be added if there
+    is no system keyring against which trust can be determined.
+    
+    Signed-off-by: David Howells <dhowells@redhat.com>
+
+diff --git a/security/integrity/digsig.c b/security/integrity/digsig.c
+index 659566c2200b..d647178c6bbd 100644
+--- a/security/integrity/digsig.c
++++ b/security/integrity/digsig.c
+@@ -18,6 +18,8 @@
+ #include <linux/cred.h>
+ #include <linux/key-type.h>
+ #include <linux/digsig.h>
++#include <crypto/public_key.h>
++#include <keys/system_keyring.h>
+ 
+ #include "integrity.h"
+ 
+@@ -40,6 +42,35 @@ static bool init_keyring __initdata = true;
+ static bool init_keyring __initdata;
+ #endif
+ 
++#ifdef CONFIG_SYSTEM_TRUSTED_KEYRING
++/*
++ * Restrict the addition of keys into the IMA keyring.
++ *
++ * Any key that needs to go in .ima keyring must be signed by CA in
++ * either .system or .ima_mok keyrings.
++ */
++static int restrict_link_by_ima_mok(struct key *keyring,
++				    const struct key_type *type,
++				    unsigned long flags,
++				    const union key_payload *payload)
++{
++	int ret;
++
++	ret = restrict_link_by_builtin_trusted(keyring, type, flags, payload);
++	if (ret != -ENOKEY)
++		return ret;
++
++	return restrict_link_by_signature(get_ima_mok_keyring(),
++					  type, payload);
++}
++#else
++/*
++ * If there's no system trusted keyring, then keys cannot be loaded into
++ * .ima_mok and added keys cannot be marked trusted.
++ */
++#define restrict_link_by_ima_mok restrict_link_reject
++#endif
++
+ int integrity_digsig_verify(const unsigned int id, const char *sig, int siglen,
+ 			    const char *digest, int digestlen)
+ {
+@@ -84,7 +115,7 @@ int __init integrity_init_keyring(const unsigned int id)
+ 				     KEY_USR_VIEW | KEY_USR_READ |
+ 				     KEY_USR_WRITE | KEY_USR_SEARCH),
+ 				    KEY_ALLOC_NOT_IN_QUOTA,
+-				    NULL, NULL);
++				    restrict_link_by_ima_mok, NULL);
+ 	if (IS_ERR(keyring[id])) {
+ 		err = PTR_ERR(keyring[id]);
+ 		pr_info("Can't allocate %s keyring (%d)\n",

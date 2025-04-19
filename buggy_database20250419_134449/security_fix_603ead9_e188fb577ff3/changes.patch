@@ -1,0 +1,41 @@
+diff --git a/drivers/net/ethernet/microchip/sparx5/sparx5_main.c b/drivers/net/ethernet/microchip/sparx5/sparx5_main.c
+index d1f7fc8b1b71..3c066b62e689 100644
+--- a/drivers/net/ethernet/microchip/sparx5/sparx5_main.c
++++ b/drivers/net/ethernet/microchip/sparx5/sparx5_main.c
+@@ -757,6 +757,7 @@ static int mchp_sparx5_probe(struct platform_device *pdev)
+ 	platform_set_drvdata(pdev, sparx5);
+ 	sparx5->pdev = pdev;
+ 	sparx5->dev = &pdev->dev;
++	spin_lock_init(&sparx5->tx_lock);
+ 
+ 	/* Do switch core reset if available */
+ 	reset = devm_reset_control_get_optional_shared(&pdev->dev, "switch");
+diff --git a/drivers/net/ethernet/microchip/sparx5/sparx5_main.h b/drivers/net/ethernet/microchip/sparx5/sparx5_main.h
+index 6f565c0c0c3d..316fed5f2735 100644
+--- a/drivers/net/ethernet/microchip/sparx5/sparx5_main.h
++++ b/drivers/net/ethernet/microchip/sparx5/sparx5_main.h
+@@ -280,6 +280,7 @@ struct sparx5 {
+ 	int xtr_irq;
+ 	/* Frame DMA */
+ 	int fdma_irq;
++	spinlock_t tx_lock; /* lock for frame transmission */
+ 	struct sparx5_rx rx;
+ 	struct sparx5_tx tx;
+ 	/* PTP */
+diff --git a/drivers/net/ethernet/microchip/sparx5/sparx5_packet.c b/drivers/net/ethernet/microchip/sparx5/sparx5_packet.c
+index 6db6ac6a3bbc..ac7e1cffbcec 100644
+--- a/drivers/net/ethernet/microchip/sparx5/sparx5_packet.c
++++ b/drivers/net/ethernet/microchip/sparx5/sparx5_packet.c
+@@ -244,10 +244,12 @@ netdev_tx_t sparx5_port_xmit_impl(struct sk_buff *skb, struct net_device *dev)
+ 	}
+ 
+ 	skb_tx_timestamp(skb);
++	spin_lock(&sparx5->tx_lock);
+ 	if (sparx5->fdma_irq > 0)
+ 		ret = sparx5_fdma_xmit(sparx5, ifh, skb);
+ 	else
+ 		ret = sparx5_inject(sparx5, ifh, skb, dev);
++	spin_unlock(&sparx5->tx_lock);
+ 
+ 	if (ret == -EBUSY)
+ 		goto busy;

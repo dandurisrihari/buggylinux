@@ -1,0 +1,71 @@
+commit 432434c9f8e18cb4cf0fe05bc3eeceada0e10dc6
+Author: Eric Biggers <ebiggers@google.com>
+Date:   Mon Jul 22 09:26:23 2019 -0700
+
+    fs-verity: support builtin file signatures
+    
+    To meet some users' needs, add optional support for having fs-verity
+    handle a portion of the authentication policy in the kernel.  An
+    ".fs-verity" keyring is created to which X.509 certificates can be
+    added; then a sysctl 'fs.verity.require_signatures' can be set to cause
+    the kernel to enforce that all fs-verity files contain a signature of
+    their file measurement by a key in this keyring.
+    
+    See the "Built-in signature verification" section of
+    Documentation/filesystems/fsverity.rst for the full documentation.
+    
+    Reviewed-by: Theodore Ts'o <tytso@mit.edu>
+    Signed-off-by: Eric Biggers <ebiggers@google.com>
+
+diff --git a/fs/verity/enable.c b/fs/verity/enable.c
+index df5dab03f0c2..eabc6ac19906 100644
+--- a/fs/verity/enable.c
++++ b/fs/verity/enable.c
+@@ -161,7 +161,7 @@ static int enable_verity(struct file *filp,
+ 	const struct fsverity_operations *vops = inode->i_sb->s_vop;
+ 	struct merkle_tree_params params = { };
+ 	struct fsverity_descriptor *desc;
+-	size_t desc_size = sizeof(*desc);
++	size_t desc_size = sizeof(*desc) + arg->sig_size;
+ 	struct fsverity_info *vi;
+ 	int err;
+ 
+@@ -183,6 +183,16 @@ static int enable_verity(struct file *filp,
+ 	}
+ 	desc->salt_size = arg->salt_size;
+ 
++	/* Get the signature if the user provided one */
++	if (arg->sig_size &&
++	    copy_from_user(desc->signature,
++			   (const u8 __user *)(uintptr_t)arg->sig_ptr,
++			   arg->sig_size)) {
++		err = -EFAULT;
++		goto out;
++	}
++	desc->sig_size = cpu_to_le32(arg->sig_size);
++
+ 	desc->data_size = cpu_to_le64(inode->i_size);
+ 
+ 	/* Prepare the Merkle tree parameters */
+@@ -238,6 +248,10 @@ static int enable_verity(struct file *filp,
+ 		goto rollback;
+ 	}
+ 
++	if (arg->sig_size)
++		pr_debug("Storing a %u-byte PKCS#7 signature alongside the file\n",
++			 arg->sig_size);
++
+ 	/*
+ 	 * Tell the filesystem to finish enabling verity on the file.
+ 	 * Serialized with ->begin_enable_verity() by the inode lock.
+@@ -304,8 +318,8 @@ int fsverity_ioctl_enable(struct file *filp, const void __user *uarg)
+ 	if (arg.salt_size > FIELD_SIZEOF(struct fsverity_descriptor, salt))
+ 		return -EMSGSIZE;
+ 
+-	if (arg.sig_size)
+-		return -EINVAL;
++	if (arg.sig_size > FS_VERITY_MAX_SIGNATURE_SIZE)
++		return -EMSGSIZE;
+ 
+ 	/*
+ 	 * Require a regular file with write access.  But the actual fd must

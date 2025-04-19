@@ -1,0 +1,143 @@
+commit 8520e224f547cd070c7c8f97b1fc6d58cff7ccaa
+Author: Daniel Borkmann <daniel@iogearbox.net>
+Date:   Tue Sep 14 01:07:57 2021 +0200
+
+    bpf, cgroups: Fix cgroup v2 fallback on v1/v2 mixed mode
+    
+    Fix cgroup v1 interference when non-root cgroup v2 BPF programs are used.
+    Back in the days, commit bd1060a1d671 ("sock, cgroup: add sock->sk_cgroup")
+    embedded per-socket cgroup information into sock->sk_cgrp_data and in order
+    to save 8 bytes in struct sock made both mutually exclusive, that is, when
+    cgroup v1 socket tagging (e.g. net_cls/net_prio) is used, then cgroup v2
+    falls back to the root cgroup in sock_cgroup_ptr() (&cgrp_dfl_root.cgrp).
+    
+    The assumption made was "there is no reason to mix the two and this is in line
+    with how legacy and v2 compatibility is handled" as stated in bd1060a1d671.
+    However, with Kubernetes more widely supporting cgroups v2 as well nowadays,
+    this assumption no longer holds, and the possibility of the v1/v2 mixed mode
+    with the v2 root fallback being hit becomes a real security issue.
+    
+    Many of the cgroup v2 BPF programs are also used for policy enforcement, just
+    to pick _one_ example, that is, to programmatically deny socket related system
+    calls like connect(2) or bind(2). A v2 root fallback would implicitly cause
+    a policy bypass for the affected Pods.
+    
+    In production environments, we have recently seen this case due to various
+    circumstances: i) a different 3rd party agent and/or ii) a container runtime
+    such as [0] in the user's environment configuring legacy cgroup v1 net_cls
+    tags, which triggered implicitly mentioned root fallback. Another case is
+    Kubernetes projects like kind [1] which create Kubernetes nodes in a container
+    and also add cgroup namespaces to the mix, meaning programs which are attached
+    to the cgroup v2 root of the cgroup namespace get attached to a non-root
+    cgroup v2 path from init namespace point of view. And the latter's root is
+    out of reach for agents on a kind Kubernetes node to configure. Meaning, any
+    entity on the node setting cgroup v1 net_cls tag will trigger the bypass
+    despite cgroup v2 BPF programs attached to the namespace root.
+    
+    Generally, this mutual exclusiveness does not hold anymore in today's user
+    environments and makes cgroup v2 usage from BPF side fragile and unreliable.
+    This fix adds proper struct cgroup pointer for the cgroup v2 case to struct
+    sock_cgroup_data in order to address these issues; this implicitly also fixes
+    the tradeoffs being made back then with regards to races and refcount leaks
+    as stated in bd1060a1d671, and removes the fallback, so that cgroup v2 BPF
+    programs always operate as expected.
+    
+      [0] https://github.com/nestybox/sysbox/
+      [1] https://kind.sigs.k8s.io/
+    
+    Fixes: bd1060a1d671 ("sock, cgroup: add sock->sk_cgroup")
+    Signed-off-by: Daniel Borkmann <daniel@iogearbox.net>
+    Signed-off-by: Alexei Starovoitov <ast@kernel.org>
+    Acked-by: Stanislav Fomichev <sdf@google.com>
+    Acked-by: Tejun Heo <tj@kernel.org>
+    Link: https://lore.kernel.org/bpf/20210913230759.2313-1-daniel@iogearbox.net
+
+diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
+index 881ce1470beb..8afa8690d288 100644
+--- a/kernel/cgroup/cgroup.c
++++ b/kernel/cgroup/cgroup.c
+@@ -6572,74 +6572,44 @@ int cgroup_parse_float(const char *input, unsigned dec_shift, s64 *v)
+  */
+ #ifdef CONFIG_SOCK_CGROUP_DATA
+ 
+-#if defined(CONFIG_CGROUP_NET_PRIO) || defined(CONFIG_CGROUP_NET_CLASSID)
+-
+-DEFINE_SPINLOCK(cgroup_sk_update_lock);
+-static bool cgroup_sk_alloc_disabled __read_mostly;
+-
+-void cgroup_sk_alloc_disable(void)
+-{
+-	if (cgroup_sk_alloc_disabled)
+-		return;
+-	pr_info("cgroup: disabling cgroup2 socket matching due to net_prio or net_cls activation\n");
+-	cgroup_sk_alloc_disabled = true;
+-}
+-
+-#else
+-
+-#define cgroup_sk_alloc_disabled	false
+-
+-#endif
+-
+ void cgroup_sk_alloc(struct sock_cgroup_data *skcd)
+ {
+-	if (cgroup_sk_alloc_disabled) {
+-		skcd->no_refcnt = 1;
+-		return;
+-	}
+-
+ 	/* Don't associate the sock with unrelated interrupted task's cgroup. */
+ 	if (in_interrupt())
+ 		return;
+ 
+ 	rcu_read_lock();
+-
+ 	while (true) {
+ 		struct css_set *cset;
+ 
+ 		cset = task_css_set(current);
+ 		if (likely(cgroup_tryget(cset->dfl_cgrp))) {
+-			skcd->val = (unsigned long)cset->dfl_cgrp;
++			skcd->cgroup = cset->dfl_cgrp;
+ 			cgroup_bpf_get(cset->dfl_cgrp);
+ 			break;
+ 		}
+ 		cpu_relax();
+ 	}
+-
+ 	rcu_read_unlock();
+ }
+ 
+ void cgroup_sk_clone(struct sock_cgroup_data *skcd)
+ {
+-	if (skcd->val) {
+-		if (skcd->no_refcnt)
+-			return;
+-		/*
+-		 * We might be cloning a socket which is left in an empty
+-		 * cgroup and the cgroup might have already been rmdir'd.
+-		 * Don't use cgroup_get_live().
+-		 */
+-		cgroup_get(sock_cgroup_ptr(skcd));
+-		cgroup_bpf_get(sock_cgroup_ptr(skcd));
+-	}
++	struct cgroup *cgrp = sock_cgroup_ptr(skcd);
++
++	/*
++	 * We might be cloning a socket which is left in an empty
++	 * cgroup and the cgroup might have already been rmdir'd.
++	 * Don't use cgroup_get_live().
++	 */
++	cgroup_get(cgrp);
++	cgroup_bpf_get(cgrp);
+ }
+ 
+ void cgroup_sk_free(struct sock_cgroup_data *skcd)
+ {
+ 	struct cgroup *cgrp = sock_cgroup_ptr(skcd);
+ 
+-	if (skcd->no_refcnt)
+-		return;
+ 	cgroup_bpf_put(cgrp);
+ 	cgroup_put(cgrp);
+ }

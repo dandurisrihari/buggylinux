@@ -1,0 +1,149 @@
+commit f5f5370da4b3128b7dfd944b4fcbb5c7b6887348
+Author: Kyle McMartin <kyle@parisc-linux.org>
+Date:   Tue Mar 28 01:56:11 2006 -0800
+
+    [PATCH] Decrapify asm-generic/local.h
+    
+    Now that Christoph Lameter's atomic_long_t support is merged in mainline,
+    might as well convert asm-generic/local.h to use it, so the same code can
+    be used for both sizes of 32 and 64-bit unsigned longs.
+    
+    akpm sayeth:
+    
+    Q:
+    
+      Is there any particular reason why these routines weren't simply
+      implemented with local_save/restore_flags, if they are only meant to
+      guarantee atomicity to the local cpu?  I'm sure on most platforms this
+      would be more efficient than using an atomic...
+    
+    A:
+    
+      The whole _point_ of local_t is to avoid local_irq_disable().  It's
+      designed to exploit the fact that many CPUs can do incs and decs in a way
+      which is atomic wrt local interrupts, but not atomic wrt SMP.
+    
+    But this patch makes sense, because asm-generic/local.h is just a fallback
+    implementation for architectures which either cannot perform these
+    local-irq-atomic operations, or its maintainers haven't yet got around to
+    implementing them.
+    
+    We need more work done on local_t in the 2.6.17 timeframe - they're defined as
+    unsigned long, but some architectures implement them as signed long.
+    
+    Signed-off-by: Kyle McMartin <kyle@parisc-linux.org>
+    Cc: Benjamin LaHaise <bcrl@kvack.org>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/include/asm-generic/local.h b/include/asm-generic/local.h
+index 16fc00360f75..de4614840c2c 100644
+--- a/include/asm-generic/local.h
++++ b/include/asm-generic/local.h
+@@ -4,28 +4,28 @@
+ #include <linux/config.h>
+ #include <linux/percpu.h>
+ #include <linux/hardirq.h>
++#include <asm/atomic.h>
+ #include <asm/types.h>
+ 
+ /* An unsigned long type for operations which are atomic for a single
+  * CPU.  Usually used in combination with per-cpu variables. */
+ 
+-#if BITS_PER_LONG == 32
+ /* Implement in terms of atomics. */
+ 
+ /* Don't use typedef: don't want them to be mixed with atomic_t's. */
+ typedef struct
+ {
+-	atomic_t a;
++	atomic_long_t a;
+ } local_t;
+ 
+-#define LOCAL_INIT(i)	{ ATOMIC_INIT(i) }
++#define LOCAL_INIT(i)	{ ATOMIC_LONG_INIT(i) }
+ 
+-#define local_read(l)	((unsigned long)atomic_read(&(l)->a))
+-#define local_set(l,i)	atomic_set((&(l)->a),(i))
+-#define local_inc(l)	atomic_inc(&(l)->a)
+-#define local_dec(l)	atomic_dec(&(l)->a)
+-#define local_add(i,l)	atomic_add((i),(&(l)->a))
+-#define local_sub(i,l)	atomic_sub((i),(&(l)->a))
++#define local_read(l)	((unsigned long)atomic_long_read(&(l)->a))
++#define local_set(l,i)	atomic_long_set((&(l)->a),(i))
++#define local_inc(l)	atomic_long_inc(&(l)->a)
++#define local_dec(l)	atomic_long_dec(&(l)->a)
++#define local_add(i,l)	atomic_long_add((i),(&(l)->a))
++#define local_sub(i,l)	atomic_long_sub((i),(&(l)->a))
+ 
+ /* Non-atomic variants, ie. preemption disabled and won't be touched
+  * in interrupt, etc.  Some archs can optimize this case well. */
+@@ -34,68 +34,6 @@ typedef struct
+ #define __local_add(i,l)	local_set((l), local_read(l) + (i))
+ #define __local_sub(i,l)	local_set((l), local_read(l) - (i))
+ 
+-#else /* ... can't use atomics. */
+-/* Implement in terms of three variables.
+-   Another option would be to use local_irq_save/restore. */
+-
+-typedef struct
+-{
+-	/* 0 = in hardirq, 1 = in softirq, 2 = usermode. */
+-	unsigned long v[3];
+-} local_t;
+-
+-#define _LOCAL_VAR(l)	((l)->v[!in_interrupt() + !in_irq()])
+-
+-#define LOCAL_INIT(i)	{ { (i), 0, 0 } }
+-
+-static inline unsigned long local_read(local_t *l)
+-{
+-	return l->v[0] + l->v[1] + l->v[2];
+-}
+-
+-static inline void local_set(local_t *l, unsigned long v)
+-{
+-	l->v[0] = v;
+-	l->v[1] = l->v[2] = 0;
+-}
+-
+-static inline void local_inc(local_t *l)
+-{
+-	preempt_disable();
+-	_LOCAL_VAR(l)++;
+-	preempt_enable();
+-}
+-
+-static inline void local_dec(local_t *l)
+-{
+-	preempt_disable();
+-	_LOCAL_VAR(l)--;
+-	preempt_enable();
+-}
+-
+-static inline void local_add(unsigned long v, local_t *l)
+-{
+-	preempt_disable();
+-	_LOCAL_VAR(l) += v;
+-	preempt_enable();
+-}
+-
+-static inline void local_sub(unsigned long v, local_t *l)
+-{
+-	preempt_disable();
+-	_LOCAL_VAR(l) -= v;
+-	preempt_enable();
+-}
+-
+-/* Non-atomic variants, ie. preemption disabled and won't be touched
+- * in interrupt, etc.  Some archs can optimize this case well. */
+-#define __local_inc(l)		((l)->v[0]++)
+-#define __local_dec(l)		((l)->v[0]--)
+-#define __local_add(i,l)	((l)->v[0] += (i))
+-#define __local_sub(i,l)	((l)->v[0] -= (i))
+-
+-#endif /* Non-atomic implementation */
+-
+ /* Use these for per-cpu local_t variables: on some archs they are
+  * much more efficient than these naive implementations.  Note they take
+  * a variable (eg. mystruct.foo), not an address.

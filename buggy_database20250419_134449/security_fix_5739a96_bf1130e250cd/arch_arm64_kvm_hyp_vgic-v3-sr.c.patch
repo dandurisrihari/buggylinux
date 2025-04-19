@@ -1,0 +1,91 @@
+commit 5739a961b542530626cb3afb721efa688b290cce
+Author: Marc Zyngier <maz@kernel.org>
+Date:   Tue Aug 27 16:25:08 2024 +0100
+
+    KVM: arm64: Force SRE traps when SRE access is not enabled
+    
+    We so far only write the ICH_HCR_EL2 config in two situations:
+    
+    - when we need to emulate the GICv3 CPU interface due to HW bugs
+    
+    - when we do direct injection, as the virtual CPU interface needs
+      to be enabled
+    
+    This is all good. But it also means that we don't do anything special
+    when we emulate a GICv2, or that there is no GIC at all.
+    
+    What happens in this case when the guest uses the GICv3 system
+    registers? The *guest* gets a trap for a sysreg access (EC=0x18)
+    while we'd really like it to get an UNDEF.
+    
+    Fixing this is a bit involved:
+    
+    - we need to set all the required trap bits (TC, TALL0, TALL1, TDIR)
+    
+    - for these traps to take effect, we need to (counter-intuitively)
+      set ICC_SRE_EL1.SRE to 1 so that the above traps take priority.
+    
+    Note that doesn't fully work when GICv2 emulation is enabled, as
+    we cannot set ICC_SRE_EL1.SRE to 1 (it breaks Group0 delivery as
+    IRQ).
+    
+    Reviewed-by: Oliver Upton <oliver.upton@linux.dev>
+    Link: https://lore.kernel.org/r/20240827152517.3909653-3-maz@kernel.org
+    Signed-off-by: Marc Zyngier <maz@kernel.org>
+
+diff --git a/arch/arm64/kvm/hyp/vgic-v3-sr.c b/arch/arm64/kvm/hyp/vgic-v3-sr.c
+index 7b397fad26f2..c9ab76652c32 100644
+--- a/arch/arm64/kvm/hyp/vgic-v3-sr.c
++++ b/arch/arm64/kvm/hyp/vgic-v3-sr.c
+@@ -268,8 +268,16 @@ void __vgic_v3_activate_traps(struct vgic_v3_cpu_if *cpu_if)
+ 	 * starting to mess with the rest of the GIC, and VMCR_EL2 in
+ 	 * particular.  This logic must be called before
+ 	 * __vgic_v3_restore_state().
++	 *
++	 * However, if the vgic is disabled (ICH_HCR_EL2.EN==0), no GIC is
++	 * provisioned at all. In order to prevent illegal accesses to the
++	 * system registers to trap to EL1 (duh), force ICC_SRE_EL1.SRE to 1
++	 * so that the trap bits can take effect. Yes, we *loves* the GIC.
+ 	 */
+-	if (!cpu_if->vgic_sre) {
++	if (!(cpu_if->vgic_hcr & ICH_HCR_EN)) {
++		write_gicreg(ICC_SRE_EL1_SRE, ICC_SRE_EL1);
++		isb();
++	} else if (!cpu_if->vgic_sre) {
+ 		write_gicreg(0, ICC_SRE_EL1);
+ 		isb();
+ 		write_gicreg(cpu_if->vgic_vmcr, ICH_VMCR_EL2);
+@@ -288,8 +296,9 @@ void __vgic_v3_activate_traps(struct vgic_v3_cpu_if *cpu_if)
+ 	}
+ 
+ 	/*
+-	 * Prevent the guest from touching the GIC system registers if
+-	 * SRE isn't enabled for GICv3 emulation.
++	 * Prevent the guest from touching the ICC_SRE_EL1 system
++	 * register. Note that this may not have any effect, as
++	 * ICC_SRE_EL2.Enable being RAO/WI is a valid implementation.
+ 	 */
+ 	write_gicreg(read_gicreg(ICC_SRE_EL2) & ~ICC_SRE_EL2_ENABLE,
+ 		     ICC_SRE_EL2);
+@@ -297,10 +306,11 @@ void __vgic_v3_activate_traps(struct vgic_v3_cpu_if *cpu_if)
+ 	/*
+ 	 * If we need to trap system registers, we must write
+ 	 * ICH_HCR_EL2 anyway, even if no interrupts are being
+-	 * injected,
++	 * injected. Note that this also applies if we don't expect
++	 * any system register access (no vgic at all).
+ 	 */
+ 	if (static_branch_unlikely(&vgic_v3_cpuif_trap) ||
+-	    cpu_if->its_vpe.its_vm)
++	    cpu_if->its_vpe.its_vm || !cpu_if->vgic_sre)
+ 		write_gicreg(cpu_if->vgic_hcr, ICH_HCR_EL2);
+ }
+ 
+@@ -326,7 +336,7 @@ void __vgic_v3_deactivate_traps(struct vgic_v3_cpu_if *cpu_if)
+ 	 * no interrupts were being injected, and we disable it again here.
+ 	 */
+ 	if (static_branch_unlikely(&vgic_v3_cpuif_trap) ||
+-	    cpu_if->its_vpe.its_vm)
++	    cpu_if->its_vpe.its_vm || !cpu_if->vgic_sre)
+ 		write_gicreg(0, ICH_HCR_EL2);
+ }

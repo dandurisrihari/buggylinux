@@ -1,0 +1,147 @@
+diff --git a/drivers/net/dsa/ocelot/felix.c b/drivers/net/dsa/ocelot/felix.c
+index 4b255ed614e4..b9981d8c4c98 100644
+--- a/drivers/net/dsa/ocelot/felix.c
++++ b/drivers/net/dsa/ocelot/felix.c
+@@ -522,6 +522,7 @@ static int felix_init_structs(struct felix *felix, int num_phys_ports)
+ 	for (port = 0; port < num_phys_ports; port++) {
+ 		struct ocelot_port *ocelot_port;
+ 		struct regmap *target;
++		u8 *template;
+ 
+ 		ocelot_port = devm_kzalloc(ocelot->dev,
+ 					   sizeof(struct ocelot_port),
+@@ -547,10 +548,22 @@ static int felix_init_structs(struct felix *felix, int num_phys_ports)
+ 			return PTR_ERR(target);
+ 		}
+ 
++		template = devm_kzalloc(ocelot->dev, OCELOT_TAG_LEN,
++					GFP_KERNEL);
++		if (!template) {
++			dev_err(ocelot->dev,
++				"Failed to allocate memory for DSA tag\n");
++			kfree(port_phy_modes);
++			return -ENOMEM;
++		}
++
+ 		ocelot_port->phy_mode = port_phy_modes[port];
+ 		ocelot_port->ocelot = ocelot;
+ 		ocelot_port->target = target;
++		ocelot_port->xmit_template = template;
+ 		ocelot->ports[port] = ocelot_port;
++
++		felix->info->xmit_template_populate(ocelot, port);
+ 	}
+ 
+ 	kfree(port_phy_modes);
+diff --git a/drivers/net/dsa/ocelot/felix.h b/drivers/net/dsa/ocelot/felix.h
+index 00137b64132b..a85631d716b9 100644
+--- a/drivers/net/dsa/ocelot/felix.h
++++ b/drivers/net/dsa/ocelot/felix.h
+@@ -43,6 +43,7 @@ struct felix_info {
+ 				 enum tc_setup_type type, void *type_data);
+ 	void	(*port_sched_speed_set)(struct ocelot *ocelot, int port,
+ 					u32 speed);
++	void	(*xmit_template_populate)(struct ocelot *ocelot, int port);
+ };
+ 
+ extern struct felix_info		felix_info_vsc9959;
+diff --git a/drivers/net/dsa/ocelot/felix_vsc9959.c b/drivers/net/dsa/ocelot/felix_vsc9959.c
+index efbfbdccb2b6..d640146acc3d 100644
+--- a/drivers/net/dsa/ocelot/felix_vsc9959.c
++++ b/drivers/net/dsa/ocelot/felix_vsc9959.c
+@@ -8,6 +8,7 @@
+ #include <soc/mscc/ocelot_ptp.h>
+ #include <soc/mscc/ocelot_sys.h>
+ #include <soc/mscc/ocelot.h>
++#include <linux/packing.h>
+ #include <net/pkt_sched.h>
+ #include <linux/iopoll.h>
+ #include <linux/pci.h>
+@@ -1432,6 +1433,24 @@ static int vsc9959_port_setup_tc(struct dsa_switch *ds, int port,
+ 	}
+ }
+ 
++static void vsc9959_xmit_template_populate(struct ocelot *ocelot, int port)
++{
++	struct ocelot_port *ocelot_port = ocelot->ports[port];
++	u8 *template = ocelot_port->xmit_template;
++	u64 bypass, dest, src;
++
++	/* Set the source port as the CPU port module and not the
++	 * NPI port
++	 */
++	src = ocelot->num_phys_ports;
++	dest = BIT(port);
++	bypass = true;
++
++	packing(template, &bypass, 127, 127, OCELOT_TAG_LEN, PACK, 0);
++	packing(template, &dest,    68,  56, OCELOT_TAG_LEN, PACK, 0);
++	packing(template, &src,     46,  43, OCELOT_TAG_LEN, PACK, 0);
++}
++
+ struct felix_info felix_info_vsc9959 = {
+ 	.target_io_res		= vsc9959_target_io_res,
+ 	.port_io_res		= vsc9959_port_io_res,
+@@ -1458,4 +1477,5 @@ struct felix_info felix_info_vsc9959 = {
+ 	.prevalidate_phy_mode	= vsc9959_prevalidate_phy_mode,
+ 	.port_setup_tc          = vsc9959_port_setup_tc,
+ 	.port_sched_speed_set   = vsc9959_sched_speed_set,
++	.xmit_template_populate	= vsc9959_xmit_template_populate,
+ };
+diff --git a/include/soc/mscc/ocelot.h b/include/soc/mscc/ocelot.h
+index 19d97585345a..6cfbace57770 100644
+--- a/include/soc/mscc/ocelot.h
++++ b/include/soc/mscc/ocelot.h
+@@ -564,6 +564,8 @@ struct ocelot_port {
+ 	u8				ts_id;
+ 
+ 	phy_interface_t			phy_mode;
++
++	u8				*xmit_template;
+ };
+ 
+ struct ocelot {
+diff --git a/net/dsa/tag_ocelot.c b/net/dsa/tag_ocelot.c
+index b0c98ee4e13b..42f327c06dca 100644
+--- a/net/dsa/tag_ocelot.c
++++ b/net/dsa/tag_ocelot.c
+@@ -137,11 +137,10 @@ static struct sk_buff *ocelot_xmit(struct sk_buff *skb,
+ 				   struct net_device *netdev)
+ {
+ 	struct dsa_port *dp = dsa_slave_to_port(netdev);
+-	u64 bypass, dest, src, qos_class, rew_op;
+ 	struct dsa_switch *ds = dp->ds;
+-	int port = dp->index;
+ 	struct ocelot *ocelot = ds->priv;
+-	struct ocelot_port *ocelot_port = ocelot->ports[port];
++	struct ocelot_port *ocelot_port;
++	u64 qos_class, rew_op;
+ 	u8 *injection;
+ 
+ 	if (unlikely(skb_cow_head(skb, OCELOT_TAG_LEN) < 0)) {
+@@ -149,19 +148,15 @@ static struct sk_buff *ocelot_xmit(struct sk_buff *skb,
+ 		return NULL;
+ 	}
+ 
+-	injection = skb_push(skb, OCELOT_TAG_LEN);
++	ocelot_port = ocelot->ports[dp->index];
+ 
+-	memset(injection, 0, OCELOT_TAG_LEN);
++	injection = skb_push(skb, OCELOT_TAG_LEN);
+ 
+-	/* Set the source port as the CPU port module and not the NPI port */
+-	src = ocelot->num_phys_ports;
+-	dest = BIT(port);
+-	bypass = true;
++	memcpy(injection, ocelot_port->xmit_template, OCELOT_TAG_LEN);
++	/* Fix up the fields which are not statically determined
++	 * in the template
++	 */
+ 	qos_class = skb->priority;
+-
+-	packing(injection, &bypass,   127, 127, OCELOT_TAG_LEN, PACK, 0);
+-	packing(injection, &dest,      68,  56, OCELOT_TAG_LEN, PACK, 0);
+-	packing(injection, &src,       46,  43, OCELOT_TAG_LEN, PACK, 0);
+ 	packing(injection, &qos_class, 19,  17, OCELOT_TAG_LEN, PACK, 0);
+ 
+ 	if (ocelot->ptp && (skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP)) {

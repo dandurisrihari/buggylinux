@@ -1,0 +1,60 @@
+commit 0b04758b002bde9434053be2fff8064ac3d9d8bb
+Author: Marc Zyngier <maz@kernel.org>
+Date:   Wed Mar 4 20:33:08 2020 +0000
+
+    irqchip/gic-v3: Use SGIs without active state if offered
+    
+    To allow the direct injection of SGIs into a guest, the GICv4.1
+    architecture has to sacrifice the Active state so that SGIs look
+    a lot like LPIs (they are injected by the same mechanism).
+    
+    In order not to break existing software, the architecture gives
+    offers guests OSs the choice: SGIs with or without an active
+    state. It is the hypervisors duty to honor the guest's choice.
+    
+    For this, the architecture offers a discovery bit indicating whether
+    the GIC supports GICv4.1 SGIs (GICD_TYPER2.nASSGIcap), and another
+    bit indicating whether the guest wants Active-less SGIs or not
+    (controlled by GICD_CTLR.nASSGIreq).
+    
+    A hypervisor not supporting GICv4.1 SGIs would leave nASSGIcap
+    clear, and a guest not knowing about GICv4.1 SGIs (or definitely
+    wanting an Active state) would leave nASSGIreq clear (both being
+    thankfully backward compatible with older revisions of the GIC).
+    
+    Since Linux is perfectly happy without an active state on SGIs,
+    inform the hypervisor that we'll use that if offered.
+    
+    Signed-off-by: Marc Zyngier <maz@kernel.org>
+    Reviewed-by: Zenghui Yu <yuzenghui@huawei.com>
+    Link: https://lore.kernel.org/r/20200304203330.4967-2-maz@kernel.org
+
+diff --git a/drivers/irqchip/irq-gic-v3.c b/drivers/irqchip/irq-gic-v3.c
+index c1f7af9d9ae7..b6b0f86584d6 100644
+--- a/drivers/irqchip/irq-gic-v3.c
++++ b/drivers/irqchip/irq-gic-v3.c
+@@ -723,6 +723,7 @@ static void __init gic_dist_init(void)
+ 	unsigned int i;
+ 	u64 affinity;
+ 	void __iomem *base = gic_data.dist_base;
++	u32 val;
+ 
+ 	/* Disable the distributor */
+ 	writel_relaxed(0, base + GICD_CTLR);
+@@ -755,9 +756,14 @@ static void __init gic_dist_init(void)
+ 	/* Now do the common stuff, and wait for the distributor to drain */
+ 	gic_dist_config(base, GIC_LINE_NR, gic_dist_wait_for_rwp);
+ 
++	val = GICD_CTLR_ARE_NS | GICD_CTLR_ENABLE_G1A | GICD_CTLR_ENABLE_G1;
++	if (gic_data.rdists.gicd_typer2 & GICD_TYPER2_nASSGIcap) {
++		pr_info("Enabling SGIs without active state\n");
++		val |= GICD_CTLR_nASSGIreq;
++	}
++
+ 	/* Enable distributor with ARE, Group1 */
+-	writel_relaxed(GICD_CTLR_ARE_NS | GICD_CTLR_ENABLE_G1A | GICD_CTLR_ENABLE_G1,
+-		       base + GICD_CTLR);
++	writel_relaxed(val, base + GICD_CTLR);
+ 
+ 	/*
+ 	 * Set all global interrupts to the boot CPU only. ARE must be

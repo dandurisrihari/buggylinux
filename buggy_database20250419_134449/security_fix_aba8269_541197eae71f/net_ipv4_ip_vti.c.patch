@@ -1,0 +1,120 @@
+commit aba8269588301f7778bea811d6f7ec74c2e37279
+Author: Fan Du <fan.du@windriver.com>
+Date:   Wed Aug 28 15:09:40 2013 +0800
+
+    {ipv4,xfrm}: Introduce xfrm_tunnel_notifier for xfrm tunnel mode callback
+    
+    Some thoughts on IPv4 VTI implementation:
+    
+    The connection between VTI receiving part and xfrm tunnel mode input process
+    is hardly a "xfrm_tunnel", xfrm_tunnel is used in places where, e.g ipip/sit
+    and xfrm4_tunnel, acts like a true "tunnel" device.
+    
+    In addition, IMHO, VTI doesn't need vti_err to do something meaningful, as all
+    VTI needs is just a notifier to be called whenever xfrm_input ingress a packet
+    to update statistics.
+    
+    A IPsec protected packet is first handled by protocol handlers, e.g AH/ESP,
+    to check packet authentication or encryption rightness. PMTU update is taken
+    care of in this stage by protocol error handler.
+    
+    Then the packet is rearranged properly depending on whether it's transport
+    mode or tunnel mode packed by mode "input" handler. The VTI handler code
+    takes effects in this stage in tunnel mode only. So it neither need propagate
+    PMTU, as it has already been done if necessary, nor the VTI handler is
+    qualified as a xfrm_tunnel.
+    
+    So this patch introduces xfrm_tunnel_notifier and meanwhile wipe out vti_err
+    code.
+    
+    Signed-off-by: Fan Du <fan.du@windriver.com>
+    Cc: Steffen Klassert <steffen.klassert@secunet.com>
+    Cc: David S. Miller <davem@davemloft.net>
+    Reviewed-by: Saurabh Mohan <saurabh.mohan@vyatta.com>
+    Signed-off-by: Steffen Klassert <steffen.klassert@secunet.com>
+
+diff --git a/net/ipv4/ip_vti.c b/net/ipv4/ip_vti.c
+index e805e7b3030e..91f69bc883fe 100644
+--- a/net/ipv4/ip_vti.c
++++ b/net/ipv4/ip_vti.c
+@@ -49,70 +49,6 @@ static struct rtnl_link_ops vti_link_ops __read_mostly;
+ static int vti_net_id __read_mostly;
+ static int vti_tunnel_init(struct net_device *dev);
+ 
+-static int vti_err(struct sk_buff *skb, u32 info)
+-{
+-
+-	/* All the routers (except for Linux) return only
+-	 * 8 bytes of packet payload. It means, that precise relaying of
+-	 * ICMP in the real Internet is absolutely infeasible.
+-	 */
+-	struct net *net = dev_net(skb->dev);
+-	struct ip_tunnel_net *itn = net_generic(net, vti_net_id);
+-	struct iphdr *iph = (struct iphdr *)skb->data;
+-	const int type = icmp_hdr(skb)->type;
+-	const int code = icmp_hdr(skb)->code;
+-	struct ip_tunnel *t;
+-	int err;
+-
+-	switch (type) {
+-	default:
+-	case ICMP_PARAMETERPROB:
+-		return 0;
+-
+-	case ICMP_DEST_UNREACH:
+-		switch (code) {
+-		case ICMP_SR_FAILED:
+-		case ICMP_PORT_UNREACH:
+-			/* Impossible event. */
+-			return 0;
+-		default:
+-			/* All others are translated to HOST_UNREACH. */
+-			break;
+-		}
+-		break;
+-	case ICMP_TIME_EXCEEDED:
+-		if (code != ICMP_EXC_TTL)
+-			return 0;
+-		break;
+-	}
+-
+-	err = -ENOENT;
+-
+-	t = ip_tunnel_lookup(itn, skb->dev->ifindex, TUNNEL_NO_KEY,
+-			     iph->daddr, iph->saddr, 0);
+-	if (t == NULL)
+-		goto out;
+-
+-	if (type == ICMP_DEST_UNREACH && code == ICMP_FRAG_NEEDED) {
+-		ipv4_update_pmtu(skb, dev_net(skb->dev), info,
+-				 t->parms.link, 0, IPPROTO_IPIP, 0);
+-		err = 0;
+-		goto out;
+-	}
+-
+-	err = 0;
+-	if (t->parms.iph.ttl == 0 && type == ICMP_TIME_EXCEEDED)
+-		goto out;
+-
+-	if (time_before(jiffies, t->err_time + IPTUNNEL_ERR_TIMEO))
+-		t->err_count++;
+-	else
+-		t->err_count = 1;
+-	t->err_time = jiffies;
+-out:
+-	return err;
+-}
+-
+ /* We dont digest the packet therefore let the packet pass */
+ static int vti_rcv(struct sk_buff *skb)
+ {
+@@ -296,9 +232,8 @@ static void __net_init vti_fb_tunnel_init(struct net_device *dev)
+ 	iph->ihl		= 5;
+ }
+ 
+-static struct xfrm_tunnel vti_handler __read_mostly = {
++static struct xfrm_tunnel_notifier vti_handler __read_mostly = {
+ 	.handler	=	vti_rcv,
+-	.err_handler	=	vti_err,
+ 	.priority	=	1,
+ };

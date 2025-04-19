@@ -1,0 +1,116 @@
+commit 0378daef0c6cf1c2ba525bde0b529f0d4ef5233b
+Merge: 05487215e6b9 16314874b12b
+Author: Paolo Bonzini <pbonzini@redhat.com>
+Date:   Sun Aug 9 12:58:23 2020 -0400
+
+    Merge tag 'kvmarm-5.9' of git://git.kernel.org/pub/scm/linux/kernel/git/kvmarm/kvmarm into kvm-next-5.6
+    
+    KVM/arm64 updates for Linux 5.9:
+    
+    - Split the VHE and nVHE hypervisor code bases, build the EL2 code
+      separately, allowing for the VHE code to now be built with instrumentation
+    
+    - Level-based TLB invalidation support
+    
+    - Restructure of the vcpu register storage to accomodate the NV code
+    
+    - Pointer Authentication available for guests on nVHE hosts
+    
+    - Simplification of the system register table parsing
+    
+    - MMU cleanups and fixes
+    
+    - A number of post-32bit cleanups and other fixes
+
+diff --cc arch/arm64/kvm/mmu.c
+index 7a7ddc4558a7,05e0e03fbdf8..0121ef2c7c8d
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@@ -124,11 -127,44 +127,12 @@@ static void stage2_dissolve_pud(struct 
+  	put_page(virt_to_page(pudp));
+  }
+  
+- static void clear_stage2_pgd_entry(struct kvm *kvm, pgd_t *pgd, phys_addr_t addr)
+ -static int mmu_topup_memory_cache(struct kvm_mmu_memory_cache *cache,
+ -				  int min, int max)
+ -{
+ -	void *page;
+ -
+ -	BUG_ON(max > KVM_NR_MEM_OBJS);
+ -	if (cache->nobjs >= min)
+ -		return 0;
+ -	while (cache->nobjs < max) {
+ -		page = (void *)__get_free_page(GFP_PGTABLE_USER);
+ -		if (!page)
+ -			return -ENOMEM;
+ -		cache->objects[cache->nobjs++] = page;
+ -	}
+ -	return 0;
+ -}
+ -
+ -static void mmu_free_memory_cache(struct kvm_mmu_memory_cache *mc)
+ -{
+ -	while (mc->nobjs)
+ -		free_page((unsigned long)mc->objects[--mc->nobjs]);
+ -}
+ -
+ -static void *mmu_memory_cache_alloc(struct kvm_mmu_memory_cache *mc)
+ -{
+ -	void *p;
+ -
+ -	BUG_ON(!mc || !mc->nobjs);
+ -	p = mc->objects[--mc->nobjs];
+ -	return p;
+ -}
+ -
++ static void clear_stage2_pgd_entry(struct kvm_s2_mmu *mmu, pgd_t *pgd, phys_addr_t addr)
+  {
++ 	struct kvm *kvm = mmu->kvm;
+  	p4d_t *p4d_table __maybe_unused = stage2_p4d_offset(kvm, pgd, 0UL);
+  	stage2_pgd_clear(kvm, pgd);
+- 	kvm_tlb_flush_vmid_ipa(kvm, addr);
++ 	kvm_tlb_flush_vmid_ipa(mmu, addr, S2_NO_LEVEL_HINT);
+  	stage2_p4d_free(kvm, p4d_table);
+  	put_page(virt_to_page(pgd));
+  }
+@@@ -1294,7 -1356,7 +1324,7 @@@ static bool stage2_get_leaf_entry(struc
+  	return true;
+  }
+  
+- static bool stage2_is_exec(struct kvm *kvm, phys_addr_t addr, unsigned long sz)
+ -static bool stage2_is_exec(struct kvm_s2_mmu *mmu, phys_addr_t addr)
+++static bool stage2_is_exec(struct kvm_s2_mmu *mmu, phys_addr_t addr, unsigned long sz)
+  {
+  	pud_t *pudp;
+  	pmd_t *pmdp;
+@@@ -1306,14 -1368,15 +1336,15 @@@
+  		return false;
+  
+  	if (pudp)
+ -		return kvm_s2pud_exec(pudp);
+ +		return sz <= PUD_SIZE && kvm_s2pud_exec(pudp);
+  	else if (pmdp)
+ -		return kvm_s2pmd_exec(pmdp);
+ +		return sz <= PMD_SIZE && kvm_s2pmd_exec(pmdp);
+  	else
+ -		return kvm_s2pte_exec(ptep);
+ +		return sz == PAGE_SIZE && kvm_s2pte_exec(ptep);
+  }
+  
+- static int stage2_set_pte(struct kvm *kvm, struct kvm_mmu_memory_cache *cache,
++ static int stage2_set_pte(struct kvm_s2_mmu *mmu,
++ 			  struct kvm_mmu_memory_cache *cache,
+  			  phys_addr_t addr, const pte_t *new_pte,
+  			  unsigned long flags)
+  {
+@@@ -1924,8 -1995,7 +1961,8 @@@ static int user_mem_abort(struct kvm_vc
+  	 * execute permissions, and we preserve whatever we have.
+  	 */
+  	needs_exec = exec_fault ||
+ -		(fault_status == FSC_PERM && stage2_is_exec(mmu, fault_ipa));
+ +		(fault_status == FSC_PERM &&
+- 		 stage2_is_exec(kvm, fault_ipa, vma_pagesize));
+++		 stage2_is_exec(mmu, fault_ipa, vma_pagesize));
+  
+  	if (vma_pagesize == PUD_SIZE) {
+  		pud_t new_pud = kvm_pfn_pud(pfn, mem_type);

@@ -1,0 +1,63 @@
+commit 7a09e8d92c6d56121910ccb2e8bc0d1affff66ee
+Author: Quinn Tran <qutran@marvell.com>
+Date:   Wed Jun 23 22:26:03 2021 -0700
+
+    scsi: qla2xxx: edif: Add doorbell notification for app
+    
+    Some FC adapters from Marvell offer the ability to encrypt data in flight
+    (EDIF). This feature requires an application to act as an authenticator.
+    
+    During runtime, driver and authentication application need to stay in sync
+    in terms of: Session being down|up, arrival of new authentication
+    message (AUTH ELS) and SADB update completion.
+    
+    These events are queued up as doorbell to the authentication
+    application. Application would read this doorbell on regular basis to stay
+    up to date. Each SCSI host would have a separate doorbell queue.
+    
+    The doorbell interface can daisy chain a list of events for each read. Each
+    event contains an event code + hint to help application steer the next
+    course of action.
+    
+    Link: https://lore.kernel.org/r/20210624052606.21613-9-njavali@marvell.com
+    Reviewed-by: Hannes Reinecke <hare@suse.de>
+    Reviewed-by: Himanshu Madhani <himanshu.madhani@oracle.com>
+    Co-developed-by: Larry Wisneski <Larry.Wisneski@marvell.com>
+    Signed-off-by: Larry Wisneski <Larry.Wisneski@marvell.com>
+    Co-developed-by: Duane Grigsby <duane.grigsby@marvell.com>
+    Signed-off-by: Duane Grigsby <duane.grigsby@marvell.com>
+    Co-developed-by: Rick Hicksted Jr <rhicksted@marvell.com>
+    Signed-off-by: Rick Hicksted Jr <rhicksted@marvell.com>
+    Signed-off-by: Quinn Tran <qutran@marvell.com>
+    Signed-off-by: Nilesh Javali <njavali@marvell.com>
+    Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+
+diff --git a/drivers/scsi/qla2xxx/qla_attr.c b/drivers/scsi/qla2xxx/qla_attr.c
+index d78db2949ef6..22191e9a04a0 100644
+--- a/drivers/scsi/qla2xxx/qla_attr.c
++++ b/drivers/scsi/qla2xxx/qla_attr.c
+@@ -2435,6 +2435,7 @@ static DEVICE_ATTR(port_speed, 0644, qla2x00_port_speed_show,
+     qla2x00_port_speed_store);
+ static DEVICE_ATTR(port_no, 0444, qla2x00_port_no_show, NULL);
+ static DEVICE_ATTR(fw_attr, 0444, qla2x00_fw_attr_show, NULL);
++static DEVICE_ATTR_RO(edif_doorbell);
+ 
+ 
+ struct device_attribute *qla2x00_host_attrs[] = {
+@@ -2480,6 +2481,7 @@ struct device_attribute *qla2x00_host_attrs[] = {
+ 	&dev_attr_port_no,
+ 	&dev_attr_fw_attr,
+ 	&dev_attr_dport_diagnostics,
++	&dev_attr_edif_doorbell,
+ 	NULL, /* reserve for qlini_mode */
+ 	NULL, /* reserve for ql2xiniexchg */
+ 	NULL, /* reserve for ql2xexchoffld */
+@@ -3108,6 +3110,8 @@ qla24xx_vport_delete(struct fc_vport *fc_vport)
+ 
+ 	qla_nvme_delete(vha);
+ 	qla_enode_stop(vha);
++	qla_edb_stop(vha);
++
+ 	vha->flags.delete_progress = 1;
+ 
+ 	qlt_remove_target(ha, vha);

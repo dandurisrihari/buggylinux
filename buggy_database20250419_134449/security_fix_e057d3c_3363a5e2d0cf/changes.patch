@@ -1,0 +1,84 @@
+diff --git a/include/net/cfg80211.h b/include/net/cfg80211.h
+index b3b076a46d50..13b247d26544 100644
+--- a/include/net/cfg80211.h
++++ b/include/net/cfg80211.h
+@@ -961,6 +961,7 @@ struct station_info {
+  * @MONITOR_FLAG_CONTROL: pass control frames
+  * @MONITOR_FLAG_OTHER_BSS: disable BSSID filtering
+  * @MONITOR_FLAG_COOK_FRAMES: report frames after processing
++ * @MONITOR_FLAG_ACTIVE: active monitor, ACKs frames on its MAC address
+  */
+ enum monitor_flags {
+ 	MONITOR_FLAG_FCSFAIL		= 1<<NL80211_MNTR_FLAG_FCSFAIL,
+@@ -968,6 +969,7 @@ enum monitor_flags {
+ 	MONITOR_FLAG_CONTROL		= 1<<NL80211_MNTR_FLAG_CONTROL,
+ 	MONITOR_FLAG_OTHER_BSS		= 1<<NL80211_MNTR_FLAG_OTHER_BSS,
+ 	MONITOR_FLAG_COOK_FRAMES	= 1<<NL80211_MNTR_FLAG_COOK_FRAMES,
++	MONITOR_FLAG_ACTIVE		= 1<<NL80211_MNTR_FLAG_ACTIVE,
+ };
+ 
+ /**
+diff --git a/include/uapi/linux/nl80211.h b/include/uapi/linux/nl80211.h
+index 32b060ea5266..5920715278c2 100644
+--- a/include/uapi/linux/nl80211.h
++++ b/include/uapi/linux/nl80211.h
+@@ -2428,6 +2428,8 @@ enum nl80211_survey_info {
+  * @NL80211_MNTR_FLAG_OTHER_BSS: disable BSSID filtering
+  * @NL80211_MNTR_FLAG_COOK_FRAMES: report frames after processing.
+  *	overrides all other flags.
++ * @NL80211_MNTR_FLAG_ACTIVE: use the configured MAC address
++ *	and ACK incoming unicast packets.
+  *
+  * @__NL80211_MNTR_FLAG_AFTER_LAST: internal use
+  * @NL80211_MNTR_FLAG_MAX: highest possible monitor flag
+@@ -2439,6 +2441,7 @@ enum nl80211_mntr_flags {
+ 	NL80211_MNTR_FLAG_CONTROL,
+ 	NL80211_MNTR_FLAG_OTHER_BSS,
+ 	NL80211_MNTR_FLAG_COOK_FRAMES,
++	NL80211_MNTR_FLAG_ACTIVE,
+ 
+ 	/* keep last */
+ 	__NL80211_MNTR_FLAG_AFTER_LAST,
+@@ -3595,6 +3598,7 @@ enum nl80211_feature_flags {
+ 	NL80211_FEATURE_ADVERTISE_CHAN_LIMITS		= 1 << 14,
+ 	NL80211_FEATURE_FULL_AP_CLIENT_STATE		= 1 << 15,
+ 	NL80211_FEATURE_USERSPACE_MPM			= 1 << 16,
++	NL80211_FEATURE_ACTIVE_MONITOR			= 1 << 17,
+ };
+ 
+ /**
+diff --git a/net/wireless/nl80211.c b/net/wireless/nl80211.c
+index fb6abcb359a1..31d265f36d2c 100644
+--- a/net/wireless/nl80211.c
++++ b/net/wireless/nl80211.c
+@@ -2227,6 +2227,7 @@ static const struct nla_policy mntr_flags_policy[NL80211_MNTR_FLAG_MAX + 1] = {
+ 	[NL80211_MNTR_FLAG_CONTROL] = { .type = NLA_FLAG },
+ 	[NL80211_MNTR_FLAG_OTHER_BSS] = { .type = NLA_FLAG },
+ 	[NL80211_MNTR_FLAG_COOK_FRAMES] = { .type = NLA_FLAG },
++	[NL80211_MNTR_FLAG_ACTIVE] = { .type = NLA_FLAG },
+ };
+ 
+ static int parse_monitor_flags(struct nlattr *nla, u32 *mntrflags)
+@@ -2338,6 +2339,10 @@ static int nl80211_set_interface(struct sk_buff *skb, struct genl_info *info)
+ 		change = true;
+ 	}
+ 
++	if (flags && (*flags & NL80211_MNTR_FLAG_ACTIVE) &&
++	    !(rdev->wiphy.features & NL80211_FEATURE_ACTIVE_MONITOR))
++		return -EOPNOTSUPP;
++
+ 	if (change)
+ 		err = cfg80211_change_iface(rdev, dev, ntype, flags, &params);
+ 	else
+@@ -2395,6 +2400,11 @@ static int nl80211_new_interface(struct sk_buff *skb, struct genl_info *info)
+ 	err = parse_monitor_flags(type == NL80211_IFTYPE_MONITOR ?
+ 				  info->attrs[NL80211_ATTR_MNTR_FLAGS] : NULL,
+ 				  &flags);
++
++	if (!err && (flags & NL80211_MNTR_FLAG_ACTIVE) &&
++	    !(rdev->wiphy.features & NL80211_FEATURE_ACTIVE_MONITOR))
++		return -EOPNOTSUPP;
++
+ 	wdev = rdev_add_virtual_intf(rdev,
+ 				nla_data(info->attrs[NL80211_ATTR_IFNAME]),
+ 				type, err ? NULL : &flags, &params);

@@ -1,0 +1,78 @@
+commit 50e3ed0f93f4f62ed2aa83de5db6cb84ecdd5707
+Author: Ard Biesheuvel <ardb@kernel.org>
+Date:   Wed Feb 14 13:29:29 2024 +0100
+
+    arm64: mm: add support for WXN memory translation attribute
+    
+    The AArch64 virtual memory system supports a global WXN control, which
+    can be enabled to make all writable mappings implicitly no-exec. This is
+    a useful hardening feature, as it prevents mistakes in managing page
+    table permissions from being exploited to attack the system.
+    
+    When enabled at EL1, the restrictions apply to both EL1 and EL0. EL1 is
+    completely under our control, and has been cleaned up to allow WXN to be
+    enabled from boot onwards. EL0 is not under our control, but given that
+    widely deployed security features such as selinux or PaX already limit
+    the ability of user space to create mappings that are writable and
+    executable at the same time, the impact of enabling this for EL0 is
+    expected to be limited. (For this reason, common user space libraries
+    that have a legitimate need for manipulating executable code already
+    carry fallbacks such as [0].)
+    
+    If enabled at compile time, the feature can still be disabled at boot if
+    needed, by passing arm64.nowxn on the kernel command line.
+    
+    [0] https://github.com/libffi/libffi/blob/master/src/closures.c#L440
+    
+    Signed-off-by: Ard Biesheuvel <ardb@kernel.org>
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Link: https://lore.kernel.org/r/20240214122845.2033971-88-ardb+git@google.com
+    Signed-off-by: Catalin Marinas <catalin.marinas@arm.com>
+
+diff --git a/arch/arm64/include/asm/mmu_context.h b/arch/arm64/include/asm/mmu_context.h
+index c768d16b81a4..f0fe2d09d139 100644
+--- a/arch/arm64/include/asm/mmu_context.h
++++ b/arch/arm64/include/asm/mmu_context.h
+@@ -20,13 +20,41 @@
+ #include <asm/cpufeature.h>
+ #include <asm/daifflags.h>
+ #include <asm/proc-fns.h>
+-#include <asm-generic/mm_hooks.h>
+ #include <asm/cputype.h>
+ #include <asm/sysreg.h>
+ #include <asm/tlbflush.h>
+ 
+ extern bool rodata_full;
+ 
++static inline int arch_dup_mmap(struct mm_struct *oldmm,
++				struct mm_struct *mm)
++{
++	return 0;
++}
++
++static inline void arch_exit_mmap(struct mm_struct *mm)
++{
++}
++
++static inline void arch_unmap(struct mm_struct *mm,
++			unsigned long start, unsigned long end)
++{
++}
++
++static inline bool arch_vma_access_permitted(struct vm_area_struct *vma,
++		bool write, bool execute, bool foreign)
++{
++	if (IS_ENABLED(CONFIG_ARM64_WXN) && execute &&
++	    (vma->vm_flags & (VM_WRITE | VM_EXEC)) == (VM_WRITE | VM_EXEC)) {
++		pr_warn_ratelimited(
++			"process %s (%d) attempted to execute from writable memory\n",
++			current->comm, current->pid);
++		/* disallow unless the nowxn override is set */
++		return !arm64_wxn_enabled();
++	}
++	return true;
++}
++
+ static inline void contextidr_thread_switch(struct task_struct *next)
+ {
+ 	if (!IS_ENABLED(CONFIG_PID_IN_CONTEXTIDR))

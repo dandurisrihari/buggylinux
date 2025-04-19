@@ -1,0 +1,65 @@
+commit 71f3ca408fd43b586c02480768a503af075b247e
+Author: David Howells <dhowells@redhat.com>
+Date:   Sat Sep 17 10:49:14 2016 +0100
+
+    rxrpc: Improve skb tracing
+    
+    Improve sk_buff tracing within AF_RXRPC by the following means:
+    
+     (1) Use an enum to note the event type rather than plain integers and use
+         an array of event names rather than a big multi ?: list.
+    
+     (2) Distinguish Rx from Tx packets and account them separately.  This
+         requires the call phase to be tracked so that we know what we might
+         find in rxtx_buffer[].
+    
+     (3) Add a parameter to rxrpc_{new,see,get,free}_skb() to indicate the
+         event type.
+    
+     (4) A pair of 'rotate' events are added to indicate packets that are about
+         to be rotated out of the Rx and Tx windows.
+    
+     (5) A pair of 'lost' events are added, along with rxrpc_lose_skb() for
+         packet loss injection recording.
+    
+    Signed-off-by: David Howells <dhowells@redhat.com>
+
+diff --git a/net/rxrpc/recvmsg.c b/net/rxrpc/recvmsg.c
+index 79e65668bc58..6ba4af5a8d95 100644
+--- a/net/rxrpc/recvmsg.c
++++ b/net/rxrpc/recvmsg.c
+@@ -155,6 +155,7 @@ static void rxrpc_end_rx_phase(struct rxrpc_call *call)
+ 		break;
+ 
+ 	case RXRPC_CALL_SERVER_RECV_REQUEST:
++		call->tx_phase = true;
+ 		call->state = RXRPC_CALL_SERVER_ACK_REQUEST;
+ 		break;
+ 	default:
+@@ -185,7 +186,7 @@ static void rxrpc_rotate_rx_window(struct rxrpc_call *call)
+ 	hard_ack++;
+ 	ix = hard_ack & RXRPC_RXTX_BUFF_MASK;
+ 	skb = call->rxtx_buffer[ix];
+-	rxrpc_see_skb(skb);
++	rxrpc_see_skb(skb, rxrpc_skb_rx_rotated);
+ 	sp = rxrpc_skb(skb);
+ 	flags = sp->hdr.flags;
+ 	serial = sp->hdr.serial;
+@@ -197,7 +198,7 @@ static void rxrpc_rotate_rx_window(struct rxrpc_call *call)
+ 	/* Barrier against rxrpc_input_data(). */
+ 	smp_store_release(&call->rx_hard_ack, hard_ack);
+ 
+-	rxrpc_free_skb(skb);
++	rxrpc_free_skb(skb, rxrpc_skb_rx_freed);
+ 
+ 	_debug("%u,%u,%02x", hard_ack, top, flags);
+ 	trace_rxrpc_receive(call, rxrpc_receive_rotate, serial, hard_ack);
+@@ -317,7 +318,7 @@ static int rxrpc_recvmsg_data(struct socket *sock, struct rxrpc_call *call,
+ 			break;
+ 		}
+ 		smp_rmb();
+-		rxrpc_see_skb(skb);
++		rxrpc_see_skb(skb, rxrpc_skb_rx_seen);
+ 		sp = rxrpc_skb(skb);
+ 
+ 		if (!(flags & MSG_PEEK))

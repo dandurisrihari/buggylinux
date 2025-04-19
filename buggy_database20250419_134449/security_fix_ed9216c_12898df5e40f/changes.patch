@@ -1,0 +1,90 @@
+diff --cc arch/Kconfig
+index eef3bbb97075,4e312fffbfd7..d82875820a15
+--- a/arch/Kconfig
++++ b/arch/Kconfig
+@@@ -126,11 -133,7 +133,13 @@@ config HAVE_DMA_API_DEBU
+  config HAVE_DEFAULT_NO_SPIN_MUTEXES
+  	bool
+  
+ +config HAVE_HW_BREAKPOINT
+ +	bool
+ +	depends on HAVE_PERF_EVENTS
+ +	select ANON_INODES
+ +	select PERF_EVENTS
+ +
++ config HAVE_USER_RETURN_NOTIFIER
++ 	bool
+  
+  source "kernel/gcov/Kconfig"
+diff --cc arch/x86/Kconfig
+index 178084b4377c,8b54096e6d73..1b2182b4d5c8
+--- a/arch/x86/Kconfig
++++ b/arch/x86/Kconfig
+@@@ -49,8 -49,8 +49,9 @@@ config X8
+  	select HAVE_KERNEL_GZIP
+  	select HAVE_KERNEL_BZIP2
+  	select HAVE_KERNEL_LZMA
+ +	select HAVE_HW_BREAKPOINT
+  	select HAVE_ARCH_KMEMCHECK
++ 	select HAVE_USER_RETURN_NOTIFIER
+  
+  config OUTPUT_FORMAT
+  	string
+diff --cc arch/x86/kernel/process.c
+index 744508e7cfdd,e51b056fc88f..5e2ba634ea15
+--- a/arch/x86/kernel/process.c
++++ b/arch/x86/kernel/process.c
+@@@ -9,8 -9,8 +9,9 @@@
+  #include <linux/pm.h>
+  #include <linux/clockchips.h>
+  #include <linux/random.h>
++ #include <linux/user-return-notifier.h>
+  #include <trace/events/power.h>
+ +#include <linux/hw_breakpoint.h>
+  #include <asm/system.h>
+  #include <asm/apic.h>
+  #include <asm/syscalls.h>
+diff --cc arch/x86/kvm/x86.c
+index 4fc80174191c,ce677b20bf86..9d068966fb2a
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@@ -3642,17 -3918,16 +3919,17 @@@ static int vcpu_enter_guest(struct kvm_
+  	}
+  
+  	trace_kvm_entry(vcpu->vcpu_id);
+- 	kvm_x86_ops->run(vcpu, kvm_run);
++ 	kvm_x86_ops->run(vcpu);
+  
+ -	if (unlikely(vcpu->arch.switch_db_regs || test_thread_flag(TIF_DEBUG))) {
+ -		set_debugreg(current->thread.debugreg0, 0);
+ -		set_debugreg(current->thread.debugreg1, 1);
+ -		set_debugreg(current->thread.debugreg2, 2);
+ -		set_debugreg(current->thread.debugreg3, 3);
+ -		set_debugreg(current->thread.debugreg6, 6);
+ -		set_debugreg(current->thread.debugreg7, 7);
+ -	}
+ +	/*
+ +	 * If the guest has used debug registers, at least dr7
+ +	 * will be disabled while returning to the host.
+ +	 * If we don't have active breakpoints in the host, we don't
+ +	 * care about the messed up debug address registers. But if
+ +	 * we have some of them active, restore the old state.
+ +	 */
+ +	if (hw_breakpoint_active())
+ +		hw_breakpoint_restore();
+  
+  	set_bit(KVM_REQ_KICK, &vcpu->requests);
+  	local_irq_enable();
+diff --cc kernel/Makefile
+index 9943202b4355,6c5112844980..864ff75d65f2
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@@ -98,7 -96,7 +98,8 @@@ obj-$(CONFIG_SMP) += sched_cpupri.
+  obj-$(CONFIG_SLOW_WORK) += slow-work.o
+  obj-$(CONFIG_SLOW_WORK_DEBUG) += slow-work-debugfs.o
+  obj-$(CONFIG_PERF_EVENTS) += perf_event.o
+ +obj-$(CONFIG_HAVE_HW_BREAKPOINT) += hw_breakpoint.o
++ obj-$(CONFIG_USER_RETURN_NOTIFIER) += user-return-notifier.o
+  
+  ifneq ($(CONFIG_SCHED_OMIT_FRAME_POINTER),y)
+  # According to Alan Modra <alan@linuxcare.com.au>, the -fno-omit-frame-pointer is

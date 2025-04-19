@@ -1,0 +1,132 @@
+diff --git a/drivers/gpu/drm/i915/intel_huc.c b/drivers/gpu/drm/i915/intel_huc.c
+index 6e1779ba87a9..8b4b53525422 100644
+--- a/drivers/gpu/drm/i915/intel_huc.c
++++ b/drivers/gpu/drm/i915/intel_huc.c
+@@ -225,19 +225,22 @@ void intel_huc_init_hw(struct intel_huc *huc)
+ }
+ 
+ /**
+- * intel_guc_auth_huc() - authenticate ucode
+- * @dev_priv: the drm_i915_device
++ * intel_huc_auth() - Authenticate HuC uCode
++ * @huc: intel_huc structure
++ *
++ * Called after HuC and GuC firmware loading during intel_uc_init_hw().
+  *
+- * Triggers a HuC fw authentication request to the GuC via intel_guc_action_
+- * authenticate_huc interface.
++ * This function pins HuC firmware image object into GGTT.
++ * Then it invokes GuC action to authenticate passing the offset to RSA
++ * signature through intel_guc_auth_huc(). It then waits for 50ms for
++ * firmware verification ACK and unpins the object.
+  */
+-void intel_guc_auth_huc(struct drm_i915_private *dev_priv)
++void intel_huc_auth(struct intel_huc *huc)
+ {
+-	struct intel_guc *guc = &dev_priv->guc;
+-	struct intel_huc *huc = &dev_priv->huc;
++	struct drm_i915_private *i915 = huc_to_i915(huc);
++	struct intel_guc *guc = &i915->guc;
+ 	struct i915_vma *vma;
+ 	int ret;
+-	u32 data[2];
+ 
+ 	if (huc->fw.load_status != INTEL_UC_FIRMWARE_SUCCESS)
+ 		return;
+@@ -250,23 +253,19 @@ void intel_guc_auth_huc(struct drm_i915_private *dev_priv)
+ 		return;
+ 	}
+ 
+-	/* Specify auth action and where public signature is. */
+-	data[0] = INTEL_GUC_ACTION_AUTHENTICATE_HUC;
+-	data[1] = guc_ggtt_offset(vma) + huc->fw.rsa_offset;
+-
+-	ret = intel_guc_send(guc, data, ARRAY_SIZE(data));
++	ret = intel_guc_auth_huc(guc,
++				 guc_ggtt_offset(vma) + huc->fw.rsa_offset);
+ 	if (ret) {
+ 		DRM_ERROR("HuC: GuC did not ack Auth request %d\n", ret);
+ 		goto out;
+ 	}
+ 
+ 	/* Check authentication status, it should be done by now */
+-	ret = intel_wait_for_register(dev_priv,
+-				HUC_STATUS2,
+-				HUC_FW_VERIFIED,
+-				HUC_FW_VERIFIED,
+-				50);
+-
++	ret = intel_wait_for_register(i915,
++				      HUC_STATUS2,
++				      HUC_FW_VERIFIED,
++				      HUC_FW_VERIFIED,
++				      50);
+ 	if (ret) {
+ 		DRM_ERROR("HuC: Authentication failed %d\n", ret);
+ 		goto out;
+@@ -275,4 +274,3 @@ void intel_guc_auth_huc(struct drm_i915_private *dev_priv)
+ out:
+ 	i915_vma_unpin(vma);
+ }
+-
+diff --git a/drivers/gpu/drm/i915/intel_uc.c b/drivers/gpu/drm/i915/intel_uc.c
+index 901854007664..277477890240 100644
+--- a/drivers/gpu/drm/i915/intel_uc.c
++++ b/drivers/gpu/drm/i915/intel_uc.c
+@@ -328,6 +328,27 @@ static void guc_disable_communication(struct intel_guc *guc)
+ 	guc->send = intel_guc_send_nop;
+ }
+ 
++/**
++ * intel_guc_auth_huc() - Send action to GuC to authenticate HuC ucode
++ * @guc: intel_guc structure
++ * @rsa_offset: rsa offset w.r.t ggtt base of huc vma
++ *
++ * Triggers a HuC firmware authentication request to the GuC via intel_guc_send
++ * INTEL_GUC_ACTION_AUTHENTICATE_HUC interface. This function is invoked by
++ * intel_huc_auth().
++ *
++ * Return:	non-zero code on error
++ */
++int intel_guc_auth_huc(struct intel_guc *guc, u32 rsa_offset)
++{
++	u32 action[] = {
++		INTEL_GUC_ACTION_AUTHENTICATE_HUC,
++		rsa_offset
++	};
++
++	return intel_guc_send(guc, action, ARRAY_SIZE(action));
++}
++
+ int intel_uc_init_hw(struct drm_i915_private *dev_priv)
+ {
+ 	struct intel_guc *guc = &dev_priv->guc;
+@@ -390,7 +411,7 @@ int intel_uc_init_hw(struct drm_i915_private *dev_priv)
+ 	if (ret)
+ 		goto err_log_capture;
+ 
+-	intel_guc_auth_huc(dev_priv);
++	intel_huc_auth(&dev_priv->huc);
+ 	if (i915_modparams.enable_guc_submission) {
+ 		if (i915_modparams.guc_log_level >= 0)
+ 			gen9_enable_guc_interrupts(dev_priv);
+diff --git a/drivers/gpu/drm/i915/intel_uc.h b/drivers/gpu/drm/i915/intel_uc.h
+index 7703c9ad6511..6966349ed737 100644
+--- a/drivers/gpu/drm/i915/intel_uc.h
++++ b/drivers/gpu/drm/i915/intel_uc.h
+@@ -211,6 +211,7 @@ void intel_uc_fini_hw(struct drm_i915_private *dev_priv);
+ int intel_guc_sample_forcewake(struct intel_guc *guc);
+ int intel_guc_send_nop(struct intel_guc *guc, const u32 *action, u32 len);
+ int intel_guc_send_mmio(struct intel_guc *guc, const u32 *action, u32 len);
++int intel_guc_auth_huc(struct intel_guc *guc, u32 rsa_offset);
+ 
+ static inline int intel_guc_send(struct intel_guc *guc, const u32 *action, u32 len)
+ {
+@@ -254,6 +255,6 @@ static inline u32 guc_ggtt_offset(struct i915_vma *vma)
+ /* intel_huc.c */
+ void intel_huc_select_fw(struct intel_huc *huc);
+ void intel_huc_init_hw(struct intel_huc *huc);
+-void intel_guc_auth_huc(struct drm_i915_private *dev_priv);
++void intel_huc_auth(struct intel_huc *huc);
+ 
+ #endif

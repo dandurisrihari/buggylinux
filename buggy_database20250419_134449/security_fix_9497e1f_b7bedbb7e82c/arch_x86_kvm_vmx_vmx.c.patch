@@ -1,0 +1,50 @@
+commit 9497e1f2ec93f0c8a7832c3c1eb3af8159800cd8
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Tue Aug 27 14:40:36 2019 -0700
+
+    KVM: x86: Move triple fault request into RM int injection
+    
+    Request triple fault in kvm_inject_realmode_interrupt() instead of
+    returning EMULATE_FAIL and deferring to the caller.  All existing
+    callers request triple fault and it's highly unlikely Real Mode is
+    going to acquire new features.  While this consolidates a small amount
+    of code, the real goal is to remove the last reference to EMULATE_FAIL.
+    
+    No functional change intended.
+    
+    Signed-off-by: Sean Christopherson <sean.j.christopherson@intel.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index 498270cfc71d..67733eef184c 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -1556,8 +1556,7 @@ static void vmx_queue_exception(struct kvm_vcpu *vcpu)
+ 		int inc_eip = 0;
+ 		if (kvm_exception_is_soft(nr))
+ 			inc_eip = vcpu->arch.event_exit_inst_len;
+-		if (kvm_inject_realmode_interrupt(vcpu, nr, inc_eip) != EMULATE_DONE)
+-			kvm_make_request(KVM_REQ_TRIPLE_FAULT, vcpu);
++		kvm_inject_realmode_interrupt(vcpu, nr, inc_eip);
+ 		return;
+ 	}
+ 
+@@ -4306,8 +4305,7 @@ static void vmx_inject_irq(struct kvm_vcpu *vcpu)
+ 		int inc_eip = 0;
+ 		if (vcpu->arch.interrupt.soft)
+ 			inc_eip = vcpu->arch.event_exit_inst_len;
+-		if (kvm_inject_realmode_interrupt(vcpu, irq, inc_eip) != EMULATE_DONE)
+-			kvm_make_request(KVM_REQ_TRIPLE_FAULT, vcpu);
++		kvm_inject_realmode_interrupt(vcpu, irq, inc_eip);
+ 		return;
+ 	}
+ 	intr = irq | INTR_INFO_VALID_MASK;
+@@ -4343,8 +4341,7 @@ static void vmx_inject_nmi(struct kvm_vcpu *vcpu)
+ 	vmx->loaded_vmcs->nmi_known_unmasked = false;
+ 
+ 	if (vmx->rmode.vm86_active) {
+-		if (kvm_inject_realmode_interrupt(vcpu, NMI_VECTOR, 0) != EMULATE_DONE)
+-			kvm_make_request(KVM_REQ_TRIPLE_FAULT, vcpu);
++		kvm_inject_realmode_interrupt(vcpu, NMI_VECTOR, 0);
+ 		return;
+ 	}

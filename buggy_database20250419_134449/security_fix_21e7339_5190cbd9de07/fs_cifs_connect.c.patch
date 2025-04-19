@@ -1,0 +1,85 @@
+commit 21e733930be6458e0c33482b6783e7c15ba984eb
+Author: Shirish Pargaonkar <shirishpargaonkar@gmail.com>
+Date:   Thu Oct 21 06:42:55 2010 -0500
+
+    NTLM auth and sign - Allocate session key/client response dynamically
+    
+    Start calculating auth response within a session.  Move/Add pertinet
+    data structures like session key, server challenge and ntlmv2_hash in
+    a session structure.  We should do the calculations within a session
+    before copying session key and response over to server data
+    structures because a session setup can fail.
+    
+    Only after a very first smb session succeeds, it copy/make its
+    session key, session key of smb connection.  This key stays with
+    the smb connection throughout its life.
+    sequence_number within server is set to 0x2.
+    
+    The authentication Message Authentication Key (mak) which consists
+    of session key followed by client response within structure session_key
+    is now dynamic.  Every authentication type allocates the key + response
+    sized memory within its session structure and later either assigns or
+    frees it once the client response is sent and if session's session key
+    becomes connetion's session key.
+    
+    ntlm/ntlmi authentication functions are rearranged.  A function
+    named setup_ntlm_resp(), similar to setup_ntlmv2_resp(), replaces
+    function cifs_calculate_session_key().
+    
+    size of CIFS_SESS_KEY_SIZE is changed to 16, to reflect the byte size
+    of the key it holds.
+    
+    Reviewed-by: Jeff Layton <jlayton@samba.org>
+    Signed-off-by: Shirish Pargaonkar <shirishpargaonkar@gmail.com>
+    Signed-off-by: Steve French <sfrench@us.ibm.com>
+
+diff --git a/fs/cifs/connect.c b/fs/cifs/connect.c
+index 7e73176acb58..c5807d39dced 100644
+--- a/fs/cifs/connect.c
++++ b/fs/cifs/connect.c
+@@ -175,6 +175,9 @@ cifs_reconnect(struct TCP_Server_Info *server)
+ 	}
+ 	server->sequence_number = 0;
+ 	server->session_estab = false;
++	kfree(server->session_key.response);
++	server->session_key.response = NULL;
++	server->session_key.len = 0;
+ 
+ 	spin_lock(&GlobalMid_Lock);
+ 	list_for_each(tmp, &server->pending_mid_q) {
+@@ -1562,6 +1565,10 @@ cifs_put_tcp_session(struct TCP_Server_Info *server)
+ 
+ 	cifs_fscache_release_client_cookie(server);
+ 
++	kfree(server->session_key.response);
++	server->session_key.response = NULL;
++	server->session_key.len = 0;
++
+ 	task = xchg(&server->tsk, NULL);
+ 	if (task)
+ 		force_sig(SIGKILL, task);
+@@ -3178,10 +3185,11 @@ int cifs_setup_session(unsigned int xid, struct cifsSesInfo *ses,
+ 	} else {
+ 		mutex_lock(&ses->server->srv_mutex);
+ 		if (!server->session_estab) {
+-			memcpy(&server->session_key.data,
+-				&ses->auth_key.data, ses->auth_key.len);
++			server->session_key.response = ses->auth_key.response;
+ 			server->session_key.len = ses->auth_key.len;
+-			ses->server->session_estab = true;
++			server->sequence_number = 0x2;
++			server->session_estab = true;
++			ses->auth_key.response = NULL;
+ 		}
+ 		mutex_unlock(&server->srv_mutex);
+ 
+@@ -3192,6 +3200,10 @@ int cifs_setup_session(unsigned int xid, struct cifsSesInfo *ses,
+ 		spin_unlock(&GlobalMid_Lock);
+ 	}
+ 
++	kfree(ses->auth_key.response);
++	ses->auth_key.response = NULL;
++	ses->auth_key.len = 0;
++
+ 	return rc;
+ }

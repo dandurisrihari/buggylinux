@@ -1,0 +1,93 @@
+diff --git a/drivers/gpu/drm/i915/intel_guc_fwif.h b/drivers/gpu/drm/i915/intel_guc_fwif.h
+index ed1ab40854a4..25691f0e4c50 100644
+--- a/drivers/gpu/drm/i915/intel_guc_fwif.h
++++ b/drivers/gpu/drm/i915/intel_guc_fwif.h
+@@ -505,6 +505,7 @@ enum intel_guc_action {
+ 	INTEL_GUC_ACTION_ENTER_S_STATE = 0x501,
+ 	INTEL_GUC_ACTION_EXIT_S_STATE = 0x502,
+ 	INTEL_GUC_ACTION_SLPC_REQUEST = 0x3003,
++	INTEL_GUC_ACTION_AUTHENTICATE_HUC = 0x4000,
+ 	INTEL_GUC_ACTION_UK_LOG_ENABLE_LOGGING = 0x0E000,
+ 	INTEL_GUC_ACTION_LIMIT
+ };
+diff --git a/drivers/gpu/drm/i915/intel_guc_loader.c b/drivers/gpu/drm/i915/intel_guc_loader.c
+index 8c96a998c867..2f1cf9aea04e 100644
+--- a/drivers/gpu/drm/i915/intel_guc_loader.c
++++ b/drivers/gpu/drm/i915/intel_guc_loader.c
+@@ -524,6 +524,8 @@ int intel_guc_setup(struct drm_i915_private *dev_priv)
+ 		intel_uc_fw_status_repr(guc_fw->fetch_status),
+ 		intel_uc_fw_status_repr(guc_fw->load_status));
+ 
++	intel_guc_auth_huc(dev_priv);
++
+ 	if (i915.enable_guc_submission) {
+ 		if (i915.guc_log_level >= 0)
+ 			gen9_enable_guc_interrupts(dev_priv);
+diff --git a/drivers/gpu/drm/i915/intel_huc.c b/drivers/gpu/drm/i915/intel_huc.c
+index 8b84ba835b1f..897ef31d865e 100644
+--- a/drivers/gpu/drm/i915/intel_huc.c
++++ b/drivers/gpu/drm/i915/intel_huc.c
+@@ -284,3 +284,52 @@ void intel_huc_fini(struct drm_i915_private *dev_priv)
+ 	huc_fw->fetch_status = INTEL_UC_FIRMWARE_NONE;
+ }
+ 
++/**
++ * intel_guc_auth_huc() - authenticate ucode
++ * @dev_priv: the drm_i915_device
++ *
++ * Triggers a HuC fw authentication request to the GuC via intel_guc_action_
++ * authenticate_huc interface.
++ */
++void intel_guc_auth_huc(struct drm_i915_private *dev_priv)
++{
++	struct intel_guc *guc = &dev_priv->guc;
++	struct intel_huc *huc = &dev_priv->huc;
++	struct i915_vma *vma;
++	int ret;
++	u32 data[2];
++
++	vma = i915_gem_object_ggtt_pin(huc->fw.obj, NULL, 0, 0,
++				PIN_OFFSET_BIAS | GUC_WOPCM_TOP);
++	if (IS_ERR(vma)) {
++		DRM_ERROR("failed to pin huc fw object %d\n",
++				(int)PTR_ERR(vma));
++		return;
++	}
++
++	/* Specify auth action and where public signature is. */
++	data[0] = INTEL_GUC_ACTION_AUTHENTICATE_HUC;
++	data[1] = i915_ggtt_offset(vma) + huc->fw.rsa_offset;
++
++	ret = intel_guc_send(guc, data, ARRAY_SIZE(data));
++	if (ret) {
++		DRM_ERROR("HuC: GuC did not ack Auth request %d\n", ret);
++		goto out;
++	}
++
++	/* Check authentication status, it should be done by now */
++	ret = intel_wait_for_register(dev_priv,
++				HUC_STATUS2,
++				HUC_FW_VERIFIED,
++				HUC_FW_VERIFIED,
++				50);
++
++	if (ret) {
++		DRM_ERROR("HuC: Authentication failed %d\n", ret);
++		goto out;
++	}
++
++out:
++	i915_vma_unpin(vma);
++}
++
+diff --git a/drivers/gpu/drm/i915/intel_uc.h b/drivers/gpu/drm/i915/intel_uc.h
+index 4fd411b02ceb..d74f4d3ad8dc 100644
+--- a/drivers/gpu/drm/i915/intel_uc.h
++++ b/drivers/gpu/drm/i915/intel_uc.h
+@@ -226,5 +226,6 @@ static inline u32 guc_ggtt_offset(struct i915_vma *vma)
+ void intel_huc_init(struct drm_i915_private *dev_priv);
+ void intel_huc_fini(struct drm_i915_private  *dev_priv);
+ int intel_huc_load(struct drm_i915_private *dev_priv);
++void intel_guc_auth_huc(struct drm_i915_private *dev_priv);
+ 
+ #endif

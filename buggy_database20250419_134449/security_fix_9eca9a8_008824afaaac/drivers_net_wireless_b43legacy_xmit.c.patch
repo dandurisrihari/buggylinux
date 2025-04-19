@@ -1,0 +1,71 @@
+commit 9eca9a8e81928685b4de00ecef83a7c13c340fc9
+Author: Stefano Brivio <stefano.brivio@polimi.it>
+Date:   Sat Feb 2 19:16:01 2008 +0100
+
+    b43legacy: drop packets we are not able to encrypt
+    
+    We must drop any packets we are not able to encrypt.
+    We must not send them unencrypted or with an all-zero-key (which
+    basically is the same as unencrypted, from a security point of view).
+    
+    This might only trigger shortly after resume before mac80211 reassociated
+    and reconfigured the keys.
+    
+    It is safe to drop these packets, as the association they belong to
+    is not guaranteed anymore anyway.
+    This is a security fix in the sense that it prevents information leakage.
+    
+    This patch by Michael Buesch has been ported to b43legacy.
+    
+    Cc: Michael Buesch <mb@bu3sch.de>
+    Signed-off-by: Stefano Brivio <stefano.brivio@polimi.it>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/drivers/net/wireless/b43legacy/xmit.c b/drivers/net/wireless/b43legacy/xmit.c
+index e20c552442d5..d84408a82db9 100644
+--- a/drivers/net/wireless/b43legacy/xmit.c
++++ b/drivers/net/wireless/b43legacy/xmit.c
+@@ -181,7 +181,7 @@ static u8 b43legacy_calc_fallback_rate(u8 bitrate)
+ 	return 0;
+ }
+ 
+-static void generate_txhdr_fw3(struct b43legacy_wldev *dev,
++static int generate_txhdr_fw3(struct b43legacy_wldev *dev,
+ 			       struct b43legacy_txhdr_fw3 *txhdr,
+ 			       const unsigned char *fragment_data,
+ 			       unsigned int fragment_len,
+@@ -252,6 +252,13 @@ static void generate_txhdr_fw3(struct b43legacy_wldev *dev,
+ 			iv_len = min((size_t)txctl->iv_len,
+ 				     ARRAY_SIZE(txhdr->iv));
+ 			memcpy(txhdr->iv, ((u8 *)wlhdr) + wlhdr_len, iv_len);
++		} else {
++			/* This key is invalid. This might only happen
++			 * in a short timeframe after machine resume before
++			 * we were able to reconfigure keys.
++			 * Drop this packet completely. Do not transmit it
++			 * unencrypted to avoid leaking information. */
++			return -ENOKEY;
+ 		}
+ 	}
+ 	b43legacy_generate_plcp_hdr((struct b43legacy_plcp_hdr4 *)
+@@ -345,16 +352,18 @@ static void generate_txhdr_fw3(struct b43legacy_wldev *dev,
+ 	/* Apply the bitfields */
+ 	txhdr->mac_ctl = cpu_to_le32(mac_ctl);
+ 	txhdr->phy_ctl = cpu_to_le16(phy_ctl);
++
++	return 0;
+ }
+ 
+-void b43legacy_generate_txhdr(struct b43legacy_wldev *dev,
++int b43legacy_generate_txhdr(struct b43legacy_wldev *dev,
+ 			      u8 *txhdr,
+ 			      const unsigned char *fragment_data,
+ 			      unsigned int fragment_len,
+ 			      const struct ieee80211_tx_control *txctl,
+ 			      u16 cookie)
+ {
+-	generate_txhdr_fw3(dev, (struct b43legacy_txhdr_fw3 *)txhdr,
++	return generate_txhdr_fw3(dev, (struct b43legacy_txhdr_fw3 *)txhdr,
+ 			   fragment_data, fragment_len,
+ 			   txctl, cookie);
+ }

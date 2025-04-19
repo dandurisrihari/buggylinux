@@ -1,0 +1,47 @@
+commit bc3e5f48b7ee021371dc37297678f7089be6ce28
+Author: Maciej Falkowski <maciej.falkowski@linux.intel.com>
+Date:   Tue Jan 7 18:32:28 2025 +0100
+
+    accel/ivpu: Use workqueue for IRQ handling
+    
+    Convert IRQ bottom half from the thread handler into workqueue.
+    This increases a stability in rare scenarios where driver on
+    debugging/hardening kernels processes IRQ too slow and misses
+    some interrupts due to it.
+    Workqueue handler also gives a very minor performance increase.
+    
+    Signed-off-by: Maciej Falkowski <maciej.falkowski@linux.intel.com>
+    Reviewed-by: Jacek Lawrynowicz <jacek.lawrynowicz@linux.intel.com>
+    Signed-off-by: Jacek Lawrynowicz <jacek.lawrynowicz@linux.intel.com>
+    Link: https://patchwork.freedesktop.org/patch/msgid/20250107173238.381120-6-maciej.falkowski@linux.intel.com
+
+diff --git a/drivers/accel/ivpu/ivpu_hw.c b/drivers/accel/ivpu/ivpu_hw.c
+index 4e1054f3466e..1b691375ee4d 100644
+--- a/drivers/accel/ivpu/ivpu_hw.c
++++ b/drivers/accel/ivpu/ivpu_hw.c
+@@ -285,8 +285,6 @@ void ivpu_hw_profiling_freq_drive(struct ivpu_device *vdev, bool enable)
+ 
+ void ivpu_irq_handlers_init(struct ivpu_device *vdev)
+ {
+-	INIT_KFIFO(vdev->hw->irq.fifo);
+-
+ 	if (ivpu_hw_ip_gen(vdev) == IVPU_HW_IP_37XX)
+ 		vdev->hw->irq.ip_irq_handler = ivpu_hw_ip_irq_handler_37xx;
+ 	else
+@@ -300,7 +298,6 @@ void ivpu_irq_handlers_init(struct ivpu_device *vdev)
+ 
+ void ivpu_hw_irq_enable(struct ivpu_device *vdev)
+ {
+-	kfifo_reset(&vdev->hw->irq.fifo);
+ 	ivpu_hw_ip_irq_enable(vdev);
+ 	ivpu_hw_btrs_irq_enable(vdev);
+ }
+@@ -327,8 +324,6 @@ irqreturn_t ivpu_hw_irq_handler(int irq, void *ptr)
+ 	/* Re-enable global interrupts to re-trigger MSI for pending interrupts */
+ 	ivpu_hw_btrs_global_int_enable(vdev);
+ 
+-	if (!kfifo_is_empty(&vdev->hw->irq.fifo))
+-		return IRQ_WAKE_THREAD;
+ 	if (ip_handled || btrs_handled)
+ 		return IRQ_HANDLED;
+ 	return IRQ_NONE;

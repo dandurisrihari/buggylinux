@@ -1,0 +1,61 @@
+commit 53e724067a4ee9373972079e225d0d5f683b9c5a
+Author: Marc Zyngier <maz@kernel.org>
+Date:   Wed Jan 23 13:21:58 2013 -0500
+
+    ARM: KVM: arch_timers: Add guest timer core support
+    
+    Add some the architected timer related infrastructure, and support timer
+    interrupt injection, which can happen as a resultof three possible
+    events:
+    
+    - The virtual timer interrupt has fired while we were still
+      executing the guest
+    - The timer interrupt hasn't fired, but it expired while we
+      were doing the world switch
+    - A hrtimer we programmed earlier has fired
+    
+    Reviewed-by: Will Deacon <will.deacon@arm.com>
+    Signed-off-by: Christoffer Dall <c.dall@virtualopensystems.com>
+    Signed-off-by: Marc Zyngier <marc.zyngier@arm.com>
+
+diff --git a/arch/arm/kvm/interrupts_head.S b/arch/arm/kvm/interrupts_head.S
+index 8c875d54a089..06f251395bec 100644
+--- a/arch/arm/kvm/interrupts_head.S
++++ b/arch/arm/kvm/interrupts_head.S
+@@ -453,6 +453,37 @@ vcpu	.req	r0		@ vcpu pointer always in r0
+ #endif
+ .endm
+ 
++#define CNTHCTL_PL1PCTEN	(1 << 0)
++#define CNTHCTL_PL1PCEN		(1 << 1)
++
++/*
++ * Save the timer state onto the VCPU and allow physical timer/counter access
++ * for the host.
++ *
++ * Assumes vcpu pointer in vcpu reg
++ */
++.macro save_timer_state
++	@ Allow physical timer/counter access for the host
++	mrc	p15, 4, r2, c14, c1, 0	@ CNTHCTL
++	orr	r2, r2, #(CNTHCTL_PL1PCEN | CNTHCTL_PL1PCTEN)
++	mcr	p15, 4, r2, c14, c1, 0	@ CNTHCTL
++.endm
++
++/*
++ * Load the timer state from the VCPU and deny physical timer/counter access
++ * for the host.
++ *
++ * Assumes vcpu pointer in vcpu reg
++ */
++.macro restore_timer_state
++	@ Disallow physical timer access for the guest
++	@ Physical counter access is allowed
++	mrc	p15, 4, r2, c14, c1, 0	@ CNTHCTL
++	orr	r2, r2, #CNTHCTL_PL1PCTEN
++	bic	r2, r2, #CNTHCTL_PL1PCEN
++	mcr	p15, 4, r2, c14, c1, 0	@ CNTHCTL
++.endm
++
+ .equ vmentry,	0
+ .equ vmexit,	1

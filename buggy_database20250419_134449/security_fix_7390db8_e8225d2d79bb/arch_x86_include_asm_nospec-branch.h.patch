@@ -1,0 +1,64 @@
+commit 7390db8aea0d64e9deb28b8e1ce716f5020c7ee5
+Author: Pawan Gupta <pawan.kumar.gupta@linux.intel.com>
+Date:   Mon Mar 11 08:56:58 2024 -0700
+
+    x86/bhi: Add support for clearing branch history at syscall entry
+    
+    Branch History Injection (BHI) attacks may allow a malicious application to
+    influence indirect branch prediction in kernel by poisoning the branch
+    history. eIBRS isolates indirect branch targets in ring0.  The BHB can
+    still influence the choice of indirect branch predictor entry, and although
+    branch predictor entries are isolated between modes when eIBRS is enabled,
+    the BHB itself is not isolated between modes.
+    
+    Alder Lake and new processors supports a hardware control BHI_DIS_S to
+    mitigate BHI.  For older processors Intel has released a software sequence
+    to clear the branch history on parts that don't support BHI_DIS_S. Add
+    support to execute the software sequence at syscall entry and VMexit to
+    overwrite the branch history.
+    
+    For now, branch history is not cleared at interrupt entry, as malicious
+    applications are not believed to have sufficient control over the
+    registers, since previous register state is cleared at interrupt
+    entry. Researchers continue to poke at this area and it may become
+    necessary to clear at interrupt entry as well in the future.
+    
+    This mitigation is only defined here. It is enabled later.
+    
+    Signed-off-by: Pawan Gupta <pawan.kumar.gupta@linux.intel.com>
+    Co-developed-by: Daniel Sneddon <daniel.sneddon@linux.intel.com>
+    Signed-off-by: Daniel Sneddon <daniel.sneddon@linux.intel.com>
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Reviewed-by: Alexandre Chartre <alexandre.chartre@oracle.com>
+    Reviewed-by: Josh Poimboeuf <jpoimboe@kernel.org>
+
+diff --git a/arch/x86/include/asm/nospec-branch.h b/arch/x86/include/asm/nospec-branch.h
+index 170c89ed22fc..aea40204278b 100644
+--- a/arch/x86/include/asm/nospec-branch.h
++++ b/arch/x86/include/asm/nospec-branch.h
+@@ -326,6 +326,14 @@
+ 	ALTERNATIVE "", __stringify(verw _ASM_RIP(mds_verw_sel)), X86_FEATURE_CLEAR_CPU_BUF
+ .endm
+ 
++#ifdef CONFIG_X86_64
++.macro CLEAR_BRANCH_HISTORY
++	ALTERNATIVE "", "call clear_bhb_loop", X86_FEATURE_CLEAR_BHB_LOOP
++.endm
++#else
++#define CLEAR_BRANCH_HISTORY
++#endif
++
+ #else /* __ASSEMBLY__ */
+ 
+ #define ANNOTATE_RETPOLINE_SAFE					\
+@@ -368,6 +376,10 @@ extern void srso_alias_return_thunk(void);
+ extern void entry_untrain_ret(void);
+ extern void entry_ibpb(void);
+ 
++#ifdef CONFIG_X86_64
++extern void clear_bhb_loop(void);
++#endif
++
+ extern void (*x86_return_thunk)(void);
+ 
+ extern void __warn_thunk(void);

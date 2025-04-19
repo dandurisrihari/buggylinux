@@ -1,0 +1,78 @@
+commit c4e927da893b2d9ebe71ac206ed021df363771e4
+Author: Srinivas Pandruvada <srinivas.pandruvada@linux.intel.com>
+Date:   Tue Sep 20 04:08:02 2022 -0700
+
+    thermal: intel_powerclamp: Remove accounting for IRQ wakes
+    
+    There is a static variable "idle_wakeup_counter", which accounts for
+    number of wake ups because of IRQs and take actions to compensate idle
+    injection. This is now read and reset to 0, but never incremented.
+    So all the usage of this counter for idle injection has no use.
+    
+    Also another static variable "reduce_irq", which depends on
+    "idle_wakeup_counter", so remove usage of "reduce_irq" also.
+    
+    Commit feb6cd6a0f9f ("thermal/intel_powerclamp: stop sched tick in
+    forced idle") replaced the local use of "mwait_idle_with_hints" with
+    play_idle(). This removed possibility of updating "idle_wakeup_counter"
+    without change in play_idle(). This change was made in Linux 4.10.
+    
+    Signed-off-by: Srinivas Pandruvada <srinivas.pandruvada@linux.intel.com>
+    [ rjw: Changelog edits ]
+    Signed-off-by: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
+
+diff --git a/drivers/thermal/intel/intel_powerclamp.c b/drivers/thermal/intel/intel_powerclamp.c
+index 46cd799af148..2a5570b9799a 100644
+--- a/drivers/thermal/intel/intel_powerclamp.c
++++ b/drivers/thermal/intel/intel_powerclamp.c
+@@ -62,8 +62,7 @@ static struct dentry *debug_dir;
+ static unsigned int set_target_ratio;
+ static unsigned int current_ratio;
+ static bool should_skip;
+-static bool reduce_irq;
+-static atomic_t idle_wakeup_counter;
++
+ static unsigned int control_cpu; /* The cpu assigned to collect stat and update
+ 				  * control parameters. default to BSP but BSP
+ 				  * can be offlined.
+@@ -285,9 +284,6 @@ static unsigned int get_compensation(int ratio)
+ 			cal_data[ratio + 1].steady_comp) / 3;
+ 	}
+ 
+-	/* REVISIT: simple penalty of double idle injection */
+-	if (reduce_irq)
+-		comp = ratio;
+ 	/* do not exceed limit */
+ 	if (comp + ratio >= MAX_TARGET_RATIO)
+ 		comp = MAX_TARGET_RATIO - ratio - 1;
+@@ -301,13 +297,9 @@ static void adjust_compensation(int target_ratio, unsigned int win)
+ 	struct powerclamp_calibration_data *d = &cal_data[target_ratio];
+ 
+ 	/*
+-	 * adjust compensations if confidence level has not been reached or
+-	 * there are too many wakeups during the last idle injection period, we
+-	 * cannot trust the data for compensation.
++	 * adjust compensations if confidence level has not been reached.
+ 	 */
+-	if (d->confidence >= CONFIDENCE_OK ||
+-		atomic_read(&idle_wakeup_counter) >
+-		win * num_online_cpus())
++	if (d->confidence >= CONFIDENCE_OK)
+ 		return;
+ 
+ 	delta = set_target_ratio - current_ratio;
+@@ -347,14 +339,7 @@ static bool powerclamp_adjust_controls(unsigned int target_ratio,
+ 	tsc_last = tsc_now;
+ 
+ 	adjust_compensation(target_ratio, win);
+-	/*
+-	 * too many external interrupts, set flag such
+-	 * that we can take measure later.
+-	 */
+-	reduce_irq = atomic_read(&idle_wakeup_counter) >=
+-		2 * win * num_online_cpus();
+ 
+-	atomic_set(&idle_wakeup_counter, 0);
+ 	/* if we are above target+guard, skip */
+ 	return set_target_ratio + guard <= current_ratio;
+ }

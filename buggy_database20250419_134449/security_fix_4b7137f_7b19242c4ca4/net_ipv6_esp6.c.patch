@@ -1,0 +1,68 @@
+commit 4b7137ff8fb49d7bf22dfa248baa0d02ace2c43d
+Author: Herbert Xu <herbert@gondor.apana.org.au>
+Date:   Mon Oct 8 17:13:44 2007 -0700
+
+    [IPSEC] esp: Remove keys from esp_data structure
+    
+    The keys are only used during initialisation so we don't need to carry them
+    in esp_data.  Since we don't have to allocate them again, there is no need
+    to place a limit on the authentication key length anymore.
+    
+    This patch also kills the unused auth.icv member.
+    
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/ipv6/esp6.c b/net/ipv6/esp6.c
+index 2db31ce3c7e6..77281068d0f9 100644
+--- a/net/ipv6/esp6.c
++++ b/net/ipv6/esp6.c
+@@ -297,11 +297,6 @@ static int esp6_init_state(struct xfrm_state *x)
+ 	struct esp_data *esp = NULL;
+ 	struct crypto_blkcipher *tfm;
+ 
+-	/* null auth and encryption can have zero length keys */
+-	if (x->aalg) {
+-		if (x->aalg->alg_key_len > 512)
+-			goto error;
+-	}
+ 	if (x->ealg == NULL)
+ 		goto error;
+ 
+@@ -316,15 +311,14 @@ static int esp6_init_state(struct xfrm_state *x)
+ 		struct xfrm_algo_desc *aalg_desc;
+ 		struct crypto_hash *hash;
+ 
+-		esp->auth.key = x->aalg->alg_key;
+-		esp->auth.key_len = (x->aalg->alg_key_len+7)/8;
+ 		hash = crypto_alloc_hash(x->aalg->alg_name, 0,
+ 					 CRYPTO_ALG_ASYNC);
+ 		if (IS_ERR(hash))
+ 			goto error;
+ 
+ 		esp->auth.tfm = hash;
+-		if (crypto_hash_setkey(hash, esp->auth.key, esp->auth.key_len))
++		if (crypto_hash_setkey(hash, x->aalg->alg_key,
++				       (x->aalg->alg_key_len + 7) / 8))
+ 			goto error;
+ 
+ 		aalg_desc = xfrm_aalg_get_byname(x->aalg->alg_name, 0);
+@@ -346,8 +340,6 @@ static int esp6_init_state(struct xfrm_state *x)
+ 		if (!esp->auth.work_icv)
+ 			goto error;
+ 	}
+-	esp->conf.key = x->ealg->alg_key;
+-	esp->conf.key_len = (x->ealg->alg_key_len+7)/8;
+ 	tfm = crypto_alloc_blkcipher(x->ealg->alg_name, 0, CRYPTO_ALG_ASYNC);
+ 	if (IS_ERR(tfm))
+ 		goto error;
+@@ -360,7 +352,8 @@ static int esp6_init_state(struct xfrm_state *x)
+ 			goto error;
+ 		esp->conf.ivinitted = 0;
+ 	}
+-	if (crypto_blkcipher_setkey(tfm, esp->conf.key, esp->conf.key_len))
++	if (crypto_blkcipher_setkey(tfm, x->ealg->alg_key,
++				    (x->ealg->alg_key_len + 7) / 8))
+ 		goto error;
+ 	x->props.header_len = sizeof(struct ipv6_esp_hdr) + esp->conf.ivlen;
+ 	if (x->props.mode == XFRM_MODE_TUNNEL)

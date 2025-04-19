@@ -1,0 +1,79 @@
+commit 4e7a5dcd1bbab6560fbc8ada29a840e7a20ed7bc
+Author: Sage Weil <sage@newdream.net>
+Date:   Wed Nov 18 16:19:57 2009 -0800
+
+    ceph: negotiate authentication protocol; implement AUTH_NONE protocol
+    
+    When we open a monitor session, we send an initial AUTH message listing
+    the auth protocols we support, our entity name, and (possibly) a previously
+    assigned global_id.  The monitor chooses a protocol and responds with an
+    initial message.
+    
+    Initially implement AUTH_NONE, a dummy protocol that provides no security,
+    but works within the new framework.  It generates 'authorizers' that are
+    used when connecting to (mds, osd) services that simply state our entity
+    name and global_id.
+    
+    This is a wire protocol change.
+    
+    Signed-off-by: Sage Weil <sage@newdream.net>
+
+diff --git a/fs/ceph/msgr.h b/fs/ceph/msgr.h
+index 8e3ea2eb1bf5..c758e8f8f71b 100644
+--- a/fs/ceph/msgr.h
++++ b/fs/ceph/msgr.h
+@@ -21,7 +21,7 @@
+  * whenever the wire protocol changes.  try to keep this string length
+  * constant.
+  */
+-#define CEPH_BANNER "ceph v023"
++#define CEPH_BANNER "ceph v024"
+ #define CEPH_BANNER_MAX_LEN 30
+ 
+ 
+@@ -46,11 +46,16 @@ struct ceph_entity_name {
+ 	__le64 num;
+ } __attribute__ ((packed));
+ 
+-#define CEPH_ENTITY_TYPE_MON    1
+-#define CEPH_ENTITY_TYPE_MDS    2
+-#define CEPH_ENTITY_TYPE_OSD    3
+-#define CEPH_ENTITY_TYPE_CLIENT 4
+-#define CEPH_ENTITY_TYPE_ADMIN  5
++#define CEPH_ENTITY_TYPE_MON    0x01
++#define CEPH_ENTITY_TYPE_MDS    0x02
++#define CEPH_ENTITY_TYPE_OSD    0x04
++#define CEPH_ENTITY_TYPE_CLIENT 0x08
++#define CEPH_ENTITY_TYPE_ADMIN  0x10
++#define CEPH_ENTITY_TYPE_AUTH   0x20
++
++#define CEPH_ENTITY_TYPE_ANY    0xFF
++
++extern const char *ceph_entity_type_name(int type);
+ 
+ /*
+  * entity_addr -- network address
+@@ -94,6 +99,7 @@ struct ceph_entity_inst {
+ #define CEPH_MSGR_TAG_ACK           8  /* message ack */
+ #define CEPH_MSGR_TAG_KEEPALIVE     9  /* just a keepalive byte! */
+ #define CEPH_MSGR_TAG_BADPROTOVER  10  /* bad protocol version */
++#define CEPH_MSGR_TAG_BADAUTHORIZER 11 /* bad authorizer */
+ 
+ 
+ /*
+@@ -104,6 +110,8 @@ struct ceph_msg_connect {
+ 	__le32 global_seq;   /* count connections initiated by this host */
+ 	__le32 connect_seq;  /* count connections initiated in this session */
+ 	__le32 protocol_version;
++	__le32 authorizer_protocol;
++	__le32 authorizer_len;
+ 	__u8  flags;         /* CEPH_MSG_CONNECT_* */
+ } __attribute__ ((packed));
+ 
+@@ -112,6 +120,7 @@ struct ceph_msg_connect_reply {
+ 	__le32 global_seq;
+ 	__le32 connect_seq;
+ 	__le32 protocol_version;
++	__le32 authorizer_len;
+ 	__u8 flags;
+ } __attribute__ ((packed));

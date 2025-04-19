@@ -1,0 +1,109 @@
+commit 966fede8e4be15bcc08e3c390080d3f9072a5367
+Author: Kees Cook <kees@kernel.org>
+Date:   Thu Jul 11 20:53:29 2019 -0700
+
+    lkdtm/heap: add tests for freelist hardening
+    
+    This adds tests for double free and cross-cache freeing, which should both
+    be caught by CONFIG_SLAB_FREELIST_HARDENED.
+    
+    Link: http://lkml.kernel.org/r/20190530045017.15252-4-keescook@chromium.org
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+    Cc: Alexander Popov <alex.popov@linux.com>
+    Cc: Alexander Potapenko <glider@google.com>
+    Cc: Christoph Lameter <cl@linux.com>
+    Cc: David Rientjes <rientjes@google.com>
+    Cc: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+    Cc: Joonsoo Kim <iamjoonsoo.kim@lge.com>
+    Cc: Matthew Wilcox <willy@infradead.org>
+    Cc: Pekka Enberg <penberg@kernel.org>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/drivers/misc/lkdtm/heap.c b/drivers/misc/lkdtm/heap.c
+index 65026d7de130..3c5cec85edce 100644
+--- a/drivers/misc/lkdtm/heap.c
++++ b/drivers/misc/lkdtm/heap.c
+@@ -7,6 +7,10 @@
+ #include <linux/slab.h>
+ #include <linux/sched.h>
+ 
++static struct kmem_cache *double_free_cache;
++static struct kmem_cache *a_cache;
++static struct kmem_cache *b_cache;
++
+ /*
+  * This tries to stay within the next largest power-of-2 kmalloc cache
+  * to avoid actually overwriting anything important if it's not detected
+@@ -146,3 +150,71 @@ void lkdtm_READ_BUDDY_AFTER_FREE(void)
+ 
+ 	kfree(val);
+ }
++
++void lkdtm_SLAB_FREE_DOUBLE(void)
++{
++	int *val;
++
++	val = kmem_cache_alloc(double_free_cache, GFP_KERNEL);
++	if (!val) {
++		pr_info("Unable to allocate double_free_cache memory.\n");
++		return;
++	}
++
++	/* Just make sure we got real memory. */
++	*val = 0x12345678;
++	pr_info("Attempting double slab free ...\n");
++	kmem_cache_free(double_free_cache, val);
++	kmem_cache_free(double_free_cache, val);
++}
++
++void lkdtm_SLAB_FREE_CROSS(void)
++{
++	int *val;
++
++	val = kmem_cache_alloc(a_cache, GFP_KERNEL);
++	if (!val) {
++		pr_info("Unable to allocate a_cache memory.\n");
++		return;
++	}
++
++	/* Just make sure we got real memory. */
++	*val = 0x12345679;
++	pr_info("Attempting cross-cache slab free ...\n");
++	kmem_cache_free(b_cache, val);
++}
++
++void lkdtm_SLAB_FREE_PAGE(void)
++{
++	unsigned long p = __get_free_page(GFP_KERNEL);
++
++	pr_info("Attempting non-Slab slab free ...\n");
++	kmem_cache_free(NULL, (void *)p);
++	free_page(p);
++}
++
++/*
++ * We have constructors to keep the caches distinctly separated without
++ * needing to boot with "slab_nomerge".
++ */
++static void ctor_double_free(void *region)
++{ }
++static void ctor_a(void *region)
++{ }
++static void ctor_b(void *region)
++{ }
++
++void __init lkdtm_heap_init(void)
++{
++	double_free_cache = kmem_cache_create("lkdtm-heap-double_free",
++					      64, 0, 0, ctor_double_free);
++	a_cache = kmem_cache_create("lkdtm-heap-a", 64, 0, 0, ctor_a);
++	b_cache = kmem_cache_create("lkdtm-heap-b", 64, 0, 0, ctor_b);
++}
++
++void __exit lkdtm_heap_exit(void)
++{
++	kmem_cache_destroy(double_free_cache);
++	kmem_cache_destroy(a_cache);
++	kmem_cache_destroy(b_cache);
++}

@@ -1,0 +1,33 @@
+commit bd2b3ca7686d9470b1b58df631daa03179486182
+Author: Avi Kivity <avi@redhat.com>
+Date:   Thu Nov 20 11:47:18 2008 +0200
+
+    KVM: VMX: Fix interrupt loss during race with NMI
+    
+    If an interrupt cannot be injected for some reason (say, page fault
+    when fetching the IDT descriptor), the interrupt is marked for
+    reinjection.  However, if an NMI is queued at this time, the NMI
+    will be injected instead and the NMI will be lost.
+    
+    Fix by deferring the NMI injection until the interrupt has been
+    injected successfully.
+    
+    Analyzed by Jan Kiszka.
+    
+    Signed-off-by: Avi Kivity <avi@redhat.com>
+
+diff --git a/arch/x86/kvm/vmx.c b/arch/x86/kvm/vmx.c
+index d06b4dc0e2ea..a4018b01e1f9 100644
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -3149,7 +3149,9 @@ static void vmx_intr_assist(struct kvm_vcpu *vcpu)
+ 
+ 	if (cpu_has_virtual_nmis()) {
+ 		if (vcpu->arch.nmi_pending && !vcpu->arch.nmi_injected) {
+-			if (vmx_nmi_enabled(vcpu)) {
++			if (vcpu->arch.interrupt.pending) {
++				enable_nmi_window(vcpu);
++			} else if (vmx_nmi_enabled(vcpu)) {
+ 				vcpu->arch.nmi_pending = false;
+ 				vcpu->arch.nmi_injected = true;
+ 			} else {

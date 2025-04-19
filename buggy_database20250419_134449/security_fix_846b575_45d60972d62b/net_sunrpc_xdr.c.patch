@@ -1,0 +1,67 @@
+commit 846b5756d7632523b5bfce78c163aa883aa9d587
+Author: Chuck Lever <chuck.lever@oracle.com>
+Date:   Mon Jan 2 12:05:43 2023 -0500
+
+    SUNRPC: Add an XDR decoding helper for struct opaque_auth
+    
+    RFC 5531 defines the body of an RPC Call message like this:
+    
+            struct call_body {
+                    unsigned int rpcvers;
+                    unsigned int prog;
+                    unsigned int vers;
+                    unsigned int proc;
+                    opaque_auth cred;
+                    opaque_auth verf;
+                    /* procedure-specific parameters start here */
+            };
+    
+    In the current server code, decoding a struct opaque_auth type is
+    open-coded in several places, and is thus difficult to harden
+    everywhere.
+    
+    Introduce a helper for decoding an opaque_auth within the context
+    of a xdr_stream. This helper can be shared with all authentication
+    flavor implemenations, even on the client-side.
+    
+    Done as part of hardening the server-side RPC header decoding paths.
+    
+    Reviewed-by: Jeff Layton <jlayton@kernel.org>
+    Signed-off-by: Chuck Lever <chuck.lever@oracle.com>
+
+diff --git a/net/sunrpc/xdr.c b/net/sunrpc/xdr.c
+index f7767bf22406..4845ba2113fd 100644
+--- a/net/sunrpc/xdr.c
++++ b/net/sunrpc/xdr.c
+@@ -2274,3 +2274,31 @@ ssize_t xdr_stream_decode_string_dup(struct xdr_stream *xdr, char **str,
+ 	return ret;
+ }
+ EXPORT_SYMBOL_GPL(xdr_stream_decode_string_dup);
++
++/**
++ * xdr_stream_decode_opaque_auth - Decode struct opaque_auth (RFC5531 S8.2)
++ * @xdr: pointer to xdr_stream
++ * @flavor: location to store decoded flavor
++ * @body: location to store decode body
++ * @body_len: location to store length of decoded body
++ *
++ * Return values:
++ *   On success, returns the number of buffer bytes consumed
++ *   %-EBADMSG on XDR buffer overflow
++ *   %-EMSGSIZE if the decoded size of the body field exceeds 400 octets
++ */
++ssize_t xdr_stream_decode_opaque_auth(struct xdr_stream *xdr, u32 *flavor,
++				      void **body, unsigned int *body_len)
++{
++	ssize_t ret, len;
++
++	len = xdr_stream_decode_u32(xdr, flavor);
++	if (unlikely(len < 0))
++		return len;
++	ret = xdr_stream_decode_opaque_inline(xdr, body, RPC_MAX_AUTH_SIZE);
++	if (unlikely(ret < 0))
++		return ret;
++	*body_len = ret;
++	return len + ret;
++}
++EXPORT_SYMBOL_GPL(xdr_stream_decode_opaque_auth);

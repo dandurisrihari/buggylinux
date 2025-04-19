@@ -1,0 +1,123 @@
+diff --git a/fs/nfsd/fault_inject.c b/fs/nfsd/fault_inject.c
+index 4b385a14cf96..bf6161adf663 100644
+--- a/fs/nfsd/fault_inject.c
++++ b/fs/nfsd/fault_inject.c
+@@ -13,29 +13,29 @@
+ 
+ struct nfsd_fault_inject_op {
+ 	char *file;
+-	void (*func)(u64);
++	u64 (*forget)(struct nfs4_client *, u64);
+ };
+ 
+ static struct nfsd_fault_inject_op inject_ops[] = {
+ 	{
+ 		.file   = "forget_clients",
+-		.func   = nfsd_forget_clients,
++		.forget = nfsd_forget_client,
+ 	},
+ 	{
+ 		.file   = "forget_locks",
+-		.func   = nfsd_forget_locks,
++		.forget = nfsd_forget_client_locks,
+ 	},
+ 	{
+ 		.file   = "forget_openowners",
+-		.func   = nfsd_forget_openowners,
++		.forget = nfsd_forget_client_openowners,
+ 	},
+ 	{
+ 		.file   = "forget_delegations",
+-		.func   = nfsd_forget_delegations,
++		.forget = nfsd_forget_client_delegations,
+ 	},
+ 	{
+ 		.file   = "recall_delegations",
+-		.func   = nfsd_recall_delegations,
++		.forget = nfsd_recall_client_delegations,
+ 	},
+ };
+ 
+@@ -44,6 +44,7 @@ static struct dentry *debug_dir;
+ 
+ static int nfsd_inject_set(void *op_ptr, u64 val)
+ {
++	u64 count = 0;
+ 	struct nfsd_fault_inject_op *op = op_ptr;
+ 
+ 	if (val == 0)
+@@ -52,8 +53,9 @@ static int nfsd_inject_set(void *op_ptr, u64 val)
+ 		printk(KERN_INFO "NFSD Fault Injection: %s (n = %llu)", op->file, val);
+ 
+ 	nfs4_lock_state();
+-	op->func(val);
++	count = nfsd_for_n_state(val, op->forget);
+ 	nfs4_unlock_state();
++	printk(KERN_INFO "NFSD: %s: found %llu", op->file, count);
+ 	return 0;
+ }
+ 
+diff --git a/fs/nfsd/nfs4state.c b/fs/nfsd/nfs4state.c
+index dc7c22f14fef..ab45cdd7b3da 100644
+--- a/fs/nfsd/nfs4state.c
++++ b/fs/nfsd/nfs4state.c
+@@ -4721,36 +4721,6 @@ u64 nfsd_for_n_state(u64 max, u64 (*func)(struct nfs4_client *, u64))
+ 	return count;
+ }
+ 
+-void nfsd_forget_clients(u64 num)
+-{
+-	u64 count = nfsd_for_n_state(num, nfsd_forget_client);
+-	printk(KERN_INFO "NFSD: Forgot %llu clients", count);
+-}
+-
+-void nfsd_forget_locks(u64 num)
+-{
+-	u64 count = nfsd_for_n_state(num, nfsd_forget_client_locks);
+-	printk(KERN_INFO "NFSD: Forgot %llu locks", count);
+-}
+-
+-void nfsd_forget_openowners(u64 num)
+-{
+-	u64 count = nfsd_for_n_state(num, nfsd_forget_client_openowners);
+-	printk(KERN_INFO "NFSD: Forgot %llu open owners", count);
+-}
+-
+-void nfsd_forget_delegations(u64 num)
+-{
+-	u64 count = nfsd_for_n_state(num, nfsd_forget_client_delegations);
+-	printk(KERN_INFO "NFSD: Forgot %llu delegations", count);
+-}
+-
+-void nfsd_recall_delegations(u64 num)
+-{
+-	u64 count = nfsd_for_n_state(num, nfsd_recall_client_delegations);
+-	printk(KERN_INFO "NFSD: Recalled %llu delegations", count);
+-}
+-
+ #endif /* CONFIG_NFSD_FAULT_INJECTION */
+ 
+ /* initialization to perform at module load time: */
+diff --git a/fs/nfsd/state.h b/fs/nfsd/state.h
+index b542bf2c0fe7..423ac64ceb74 100644
+--- a/fs/nfsd/state.h
++++ b/fs/nfsd/state.h
+@@ -501,11 +501,13 @@ extern void nfsd4_record_grace_done(struct nfsd_net *nn, time_t boot_time);
+ #ifdef CONFIG_NFSD_FAULT_INJECTION
+ int nfsd_fault_inject_init(void);
+ void nfsd_fault_inject_cleanup(void);
+-void nfsd_forget_clients(u64);
+-void nfsd_forget_locks(u64);
+-void nfsd_forget_openowners(u64);
+-void nfsd_forget_delegations(u64);
+-void nfsd_recall_delegations(u64);
++u64 nfsd_for_n_state(u64, u64 (*)(struct nfs4_client *, u64));
++
++u64 nfsd_forget_client(struct nfs4_client *, u64);
++u64 nfsd_forget_client_locks(struct nfs4_client*, u64);
++u64 nfsd_forget_client_openowners(struct nfs4_client *, u64);
++u64 nfsd_forget_client_delegations(struct nfs4_client *, u64);
++u64 nfsd_recall_client_delegations(struct nfs4_client *, u64);
+ #else /* CONFIG_NFSD_FAULT_INJECTION */
+ static inline int nfsd_fault_inject_init(void) { return 0; }
+ static inline void nfsd_fault_inject_cleanup(void) {}

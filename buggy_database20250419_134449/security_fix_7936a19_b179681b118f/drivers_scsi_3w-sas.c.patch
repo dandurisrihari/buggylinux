@@ -1,0 +1,58 @@
+commit 7936a19e944b934d21d79f1b90d478d1f7081b63
+Author: Justin Stitt <justinstitt@google.com>
+Date:   Mon Oct 23 19:50:57 2023 +0000
+
+    scsi: 3w-sas: Replace deprecated strncpy() with strscpy()
+    
+    strncpy() is deprecated for use on NUL-terminated destination strings
+    [1] and as such we should prefer more robust and less ambiguous string
+    interfaces.
+    
+    This pattern of strncpy(dest, src, strlen(src)) is extremely bug-prone.
+    This pattern basically never results in NUL-terminated destination
+    strings unless `dest` was zero-initialized. The current implementation
+    may be accidentally correct as tw_dev is zero-allocated via:
+    
+            host = scsi_host_alloc(&driver_template, sizeof(TW_Device_Extension));
+            ...
+            tw_dev = shost_priv(host);
+    
+    ... wherein scsi_host_alloc() zero-allocates host:
+    
+            shost = kzalloc(sizeof(struct Scsi_Host) + privsize, GFP_KERNEL);
+    
+    Also, further suggesting this change is worthwhile is another strscpy()
+    usage in 3w-9xxx.c:
+    
+            strscpy(tw_dev->tw_compat_info.driver_version, TW_DRIVER_VERSION,
+                    sizeof(tw_dev->tw_compat_info.driver_version));
+    
+    Considering the above, a suitable replacement is strscpy() [2] due to
+    the fact that it guarantees NUL-termination on the destination buffer
+    without unnecessarily NUL-padding.
+    
+    Let's not be accidentally correct, let's be definitely correct.
+    
+    Link: https://www.kernel.org/doc/html/latest/process/deprecated.html#strncpy-on-nul-terminated-strings [1]
+    Link: https://manpages.debian.org/testing/linux-manual-4.8/strscpy.9.en.html [2]
+    Link: https://github.com/KSPP/linux/issues/90
+    Cc: linux-hardening@vger.kernel.org
+    Signed-off-by: Justin Stitt <justinstitt@google.com>
+    Link: https://lore.kernel.org/r/20231023-strncpy-drivers-scsi-3w-sas-c-v1-1-4c40a1e99dfc@google.com
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+
+diff --git a/drivers/scsi/3w-sas.c b/drivers/scsi/3w-sas.c
+index 55989eaa2d9f..9bdb75dfdcd7 100644
+--- a/drivers/scsi/3w-sas.c
++++ b/drivers/scsi/3w-sas.c
+@@ -1326,7 +1326,8 @@ static int twl_reset_sequence(TW_Device_Extension *tw_dev, int soft_reset)
+ 		}
+ 
+ 		/* Load rest of compatibility struct */
+-		strncpy(tw_dev->tw_compat_info.driver_version, TW_DRIVER_VERSION, strlen(TW_DRIVER_VERSION));
++		strscpy(tw_dev->tw_compat_info.driver_version, TW_DRIVER_VERSION,
++			sizeof(tw_dev->tw_compat_info.driver_version));
+ 		tw_dev->tw_compat_info.driver_srl_high = TW_CURRENT_DRIVER_SRL;
+ 		tw_dev->tw_compat_info.driver_branch_high = TW_CURRENT_DRIVER_BRANCH;
+ 		tw_dev->tw_compat_info.driver_build_high = TW_CURRENT_DRIVER_BUILD;

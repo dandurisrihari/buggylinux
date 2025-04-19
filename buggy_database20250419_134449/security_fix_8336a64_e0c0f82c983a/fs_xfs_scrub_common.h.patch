@@ -1,0 +1,49 @@
+commit 8336a64eb75cba4cc4749d9c4770fef53afdc1ad
+Author: Darrick J. Wong <djwong@kernel.org>
+Date:   Thu Aug 10 07:48:10 2023 -0700
+
+    xfs: don't complain about unfixed metadata when repairs were injected
+    
+    While debugging other parts of online repair, I noticed that if someone
+    injects FORCE_SCRUB_REPAIR, starts an IFLAG_REPAIR scrub on a piece of
+    metadata, and the metadata repair fails, we'll log a message about
+    uncorrected errors in the filesystem.
+    
+    This isn't strictly true if the scrub function didn't set OFLAG_CORRUPT
+    and we're only doing the repair because the error injection knob is set.
+    Repair functions are allowed to abort the entire operation at any point
+    before committing new metadata, in which case the piece of metadata is
+    in the same state as it was before.  Therefore, the log message should
+    be gated on the results of the scrub.  Refactor the predicate and
+    rearrange the code flow to make this happen.
+    
+    Note: If the repair function errors out after it commits the new
+    metadata, the transaction cancellation will shut down the filesystem,
+    which is an obvious sign of corrupt metadata.
+    
+    Signed-off-by: Darrick J. Wong <djwong@kernel.org>
+    Reviewed-by: Dave Chinner <dchinner@redhat.com>
+
+diff --git a/fs/xfs/scrub/common.h b/fs/xfs/scrub/common.h
+index 5fe6d661d42d..4f7cb410904d 100644
+--- a/fs/xfs/scrub/common.h
++++ b/fs/xfs/scrub/common.h
+@@ -167,6 +167,18 @@ static inline bool xchk_skip_xref(struct xfs_scrub_metadata *sm)
+ 			       XFS_SCRUB_OFLAG_XCORRUPT);
+ }
+ 
++#ifdef CONFIG_XFS_ONLINE_REPAIR
++/* Decide if a repair is required. */
++static inline bool xchk_needs_repair(const struct xfs_scrub_metadata *sm)
++{
++	return sm->sm_flags & (XFS_SCRUB_OFLAG_CORRUPT |
++			       XFS_SCRUB_OFLAG_XCORRUPT |
++			       XFS_SCRUB_OFLAG_PREEN);
++}
++#else
++# define xchk_needs_repair(sc)		(false)
++#endif /* CONFIG_XFS_ONLINE_REPAIR */
++
+ int xchk_metadata_inode_forks(struct xfs_scrub *sc);
+ 
+ /*

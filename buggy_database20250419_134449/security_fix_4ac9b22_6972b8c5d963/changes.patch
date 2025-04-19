@@ -1,0 +1,563 @@
+diff --git a/drivers/scsi/lpfc/lpfc.h b/drivers/scsi/lpfc/lpfc.h
+index bb2e9ec0adea..3a1ffdd6d831 100644
+--- a/drivers/scsi/lpfc/lpfc.h
++++ b/drivers/scsi/lpfc/lpfc.h
+@@ -840,6 +840,8 @@ struct lpfc_hba {
+ 	struct dentry *debug_dumpData;   /* BlockGuard BPL */
+ 	struct dentry *debug_dumpDif;    /* BlockGuard BPL */
+ 	struct dentry *debug_InjErrLBA;  /* LBA to inject errors at */
++	struct dentry *debug_InjErrNPortID;  /* NPortID to inject errors at */
++	struct dentry *debug_InjErrWWPN;  /* WWPN to inject errors at */
+ 	struct dentry *debug_writeGuard; /* inject write guard_tag errors */
+ 	struct dentry *debug_writeApp;   /* inject write app_tag errors */
+ 	struct dentry *debug_writeRef;   /* inject write ref_tag errors */
+@@ -854,6 +856,8 @@ struct lpfc_hba {
+ 	uint32_t lpfc_injerr_rgrd_cnt;
+ 	uint32_t lpfc_injerr_rapp_cnt;
+ 	uint32_t lpfc_injerr_rref_cnt;
++	uint32_t lpfc_injerr_nportid;
++	struct lpfc_name lpfc_injerr_wwpn;
+ 	sector_t lpfc_injerr_lba;
+ #define LPFC_INJERR_LBA_OFF	(sector_t)(-1)
+ 
+diff --git a/drivers/scsi/lpfc/lpfc_debugfs.c b/drivers/scsi/lpfc/lpfc_debugfs.c
+index 4f16327e19c8..5bdf2eecb178 100644
+--- a/drivers/scsi/lpfc/lpfc_debugfs.c
++++ b/drivers/scsi/lpfc/lpfc_debugfs.c
+@@ -1011,6 +1011,7 @@ lpfc_debugfs_dif_err_read(struct file *file, char __user *buf,
+ 	struct dentry *dent = file->f_dentry;
+ 	struct lpfc_hba *phba = file->private_data;
+ 	char cbuf[32];
++	uint64_t tmp = 0;
+ 	int cnt = 0;
+ 
+ 	if (dent == phba->debug_writeGuard)
+@@ -1025,12 +1026,18 @@ lpfc_debugfs_dif_err_read(struct file *file, char __user *buf,
+ 		cnt = snprintf(cbuf, 32, "%u\n", phba->lpfc_injerr_rapp_cnt);
+ 	else if (dent == phba->debug_readRef)
+ 		cnt = snprintf(cbuf, 32, "%u\n", phba->lpfc_injerr_rref_cnt);
+-	else if (dent == phba->debug_InjErrLBA) {
+-		if (phba->lpfc_injerr_lba == (unsigned long)(-1))
++	else if (dent == phba->debug_InjErrNPortID)
++		cnt = snprintf(cbuf, 32, "0x%06x\n", phba->lpfc_injerr_nportid);
++	else if (dent == phba->debug_InjErrWWPN) {
++		memcpy(&tmp, &phba->lpfc_injerr_wwpn, sizeof(struct lpfc_name));
++		tmp = cpu_to_be64(tmp);
++		cnt = snprintf(cbuf, 32, "0x%016llx\n", tmp);
++	} else if (dent == phba->debug_InjErrLBA) {
++		if (phba->lpfc_injerr_lba == (sector_t)(-1))
+ 			cnt = snprintf(cbuf, 32, "off\n");
+ 		else
+-			cnt = snprintf(cbuf, 32, "0x%lx\n",
+-				 (unsigned long) phba->lpfc_injerr_lba);
++			cnt = snprintf(cbuf, 32, "0x%llx\n",
++				 (uint64_t) phba->lpfc_injerr_lba);
+ 	} else
+ 		lpfc_printf_log(phba, KERN_ERR, LOG_INIT,
+ 			 "0547 Unknown debugfs error injection entry\n");
+@@ -1045,7 +1052,7 @@ lpfc_debugfs_dif_err_write(struct file *file, const char __user *buf,
+ 	struct dentry *dent = file->f_dentry;
+ 	struct lpfc_hba *phba = file->private_data;
+ 	char dstbuf[32];
+-	unsigned long tmp = 0;
++	uint64_t tmp = 0;
+ 	int size;
+ 
+ 	memset(dstbuf, 0, 32);
+@@ -1055,10 +1062,10 @@ lpfc_debugfs_dif_err_write(struct file *file, const char __user *buf,
+ 
+ 	if (dent == phba->debug_InjErrLBA) {
+ 		if ((buf[0] == 'o') && (buf[1] == 'f') && (buf[2] == 'f'))
+-			tmp = (unsigned long)(-1);
++			tmp = (uint64_t)(-1);
+ 	}
+ 
+-	if ((tmp == 0) && (kstrtoul(dstbuf, 0, &tmp)))
++	if ((tmp == 0) && (kstrtoull(dstbuf, 0, &tmp)))
+ 		return 0;
+ 
+ 	if (dent == phba->debug_writeGuard)
+@@ -1075,7 +1082,12 @@ lpfc_debugfs_dif_err_write(struct file *file, const char __user *buf,
+ 		phba->lpfc_injerr_rref_cnt = (uint32_t)tmp;
+ 	else if (dent == phba->debug_InjErrLBA)
+ 		phba->lpfc_injerr_lba = (sector_t)tmp;
+-	else
++	else if (dent == phba->debug_InjErrNPortID)
++		phba->lpfc_injerr_nportid = (uint32_t)(tmp & Mask_DID);
++	else if (dent == phba->debug_InjErrWWPN) {
++		tmp = cpu_to_be64(tmp);
++		memcpy(&phba->lpfc_injerr_wwpn, &tmp, sizeof(struct lpfc_name));
++	} else
+ 		lpfc_printf_log(phba, KERN_ERR, LOG_INIT,
+ 			 "0548 Unknown debugfs error injection entry\n");
+ 
+@@ -3957,6 +3969,28 @@ lpfc_debugfs_initialize(struct lpfc_vport *vport)
+ 		}
+ 		phba->lpfc_injerr_lba = LPFC_INJERR_LBA_OFF;
+ 
++		snprintf(name, sizeof(name), "InjErrNPortID");
++		phba->debug_InjErrNPortID =
++			debugfs_create_file(name, S_IFREG|S_IRUGO|S_IWUSR,
++			phba->hba_debugfs_root,
++			phba, &lpfc_debugfs_op_dif_err);
++		if (!phba->debug_InjErrNPortID) {
++			lpfc_printf_vlog(vport, KERN_ERR, LOG_INIT,
++				"0809 Cannot create debugfs InjErrNPortID\n");
++			goto debug_failed;
++		}
++
++		snprintf(name, sizeof(name), "InjErrWWPN");
++		phba->debug_InjErrWWPN =
++			debugfs_create_file(name, S_IFREG|S_IRUGO|S_IWUSR,
++			phba->hba_debugfs_root,
++			phba, &lpfc_debugfs_op_dif_err);
++		if (!phba->debug_InjErrWWPN) {
++			lpfc_printf_vlog(vport, KERN_ERR, LOG_INIT,
++				"0810 Cannot create debugfs InjErrWWPN\n");
++			goto debug_failed;
++		}
++
+ 		snprintf(name, sizeof(name), "writeGuardInjErr");
+ 		phba->debug_writeGuard =
+ 			debugfs_create_file(name, S_IFREG|S_IRUGO|S_IWUSR,
+@@ -4329,6 +4363,14 @@ lpfc_debugfs_terminate(struct lpfc_vport *vport)
+ 			debugfs_remove(phba->debug_InjErrLBA); /* InjErrLBA */
+ 			phba->debug_InjErrLBA = NULL;
+ 		}
++		if (phba->debug_InjErrNPortID) {	 /* InjErrNPortID */
++			debugfs_remove(phba->debug_InjErrNPortID);
++			phba->debug_InjErrNPortID = NULL;
++		}
++		if (phba->debug_InjErrWWPN) {
++			debugfs_remove(phba->debug_InjErrWWPN); /* InjErrWWPN */
++			phba->debug_InjErrWWPN = NULL;
++		}
+ 		if (phba->debug_writeGuard) {
+ 			debugfs_remove(phba->debug_writeGuard); /* writeGuard */
+ 			phba->debug_writeGuard = NULL;
+diff --git a/drivers/scsi/lpfc/lpfc_scsi.c b/drivers/scsi/lpfc/lpfc_scsi.c
+index b1b7dd22af09..2e65168d8723 100644
+--- a/drivers/scsi/lpfc/lpfc_scsi.c
++++ b/drivers/scsi/lpfc/lpfc_scsi.c
+@@ -1314,6 +1314,8 @@ lpfc_bg_err_inject(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 	struct scatterlist *sgde; /* s/g data entry */
+ 	struct lpfc_scsi_buf *lpfc_cmd = NULL;
+ 	struct scsi_dif_tuple *src = NULL;
++	struct lpfc_nodelist *ndlp;
++	struct lpfc_rport_data *rdata;
+ 	uint32_t op = scsi_get_prot_op(sc);
+ 	uint32_t blksize;
+ 	uint32_t numblks;
+@@ -1326,8 +1328,9 @@ lpfc_bg_err_inject(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 
+ 	sgpe = scsi_prot_sglist(sc);
+ 	sgde = scsi_sglist(sc);
+-
+ 	lba = scsi_get_lba(sc);
++
++	/* First check if we need to match the LBA */
+ 	if (phba->lpfc_injerr_lba != LPFC_INJERR_LBA_OFF) {
+ 		blksize = lpfc_cmd_blksize(sc);
+ 		numblks = (scsi_bufflen(sc) + blksize - 1) / blksize;
+@@ -1342,12 +1345,36 @@ lpfc_bg_err_inject(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 				sizeof(struct scsi_dif_tuple);
+ 			if (numblks < blockoff)
+ 				blockoff = numblks;
+-			src = (struct scsi_dif_tuple *)sg_virt(sgpe);
+-			src += blockoff;
+-			lpfc_cmd = (struct lpfc_scsi_buf *)sc->host_scribble;
+ 		}
+ 	}
+ 
++	/* Next check if we need to match the remote NPortID or WWPN */
++	rdata = sc->device->hostdata;
++	if (rdata && rdata->pnode) {
++		ndlp = rdata->pnode;
++
++		/* Make sure we have the right NPortID if one is specified */
++		if (phba->lpfc_injerr_nportid  &&
++			(phba->lpfc_injerr_nportid != ndlp->nlp_DID))
++			return 0;
++
++		/*
++		 * Make sure we have the right WWPN if one is specified.
++		 * wwn[0] should be a non-zero NAA in a good WWPN.
++		 */
++		if (phba->lpfc_injerr_wwpn.u.wwn[0]  &&
++			(memcmp(&ndlp->nlp_portname, &phba->lpfc_injerr_wwpn,
++				sizeof(struct lpfc_name)) != 0))
++			return 0;
++	}
++
++	/* Setup a ptr to the protection data if the SCSI host provides it */
++	if (sgpe) {
++		src = (struct scsi_dif_tuple *)sg_virt(sgpe);
++		src += blockoff;
++		lpfc_cmd = (struct lpfc_scsi_buf *)sc->host_scribble;
++	}
++
+ 	/* Should we change the Reference Tag */
+ 	if (reftag) {
+ 		if (phba->lpfc_injerr_wref_cnt) {
+@@ -1382,8 +1409,13 @@ lpfc_bg_err_inject(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 					}
+ 					src->ref_tag = cpu_to_be32(0xDEADBEEF);
+ 					phba->lpfc_injerr_wref_cnt--;
+-					phba->lpfc_injerr_lba =
+-						LPFC_INJERR_LBA_OFF;
++					if (phba->lpfc_injerr_wref_cnt == 0) {
++						phba->lpfc_injerr_nportid = 0;
++						phba->lpfc_injerr_lba =
++							LPFC_INJERR_LBA_OFF;
++						memset(&phba->lpfc_injerr_wwpn,
++						  0, sizeof(struct lpfc_name));
++					}
+ 					rc = BG_ERR_TGT | BG_ERR_CHECK;
+ 
+ 					break;
+@@ -1398,7 +1430,13 @@ lpfc_bg_err_inject(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 				/* DEADBEEF will be the reftag on the wire */
+ 				*reftag = 0xDEADBEEF;
+ 				phba->lpfc_injerr_wref_cnt--;
+-				phba->lpfc_injerr_lba = LPFC_INJERR_LBA_OFF;
++				if (phba->lpfc_injerr_wref_cnt == 0) {
++					phba->lpfc_injerr_nportid = 0;
++					phba->lpfc_injerr_lba =
++					LPFC_INJERR_LBA_OFF;
++					memset(&phba->lpfc_injerr_wwpn,
++						0, sizeof(struct lpfc_name));
++				}
+ 				rc = BG_ERR_TGT | BG_ERR_CHECK;
+ 
+ 				lpfc_printf_log(phba, KERN_ERR, LOG_BG,
+@@ -1413,7 +1451,13 @@ lpfc_bg_err_inject(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 				 */
+ 				*reftag = 0xDEADBEEF;
+ 				phba->lpfc_injerr_wref_cnt--;
+-				phba->lpfc_injerr_lba = LPFC_INJERR_LBA_OFF;
++				if (phba->lpfc_injerr_wref_cnt == 0) {
++					phba->lpfc_injerr_nportid = 0;
++					phba->lpfc_injerr_lba =
++						LPFC_INJERR_LBA_OFF;
++					memset(&phba->lpfc_injerr_wwpn,
++						0, sizeof(struct lpfc_name));
++				}
+ 				rc = BG_ERR_INIT;
+ 
+ 				lpfc_printf_log(phba, KERN_ERR, LOG_BG,
+@@ -1425,11 +1469,6 @@ lpfc_bg_err_inject(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 		if (phba->lpfc_injerr_rref_cnt) {
+ 			switch (op) {
+ 			case SCSI_PROT_READ_INSERT:
+-				/*
+-				 * For READ_INSERT, it doesn't make sense
+-				 * to change the reftag.
+-				 */
+-				break;
+ 			case SCSI_PROT_READ_STRIP:
+ 			case SCSI_PROT_READ_PASS:
+ 				/*
+@@ -1439,7 +1478,13 @@ lpfc_bg_err_inject(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 				 */
+ 				*reftag = 0xDEADBEEF;
+ 				phba->lpfc_injerr_rref_cnt--;
+-				phba->lpfc_injerr_lba = LPFC_INJERR_LBA_OFF;
++				if (phba->lpfc_injerr_rref_cnt == 0) {
++					phba->lpfc_injerr_nportid = 0;
++					phba->lpfc_injerr_lba =
++						LPFC_INJERR_LBA_OFF;
++					memset(&phba->lpfc_injerr_wwpn,
++						0, sizeof(struct lpfc_name));
++				}
+ 				rc = BG_ERR_INIT;
+ 
+ 				lpfc_printf_log(phba, KERN_ERR, LOG_BG,
+@@ -1455,7 +1500,7 @@ lpfc_bg_err_inject(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 		if (phba->lpfc_injerr_wapp_cnt) {
+ 			switch (op) {
+ 			case SCSI_PROT_WRITE_PASS:
+-				if (blockoff && src) {
++				if (src) {
+ 					/*
+ 					 * For WRITE_PASS, force the error
+ 					 * to be sent on the wire. It should
+@@ -1464,7 +1509,6 @@ lpfc_bg_err_inject(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 					 * inserted in middle of the IO.
+ 					 */
+ 
+-
+ 					lpfc_printf_log(phba, KERN_ERR, LOG_BG,
+ 					"9080 BLKGRD: Injecting apptag error: "
+ 					"write lba x%lx + x%x oldappTag x%x\n",
+@@ -1485,8 +1529,13 @@ lpfc_bg_err_inject(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 					}
+ 					src->app_tag = cpu_to_be16(0xDEAD);
+ 					phba->lpfc_injerr_wapp_cnt--;
+-					phba->lpfc_injerr_lba =
+-						LPFC_INJERR_LBA_OFF;
++					if (phba->lpfc_injerr_wapp_cnt == 0) {
++						phba->lpfc_injerr_nportid = 0;
++						phba->lpfc_injerr_lba =
++							LPFC_INJERR_LBA_OFF;
++						memset(&phba->lpfc_injerr_wwpn,
++						  0, sizeof(struct lpfc_name));
++					}
+ 					rc = BG_ERR_TGT | BG_ERR_CHECK;
+ 					break;
+ 				}
+@@ -1500,8 +1549,13 @@ lpfc_bg_err_inject(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 				/* DEAD will be the apptag on the wire */
+ 				*apptag = 0xDEAD;
+ 				phba->lpfc_injerr_wapp_cnt--;
+-				phba->lpfc_injerr_lba = LPFC_INJERR_LBA_OFF;
+-				rc = BG_ERR_TGT;
++				if (phba->lpfc_injerr_wapp_cnt == 0) {
++					phba->lpfc_injerr_nportid = 0;
++					phba->lpfc_injerr_lba =
++						LPFC_INJERR_LBA_OFF;
++					memset(&phba->lpfc_injerr_wwpn,
++						0, sizeof(struct lpfc_name));
++				}
+ 				rc = BG_ERR_TGT | BG_ERR_CHECK;
+ 
+ 				lpfc_printf_log(phba, KERN_ERR, LOG_BG,
+@@ -1516,7 +1570,13 @@ lpfc_bg_err_inject(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 				 */
+ 				*apptag = 0xDEAD;
+ 				phba->lpfc_injerr_wapp_cnt--;
+-				phba->lpfc_injerr_lba = LPFC_INJERR_LBA_OFF;
++				if (phba->lpfc_injerr_wapp_cnt == 0) {
++					phba->lpfc_injerr_nportid = 0;
++					phba->lpfc_injerr_lba =
++						LPFC_INJERR_LBA_OFF;
++					memset(&phba->lpfc_injerr_wwpn,
++						0, sizeof(struct lpfc_name));
++				}
+ 				rc = BG_ERR_INIT;
+ 
+ 				lpfc_printf_log(phba, KERN_ERR, LOG_BG,
+@@ -1528,11 +1588,6 @@ lpfc_bg_err_inject(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 		if (phba->lpfc_injerr_rapp_cnt) {
+ 			switch (op) {
+ 			case SCSI_PROT_READ_INSERT:
+-				/*
+-				 * For READ_INSERT, it doesn't make sense
+-				 * to change the apptag.
+-				 */
+-				break;
+ 			case SCSI_PROT_READ_STRIP:
+ 			case SCSI_PROT_READ_PASS:
+ 				/*
+@@ -1542,7 +1597,13 @@ lpfc_bg_err_inject(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 				 */
+ 				*apptag = 0xDEAD;
+ 				phba->lpfc_injerr_rapp_cnt--;
+-				phba->lpfc_injerr_lba = LPFC_INJERR_LBA_OFF;
++				if (phba->lpfc_injerr_rapp_cnt == 0) {
++					phba->lpfc_injerr_nportid = 0;
++					phba->lpfc_injerr_lba =
++						LPFC_INJERR_LBA_OFF;
++					memset(&phba->lpfc_injerr_wwpn,
++						0, sizeof(struct lpfc_name));
++				}
+ 				rc = BG_ERR_INIT;
+ 
+ 				lpfc_printf_log(phba, KERN_ERR, LOG_BG,
+@@ -1569,7 +1630,13 @@ lpfc_bg_err_inject(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 				 * detected by the Target.
+ 				 */
+ 				phba->lpfc_injerr_wgrd_cnt--;
+-				phba->lpfc_injerr_lba = LPFC_INJERR_LBA_OFF;
++				if (phba->lpfc_injerr_wgrd_cnt == 0) {
++					phba->lpfc_injerr_nportid = 0;
++					phba->lpfc_injerr_lba =
++						LPFC_INJERR_LBA_OFF;
++					memset(&phba->lpfc_injerr_wwpn,
++						0, sizeof(struct lpfc_name));
++				}
+ 
+ 				rc |= BG_ERR_TGT | BG_ERR_SWAP;
+ 				/* Signals the caller to swap CRC->CSUM */
+@@ -1585,7 +1652,13 @@ lpfc_bg_err_inject(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 				 * being copied from SLI-Host to SLI-Port.
+ 				 */
+ 				phba->lpfc_injerr_wgrd_cnt--;
+-				phba->lpfc_injerr_lba = LPFC_INJERR_LBA_OFF;
++				if (phba->lpfc_injerr_wgrd_cnt == 0) {
++					phba->lpfc_injerr_nportid = 0;
++					phba->lpfc_injerr_lba =
++						LPFC_INJERR_LBA_OFF;
++					memset(&phba->lpfc_injerr_wwpn,
++						0, sizeof(struct lpfc_name));
++				}
+ 
+ 				rc = BG_ERR_INIT | BG_ERR_SWAP;
+ 				/* Signals the caller to swap CRC->CSUM */
+@@ -1599,11 +1672,6 @@ lpfc_bg_err_inject(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 		if (phba->lpfc_injerr_rgrd_cnt) {
+ 			switch (op) {
+ 			case SCSI_PROT_READ_INSERT:
+-				/*
+-				 * For READ_INSERT, it doesn't make sense
+-				 * to change the guard tag.
+-				 */
+-				break;
+ 			case SCSI_PROT_READ_STRIP:
+ 			case SCSI_PROT_READ_PASS:
+ 				/*
+@@ -1612,7 +1680,13 @@ lpfc_bg_err_inject(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 				 * should force an IO error to the driver.
+ 				 */
+ 				phba->lpfc_injerr_rgrd_cnt--;
+-				phba->lpfc_injerr_lba = LPFC_INJERR_LBA_OFF;
++				if (phba->lpfc_injerr_rgrd_cnt == 0) {
++					phba->lpfc_injerr_nportid = 0;
++					phba->lpfc_injerr_lba =
++						LPFC_INJERR_LBA_OFF;
++					memset(&phba->lpfc_injerr_wwpn,
++						0, sizeof(struct lpfc_name));
++				}
+ 
+ 				rc = BG_ERR_INIT | BG_ERR_SWAP;
+ 				/* Signals the caller to swap CRC->CSUM */
+@@ -1650,20 +1724,20 @@ lpfc_sc_to_bg_opcodes(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 		switch (scsi_get_prot_op(sc)) {
+ 		case SCSI_PROT_READ_INSERT:
+ 		case SCSI_PROT_WRITE_STRIP:
+-			*txop = BG_OP_IN_CSUM_OUT_NODIF;
+ 			*rxop = BG_OP_IN_NODIF_OUT_CSUM;
++			*txop = BG_OP_IN_CSUM_OUT_NODIF;
+ 			break;
+ 
+ 		case SCSI_PROT_READ_STRIP:
+ 		case SCSI_PROT_WRITE_INSERT:
+-			*txop = BG_OP_IN_NODIF_OUT_CRC;
+ 			*rxop = BG_OP_IN_CRC_OUT_NODIF;
++			*txop = BG_OP_IN_NODIF_OUT_CRC;
+ 			break;
+ 
+ 		case SCSI_PROT_READ_PASS:
+ 		case SCSI_PROT_WRITE_PASS:
+-			*txop = BG_OP_IN_CSUM_OUT_CRC;
+ 			*rxop = BG_OP_IN_CRC_OUT_CSUM;
++			*txop = BG_OP_IN_CSUM_OUT_CRC;
+ 			break;
+ 
+ 		case SCSI_PROT_NORMAL:
+@@ -1679,20 +1753,20 @@ lpfc_sc_to_bg_opcodes(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 		switch (scsi_get_prot_op(sc)) {
+ 		case SCSI_PROT_READ_STRIP:
+ 		case SCSI_PROT_WRITE_INSERT:
+-			*txop = BG_OP_IN_NODIF_OUT_CRC;
+ 			*rxop = BG_OP_IN_CRC_OUT_NODIF;
++			*txop = BG_OP_IN_NODIF_OUT_CRC;
+ 			break;
+ 
+ 		case SCSI_PROT_READ_PASS:
+ 		case SCSI_PROT_WRITE_PASS:
+-			*txop = BG_OP_IN_CRC_OUT_CRC;
+ 			*rxop = BG_OP_IN_CRC_OUT_CRC;
++			*txop = BG_OP_IN_CRC_OUT_CRC;
+ 			break;
+ 
+ 		case SCSI_PROT_READ_INSERT:
+ 		case SCSI_PROT_WRITE_STRIP:
+-			*txop = BG_OP_IN_CRC_OUT_NODIF;
+ 			*rxop = BG_OP_IN_NODIF_OUT_CRC;
++			*txop = BG_OP_IN_CRC_OUT_NODIF;
+ 			break;
+ 
+ 		case SCSI_PROT_NORMAL:
+@@ -1731,20 +1805,20 @@ lpfc_bg_err_opcodes(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 		switch (scsi_get_prot_op(sc)) {
+ 		case SCSI_PROT_READ_INSERT:
+ 		case SCSI_PROT_WRITE_STRIP:
+-			*txop = BG_OP_IN_CRC_OUT_NODIF;
+ 			*rxop = BG_OP_IN_NODIF_OUT_CRC;
++			*txop = BG_OP_IN_CRC_OUT_NODIF;
+ 			break;
+ 
+ 		case SCSI_PROT_READ_STRIP:
+ 		case SCSI_PROT_WRITE_INSERT:
+-			*txop = BG_OP_IN_NODIF_OUT_CSUM;
+ 			*rxop = BG_OP_IN_CSUM_OUT_NODIF;
++			*txop = BG_OP_IN_NODIF_OUT_CSUM;
+ 			break;
+ 
+ 		case SCSI_PROT_READ_PASS:
+ 		case SCSI_PROT_WRITE_PASS:
++			*rxop = BG_OP_IN_CSUM_OUT_CRC;
+ 			*txop = BG_OP_IN_CRC_OUT_CSUM;
+-			*rxop = BG_OP_IN_CRC_OUT_CRC;
+ 			break;
+ 
+ 		case SCSI_PROT_NORMAL:
+@@ -1756,20 +1830,20 @@ lpfc_bg_err_opcodes(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 		switch (scsi_get_prot_op(sc)) {
+ 		case SCSI_PROT_READ_STRIP:
+ 		case SCSI_PROT_WRITE_INSERT:
+-			*txop = BG_OP_IN_NODIF_OUT_CSUM;
+ 			*rxop = BG_OP_IN_CSUM_OUT_NODIF;
++			*txop = BG_OP_IN_NODIF_OUT_CSUM;
+ 			break;
+ 
+ 		case SCSI_PROT_READ_PASS:
+ 		case SCSI_PROT_WRITE_PASS:
++			*rxop = BG_OP_IN_CSUM_OUT_CSUM;
+ 			*txop = BG_OP_IN_CSUM_OUT_CSUM;
+-			*rxop = BG_OP_IN_CRC_OUT_CSUM;
+ 			break;
+ 
+ 		case SCSI_PROT_READ_INSERT:
+ 		case SCSI_PROT_WRITE_STRIP:
+-			*txop = BG_OP_IN_CSUM_OUT_NODIF;
+ 			*rxop = BG_OP_IN_NODIF_OUT_CSUM;
++			*txop = BG_OP_IN_CSUM_OUT_NODIF;
+ 			break;
+ 
+ 		case SCSI_PROT_NORMAL:
+@@ -1838,7 +1912,7 @@ lpfc_bg_setup_bpl(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 	reftag = (uint32_t)scsi_get_lba(sc); /* Truncate LBA */
+ 
+ #ifdef CONFIG_SCSI_LPFC_DEBUG_FS
+-	rc = lpfc_bg_err_inject(phba, sc, &reftag, 0, 1);
++	rc = lpfc_bg_err_inject(phba, sc, &reftag, NULL, 1);
+ 	if (rc) {
+ 		if (rc & BG_ERR_SWAP)
+ 			lpfc_bg_err_opcodes(phba, sc, &txop, &rxop);
+@@ -1985,7 +2059,7 @@ lpfc_bg_setup_bpl_prot(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 	reftag = (uint32_t)scsi_get_lba(sc); /* Truncate LBA */
+ 
+ #ifdef CONFIG_SCSI_LPFC_DEBUG_FS
+-	rc = lpfc_bg_err_inject(phba, sc, &reftag, 0, 1);
++	rc = lpfc_bg_err_inject(phba, sc, &reftag, NULL, 1);
+ 	if (rc) {
+ 		if (rc & BG_ERR_SWAP)
+ 			lpfc_bg_err_opcodes(phba, sc, &txop, &rxop);
+@@ -2193,7 +2267,7 @@ lpfc_bg_setup_sgl(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 	reftag = (uint32_t)scsi_get_lba(sc); /* Truncate LBA */
+ 
+ #ifdef CONFIG_SCSI_LPFC_DEBUG_FS
+-	rc = lpfc_bg_err_inject(phba, sc, &reftag, 0, 1);
++	rc = lpfc_bg_err_inject(phba, sc, &reftag, NULL, 1);
+ 	if (rc) {
+ 		if (rc & BG_ERR_SWAP)
+ 			lpfc_bg_err_opcodes(phba, sc, &txop, &rxop);
+@@ -2333,7 +2407,7 @@ lpfc_bg_setup_sgl_prot(struct lpfc_hba *phba, struct scsi_cmnd *sc,
+ 	reftag = (uint32_t)scsi_get_lba(sc); /* Truncate LBA */
+ 
+ #ifdef CONFIG_SCSI_LPFC_DEBUG_FS
+-	rc = lpfc_bg_err_inject(phba, sc, &reftag, 0, 1);
++	rc = lpfc_bg_err_inject(phba, sc, &reftag, NULL, 1);
+ 	if (rc) {
+ 		if (rc & BG_ERR_SWAP)
+ 			lpfc_bg_err_opcodes(phba, sc, &txop, &rxop);
+@@ -2809,7 +2883,7 @@ lpfc_parse_bg_err(struct lpfc_hba *phba, struct lpfc_scsi_buf *lpfc_cmd,
+ 		/* No error was reported - problem in FW? */
+ 		cmd->result = ScsiResult(DID_ERROR, 0);
+ 		lpfc_printf_log(phba, KERN_ERR, LOG_BG,
+-			"9057 BLKGRD: no errors reported!\n");
++			"9057 BLKGRD: Unknown error reported!\n");
+ 	}
+ 
+ out:

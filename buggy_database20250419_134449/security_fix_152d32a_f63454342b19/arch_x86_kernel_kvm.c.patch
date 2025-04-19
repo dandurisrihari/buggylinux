@@ -1,0 +1,178 @@
+commit 152d32aa846835987966fd20ee1143b0e05036a0
+Merge: 4f9701057a9c 3bf0fcd75434
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Sat May 1 10:14:08 2021 -0700
+
+    Merge tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm
+    
+    Pull kvm updates from Paolo Bonzini:
+     "This is a large update by KVM standards, including AMD PSP (Platform
+      Security Processor, aka "AMD Secure Technology") and ARM CoreSight
+      (debug and trace) changes.
+    
+      ARM:
+    
+       - CoreSight: Add support for ETE and TRBE
+    
+       - Stage-2 isolation for the host kernel when running in protected
+         mode
+    
+       - Guest SVE support when running in nVHE mode
+    
+       - Force W^X hypervisor mappings in nVHE mode
+    
+       - ITS save/restore for guests using direct injection with GICv4.1
+    
+       - nVHE panics now produce readable backtraces
+    
+       - Guest support for PTP using the ptp_kvm driver
+    
+       - Performance improvements in the S2 fault handler
+    
+      x86:
+    
+       - AMD PSP driver changes
+    
+       - Optimizations and cleanup of nested SVM code
+    
+       - AMD: Support for virtual SPEC_CTRL
+    
+       - Optimizations of the new MMU code: fast invalidation, zap under
+         read lock, enable/disably dirty page logging under read lock
+    
+       - /dev/kvm API for AMD SEV live migration (guest API coming soon)
+    
+       - support SEV virtual machines sharing the same encryption context
+    
+       - support SGX in virtual machines
+    
+       - add a few more statistics
+    
+       - improved directed yield heuristics
+    
+       - Lots and lots of cleanups
+    
+      Generic:
+    
+       - Rework of MMU notifier interface, simplifying and optimizing the
+         architecture-specific code
+    
+       - a handful of "Get rid of oprofile leftovers" patches
+    
+       - Some selftests improvements"
+    
+    * tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm: (379 commits)
+      KVM: selftests: Speed up set_memory_region_test
+      selftests: kvm: Fix the check of return value
+      KVM: x86: Take advantage of kvm_arch_dy_has_pending_interrupt()
+      KVM: SVM: Skip SEV cache flush if no ASIDs have been used
+      KVM: SVM: Remove an unnecessary prototype declaration of sev_flush_asids()
+      KVM: SVM: Drop redundant svm_sev_enabled() helper
+      KVM: SVM: Move SEV VMCB tracking allocation to sev.c
+      KVM: SVM: Explicitly check max SEV ASID during sev_hardware_setup()
+      KVM: SVM: Unconditionally invoke sev_hardware_teardown()
+      KVM: SVM: Enable SEV/SEV-ES functionality by default (when supported)
+      KVM: SVM: Condition sev_enabled and sev_es_enabled on CONFIG_KVM_AMD_SEV=y
+      KVM: SVM: Append "_enabled" to module-scoped SEV/SEV-ES control variables
+      KVM: SEV: Mask CPUID[0x8000001F].eax according to supported features
+      KVM: SVM: Move SEV module params/variables to sev.c
+      KVM: SVM: Disable SEV/SEV-ES if NPT is disabled
+      KVM: SVM: Free sev_asid_bitmap during init if SEV setup fails
+      KVM: SVM: Zero out the VMCB array used to track SEV ASID association
+      x86/sev: Drop redundant and potentially misleading 'sev_enabled'
+      KVM: x86: Move reverse CPUID helpers to separate header file
+      KVM: x86: Rename GPR accessors to make mode-aware variants the defaults
+      ...
+
+diff --cc arch/x86/kernel/kvm.c
+index 5d32fa477a62,bd01a6131edf..d307c22e5c18
+--- a/arch/x86/kernel/kvm.c
++++ b/arch/x86/kernel/kvm.c
+@@@ -574,6 -574,49 +574,54 @@@ static void kvm_smp_send_call_func_ipi(
+  	}
+  }
+  
+ -static void kvm_flush_tlb_others(const struct cpumask *cpumask,
+++static void kvm_flush_tlb_multi(const struct cpumask *cpumask,
++ 			const struct flush_tlb_info *info)
++ {
++ 	u8 state;
++ 	int cpu;
++ 	struct kvm_steal_time *src;
++ 	struct cpumask *flushmask = this_cpu_cpumask_var_ptr(__pv_cpu_mask);
++ 
++ 	cpumask_copy(flushmask, cpumask);
++ 	/*
++ 	 * We have to call flush only on online vCPUs. And
++ 	 * queue flush_on_enter for pre-empted vCPUs
++ 	 */
++ 	for_each_cpu(cpu, flushmask) {
+++		/*
+++		 * The local vCPU is never preempted, so we do not explicitly
+++		 * skip check for local vCPU - it will never be cleared from
+++		 * flushmask.
+++		 */
++ 		src = &per_cpu(steal_time, cpu);
++ 		state = READ_ONCE(src->preempted);
++ 		if ((state & KVM_VCPU_PREEMPTED)) {
++ 			if (try_cmpxchg(&src->preempted, &state,
++ 					state | KVM_VCPU_FLUSH_TLB))
++ 				__cpumask_clear_cpu(cpu, flushmask);
++ 		}
++ 	}
++ 
+ -	native_flush_tlb_others(flushmask, info);
+++	native_flush_tlb_multi(flushmask, info);
++ }
++ 
++ static __init int kvm_alloc_cpumask(void)
++ {
++ 	int cpu;
++ 
++ 	if (!kvm_para_available() || nopv)
++ 		return 0;
++ 
++ 	if (pv_tlb_flush_supported() || pv_ipi_supported())
++ 		for_each_possible_cpu(cpu) {
++ 			zalloc_cpumask_var_node(per_cpu_ptr(&__pv_cpu_mask, cpu),
++ 				GFP_KERNEL, cpu_to_node(cpu));
++ 		}
++ 
++ 	return 0;
++ }
++ arch_initcall(kvm_alloc_cpumask);
++ 
+  static void __init kvm_smp_prepare_boot_cpu(void)
+  {
+  	/*
+@@@ -655,15 -668,9 +673,9 @@@ static void __init kvm_guest_init(void
+  
+  	if (kvm_para_has_feature(KVM_FEATURE_STEAL_TIME)) {
+  		has_steal_clock = 1;
+ -		pv_ops.time.steal_clock = kvm_steal_clock;
+ +		static_call_update(pv_steal_clock, kvm_steal_clock);
+  	}
+  
+- 	if (pv_tlb_flush_supported()) {
+- 		pv_ops.mmu.flush_tlb_multi = kvm_flush_tlb_multi;
+- 		pv_ops.mmu.tlb_remove_table = tlb_remove_table;
+- 		pr_info("KVM setup pv remote TLB flush\n");
+- 	}
+- 
+  	if (kvm_para_has_feature(KVM_FEATURE_PV_EOI))
+  		apic_set_eoi_write(kvm_guest_apic_eoi_write);
+  
+@@@ -673,6 -680,12 +685,12 @@@
+  	}
+  
+  #ifdef CONFIG_SMP
++ 	if (pv_tlb_flush_supported()) {
+ -		pv_ops.mmu.flush_tlb_others = kvm_flush_tlb_others;
+++		pv_ops.mmu.flush_tlb_multi = kvm_flush_tlb_multi;
++ 		pv_ops.mmu.tlb_remove_table = tlb_remove_table;
++ 		pr_info("KVM setup pv remote TLB flush\n");
++ 	}
++ 
+  	smp_ops.smp_prepare_boot_cpu = kvm_smp_prepare_boot_cpu;
+  	if (pv_sched_yield_supported()) {
+  		smp_ops.send_call_func_ipi = kvm_smp_send_call_func_ipi;

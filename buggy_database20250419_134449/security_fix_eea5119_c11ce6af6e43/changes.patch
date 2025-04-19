@@ -1,0 +1,93 @@
+diff --git a/fs/smb/client/asn1.c b/fs/smb/client/asn1.c
+index b5724ef9f182..214a44509e7b 100644
+--- a/fs/smb/client/asn1.c
++++ b/fs/smb/client/asn1.c
+@@ -52,6 +52,8 @@ int cifs_neg_token_init_mech_type(void *context, size_t hdrlen,
+ 		server->sec_kerberos = true;
+ 	else if (oid == OID_ntlmssp)
+ 		server->sec_ntlmssp = true;
++	else if (oid == OID_IAKerb)
++		server->sec_iakerb = true;
+ 	else {
+ 		char buf[50];
+ 
+diff --git a/fs/smb/client/cifs_spnego.c b/fs/smb/client/cifs_spnego.c
+index 28f568b5fc27..bc1c1e9b288a 100644
+--- a/fs/smb/client/cifs_spnego.c
++++ b/fs/smb/client/cifs_spnego.c
+@@ -138,11 +138,13 @@ cifs_get_spnego_key(struct cifs_ses *sesInfo,
+ 
+ 	dp = description + strlen(description);
+ 
+-	/* for now, only sec=krb5 and sec=mskrb5 are valid */
++	/* for now, only sec=krb5 and sec=mskrb5 and iakerb are valid */
+ 	if (server->sec_kerberos)
+ 		sprintf(dp, ";sec=krb5");
+ 	else if (server->sec_mskerberos)
+ 		sprintf(dp, ";sec=mskrb5");
++	else if (server->sec_iakerb)
++		sprintf(dp, ";sec=iakerb");
+ 	else {
+ 		cifs_dbg(VFS, "unknown or missing server auth type, use krb5\n");
+ 		sprintf(dp, ";sec=krb5");
+diff --git a/fs/smb/client/cifsglob.h b/fs/smb/client/cifsglob.h
+index 5ba6b46fe9d1..a68434ad744a 100644
+--- a/fs/smb/client/cifsglob.h
++++ b/fs/smb/client/cifsglob.h
+@@ -151,6 +151,7 @@ enum securityEnum {
+ 	NTLMv2,			/* Legacy NTLM auth with NTLMv2 hash */
+ 	RawNTLMSSP,		/* NTLMSSP without SPNEGO, NTLMv2 hash */
+ 	Kerberos,		/* Kerberos via SPNEGO */
++	IAKerb,			/* Kerberos proxy */
+ };
+ 
+ enum upcall_target_enum {
+@@ -781,6 +782,7 @@ struct TCP_Server_Info {
+ 	bool	sec_kerberosu2u;	/* supports U2U Kerberos */
+ 	bool	sec_kerberos;		/* supports plain Kerberos */
+ 	bool	sec_mskerberos;		/* supports legacy MS Kerberos */
++	bool	sec_iakerb;		/* supports pass-through auth for Kerberos (krb5 proxy) */
+ 	bool	large_buf;		/* is current buffer large? */
+ 	/* use SMBD connection instead of socket */
+ 	bool	rdma;
+@@ -2148,6 +2150,8 @@ static inline char *get_security_type_str(enum securityEnum sectype)
+ 		return "Kerberos";
+ 	case NTLMv2:
+ 		return "NTLMv2";
++	case IAKerb:
++		return "IAKerb";
+ 	default:
+ 		return "Unknown";
+ 	}
+diff --git a/fs/smb/client/sess.c b/fs/smb/client/sess.c
+index 91d4d409cb1d..faa80e7d54a6 100644
+--- a/fs/smb/client/sess.c
++++ b/fs/smb/client/sess.c
+@@ -1235,12 +1235,13 @@ cifs_select_sectype(struct TCP_Server_Info *server, enum securityEnum requested)
+ 		switch (requested) {
+ 		case Kerberos:
+ 		case RawNTLMSSP:
++		case IAKerb:
+ 			return requested;
+ 		case Unspecified:
+ 			if (server->sec_ntlmssp &&
+ 			    (global_secflags & CIFSSEC_MAY_NTLMSSP))
+ 				return RawNTLMSSP;
+-			if ((server->sec_kerberos || server->sec_mskerberos) &&
++			if ((server->sec_kerberos || server->sec_mskerberos || server->sec_iakerb) &&
+ 			    (global_secflags & CIFSSEC_MAY_KRB5))
+ 				return Kerberos;
+ 			fallthrough;
+diff --git a/fs/smb/client/smb2pdu.c b/fs/smb/client/smb2pdu.c
+index 9f54596a6866..40ad9e79437a 100644
+--- a/fs/smb/client/smb2pdu.c
++++ b/fs/smb/client/smb2pdu.c
+@@ -1429,7 +1429,7 @@ smb2_select_sectype(struct TCP_Server_Info *server, enum securityEnum requested)
+ 		if (server->sec_ntlmssp &&
+ 			(global_secflags & CIFSSEC_MAY_NTLMSSP))
+ 			return RawNTLMSSP;
+-		if ((server->sec_kerberos || server->sec_mskerberos) &&
++		if ((server->sec_kerberos || server->sec_mskerberos || server->sec_iakerb) &&
+ 			(global_secflags & CIFSSEC_MAY_KRB5))
+ 			return Kerberos;
+ 		fallthrough;

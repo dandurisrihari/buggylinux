@@ -1,0 +1,61 @@
+commit 7b402c8db66414abb4001d0c2676553baa619a2b
+Author: Chuck Lever <chuck.lever@oracle.com>
+Date:   Sun Jan 8 11:29:38 2023 -0500
+
+    SUNRPC: Add XDR encoding helper for opaque_auth
+    
+    RFC 5531 defines an MSG_ACCEPTED Reply message like this:
+    
+            struct accepted_reply {
+                    opaque_auth verf;
+                    union switch (accept_stat stat) {
+                    case SUCCESS:
+                       ...
+    
+    In the current server code, struct opaque_auth encoding is open-
+    coded. Introduce a helper that encodes an opaque_auth data item
+    within the context of a xdr_stream.
+    
+    Done as part of hardening the server-side RPC header decoding and
+    encoding paths.
+    
+    Reviewed-by: Jeff Layton <jlayton@kernel.org>
+    Signed-off-by: Chuck Lever <chuck.lever@oracle.com>
+
+diff --git a/net/sunrpc/xdr.c b/net/sunrpc/xdr.c
+index 56d87c784c9e..6b2ec24ec62d 100644
+--- a/net/sunrpc/xdr.c
++++ b/net/sunrpc/xdr.c
+@@ -2310,3 +2310,32 @@ ssize_t xdr_stream_decode_opaque_auth(struct xdr_stream *xdr, u32 *flavor,
+ 	return len + ret;
+ }
+ EXPORT_SYMBOL_GPL(xdr_stream_decode_opaque_auth);
++
++/**
++ * xdr_stream_encode_opaque_auth - Encode struct opaque_auth (RFC5531 S8.2)
++ * @xdr: pointer to xdr_stream
++ * @flavor: verifier flavor to encode
++ * @body: content of body to encode
++ * @body_len: length of body to encode
++ *
++ * Return values:
++ *   On success, returns length in bytes of XDR buffer consumed
++ *   %-EBADMSG on XDR buffer overflow
++ *   %-EMSGSIZE if the size of @body exceeds 400 octets
++ */
++ssize_t xdr_stream_encode_opaque_auth(struct xdr_stream *xdr, u32 flavor,
++				      void *body, unsigned int body_len)
++{
++	ssize_t ret, len;
++
++	if (unlikely(body_len > RPC_MAX_AUTH_SIZE))
++		return -EMSGSIZE;
++	len = xdr_stream_encode_u32(xdr, flavor);
++	if (unlikely(len < 0))
++		return len;
++	ret = xdr_stream_encode_opaque(xdr, body, body_len);
++	if (unlikely(ret < 0))
++		return ret;
++	return len + ret;
++}
++EXPORT_SYMBOL_GPL(xdr_stream_encode_opaque_auth);

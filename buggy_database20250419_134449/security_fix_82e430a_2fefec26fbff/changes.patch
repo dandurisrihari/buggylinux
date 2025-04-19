@@ -1,0 +1,71 @@
+diff --git a/drivers/powercap/idle_inject.c b/drivers/powercap/idle_inject.c
+index 24ff2a068978..10601f4bdf72 100644
+--- a/drivers/powercap/idle_inject.c
++++ b/drivers/powercap/idle_inject.c
+@@ -138,7 +138,7 @@ static void idle_inject_fn(unsigned int cpu)
+ 	 */
+ 	iit->should_run = 0;
+ 
+-	play_idle(READ_ONCE(ii_dev->idle_duration_ms));
++	play_idle(READ_ONCE(ii_dev->idle_duration_ms) * USEC_PER_MSEC);
+ }
+ 
+ /**
+diff --git a/drivers/thermal/intel/intel_powerclamp.c b/drivers/thermal/intel/intel_powerclamp.c
+index 5149a817456b..53216dcbe173 100644
+--- a/drivers/thermal/intel/intel_powerclamp.c
++++ b/drivers/thermal/intel/intel_powerclamp.c
+@@ -430,7 +430,7 @@ static void clamp_idle_injection_func(struct kthread_work *work)
+ 	if (should_skip)
+ 		goto balance;
+ 
+-	play_idle(jiffies_to_msecs(w_data->duration_jiffies));
++	play_idle(jiffies_to_usecs(w_data->duration_jiffies));
+ 
+ balance:
+ 	if (clamping && w_data->clamping && cpu_online(w_data->cpu))
+diff --git a/include/linux/cpu.h b/include/linux/cpu.h
+index fcb1386bb0d4..88dc0c653925 100644
+--- a/include/linux/cpu.h
++++ b/include/linux/cpu.h
+@@ -179,7 +179,7 @@ void arch_cpu_idle_dead(void);
+ int cpu_report_state(int cpu);
+ int cpu_check_up_prepare(int cpu);
+ void cpu_set_state_online(int cpu);
+-void play_idle(unsigned long duration_ms);
++void play_idle(unsigned long duration_us);
+ 
+ #ifdef CONFIG_HOTPLUG_CPU
+ bool cpu_wait_death(unsigned int cpu, int seconds);
+diff --git a/kernel/sched/idle.c b/kernel/sched/idle.c
+index 80940939b733..b98283fc6914 100644
+--- a/kernel/sched/idle.c
++++ b/kernel/sched/idle.c
+@@ -311,7 +311,7 @@ static enum hrtimer_restart idle_inject_timer_fn(struct hrtimer *timer)
+ 	return HRTIMER_NORESTART;
+ }
+ 
+-void play_idle(unsigned long duration_ms)
++void play_idle(unsigned long duration_us)
+ {
+ 	struct idle_timer it;
+ 
+@@ -323,7 +323,7 @@ void play_idle(unsigned long duration_ms)
+ 	WARN_ON_ONCE(current->nr_cpus_allowed != 1);
+ 	WARN_ON_ONCE(!(current->flags & PF_KTHREAD));
+ 	WARN_ON_ONCE(!(current->flags & PF_NO_SETAFFINITY));
+-	WARN_ON_ONCE(!duration_ms);
++	WARN_ON_ONCE(!duration_us);
+ 
+ 	rcu_sleep_check();
+ 	preempt_disable();
+@@ -333,7 +333,8 @@ void play_idle(unsigned long duration_ms)
+ 	it.done = 0;
+ 	hrtimer_init_on_stack(&it.timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+ 	it.timer.function = idle_inject_timer_fn;
+-	hrtimer_start(&it.timer, ms_to_ktime(duration_ms), HRTIMER_MODE_REL_PINNED);
++	hrtimer_start(&it.timer, ns_to_ktime(duration_us * NSEC_PER_USEC),
++		      HRTIMER_MODE_REL_PINNED);
+ 
+ 	while (!READ_ONCE(it.done))
+ 		do_idle();

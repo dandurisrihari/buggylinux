@@ -1,0 +1,59 @@
+commit d3686d54c7902a303bd65d751226aa1647319863
+Author: Shirish Pargaonkar <shirishpargaonkar@gmail.com>
+Date:   Thu Oct 28 09:53:07 2010 -0500
+
+    cifs: Cleanup and thus reduce smb session structure and fields used during authentication
+    
+    Removed following fields from smb session structure
+     cryptkey, ntlmv2_hash, tilen, tiblob
+    and ntlmssp_auth structure is allocated dynamically only if the auth mech
+    in NTLMSSP.
+    
+    response field within a session_key structure is used to initially store the
+    target info (either plucked from type 2 challenge packet in case of NTLMSSP
+    or fabricated in case of NTLMv2 without extended security) and then to store
+    Message Authentication Key (mak) (session key + client response).
+    
+    Server challenge or cryptkey needed during a NTLMSSP authentication
+    is now part of ntlmssp_auth structure which gets allocated and freed
+    once authenticaiton process is done.
+    
+    Signed-off-by: Shirish Pargaonkar <shirishpargaonkar@gmail.com>
+    Signed-off-by: Steve French <sfrench@us.ibm.com>
+
+diff --git a/fs/cifs/connect.c b/fs/cifs/connect.c
+index 4d8004ce5834..9eb327defa1d 100644
+--- a/fs/cifs/connect.c
++++ b/fs/cifs/connect.c
+@@ -1818,8 +1818,6 @@ cifs_get_smb_ses(struct TCP_Server_Info *server, struct smb_vol *volume_info)
+ 	if (ses == NULL)
+ 		goto get_ses_fail;
+ 
+-	ses->tilen = 0;
+-	ses->tiblob = NULL;
+ 	/* new SMB session uses our server ref */
+ 	ses->server = server;
+ 	if (server->addr.sockAddr6.sin6_family == AF_INET6)
+@@ -1840,10 +1838,9 @@ cifs_get_smb_ses(struct TCP_Server_Info *server, struct smb_vol *volume_info)
+ 			goto get_ses_fail;
+ 	}
+ 	if (volume_info->domainname) {
+-		int len = strlen(volume_info->domainname);
+-		ses->domainName = kmalloc(len + 1, GFP_KERNEL);
+-		if (ses->domainName)
+-			strcpy(ses->domainName, volume_info->domainname);
++		ses->domainName = kstrdup(volume_info->domainname, GFP_KERNEL);
++		if (!ses->domainName)
++			goto get_ses_fail;
+ 	}
+ 	ses->cred_uid = volume_info->cred_uid;
+ 	ses->linux_uid = volume_info->linux_uid;
+@@ -3213,6 +3210,8 @@ int cifs_setup_session(unsigned int xid, struct cifsSesInfo *ses,
+ 	kfree(ses->auth_key.response);
+ 	ses->auth_key.response = NULL;
+ 	ses->auth_key.len = 0;
++	kfree(ses->ntlmssp);
++	ses->ntlmssp = NULL;
+ 
+ 	return rc;
+ }

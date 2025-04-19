@@ -1,0 +1,54 @@
+commit 598781d71119827b454fd75d46f84755bca6f0c6
+Author: Thomas Hellstrom <thellstrom@vmware.com>
+Date:   Tue Jan 24 18:54:21 2012 +0100
+
+    drm: Fix authentication kernel crash
+    
+    If the master tries to authenticate a client using drm_authmagic and
+    that client has already closed its drm file descriptor,
+    either wilfully or because it was terminated, the
+    call to drm_authmagic will dereference a stale pointer into kmalloc'ed memory
+    and corrupt it.
+    
+    Typically this results in a hard system hang.
+    
+    This patch fixes that problem by removing any authentication tokens
+    (struct drm_magic_entry) open for a file descriptor when that file
+    descriptor is closed.
+    
+    Signed-off-by: Thomas Hellstrom <thellstrom@vmware.com>
+    Reviewed-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+    Cc: stable@vger.kernel.org
+    Signed-off-by: Dave Airlie <airlied@redhat.com>
+
+diff --git a/drivers/gpu/drm/drm_auth.c b/drivers/gpu/drm/drm_auth.c
+index 3f46772f0cb2..ba23790450e9 100644
+--- a/drivers/gpu/drm/drm_auth.c
++++ b/drivers/gpu/drm/drm_auth.c
+@@ -101,7 +101,7 @@ static int drm_add_magic(struct drm_master *master, struct drm_file *priv,
+  * Searches and unlinks the entry in drm_device::magiclist with the magic
+  * number hash key, while holding the drm_device::struct_mutex lock.
+  */
+-static int drm_remove_magic(struct drm_master *master, drm_magic_t magic)
++int drm_remove_magic(struct drm_master *master, drm_magic_t magic)
+ {
+ 	struct drm_magic_entry *pt;
+ 	struct drm_hash_item *hash;
+@@ -136,6 +136,8 @@ static int drm_remove_magic(struct drm_master *master, drm_magic_t magic)
+  * If there is a magic number in drm_file::magic then use it, otherwise
+  * searches an unique non-zero magic number and add it associating it with \p
+  * file_priv.
++ * This ioctl needs protection by the drm_global_mutex, which protects
++ * struct drm_file::magic and struct drm_magic_entry::priv.
+  */
+ int drm_getmagic(struct drm_device *dev, void *data, struct drm_file *file_priv)
+ {
+@@ -173,6 +175,8 @@ int drm_getmagic(struct drm_device *dev, void *data, struct drm_file *file_priv)
+  * \return zero if authentication successed, or a negative number otherwise.
+  *
+  * Checks if \p file_priv is associated with the magic number passed in \arg.
++ * This ioctl needs protection by the drm_global_mutex, which protects
++ * struct drm_file::magic and struct drm_magic_entry::priv.
+  */
+ int drm_authmagic(struct drm_device *dev, void *data,
+ 		  struct drm_file *file_priv)

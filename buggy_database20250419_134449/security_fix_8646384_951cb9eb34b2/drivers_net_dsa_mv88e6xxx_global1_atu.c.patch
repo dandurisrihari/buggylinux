@@ -1,0 +1,74 @@
+commit 8646384d80f3d3b4a66b3284dbbd8232d1b8799e
+Author: Vladimir Oltean <vladimir.oltean@nxp.com>
+Date:   Fri Dec 9 19:28:16 2022 +0200
+
+    net: dsa: mv88e6xxx: replace ATU violation prints with trace points
+    
+    In applications where the switch ports must perform 802.1X based
+    authentication and are therefore locked, ATU violation interrupts are
+    quite to be expected as part of normal operation. The problem is that
+    they currently spam the kernel log, even if rate limited.
+    
+    Create a series of trace points, all derived from the same event class,
+    which log these violations to the kernel's trace buffer, which is both
+    much faster and much easier to ignore than printing to a serial console.
+    
+    New usage model:
+    
+    $ trace-cmd list | grep mv88e6xxx
+    mv88e6xxx
+    mv88e6xxx:mv88e6xxx_atu_full_violation
+    mv88e6xxx:mv88e6xxx_atu_miss_violation
+    mv88e6xxx:mv88e6xxx_atu_member_violation
+    $ trace-cmd record -e mv88e6xxx sleep 10
+    
+    Signed-off-by: Vladimir Oltean <vladimir.oltean@nxp.com>
+    Reviewed-by: Saeed Mahameed <saeed@kernel.org>
+    Reviewed-by: Florian Fainelli <f.fainelli@gmail.com>
+    Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+diff --git a/drivers/net/dsa/mv88e6xxx/global1_atu.c b/drivers/net/dsa/mv88e6xxx/global1_atu.c
+index b7e62ff4b599..61ae2d61e25c 100644
+--- a/drivers/net/dsa/mv88e6xxx/global1_atu.c
++++ b/drivers/net/dsa/mv88e6xxx/global1_atu.c
+@@ -12,6 +12,7 @@
+ 
+ #include "chip.h"
+ #include "global1.h"
++#include "trace.h"
+ 
+ /* Offset 0x01: ATU FID Register */
+ 
+@@ -429,23 +430,23 @@ static irqreturn_t mv88e6xxx_g1_atu_prob_irq_thread_fn(int irq, void *dev_id)
+ 	spid = entry.state;
+ 
+ 	if (val & MV88E6XXX_G1_ATU_OP_MEMBER_VIOLATION) {
+-		dev_err_ratelimited(chip->dev,
+-				    "ATU member violation for %pM fid %u portvec %x spid %d\n",
+-				    entry.mac, fid, entry.portvec, spid);
++		trace_mv88e6xxx_atu_member_violation(chip->dev, spid,
++						     entry.portvec, entry.mac,
++						     fid);
+ 		chip->ports[spid].atu_member_violation++;
+ 	}
+ 
+ 	if (val & MV88E6XXX_G1_ATU_OP_MISS_VIOLATION) {
+-		dev_err_ratelimited(chip->dev,
+-				    "ATU miss violation for %pM fid %u portvec %x spid %d\n",
+-				    entry.mac, fid, entry.portvec, spid);
++		trace_mv88e6xxx_atu_miss_violation(chip->dev, spid,
++						   entry.portvec, entry.mac,
++						   fid);
+ 		chip->ports[spid].atu_miss_violation++;
+ 	}
+ 
+ 	if (val & MV88E6XXX_G1_ATU_OP_FULL_VIOLATION) {
+-		dev_err_ratelimited(chip->dev,
+-				    "ATU full violation for %pM fid %u portvec %x spid %d\n",
+-				    entry.mac, fid, entry.portvec, spid);
++		trace_mv88e6xxx_atu_full_violation(chip->dev, spid,
++						   entry.portvec, entry.mac,
++						   fid);
+ 		chip->ports[spid].atu_full_violation++;
+ 	}
+ 	mv88e6xxx_reg_unlock(chip);

@@ -1,0 +1,235 @@
+diff --git a/arch/x86/include/asm/svm.h b/arch/x86/include/asm/svm.h
+index a57331de59e2..1c561945b426 100644
+--- a/arch/x86/include/asm/svm.h
++++ b/arch/x86/include/asm/svm.h
+@@ -234,7 +234,8 @@ struct vmcb_save_area {
+ 	u8 cpl;
+ 	u8 reserved_2[4];
+ 	u64 efer;
+-	u8 reserved_3[112];
++	u8 reserved_3[104];
++	u64 xss;		/* Valid for SEV-ES only */
+ 	u64 cr4;
+ 	u64 cr3;
+ 	u64 cr0;
+@@ -265,9 +266,12 @@ struct vmcb_save_area {
+ 
+ 	/*
+ 	 * The following part of the save area is valid only for
+-	 * SEV-ES guests when referenced through the GHCB.
++	 * SEV-ES guests when referenced through the GHCB or for
++	 * saving to the host save area.
+ 	 */
+-	u8 reserved_7[104];
++	u8 reserved_7[80];
++	u32 pkru;
++	u8 reserved_7a[20];
+ 	u64 reserved_8;		/* rax already available at 0x01f8 */
+ 	u64 rcx;
+ 	u64 rdx;
+diff --git a/arch/x86/kvm/svm/sev.c b/arch/x86/kvm/svm/sev.c
+index 584fede0b733..0ddae41e4865 100644
+--- a/arch/x86/kvm/svm/sev.c
++++ b/arch/x86/kvm/svm/sev.c
+@@ -16,12 +16,15 @@
+ #include <linux/swap.h>
+ #include <linux/processor.h>
+ #include <linux/trace_events.h>
++#include <asm/fpu/internal.h>
+ 
+ #include "x86.h"
+ #include "svm.h"
+ #include "cpuid.h"
+ #include "trace.h"
+ 
++#define __ex(x) __kvm_handle_fault_on_reboot(x)
++
+ static u8 sev_enc_bit;
+ static int sev_flush_asids(void);
+ static DECLARE_RWSEM(sev_deactivate_lock);
+@@ -1852,3 +1855,54 @@ void sev_es_create_vcpu(struct vcpu_svm *svm)
+ 					    GHCB_VERSION_MIN,
+ 					    sev_enc_bit));
+ }
++
++void sev_es_vcpu_load(struct vcpu_svm *svm, int cpu)
++{
++	struct svm_cpu_data *sd = per_cpu(svm_data, cpu);
++	struct vmcb_save_area *hostsa;
++	unsigned int i;
++
++	/*
++	 * As an SEV-ES guest, hardware will restore the host state on VMEXIT,
++	 * of which one step is to perform a VMLOAD. Since hardware does not
++	 * perform a VMSAVE on VMRUN, the host savearea must be updated.
++	 */
++	asm volatile(__ex("vmsave") : : "a" (__sme_page_pa(sd->save_area)) : "memory");
++
++	/*
++	 * Certain MSRs are restored on VMEXIT, only save ones that aren't
++	 * restored.
++	 */
++	for (i = 0; i < NR_HOST_SAVE_USER_MSRS; i++) {
++		if (host_save_user_msrs[i].sev_es_restored)
++			continue;
++
++		rdmsrl(host_save_user_msrs[i].index, svm->host_user_msrs[i]);
++	}
++
++	/* XCR0 is restored on VMEXIT, save the current host value */
++	hostsa = (struct vmcb_save_area *)(page_address(sd->save_area) + 0x400);
++	hostsa->xcr0 = xgetbv(XCR_XFEATURE_ENABLED_MASK);
++
++	/* PKRU is restored on VMEXIT, save the curent host value */
++	hostsa->pkru = read_pkru();
++
++	/* MSR_IA32_XSS is restored on VMEXIT, save the currnet host value */
++	hostsa->xss = host_xss;
++}
++
++void sev_es_vcpu_put(struct vcpu_svm *svm)
++{
++	unsigned int i;
++
++	/*
++	 * Certain MSRs are restored on VMEXIT and were saved with vmsave in
++	 * sev_es_vcpu_load() above. Only restore ones that weren't.
++	 */
++	for (i = 0; i < NR_HOST_SAVE_USER_MSRS; i++) {
++		if (host_save_user_msrs[i].sev_es_restored)
++			continue;
++
++		wrmsrl(host_save_user_msrs[i].index, svm->host_user_msrs[i]);
++	}
++}
+diff --git a/arch/x86/kvm/svm/svm.c b/arch/x86/kvm/svm/svm.c
+index 091f792498a2..3a2e48a8d05c 100644
+--- a/arch/x86/kvm/svm/svm.c
++++ b/arch/x86/kvm/svm/svm.c
+@@ -1417,15 +1417,20 @@ static void svm_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
+ 		vmcb_mark_all_dirty(svm->vmcb);
+ 	}
+ 
++	if (sev_es_guest(svm->vcpu.kvm)) {
++		sev_es_vcpu_load(svm, cpu);
++	} else {
+ #ifdef CONFIG_X86_64
+-	rdmsrl(MSR_GS_BASE, to_svm(vcpu)->host.gs_base);
++		rdmsrl(MSR_GS_BASE, to_svm(vcpu)->host.gs_base);
+ #endif
+-	savesegment(fs, svm->host.fs);
+-	savesegment(gs, svm->host.gs);
+-	svm->host.ldt = kvm_read_ldt();
++		savesegment(fs, svm->host.fs);
++		savesegment(gs, svm->host.gs);
++		svm->host.ldt = kvm_read_ldt();
+ 
+-	for (i = 0; i < NR_HOST_SAVE_USER_MSRS; i++)
+-		rdmsrl(host_save_user_msrs[i], svm->host_user_msrs[i]);
++		for (i = 0; i < NR_HOST_SAVE_USER_MSRS; i++)
++			rdmsrl(host_save_user_msrs[i].index,
++			       svm->host_user_msrs[i]);
++	}
+ 
+ 	if (static_cpu_has(X86_FEATURE_TSCRATEMSR)) {
+ 		u64 tsc_ratio = vcpu->arch.tsc_scaling_ratio;
+@@ -1453,19 +1458,24 @@ static void svm_vcpu_put(struct kvm_vcpu *vcpu)
+ 	avic_vcpu_put(vcpu);
+ 
+ 	++vcpu->stat.host_state_reload;
+-	kvm_load_ldt(svm->host.ldt);
++	if (sev_es_guest(svm->vcpu.kvm)) {
++		sev_es_vcpu_put(svm);
++	} else {
++		kvm_load_ldt(svm->host.ldt);
+ #ifdef CONFIG_X86_64
+-	loadsegment(fs, svm->host.fs);
+-	wrmsrl(MSR_KERNEL_GS_BASE, current->thread.gsbase);
+-	load_gs_index(svm->host.gs);
++		loadsegment(fs, svm->host.fs);
++		wrmsrl(MSR_KERNEL_GS_BASE, current->thread.gsbase);
++		load_gs_index(svm->host.gs);
+ #else
+ #ifdef CONFIG_X86_32_LAZY_GS
+-	loadsegment(gs, svm->host.gs);
++		loadsegment(gs, svm->host.gs);
+ #endif
+ #endif
+ 
+-	for (i = 0; i < NR_HOST_SAVE_USER_MSRS; i++)
+-		wrmsrl(host_save_user_msrs[i], svm->host_user_msrs[i]);
++		for (i = 0; i < NR_HOST_SAVE_USER_MSRS; i++)
++			wrmsrl(host_save_user_msrs[i].index,
++			       svm->host_user_msrs[i]);
++	}
+ }
+ 
+ static unsigned long svm_get_rflags(struct kvm_vcpu *vcpu)
+diff --git a/arch/x86/kvm/svm/svm.h b/arch/x86/kvm/svm/svm.h
+index 03359185331c..df9fe11a632c 100644
+--- a/arch/x86/kvm/svm/svm.h
++++ b/arch/x86/kvm/svm/svm.h
+@@ -23,15 +23,23 @@
+ 
+ #define __sme_page_pa(x) __sme_set(page_to_pfn(x) << PAGE_SHIFT)
+ 
+-static const u32 host_save_user_msrs[] = {
++static const struct svm_host_save_msrs {
++	u32 index;		/* Index of the MSR */
++	bool sev_es_restored;	/* True if MSR is restored on SEV-ES VMEXIT */
++} host_save_user_msrs[] = {
+ #ifdef CONFIG_X86_64
+-	MSR_STAR, MSR_LSTAR, MSR_CSTAR, MSR_SYSCALL_MASK, MSR_KERNEL_GS_BASE,
+-	MSR_FS_BASE,
++	{ .index = MSR_STAR,			.sev_es_restored = true },
++	{ .index = MSR_LSTAR,			.sev_es_restored = true },
++	{ .index = MSR_CSTAR,			.sev_es_restored = true },
++	{ .index = MSR_SYSCALL_MASK,		.sev_es_restored = true },
++	{ .index = MSR_KERNEL_GS_BASE,		.sev_es_restored = true },
++	{ .index = MSR_FS_BASE,			.sev_es_restored = true },
+ #endif
+-	MSR_IA32_SYSENTER_CS, MSR_IA32_SYSENTER_ESP, MSR_IA32_SYSENTER_EIP,
+-	MSR_TSC_AUX,
++	{ .index = MSR_IA32_SYSENTER_CS,	.sev_es_restored = true },
++	{ .index = MSR_IA32_SYSENTER_ESP,	.sev_es_restored = true },
++	{ .index = MSR_IA32_SYSENTER_EIP,	.sev_es_restored = true },
++	{ .index = MSR_TSC_AUX,			.sev_es_restored = false },
+ };
+-
+ #define NR_HOST_SAVE_USER_MSRS ARRAY_SIZE(host_save_user_msrs)
+ 
+ #define MAX_DIRECT_ACCESS_MSRS	18
+@@ -580,5 +588,7 @@ int sev_handle_vmgexit(struct vcpu_svm *svm);
+ int sev_es_string_io(struct vcpu_svm *svm, int size, unsigned int port, int in);
+ void sev_es_init_vmcb(struct vcpu_svm *svm);
+ void sev_es_create_vcpu(struct vcpu_svm *svm);
++void sev_es_vcpu_load(struct vcpu_svm *svm, int cpu);
++void sev_es_vcpu_put(struct vcpu_svm *svm);
+ 
+ #endif
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index eea0e9fed62a..3e58612babfe 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -197,7 +197,8 @@ EXPORT_SYMBOL_GPL(host_efer);
+ bool __read_mostly allow_smaller_maxphyaddr = 0;
+ EXPORT_SYMBOL_GPL(allow_smaller_maxphyaddr);
+ 
+-static u64 __read_mostly host_xss;
++u64 __read_mostly host_xss;
++EXPORT_SYMBOL_GPL(host_xss);
+ u64 __read_mostly supported_xss;
+ EXPORT_SYMBOL_GPL(supported_xss);
+ 
+diff --git a/arch/x86/kvm/x86.h b/arch/x86/kvm/x86.h
+index fe7f3df91b2c..c5ee0f5ce0f1 100644
+--- a/arch/x86/kvm/x86.h
++++ b/arch/x86/kvm/x86.h
+@@ -279,6 +279,7 @@ fastpath_t handle_fastpath_set_msr_irqoff(struct kvm_vcpu *vcpu);
+ 
+ extern u64 host_xcr0;
+ extern u64 supported_xcr0;
++extern u64 host_xss;
+ extern u64 supported_xss;
+ 
+ static inline bool kvm_mpx_supported(void)

@@ -1,0 +1,51 @@
+commit 3532e75dfadcf52f8cb56dbfb6bce4503c69091f
+Author: Daniele Ceraolo Spurio <daniele.ceraolospurio@intel.com>
+Date:   Wed May 31 16:54:09 2023 -0700
+
+    drm/i915/uc: perma-pin firmwares
+    
+    Now that each FW has its own reserved area, we can keep them always
+    pinned and skip the pin/unpin dance on reset. This will make things
+    easier for the 2-step HuC authentication, which requires the FW to be
+    pinned in GGTT after the xfer is completed.
+    Since the vma is now valid for a long time and not just for the quick
+    pin-load-unpin dance, the name "dummy" is no longer appropriare and has
+    been replaced with vma_res. All the functions have also been updated to
+    operate on vma_res for consistency.
+    Given that we pin the vma behind the allocator's back (which is ok
+    because we do the pinning in an area that was previously reserved for
+    thus purpose), we do need to explicitly re-pin on resume because the
+    automated helper won't cover us.
+    
+    v2: better comments and commit message, s/dummy/vma_res/
+    
+    Signed-off-by: Daniele Ceraolo Spurio <daniele.ceraolospurio@intel.com>
+    Cc: Alan Previn <alan.previn.teres.alexis@intel.com>
+    Cc: John Harrison <John.C.Harrison@Intel.com>
+    Reviewed-by: John Harrison <John.C.Harrison@Intel.com>
+    Link: https://patchwork.freedesktop.org/patch/msgid/20230531235415.1467475-2-daniele.ceraolospurio@intel.com
+
+diff --git a/drivers/gpu/drm/i915/gt/uc/intel_uc.c b/drivers/gpu/drm/i915/gt/uc/intel_uc.c
+index c8b9cbb7ba3a..1e7f5cc9d550 100644
+--- a/drivers/gpu/drm/i915/gt/uc/intel_uc.c
++++ b/drivers/gpu/drm/i915/gt/uc/intel_uc.c
+@@ -700,6 +700,12 @@ void intel_uc_suspend(struct intel_uc *uc)
+ 	}
+ }
+ 
++static void __uc_resume_mappings(struct intel_uc *uc)
++{
++	intel_uc_fw_resume_mapping(&uc->guc.fw);
++	intel_uc_fw_resume_mapping(&uc->huc.fw);
++}
++
+ static int __uc_resume(struct intel_uc *uc, bool enable_communication)
+ {
+ 	struct intel_guc *guc = &uc->guc;
+@@ -767,4 +773,6 @@ static const struct intel_uc_ops uc_ops_on = {
+ 
+ 	.init_hw = __uc_init_hw,
+ 	.fini_hw = __uc_fini_hw,
++
++	.resume_mappings = __uc_resume_mappings,
+ };

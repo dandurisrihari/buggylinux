@@ -1,0 +1,124 @@
+commit dfb4357da6ddbdf57d583ba64361c9d792b0e0b1
+Author: Kees Cook <kees@kernel.org>
+Date:   Wed Feb 8 11:26:59 2017 -0800
+
+    time: Remove CONFIG_TIMER_STATS
+    
+    Currently CONFIG_TIMER_STATS exposes process information across namespaces:
+    
+    kernel/time/timer_list.c print_timer():
+    
+            SEQ_printf(m, ", %s/%d", tmp, timer->start_pid);
+    
+    /proc/timer_list:
+    
+     #11: <0000000000000000>, hrtimer_wakeup, S:01, do_nanosleep, cron/2570
+    
+    Given that the tracer can give the same information, this patch entirely
+    removes CONFIG_TIMER_STATS.
+    
+    Suggested-by: Thomas Gleixner <tglx@linutronix.de>
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+    Acked-by: John Stultz <john.stultz@linaro.org>
+    Cc: Nicolas Pitre <nicolas.pitre@linaro.org>
+    Cc: linux-doc@vger.kernel.org
+    Cc: Lai Jiangshan <jiangshanlai@gmail.com>
+    Cc: Shuah Khan <shuah@kernel.org>
+    Cc: Xing Gao <xgao01@email.wm.edu>
+    Cc: Jonathan Corbet <corbet@lwn.net>
+    Cc: Jessica Frazelle <me@jessfraz.com>
+    Cc: kernel-hardening@lists.openwall.com
+    Cc: Nicolas Iooss <nicolas.iooss_linux@m4x.org>
+    Cc: "Paul E. McKenney" <paulmck@linux.vnet.ibm.com>
+    Cc: Petr Mladek <pmladek@suse.com>
+    Cc: Richard Cochran <richardcochran@gmail.com>
+    Cc: Tejun Heo <tj@kernel.org>
+    Cc: Michal Marek <mmarek@suse.com>
+    Cc: Josh Poimboeuf <jpoimboe@redhat.com>
+    Cc: Dmitry Vyukov <dvyukov@google.com>
+    Cc: Oleg Nesterov <oleg@redhat.com>
+    Cc: "Eric W. Biederman" <ebiederm@xmission.com>
+    Cc: Olof Johansson <olof@lixom.net>
+    Cc: Andrew Morton <akpm@linux-foundation.org>
+    Cc: linux-api@vger.kernel.org
+    Cc: Arjan van de Ven <arjan@linux.intel.com>
+    Link: http://lkml.kernel.org/r/20170208192659.GA32582@beast
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+
+diff --git a/kernel/time/hrtimer.c b/kernel/time/hrtimer.c
+index c6ecedd3b839..edabde646e58 100644
+--- a/kernel/time/hrtimer.c
++++ b/kernel/time/hrtimer.c
+@@ -766,34 +766,6 @@ void hrtimers_resume(void)
+ 	clock_was_set_delayed();
+ }
+ 
+-static inline void timer_stats_hrtimer_set_start_info(struct hrtimer *timer)
+-{
+-#ifdef CONFIG_TIMER_STATS
+-	if (timer->start_site)
+-		return;
+-	timer->start_site = __builtin_return_address(0);
+-	memcpy(timer->start_comm, current->comm, TASK_COMM_LEN);
+-	timer->start_pid = current->pid;
+-#endif
+-}
+-
+-static inline void timer_stats_hrtimer_clear_start_info(struct hrtimer *timer)
+-{
+-#ifdef CONFIG_TIMER_STATS
+-	timer->start_site = NULL;
+-#endif
+-}
+-
+-static inline void timer_stats_account_hrtimer(struct hrtimer *timer)
+-{
+-#ifdef CONFIG_TIMER_STATS
+-	if (likely(!timer_stats_active))
+-		return;
+-	timer_stats_update_stats(timer, timer->start_pid, timer->start_site,
+-				 timer->function, timer->start_comm, 0);
+-#endif
+-}
+-
+ /*
+  * Counterpart to lock_hrtimer_base above:
+  */
+@@ -932,7 +904,6 @@ remove_hrtimer(struct hrtimer *timer, struct hrtimer_clock_base *base, bool rest
+ 		 * rare case and less expensive than a smp call.
+ 		 */
+ 		debug_deactivate(timer);
+-		timer_stats_hrtimer_clear_start_info(timer);
+ 		reprogram = base->cpu_base == this_cpu_ptr(&hrtimer_bases);
+ 
+ 		if (!restart)
+@@ -990,8 +961,6 @@ void hrtimer_start_range_ns(struct hrtimer *timer, ktime_t tim,
+ 	/* Switch the timer base, if necessary: */
+ 	new_base = switch_hrtimer_base(timer, base, mode & HRTIMER_MODE_PINNED);
+ 
+-	timer_stats_hrtimer_set_start_info(timer);
+-
+ 	leftmost = enqueue_hrtimer(timer, new_base);
+ 	if (!leftmost)
+ 		goto unlock;
+@@ -1128,12 +1097,6 @@ static void __hrtimer_init(struct hrtimer *timer, clockid_t clock_id,
+ 	base = hrtimer_clockid_to_base(clock_id);
+ 	timer->base = &cpu_base->clock_base[base];
+ 	timerqueue_init(&timer->node);
+-
+-#ifdef CONFIG_TIMER_STATS
+-	timer->start_site = NULL;
+-	timer->start_pid = -1;
+-	memset(timer->start_comm, 0, TASK_COMM_LEN);
+-#endif
+ }
+ 
+ /**
+@@ -1217,7 +1180,6 @@ static void __run_hrtimer(struct hrtimer_cpu_base *cpu_base,
+ 	raw_write_seqcount_barrier(&cpu_base->seq);
+ 
+ 	__remove_hrtimer(timer, base, HRTIMER_STATE_INACTIVE, 0);
+-	timer_stats_account_hrtimer(timer);
+ 	fn = timer->function;
+ 
+ 	/*

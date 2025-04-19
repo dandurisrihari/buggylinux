@@ -1,0 +1,63 @@
+commit db1312dd95488b5e6ff362ff66fcf953a46b1821
+Author: Hannes Reinecke <hare@suse.de>
+Date:   Mon Jun 27 11:52:05 2022 +0200
+
+    nvmet: implement basic In-Band Authentication
+    
+    Implement NVMe-oF In-Band authentication according to NVMe TPAR 8006.
+    This patch adds three additional configfs entries 'dhchap_key',
+    'dhchap_ctrl_key', and 'dhchap_hash' to the 'host' configfs directory.
+    The 'dhchap_key' and 'dhchap_ctrl_key' entries need to be in the ASCII
+    format as specified in NVMe Base Specification v2.0 section 8.13.5.8
+    'Secret representation'.
+    'dhchap_hash' defaults to 'hmac(sha256)', and can be written to to
+    switch to a different HMAC algorithm.
+    
+    Signed-off-by: Hannes Reinecke <hare@suse.de>
+    Reviewed-by: Sagi Grimberg <sagi@grimberg.me>
+    Signed-off-by: Christoph Hellwig <hch@lst.de>
+    Signed-off-by: Jens Axboe <axboe@kernel.dk>
+
+diff --git a/drivers/nvme/target/core.c b/drivers/nvme/target/core.c
+index 527a88617813..a1345790005f 100644
+--- a/drivers/nvme/target/core.c
++++ b/drivers/nvme/target/core.c
+@@ -795,6 +795,7 @@ void nvmet_sq_destroy(struct nvmet_sq *sq)
+ 	wait_for_completion(&sq->confirm_done);
+ 	wait_for_completion(&sq->free_done);
+ 	percpu_ref_exit(&sq->ref);
++	nvmet_auth_sq_free(sq);
+ 
+ 	if (ctrl) {
+ 		/*
+@@ -871,6 +872,9 @@ static u16 nvmet_parse_io_cmd(struct nvmet_req *req)
+ 	if (nvme_is_fabrics(cmd))
+ 		return nvmet_parse_fabrics_io_cmd(req);
+ 
++	if (unlikely(!nvmet_check_auth_status(req)))
++		return NVME_SC_AUTH_REQUIRED | NVME_SC_DNR;
++
+ 	ret = nvmet_check_ctrl_status(req);
+ 	if (unlikely(ret))
+ 		return ret;
+@@ -1275,6 +1279,11 @@ u16 nvmet_check_ctrl_status(struct nvmet_req *req)
+ 		       req->cmd->common.opcode, req->sq->qid);
+ 		return NVME_SC_CMD_SEQ_ERROR | NVME_SC_DNR;
+ 	}
++
++	if (unlikely(!nvmet_check_auth_status(req))) {
++		pr_warn("qid %d not authenticated\n", req->sq->qid);
++		return NVME_SC_AUTH_REQUIRED | NVME_SC_DNR;
++	}
+ 	return 0;
+ }
+ 
+@@ -1471,6 +1480,8 @@ static void nvmet_ctrl_free(struct kref *ref)
+ 	flush_work(&ctrl->async_event_work);
+ 	cancel_work_sync(&ctrl->fatal_err_work);
+ 
++	nvmet_destroy_auth(ctrl);
++
+ 	ida_free(&cntlid_ida, ctrl->cntlid);
+ 
+ 	nvmet_async_events_free(ctrl);

@@ -1,0 +1,63 @@
+commit 19e3e6cdfdc73400eb68d1102cdbad4f9493f474
+Author: Justin Stitt <justinstitt@google.com>
+Date:   Mon Sep 18 05:30:15 2023 +0000
+
+    accessibility: speakup: refactor deprecated strncpy
+    
+    `strncpy` is deprecated for use on NUL-terminated destination strings [1].
+    
+    Let's refactor this function to just use synth_write().
+    
+    Link: www.kernel.org/doc/html/latest/process/deprecated.html#strncpy-on-nul-terminated-strings[1]
+    Link: https://manpages.debian.org/testing/linux-manual-4.8/strscpy.9.en.html [2]
+    Link: https://github.com/KSPP/linux/issues/90
+    Cc: linux-hardening@vger.kernel.org
+    Signed-off-by: Justin Stitt <justinstitt@google.com>
+    Suggested-by: Kees Cook <keescook@chromium.org>
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Tested-by: Samuel Thibault <samuel.thibault@ens-lyon.org>
+    Link: https://lore.kernel.org/r/20230918-strncpy-drivers-accessibility-speakup-kobjects-c-v2-1-d5b1976c5dbf@google.com
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/accessibility/speakup/kobjects.c b/drivers/accessibility/speakup/kobjects.c
+index a7522d409802..0dfdb6608e02 100644
+--- a/drivers/accessibility/speakup/kobjects.c
++++ b/drivers/accessibility/speakup/kobjects.c
+@@ -413,27 +413,24 @@ static ssize_t synth_direct_store(struct kobject *kobj,
+ 				  struct kobj_attribute *attr,
+ 				  const char *buf, size_t count)
+ {
+-	u_char tmp[256];
+-	int len;
+-	int bytes;
+-	const char *ptr = buf;
++	char *unescaped;
+ 	unsigned long flags;
+ 
+ 	if (!synth)
+ 		return -EPERM;
+ 
+-	len = strlen(buf);
++	unescaped = kstrdup(buf, GFP_KERNEL);
++	if (!unescaped)
++		return -ENOMEM;
++
++	string_unescape_any_inplace(unescaped);
++
+ 	spin_lock_irqsave(&speakup_info.spinlock, flags);
+-	while (len > 0) {
+-		bytes = min_t(size_t, len, 250);
+-		strncpy(tmp, ptr, bytes);
+-		tmp[bytes] = '\0';
+-		string_unescape_any_inplace(tmp);
+-		synth_printf("%s", tmp);
+-		ptr += bytes;
+-		len -= bytes;
+-	}
++	synth_write(unescaped, strlen(unescaped));
+ 	spin_unlock_irqrestore(&speakup_info.spinlock, flags);
++
++	kfree(unescaped);
++
+ 	return count;
+ }

@@ -1,0 +1,179 @@
+commit 5f316b65e99f109942c556dc8790abd4c75bcb34
+Author: Luke Nelson <lukenels@cs.washington.edu>
+Date:   Wed Mar 4 21:02:05 2020 -0800
+
+    riscv, bpf: Add RV32G eBPF JIT
+    
+    This is an eBPF JIT for RV32G, adapted from the JIT for RV64G and
+    the 32-bit ARM JIT.
+    
+    There are two main changes required for this to work compared to
+    the RV64 JIT.
+    
+    First, eBPF registers are 64-bit, while RV32G registers are 32-bit.
+    BPF registers either map directly to 2 RISC-V registers, or reside
+    in stack scratch space and are saved and restored when used.
+    
+    Second, many 64-bit ALU operations do not trivially map to 32-bit
+    operations. Operations that move bits between high and low words,
+    such as ADD, LSH, MUL, and others must emulate the 64-bit behavior
+    in terms of 32-bit instructions.
+    
+    This patch also makes related changes to bpf_jit.h, such
+    as adding RISC-V instructions required by the RV32 JIT.
+    
+    Supported features:
+    
+    The RV32 JIT supports the same features and instructions as the
+    RV64 JIT, with the following exceptions:
+    
+    - ALU64 DIV/MOD: Requires loops to implement on 32-bit hardware.
+    
+    - BPF_XADD | BPF_DW: There's no 8-byte atomic instruction in RV32.
+    
+    These features are also unsupported on other BPF JITs for 32-bit
+    architectures.
+    
+    Testing:
+    
+    - lib/test_bpf.c
+    test_bpf: Summary: 378 PASSED, 0 FAILED, [349/366 JIT'ed]
+    test_bpf: test_skb_segment: Summary: 2 PASSED, 0 FAILED
+    
+    The tests that are not JITed are all due to use of 64-bit div/mod
+    or 64-bit xadd.
+    
+    - tools/testing/selftests/bpf/test_verifier.c
+    Summary: 1415 PASSED, 122 SKIPPED, 43 FAILED
+    
+    Tested both with and without BPF JIT hardening.
+    
+    This is the same set of tests that pass using the BPF interpreter
+    with the JIT disabled.
+    
+    Verification and synthesis:
+    
+    We developed the RV32 JIT using our automated verification tool,
+    Serval. We have used Serval in the past to verify patches to the
+    RV64 JIT. We also used Serval to superoptimize the resulting code
+    through program synthesis.
+    
+    You can find the tool and a guide to the approach and results here:
+    https://github.com/uw-unsat/serval-bpf/tree/rv32-jit-v5
+    
+    Co-developed-by: Xi Wang <xi.wang@gmail.com>
+    Signed-off-by: Xi Wang <xi.wang@gmail.com>
+    Signed-off-by: Luke Nelson <luke.r.nels@gmail.com>
+    Signed-off-by: Daniel Borkmann <daniel@iogearbox.net>
+    Reviewed-by: Björn Töpel <bjorn.topel@gmail.com>
+    Acked-by: Björn Töpel <bjorn.topel@gmail.com>
+    Link: https://lore.kernel.org/bpf/20200305050207.4159-3-luke.r.nels@gmail.com
+
+diff --git a/arch/riscv/net/bpf_jit.h b/arch/riscv/net/bpf_jit.h
+index 23c123331f94..20e235d06f66 100644
+--- a/arch/riscv/net/bpf_jit.h
++++ b/arch/riscv/net/bpf_jit.h
+@@ -207,6 +207,8 @@ static inline u32 rv_amo_insn(u8 funct5, u8 aq, u8 rl, u8 rs2, u8 rs1,
+ 	return rv_r_insn(funct7, rs2, rs1, funct3, rd, opcode);
+ }
+ 
++/* Instructions shared by both RV32 and RV64. */
++
+ static inline u32 rv_addi(u8 rd, u8 rs1, u16 imm11_0)
+ {
+ 	return rv_i_insn(imm11_0, rs1, 0, rd, 0x13);
+@@ -262,6 +264,11 @@ static inline u32 rv_sub(u8 rd, u8 rs1, u8 rs2)
+ 	return rv_r_insn(0x20, rs2, rs1, 0, rd, 0x33);
+ }
+ 
++static inline u32 rv_sltu(u8 rd, u8 rs1, u8 rs2)
++{
++	return rv_r_insn(0, rs2, rs1, 3, rd, 0x33);
++}
++
+ static inline u32 rv_and(u8 rd, u8 rs1, u8 rs2)
+ {
+ 	return rv_r_insn(0, rs2, rs1, 7, rd, 0x33);
+@@ -297,6 +304,11 @@ static inline u32 rv_mul(u8 rd, u8 rs1, u8 rs2)
+ 	return rv_r_insn(1, rs2, rs1, 0, rd, 0x33);
+ }
+ 
++static inline u32 rv_mulhu(u8 rd, u8 rs1, u8 rs2)
++{
++	return rv_r_insn(1, rs2, rs1, 3, rd, 0x33);
++}
++
+ static inline u32 rv_divu(u8 rd, u8 rs1, u8 rs2)
+ {
+ 	return rv_r_insn(1, rs2, rs1, 5, rd, 0x33);
+@@ -332,21 +344,46 @@ static inline u32 rv_bltu(u8 rs1, u8 rs2, u16 imm12_1)
+ 	return rv_b_insn(imm12_1, rs2, rs1, 6, 0x63);
+ }
+ 
++static inline u32 rv_bgtu(u8 rs1, u8 rs2, u16 imm12_1)
++{
++	return rv_bltu(rs2, rs1, imm12_1);
++}
++
+ static inline u32 rv_bgeu(u8 rs1, u8 rs2, u16 imm12_1)
+ {
+ 	return rv_b_insn(imm12_1, rs2, rs1, 7, 0x63);
+ }
+ 
++static inline u32 rv_bleu(u8 rs1, u8 rs2, u16 imm12_1)
++{
++	return rv_bgeu(rs2, rs1, imm12_1);
++}
++
+ static inline u32 rv_blt(u8 rs1, u8 rs2, u16 imm12_1)
+ {
+ 	return rv_b_insn(imm12_1, rs2, rs1, 4, 0x63);
+ }
+ 
++static inline u32 rv_bgt(u8 rs1, u8 rs2, u16 imm12_1)
++{
++	return rv_blt(rs2, rs1, imm12_1);
++}
++
+ static inline u32 rv_bge(u8 rs1, u8 rs2, u16 imm12_1)
+ {
+ 	return rv_b_insn(imm12_1, rs2, rs1, 5, 0x63);
+ }
+ 
++static inline u32 rv_ble(u8 rs1, u8 rs2, u16 imm12_1)
++{
++	return rv_bge(rs2, rs1, imm12_1);
++}
++
++static inline u32 rv_lw(u8 rd, u16 imm11_0, u8 rs1)
++{
++	return rv_i_insn(imm11_0, rs1, 2, rd, 0x03);
++}
++
+ static inline u32 rv_lbu(u8 rd, u16 imm11_0, u8 rs1)
+ {
+ 	return rv_i_insn(imm11_0, rs1, 4, rd, 0x03);
+@@ -377,6 +414,15 @@ static inline u32 rv_amoadd_w(u8 rd, u8 rs2, u8 rs1, u8 aq, u8 rl)
+ 	return rv_amo_insn(0, aq, rl, rs2, rs1, 2, rd, 0x2f);
+ }
+ 
++/*
++ * RV64-only instructions.
++ *
++ * These instructions are not available on RV32.  Wrap them below a #if to
++ * ensure that the RV32 JIT doesn't emit any of these instructions.
++ */
++
++#if __riscv_xlen == 64
++
+ static inline u32 rv_addiw(u8 rd, u8 rs1, u16 imm11_0)
+ {
+ 	return rv_i_insn(imm11_0, rs1, 0, rd, 0x1b);
+@@ -457,6 +503,8 @@ static inline u32 rv_amoadd_d(u8 rd, u8 rs2, u8 rs1, u8 aq, u8 rl)
+ 	return rv_amo_insn(0, aq, rl, rs2, rs1, 3, rd, 0x2f);
+ }
+ 
++#endif /* __riscv_xlen == 64 */
++
+ void bpf_jit_build_prologue(struct rv_jit_context *ctx);
+ void bpf_jit_build_epilogue(struct rv_jit_context *ctx);

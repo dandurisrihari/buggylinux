@@ -1,0 +1,112 @@
+commit bd90d7c7835398fed879e3a9122f870d7a342ce6
+Author: Ramalingam C <ramalingam.c@intel.com>
+Date:   Sat Feb 16 23:06:54 2019 +0530
+
+    drm/i915: Implement HDCP2.2 receiver authentication
+    
+    Implements HDCP2.2 authentication for hdcp2.2 receivers, with
+    following steps:
+            Authentication and Key exchange (AKE).
+            Locality Check (LC).
+            Session Key Exchange(SKE).
+            DP Errata for stream type configuration for receivers.
+    
+    At AKE, the HDCP Receiver’s public key certificate is verified by the
+    HDCP Transmitter. A Master Key k m is exchanged.
+    
+    At LC, the HDCP Transmitter enforces locality on the content by
+    requiring that the Round Trip Time (RTT) between a pair of messages
+    is not more than 20 ms.
+    
+    At SKE, The HDCP Transmitter exchanges Session Key ks with
+    the HDCP Receiver.
+    
+    In DP HDCP2.2 encryption and decryption logics use the stream type as
+    one of the parameter. So Before enabling the Encryption DP HDCP2.2
+    receiver needs to be communicated with stream type. This is added to
+    spec as ERRATA.
+    
+    This generic implementation is complete only with the hdcp2 specific
+    functions defined at hdcp_shim.
+    
+    v2: Rebased.
+    v3:
+      %s/PARING/PAIRING
+      Coding style fixing [Uma]
+    v4:
+      Rebased as part of patch reordering.
+      Defined the functions for mei services. [Daniel]
+    v5:
+      Redefined the mei service functions as per comp redesign.
+      Required intel_hdcp members are defined [Sean Paul]
+    v6:
+      Typo of cipher is Fixed [Uma]
+      %s/uintxx_t/uxx
+      Check for comp_master is removed.
+    v7:
+      Adjust to the new interface.
+      Avoid using bool structure members. [Tomas]
+    v8: Rebased.
+    v9:
+      bool is used in struct intel_hdcp [Daniel]
+      config_stream_type is redesigned [Daniel]
+      Reviewed-by Uma.
+    
+    Signed-off-by: Ramalingam C <ramalingam.c@intel.com>
+    Reviewed-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+    Reviewed-by: Uma Shankar <uma.shankar@intel.com>
+    Signed-off-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+    Link: https://patchwork.freedesktop.org/patch/msgid/1550338640-17470-8-git-send-email-ramalingam.c@intel.com
+
+diff --git a/drivers/gpu/drm/i915/intel_drv.h b/drivers/gpu/drm/i915/intel_drv.h
+index 7fcaa3ba538c..5aa50fe34471 100644
+--- a/drivers/gpu/drm/i915/intel_drv.h
++++ b/drivers/gpu/drm/i915/intel_drv.h
+@@ -403,6 +403,22 @@ struct intel_hdcp_shim {
+ 	/* Detects whether sink is HDCP2.2 capable */
+ 	int (*hdcp_2_2_capable)(struct intel_digital_port *intel_dig_port,
+ 				bool *capable);
++
++	/* Write HDCP2.2 messages */
++	int (*write_2_2_msg)(struct intel_digital_port *intel_dig_port,
++			     void *buf, size_t size);
++
++	/* Read HDCP2.2 messages */
++	int (*read_2_2_msg)(struct intel_digital_port *intel_dig_port,
++			    u8 msg_id, void *buf, size_t size);
++
++	/*
++	 * Implementation of DP HDCP2.2 Errata for the communication of stream
++	 * type to Receivers. In DP HDCP2.2 Stream type is one of the input to
++	 * the HDCP2.2 Cipher for En/De-Cryption. Not applicable for HDMI.
++	 */
++	int (*config_stream_type)(struct intel_digital_port *intel_dig_port,
++				  bool is_repeater, u8 type);
+ };
+ 
+ struct intel_hdcp {
+@@ -430,6 +446,24 @@ struct intel_hdcp {
+ 	 */
+ 	u8 content_type;
+ 	struct hdcp_port_data port_data;
++
++	bool is_paired;
++	bool is_repeater;
++
++	/*
++	 * Count of ReceiverID_List received. Initialized to 0 at AKE_INIT.
++	 * Incremented after processing the RepeaterAuth_Send_ReceiverID_List.
++	 * When it rolls over re-auth has to be triggered.
++	 */
++	u32 seq_num_v;
++
++	/*
++	 * Count of RepeaterAuth_Stream_Manage msg propagated.
++	 * Initialized to 0 on AKE_INIT. Incremented after every successful
++	 * transmission of RepeaterAuth_Stream_Manage message. When it rolls
++	 * over re-Auth has to be triggered.
++	 */
++	u32 seq_num_m;
+ };
+ 
+ struct intel_connector {

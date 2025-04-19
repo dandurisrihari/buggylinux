@@ -1,0 +1,93 @@
+commit 611c9d88302cb9ac3b0f58f4a06c0ffb98345bd2
+Merge: a1f749de8a61 2fa5ebe3bc4e
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Thu May 4 12:40:16 2023 -0700
+
+    Merge tag 'loongarch-6.4' of git://git.kernel.org/pub/scm/linux/kernel/git/chenhuacai/linux-loongson
+    
+    Pull LoongArch updates from Huacai Chen:
+    
+     - Better backtraces for humanization
+    
+     - Relay BCE exceptions to userland as SIGSEGV
+    
+     - Provide kernel fpu functions
+    
+     - Optimize memory ops (memset/memcpy/memmove)
+    
+     - Optimize checksum and crc32(c) calculation
+    
+     - Add ARCH_HAS_FORTIFY_SOURCE selection
+    
+     - Add function error injection support
+    
+     - Add ftrace with direct call support
+    
+     - Add basic perf tools support
+    
+    * tag 'loongarch-6.4' of git://git.kernel.org/pub/scm/linux/kernel/git/chenhuacai/linux-loongson: (24 commits)
+      tools/perf: Add basic support for LoongArch
+      LoongArch: ftrace: Add direct call trampoline samples support
+      LoongArch: ftrace: Add direct call support
+      LoongArch: ftrace: Implement ftrace_find_callable_addr() to simplify code
+      LoongArch: ftrace: Fix build error if DYNAMIC_FTRACE_WITH_REGS is not set
+      LoongArch: ftrace: Abstract DYNAMIC_FTRACE_WITH_ARGS accesses
+      LoongArch: Add support for function error injection
+      LoongArch: Add ARCH_HAS_FORTIFY_SOURCE selection
+      LoongArch: crypto: Add crc32 and crc32c hw acceleration
+      LoongArch: Add checksum optimization for 64-bit system
+      LoongArch: Optimize memory ops (memset/memcpy/memmove)
+      LoongArch: Provide kernel fpu functions
+      LoongArch: Relay BCE exceptions to userland as SIGSEGV with si_code=SEGV_BNDERR
+      LoongArch: Tweak the BADV and CPUCFG.PRID lines in show_regs()
+      LoongArch: Humanize the ESTAT line when showing registers
+      LoongArch: Humanize the ECFG line when showing registers
+      LoongArch: Humanize the EUEN line when showing registers
+      LoongArch: Humanize the PRMD line when showing registers
+      LoongArch: Humanize the CRMD line when showing registers
+      LoongArch: Fix format of CSR lines during show_regs()
+      ...
+
+diff --cc samples/ftrace/ftrace-direct.c
+index d81a9473b585,9be720957bf8..06879bbd3399
+--- a/samples/ftrace/ftrace-direct.c
++++ b/samples/ftrace/ftrace-direct.c
+@@@ -63,13 -63,33 +63,36 @@@ asm 
+  
+  #endif /* CONFIG_S390 */
+  
++ #ifdef CONFIG_LOONGARCH
++ 
++ asm (
++ "	.pushsection	.text, \"ax\", @progbits\n"
++ "	.type		my_tramp, @function\n"
++ "	.globl		my_tramp\n"
++ "   my_tramp:\n"
++ "	addi.d	$sp, $sp, -32\n"
++ "	st.d	$a0, $sp, 0\n"
++ "	st.d	$t0, $sp, 8\n"
++ "	st.d	$ra, $sp, 16\n"
++ "	bl	my_direct_func\n"
++ "	ld.d	$a0, $sp, 0\n"
++ "	ld.d	$t0, $sp, 8\n"
++ "	ld.d	$ra, $sp, 16\n"
++ "	addi.d	$sp, $sp, 32\n"
++ "	jr	$t0\n"
++ "	.size		my_tramp, .-my_tramp\n"
++ "	.popsection\n"
++ );
++ 
++ #endif /* CONFIG_LOONGARCH */
++ 
+ +static struct ftrace_ops direct;
+ +
+  static int __init ftrace_direct_init(void)
+  {
+ -	return register_ftrace_direct((unsigned long)wake_up_process,
+ -				     (unsigned long)my_tramp);
+ +	ftrace_set_filter_ip(&direct, (unsigned long) wake_up_process, 0, 0);
+ +
+ +	return register_ftrace_direct(&direct, (unsigned long) my_tramp);
+  }
+  
+  static void __exit ftrace_direct_exit(void)

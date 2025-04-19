@@ -1,0 +1,86 @@
+commit 996ff5429e9898947016206ee9da387a93d63d9d
+Author: Paolo Bonzini <pbonzini@redhat.com>
+Date:   Mon Dec 14 07:49:54 2020 -0500
+
+    KVM: x86: move kvm_inject_gp up from kvm_set_dr to callers
+    
+    Push the injection of #GP up to the callers, so that they can just use
+    kvm_complete_insn_gp. __kvm_set_dr is pretty much what the callers can use
+    together with kvm_complete_insn_gp, so rename it to kvm_set_dr and drop
+    the old kvm_set_dr wrapper.
+    
+    This also allows nested VMX code, which really wanted to use __kvm_set_dr,
+    to use the right function.
+    
+    While at it, remove the kvm_require_dr() check from the SVM interception.
+    The APM states:
+    
+      All normal exception checks take precedence over the SVM intercepts.
+    
+    which includes the CR4.DE=1 #UD.
+    
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index dcb67429b75d..baa90ae76ba5 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -1143,7 +1143,7 @@ static u64 kvm_dr6_fixed(struct kvm_vcpu *vcpu)
+ 	return fixed;
+ }
+ 
+-static int __kvm_set_dr(struct kvm_vcpu *vcpu, int dr, unsigned long val)
++int kvm_set_dr(struct kvm_vcpu *vcpu, int dr, unsigned long val)
+ {
+ 	size_t size = ARRAY_SIZE(vcpu->arch.db);
+ 
+@@ -1156,13 +1156,13 @@ static int __kvm_set_dr(struct kvm_vcpu *vcpu, int dr, unsigned long val)
+ 	case 4:
+ 	case 6:
+ 		if (!kvm_dr6_valid(val))
+-			return -1; /* #GP */
++			return 1; /* #GP */
+ 		vcpu->arch.dr6 = (val & DR6_VOLATILE) | kvm_dr6_fixed(vcpu);
+ 		break;
+ 	case 5:
+ 	default: /* 7 */
+ 		if (!kvm_dr7_valid(val))
+-			return -1; /* #GP */
++			return 1; /* #GP */
+ 		vcpu->arch.dr7 = (val & DR7_VOLATILE) | DR7_FIXED_1;
+ 		kvm_update_dr7(vcpu);
+ 		break;
+@@ -1170,15 +1170,6 @@ static int __kvm_set_dr(struct kvm_vcpu *vcpu, int dr, unsigned long val)
+ 
+ 	return 0;
+ }
+-
+-int kvm_set_dr(struct kvm_vcpu *vcpu, int dr, unsigned long val)
+-{
+-	if (__kvm_set_dr(vcpu, dr, val)) {
+-		kvm_inject_gp(vcpu, 0);
+-		return 1;
+-	}
+-	return 0;
+-}
+ EXPORT_SYMBOL_GPL(kvm_set_dr);
+ 
+ void kvm_get_dr(struct kvm_vcpu *vcpu, int dr, unsigned long *val)
+@@ -6619,7 +6610,7 @@ static int emulator_set_dr(struct x86_emulate_ctxt *ctxt, int dr,
+ 			   unsigned long value)
+ {
+ 
+-	return __kvm_set_dr(emul_to_vcpu(ctxt), dr, value);
++	return kvm_set_dr(emul_to_vcpu(ctxt), dr, value);
+ }
+ 
+ static u64 mk_cr_64(u64 curr_cr, u32 new_val)
+@@ -8664,7 +8655,7 @@ static void enter_smm(struct kvm_vcpu *vcpu)
+ 	dt.address = dt.size = 0;
+ 	static_call(kvm_x86_set_idt)(vcpu, &dt);
+ 
+-	__kvm_set_dr(vcpu, 7, DR7_FIXED_1);
++	kvm_set_dr(vcpu, 7, DR7_FIXED_1);
+ 
+ 	cs.selector = (vcpu->arch.smbase >> 4) & 0xffff;
+ 	cs.base = vcpu->arch.smbase;

@@ -1,0 +1,107 @@
+commit cdc8fcb49905c0b67e355e027cb462ee168ffaa3
+Merge: 382625d0d432 fa15bafb71fd
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Mon Aug 3 13:01:22 2020 -0700
+
+    Merge tag 'for-5.9/io_uring-20200802' of git://git.kernel.dk/linux-block
+    
+    Pull io_uring updates from Jens Axboe:
+     "Lots of cleanups in here, hardening the code and/or making it easier
+      to read and fixing bugs, but a core feature/change too adding support
+      for real async buffered reads. With the latter in place, we just need
+      buffered write async support and we're done relying on kthreads for
+      the fast path. In detail:
+    
+       - Cleanup how memory accounting is done on ring setup/free (Bijan)
+    
+       - sq array offset calculation fixup (Dmitry)
+    
+       - Consistently handle blocking off O_DIRECT submission path (me)
+    
+       - Support proper async buffered reads, instead of relying on kthread
+         offload for that. This uses the page waitqueue to drive retries
+         from task_work, like we handle poll based retry. (me)
+    
+       - IO completion optimizations (me)
+    
+       - Fix race with accounting and ring fd install (me)
+    
+       - Support EPOLLEXCLUSIVE (Jiufei)
+    
+       - Get rid of the io_kiocb unionizing, made possible by shrinking
+         other bits (Pavel)
+    
+       - Completion side cleanups (Pavel)
+    
+       - Cleanup REQ_F_ flags handling, and kill off many of them (Pavel)
+    
+       - Request environment grabbing cleanups (Pavel)
+    
+       - File and socket read/write cleanups (Pavel)
+    
+       - Improve kiocb_set_rw_flags() (Pavel)
+    
+       - Tons of fixes and cleanups (Pavel)
+    
+       - IORING_SQ_NEED_WAKEUP clear fix (Xiaoguang)"
+    
+    * tag 'for-5.9/io_uring-20200802' of git://git.kernel.dk/linux-block: (127 commits)
+      io_uring: flip if handling after io_setup_async_rw
+      fs: optimise kiocb_set_rw_flags()
+      io_uring: don't touch 'ctx' after installing file descriptor
+      io_uring: get rid of atomic FAA for cq_timeouts
+      io_uring: consolidate *_check_overflow accounting
+      io_uring: fix stalled deferred requests
+      io_uring: fix racy overflow count reporting
+      io_uring: deduplicate __io_complete_rw()
+      io_uring: de-unionise io_kiocb
+      io-wq: update hash bits
+      io_uring: fix missing io_queue_linked_timeout()
+      io_uring: mark ->work uninitialised after cleanup
+      io_uring: deduplicate io_grab_files() calls
+      io_uring: don't do opcode prep twice
+      io_uring: clear IORING_SQ_NEED_WAKEUP after executing task works
+      io_uring: batch put_task_struct()
+      tasks: add put_task_struct_many()
+      io_uring: return locked and pinned page accounting
+      io_uring: don't miscount pinned memory
+      io_uring: don't open-code recv kbuf managment
+      ...
+
+diff --cc block/blk-core.c
+index 93104c7470e8,62a4904db921..d9d632639bd1
+--- a/block/blk-core.c
++++ b/block/blk-core.c
+@@@ -956,13 -952,30 +956,18 @@@ static inline blk_status_t blk_check_zo
+  	return BLK_STS_OK;
+  }
+  
+ -static noinline_for_stack bool
+ -generic_make_request_checks(struct bio *bio)
+ +static noinline_for_stack bool submit_bio_checks(struct bio *bio)
+  {
+ -	struct request_queue *q;
+ -	int nr_sectors = bio_sectors(bio);
+ +	struct request_queue *q = bio->bi_disk->queue;
+  	blk_status_t status = BLK_STS_IOERR;
++ 	struct blk_plug *plug;
+ -	char b[BDEVNAME_SIZE];
+  
+  	might_sleep();
+  
+ -	q = bio->bi_disk->queue;
+ -	if (unlikely(!q)) {
+ -		printk(KERN_ERR
+ -		       "generic_make_request: Trying to access "
+ -			"nonexistent block-device %s (%Lu)\n",
+ -			bio_devname(bio, b), (long long)bio->bi_iter.bi_sector);
+ -		goto end_io;
+ -	}
+ -
++ 	plug = blk_mq_plug(q, bio);
++ 	if (plug && plug->nowait)
++ 		bio->bi_opf |= REQ_NOWAIT;
++ 
+  	/*
+  	 * For a REQ_NOWAIT based request, return -EOPNOTSUPP
+  	 * if queue is not a request based queue.

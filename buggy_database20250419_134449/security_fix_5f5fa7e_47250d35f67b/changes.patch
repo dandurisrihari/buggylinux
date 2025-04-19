@@ -1,0 +1,132 @@
+diff --git a/kernel/rcu/tree_exp.h b/kernel/rcu/tree_exp.h
+index 1a617b9dffb0..0e5ccb330f9d 100644
+--- a/kernel/rcu/tree_exp.h
++++ b/kernel/rcu/tree_exp.h
+@@ -639,6 +639,7 @@ static void wait_rcu_exp_gp(struct work_struct *wp)
+  */
+ static void rcu_exp_handler(void *unused)
+ {
++	int depth = rcu_preempt_depth();
+ 	unsigned long flags;
+ 	struct rcu_data *rdp = this_cpu_ptr(&rcu_data);
+ 	struct rcu_node *rnp = rdp->mynode;
+@@ -649,7 +650,7 @@ static void rcu_exp_handler(void *unused)
+ 	 * critical section.  If also enabled or idle, immediately
+ 	 * report the quiescent state, otherwise defer.
+ 	 */
+-	if (!rcu_preempt_depth()) {
++	if (!depth) {
+ 		if (!(preempt_count() & (PREEMPT_MASK | SOFTIRQ_MASK)) ||
+ 		    rcu_dynticks_curr_cpu_in_eqs()) {
+ 			rcu_report_exp_rdp(rdp);
+@@ -673,7 +674,7 @@ static void rcu_exp_handler(void *unused)
+ 	 * can have caused this quiescent state to already have been
+ 	 * reported, so we really do need to check ->expmask.
+ 	 */
+-	if (rcu_preempt_depth() > 0) {
++	if (depth > 0) {
+ 		raw_spin_lock_irqsave_rcu_node(rnp, flags);
+ 		if (rnp->expmask & rdp->grpmask) {
+ 			rdp->exp_deferred_qs = true;
+@@ -683,30 +684,8 @@ static void rcu_exp_handler(void *unused)
+ 		return;
+ 	}
+ 
+-	/*
+-	 * The final and least likely case is where the interrupted
+-	 * code was just about to or just finished exiting the RCU-preempt
+-	 * read-side critical section, and no, we can't tell which.
+-	 * So either way, set ->deferred_qs to flag later code that
+-	 * a quiescent state is required.
+-	 *
+-	 * If the CPU is fully enabled (or if some buggy RCU-preempt
+-	 * read-side critical section is being used from idle), just
+-	 * invoke rcu_preempt_deferred_qs() to immediately report the
+-	 * quiescent state.  We cannot use rcu_read_unlock_special()
+-	 * because we are in an interrupt handler, which will cause that
+-	 * function to take an early exit without doing anything.
+-	 *
+-	 * Otherwise, force a context switch after the CPU enables everything.
+-	 */
+-	rdp->exp_deferred_qs = true;
+-	if (!(preempt_count() & (PREEMPT_MASK | SOFTIRQ_MASK)) ||
+-	    WARN_ON_ONCE(rcu_dynticks_curr_cpu_in_eqs())) {
+-		rcu_preempt_deferred_qs(t);
+-	} else {
+-		set_tsk_need_resched(t);
+-		set_preempt_need_resched();
+-	}
++	// Finally, negative nesting depth should not happen.
++	WARN_ON_ONCE(1);
+ }
+ 
+ /* PREEMPTION=y, so no PREEMPTION=n expedited grace period to clean up after. */
+diff --git a/kernel/rcu/tree_plugin.h b/kernel/rcu/tree_plugin.h
+index f31c5992f842..088e84e4578f 100644
+--- a/kernel/rcu/tree_plugin.h
++++ b/kernel/rcu/tree_plugin.h
+@@ -345,9 +345,7 @@ static int rcu_preempt_blocked_readers_cgp(struct rcu_node *rnp)
+ 	return READ_ONCE(rnp->gp_tasks) != NULL;
+ }
+ 
+-/* Bias and limit values for ->rcu_read_lock_nesting. */
+-#define RCU_NEST_BIAS INT_MAX
+-#define RCU_NEST_NMAX (-INT_MAX / 2)
++/* limit value for ->rcu_read_lock_nesting. */
+ #define RCU_NEST_PMAX (INT_MAX / 2)
+ 
+ static void rcu_preempt_read_enter(void)
+@@ -355,9 +353,9 @@ static void rcu_preempt_read_enter(void)
+ 	current->rcu_read_lock_nesting++;
+ }
+ 
+-static void rcu_preempt_read_exit(void)
++static int rcu_preempt_read_exit(void)
+ {
+-	current->rcu_read_lock_nesting--;
++	return --current->rcu_read_lock_nesting;
+ }
+ 
+ static void rcu_preempt_depth_set(int val)
+@@ -390,21 +388,15 @@ void __rcu_read_unlock(void)
+ {
+ 	struct task_struct *t = current;
+ 
+-	if (rcu_preempt_depth() != 1) {
+-		rcu_preempt_read_exit();
+-	} else {
++	if (rcu_preempt_read_exit() == 0) {
+ 		barrier();  /* critical section before exit code. */
+-		rcu_preempt_depth_set(-RCU_NEST_BIAS);
+-		barrier();  /* assign before ->rcu_read_unlock_special load */
+ 		if (unlikely(READ_ONCE(t->rcu_read_unlock_special.s)))
+ 			rcu_read_unlock_special(t);
+-		barrier();  /* ->rcu_read_unlock_special load before assign */
+-		rcu_preempt_depth_set(0);
+ 	}
+ 	if (IS_ENABLED(CONFIG_PROVE_LOCKING)) {
+ 		int rrln = rcu_preempt_depth();
+ 
+-		WARN_ON_ONCE(rrln < 0 && rrln > RCU_NEST_NMAX);
++		WARN_ON_ONCE(rrln < 0 || rrln > RCU_NEST_PMAX);
+ 	}
+ }
+ EXPORT_SYMBOL_GPL(__rcu_read_unlock);
+@@ -556,7 +548,7 @@ static bool rcu_preempt_need_deferred_qs(struct task_struct *t)
+ {
+ 	return (__this_cpu_read(rcu_data.exp_deferred_qs) ||
+ 		READ_ONCE(t->rcu_read_unlock_special.s)) &&
+-	       rcu_preempt_depth() <= 0;
++	       rcu_preempt_depth() == 0;
+ }
+ 
+ /*
+@@ -692,7 +684,7 @@ static void rcu_flavor_sched_clock_irq(int user)
+ 	} else if (rcu_preempt_need_deferred_qs(t)) {
+ 		rcu_preempt_deferred_qs(t); /* Report deferred QS. */
+ 		return;
+-	} else if (!rcu_preempt_depth()) {
++	} else if (!WARN_ON_ONCE(rcu_preempt_depth())) {
+ 		rcu_qs(); /* Report immediate QS. */
+ 		return;
+ 	}

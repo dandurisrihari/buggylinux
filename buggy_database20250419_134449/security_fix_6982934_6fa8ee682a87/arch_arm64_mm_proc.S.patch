@@ -1,0 +1,87 @@
+commit 6982934e19f8ebb4152ba77308facdb1a38533f9
+Author: Kristina Martsenko <kristina.martsenko@arm.com>
+Date:   Fri Mar 13 14:34:55 2020 +0530
+
+    arm64: enable ptrauth earlier
+    
+    When the kernel is compiled with pointer auth instructions, the boot CPU
+    needs to start using address auth very early, so change the cpucap to
+    account for this.
+    
+    Pointer auth must be enabled before we call C functions, because it is
+    not possible to enter a function with pointer auth disabled and exit it
+    with pointer auth enabled. Note, mismatches between architected and
+    IMPDEF algorithms will still be caught by the cpufeature framework (the
+    separate *_ARCH and *_IMP_DEF cpucaps).
+    
+    Note the change in behavior: if the boot CPU has address auth and a
+    late CPU does not, then the late CPU is parked by the cpufeature
+    framework. This is possible as kernel will only have NOP space intructions
+    for PAC so such mismatched late cpu will silently ignore those
+    instructions in C functions. Also, if the boot CPU does not have address
+    auth and the late CPU has then the late cpu will still boot but with
+    ptrauth feature disabled.
+    
+    Leave generic authentication as a "system scope" cpucap for now, since
+    initially the kernel will only use address authentication.
+    
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Reviewed-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+    Reviewed-by: Vincenzo Frascino <Vincenzo.Frascino@arm.com>
+    Signed-off-by: Kristina Martsenko <kristina.martsenko@arm.com>
+    [Amit: Re-worked ptrauth setup logic, comments]
+    Signed-off-by: Amit Daniel Kachhap <amit.kachhap@arm.com>
+    Signed-off-by: Catalin Marinas <catalin.marinas@arm.com>
+
+diff --git a/arch/arm64/mm/proc.S b/arch/arm64/mm/proc.S
+index ea0db1744c29..4cf19a26af2d 100644
+--- a/arch/arm64/mm/proc.S
++++ b/arch/arm64/mm/proc.S
+@@ -16,6 +16,7 @@
+ #include <asm/pgtable-hwdef.h>
+ #include <asm/cpufeature.h>
+ #include <asm/alternative.h>
++#include <asm/smp.h>
+ 
+ #ifdef CONFIG_ARM64_64K_PAGES
+ #define TCR_TG_FLAGS	TCR_TG0_64K | TCR_TG1_64K
+@@ -468,9 +469,39 @@ SYM_FUNC_START(__cpu_setup)
+ 1:
+ #endif	/* CONFIG_ARM64_HW_AFDBM */
+ 	msr	tcr_el1, x10
++	mov	x1, x0
+ 	/*
+ 	 * Prepare SCTLR
+ 	 */
+ 	mov_q	x0, SCTLR_EL1_SET
++
++#ifdef CONFIG_ARM64_PTR_AUTH
++	/* No ptrauth setup for run time cpus */
++	cmp	x1, #ARM64_CPU_RUNTIME
++	b.eq	3f
++
++	/* Check if the CPU supports ptrauth */
++	mrs	x2, id_aa64isar1_el1
++	ubfx	x2, x2, #ID_AA64ISAR1_APA_SHIFT, #8
++	cbz	x2, 3f
++
++	msr_s	SYS_APIAKEYLO_EL1, xzr
++	msr_s	SYS_APIAKEYHI_EL1, xzr
++
++	/* Just enable ptrauth for primary cpu */
++	cmp	x1, #ARM64_CPU_BOOT_PRIMARY
++	b.eq	2f
++
++	/* if !system_supports_address_auth() then skip enable */
++alternative_if_not ARM64_HAS_ADDRESS_AUTH
++	b	3f
++alternative_else_nop_endif
++
++2:	/* Enable ptrauth instructions */
++	ldr	x2, =SCTLR_ELx_ENIA | SCTLR_ELx_ENIB | \
++		     SCTLR_ELx_ENDA | SCTLR_ELx_ENDB
++	orr	x0, x0, x2
++3:
++#endif
+ 	ret					// return to head.S
+ SYM_FUNC_END(__cpu_setup)

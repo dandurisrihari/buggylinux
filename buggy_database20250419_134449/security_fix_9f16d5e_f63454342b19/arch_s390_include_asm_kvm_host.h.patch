@@ -1,0 +1,213 @@
+commit 9f16d5e6f220661f73b36a4be1b21575651d8833
+Merge: 42d9e8b7ccdd 9ee62c33c0fe
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Sat Nov 23 16:00:50 2024 -0800
+
+    Merge tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm
+    
+    Pull kvm updates from Paolo Bonzini:
+     "The biggest change here is eliminating the awful idea that KVM had of
+      essentially guessing which pfns are refcounted pages.
+    
+      The reason to do so was that KVM needs to map both non-refcounted
+      pages (for example BARs of VFIO devices) and VM_PFNMAP/VM_MIXMEDMAP
+      VMAs that contain refcounted pages.
+    
+      However, the result was security issues in the past, and more recently
+      the inability to map VM_IO and VM_PFNMAP memory that _is_ backed by
+      struct page but is not refcounted. In particular this broke virtio-gpu
+      blob resources (which directly map host graphics buffers into the
+      guest as "vram" for the virtio-gpu device) with the amdgpu driver,
+      because amdgpu allocates non-compound higher order pages and the tail
+      pages could not be mapped into KVM.
+    
+      This requires adjusting all uses of struct page in the
+      per-architecture code, to always work on the pfn whenever possible.
+      The large series that did this, from David Stevens and Sean
+      Christopherson, also cleaned up substantially the set of functions
+      that provided arch code with the pfn for a host virtual addresses.
+    
+      The previous maze of twisty little passages, all different, is
+      replaced by five functions (__gfn_to_page, __kvm_faultin_pfn, the
+      non-__ versions of these two, and kvm_prefetch_pages) saving almost
+      200 lines of code.
+    
+      ARM:
+    
+       - Support for stage-1 permission indirection (FEAT_S1PIE) and
+         permission overlays (FEAT_S1POE), including nested virt + the
+         emulated page table walker
+    
+       - Introduce PSCI SYSTEM_OFF2 support to KVM + client driver. This
+         call was introduced in PSCIv1.3 as a mechanism to request
+         hibernation, similar to the S4 state in ACPI
+    
+       - Explicitly trap + hide FEAT_MPAM (QoS controls) from KVM guests. As
+         part of it, introduce trivial initialization of the host's MPAM
+         context so KVM can use the corresponding traps
+    
+       - PMU support under nested virtualization, honoring the guest
+         hypervisor's trap configuration and event filtering when running a
+         nested guest
+    
+       - Fixes to vgic ITS serialization where stale device/interrupt table
+         entries are not zeroed when the mapping is invalidated by the VM
+    
+       - Avoid emulated MMIO completion if userspace has requested
+         synchronous external abort injection
+    
+       - Various fixes and cleanups affecting pKVM, vCPU initialization, and
+         selftests
+    
+      LoongArch:
+    
+       - Add iocsr and mmio bus simulation in kernel.
+    
+       - Add in-kernel interrupt controller emulation.
+    
+       - Add support for virtualization extensions to the eiointc irqchip.
+    
+      PPC:
+    
+       - Drop lingering and utterly obsolete references to PPC970 KVM, which
+         was removed 10 years ago.
+    
+       - Fix incorrect documentation references to non-existing ioctls
+    
+      RISC-V:
+    
+       - Accelerate KVM RISC-V when running as a guest
+    
+       - Perf support to collect KVM guest statistics from host side
+    
+      s390:
+    
+       - New selftests: more ucontrol selftests and CPU model sanity checks
+    
+       - Support for the gen17 CPU model
+    
+       - List registers supported by KVM_GET/SET_ONE_REG in the
+         documentation
+    
+      x86:
+    
+       - Cleanup KVM's handling of Accessed and Dirty bits to dedup code,
+         improve documentation, harden against unexpected changes.
+    
+         Even if the hardware A/D tracking is disabled, it is possible to
+         use the hardware-defined A/D bits to track if a PFN is Accessed
+         and/or Dirty, and that removes a lot of special cases.
+    
+       - Elide TLB flushes when aging secondary PTEs, as has been done in
+         x86's primary MMU for over 10 years.
+    
+       - Recover huge pages in-place in the TDP MMU when dirty page logging
+         is toggled off, instead of zapping them and waiting until the page
+         is re-accessed to create a huge mapping. This reduces vCPU jitter.
+    
+       - Batch TLB flushes when dirty page logging is toggled off. This
+         reduces the time it takes to disable dirty logging by ~3x.
+    
+       - Remove the shrinker that was (poorly) attempting to reclaim shadow
+         page tables in low-memory situations.
+    
+       - Clean up and optimize KVM's handling of writes to
+         MSR_IA32_APICBASE.
+    
+       - Advertise CPUIDs for new instructions in Clearwater Forest
+    
+       - Quirk KVM's misguided behavior of initialized certain feature MSRs
+         to their maximum supported feature set, which can result in KVM
+         creating invalid vCPU state. E.g. initializing PERF_CAPABILITIES to
+         a non-zero value results in the vCPU having invalid state if
+         userspace hides PDCM from the guest, which in turn can lead to
+         save/restore failures.
+    
+       - Fix KVM's handling of non-canonical checks for vCPUs that support
+         LA57 to better follow the "architecture", in quotes because the
+         actual behavior is poorly documented. E.g. most MSR writes and
+         descriptor table loads ignore CR4.LA57 and operate purely on
+         whether the CPU supports LA57.
+    
+       - Bypass the register cache when querying CPL from kvm_sched_out(),
+         as filling the cache from IRQ context is generally unsafe; harden
+         the cache accessors to try to prevent similar issues from occuring
+         in the future. The issue that triggered this change was already
+         fixed in 6.12, but was still kinda latent.
+    
+       - Advertise AMD_IBPB_RET to userspace, and fix a related bug where
+         KVM over-advertises SPEC_CTRL when trying to support cross-vendor
+         VMs.
+    
+       - Minor cleanups
+    
+       - Switch hugepage recovery thread to use vhost_task.
+    
+         These kthreads can consume significant amounts of CPU time on
+         behalf of a VM or in response to how the VM behaves (for example
+         how it accesses its memory); therefore KVM tried to place the
+         thread in the VM's cgroups and charge the CPU time consumed by that
+         work to the VM's container.
+    
+         However the kthreads did not process SIGSTOP/SIGCONT, and therefore
+         cgroups which had KVM instances inside could not complete freezing.
+    
+         Fix this by replacing the kthread with a PF_USER_WORKER thread, via
+         the vhost_task abstraction. Another 100+ lines removed, with
+         generally better behavior too like having these threads properly
+         parented in the process tree.
+    
+       - Revert a workaround for an old CPU erratum (Nehalem/Westmere) that
+         didn't really work; there was really nothing to work around anyway:
+         the broken patch was meant to fix nested virtualization, but the
+         PERF_GLOBAL_CTRL MSR is virtualized and therefore unaffected by the
+         erratum.
+    
+       - Fix 6.12 regression where CONFIG_KVM will be built as a module even
+         if asked to be builtin, as long as neither KVM_INTEL nor KVM_AMD is
+         'y'.
+    
+      x86 selftests:
+    
+       - x86 selftests can now use AVX.
+    
+      Documentation:
+    
+       - Use rST internal links
+    
+       - Reorganize the introduction to the API document
+    
+      Generic:
+    
+       - Protect vcpu->pid accesses outside of vcpu->mutex with a rwlock
+         instead of RCU, so that running a vCPU on a different task doesn't
+         encounter long due to having to wait for all CPUs become quiescent.
+    
+         In general both reads and writes are rare, but userspace that
+         supports confidential computing is introducing the use of "helper"
+         vCPUs that may jump from one host processor to another. Those will
+         be very happy to trigger a synchronize_rcu(), and the effect on
+         performance is quite the disaster"
+    
+    * tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm: (298 commits)
+      KVM: x86: Break CONFIG_KVM_X86's direct dependency on KVM_INTEL || KVM_AMD
+      KVM: x86: add back X86_LOCAL_APIC dependency
+      Revert "KVM: VMX: Move LOAD_IA32_PERF_GLOBAL_CTRL errata handling out of setup_vmcs_config()"
+      KVM: x86: switch hugepage recovery thread to vhost_task
+      KVM: x86: expose MSR_PLATFORM_INFO as a feature MSR
+      x86: KVM: Advertise CPUIDs for new instructions in Clearwater Forest
+      Documentation: KVM: fix malformed table
+      irqchip/loongson-eiointc: Add virt extension support
+      LoongArch: KVM: Add irqfd support
+      LoongArch: KVM: Add PCHPIC user mode read and write functions
+      LoongArch: KVM: Add PCHPIC read and write functions
+      LoongArch: KVM: Add PCHPIC device support
+      LoongArch: KVM: Add EIOINTC user mode read and write functions
+      LoongArch: KVM: Add EIOINTC read and write functions
+      LoongArch: KVM: Add EIOINTC device support
+      LoongArch: KVM: Add IPI user mode read and write function
+      LoongArch: KVM: Add IPI read and write function
+      LoongArch: KVM: Add IPI device support
+      LoongArch: KVM: Add iocsr and mmio bus simulation in kernel
+      KVM: arm64: Pass on SVE mapping failures
+      ...

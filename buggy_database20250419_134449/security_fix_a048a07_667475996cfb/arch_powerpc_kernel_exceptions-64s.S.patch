@@ -1,0 +1,84 @@
+commit a048a07d7f4535baa4cbad6bc024f175317ab938
+Author: Nicholas Piggin <npiggin@gmail.com>
+Date:   Tue May 22 09:00:00 2018 +1000
+
+    powerpc/64s: Add support for a store forwarding barrier at kernel entry/exit
+    
+    On some CPUs we can prevent a vulnerability related to store-to-load
+    forwarding by preventing store forwarding between privilege domains,
+    by inserting a barrier in kernel entry and exit paths.
+    
+    This is known to be the case on at least Power7, Power8 and Power9
+    powerpc CPUs.
+    
+    Barriers must be inserted generally before the first load after moving
+    to a higher privilege, and after the last store before moving to a
+    lower privilege, HV and PR privilege transitions must be protected.
+    
+    Barriers are added as patch sections, with all kernel/hypervisor entry
+    points patched, and the exit points to lower privilge levels patched
+    similarly to the RFI flush patching.
+    
+    Firmware advertisement is not implemented yet, so CPU flush types
+    are hard coded.
+    
+    Thanks to Michal Suchánek for bug fixes and review.
+    
+    Signed-off-by: Nicholas Piggin <npiggin@gmail.com>
+    Signed-off-by: Mauricio Faria de Oliveira <mauricfo@linux.vnet.ibm.com>
+    Signed-off-by: Michael Neuling <mikey@neuling.org>
+    Signed-off-by: Michal Suchánek <msuchanek@suse.de>
+    Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/arch/powerpc/kernel/exceptions-64s.S b/arch/powerpc/kernel/exceptions-64s.S
+index ae6a849db60b..f283958129f2 100644
+--- a/arch/powerpc/kernel/exceptions-64s.S
++++ b/arch/powerpc/kernel/exceptions-64s.S
+@@ -885,7 +885,7 @@ END_FTR_SECTION_IFSET(CPU_FTR_TM)
+ #endif
+ 
+ 
+-EXC_REAL_MASKABLE(decrementer, 0x900, 0x80, IRQS_DISABLED)
++EXC_REAL_OOL_MASKABLE(decrementer, 0x900, 0x80, IRQS_DISABLED)
+ EXC_VIRT_MASKABLE(decrementer, 0x4900, 0x80, 0x900, IRQS_DISABLED)
+ TRAMP_KVM(PACA_EXGEN, 0x900)
+ EXC_COMMON_ASYNC(decrementer_common, 0x900, timer_interrupt)
+@@ -961,6 +961,7 @@ EXC_COMMON(trap_0b_common, 0xb00, unknown_exception)
+ 	mtctr	r13;							\
+ 	GET_PACA(r13);							\
+ 	std	r10,PACA_EXGEN+EX_R10(r13);				\
++	INTERRUPT_TO_KERNEL;						\
+ 	KVMTEST_PR(0xc00); /* uses r10, branch to do_kvm_0xc00_system_call */ \
+ 	HMT_MEDIUM;							\
+ 	mfctr	r9;
+@@ -969,7 +970,8 @@ EXC_COMMON(trap_0b_common, 0xb00, unknown_exception)
+ #define SYSCALL_KVMTEST							\
+ 	HMT_MEDIUM;							\
+ 	mr	r9,r13;							\
+-	GET_PACA(r13);
++	GET_PACA(r13);							\
++	INTERRUPT_TO_KERNEL;
+ #endif
+ 	
+ #define LOAD_SYSCALL_HANDLER(reg)					\
+@@ -1507,6 +1509,19 @@ masked_##_H##interrupt:					\
+ 	b	.;					\
+ 	MASKED_DEC_HANDLER(_H)
+ 
++TRAMP_REAL_BEGIN(stf_barrier_fallback)
++	std	r9,PACA_EXRFI+EX_R9(r13)
++	std	r10,PACA_EXRFI+EX_R10(r13)
++	sync
++	ld	r9,PACA_EXRFI+EX_R9(r13)
++	ld	r10,PACA_EXRFI+EX_R10(r13)
++	ori	31,31,0
++	.rept 14
++	b	1f
++1:
++	.endr
++	blr
++
+ TRAMP_REAL_BEGIN(rfi_flush_fallback)
+ 	SET_SCRATCH0(r13);
+ 	GET_PACA(r13);

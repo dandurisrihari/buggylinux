@@ -1,0 +1,123 @@
+diff --git a/fs/afs/inode.c b/fs/afs/inode.c
+index 299dbaeb2e2a..ade6ec3873cf 100644
+--- a/fs/afs/inode.c
++++ b/fs/afs/inode.c
+@@ -54,8 +54,21 @@ static int afs_inode_map_status(struct afs_vnode *vnode, struct key *key)
+ 		inode->i_fop	= &afs_dir_file_operations;
+ 		break;
+ 	case AFS_FTYPE_SYMLINK:
+-		inode->i_mode	= S_IFLNK | vnode->status.mode;
+-		inode->i_op	= &page_symlink_inode_operations;
++		/* Symlinks with a mode of 0644 are actually mountpoints. */
++		if ((vnode->status.mode & 0777) == 0644) {
++			inode->i_flags |= S_AUTOMOUNT;
++
++			spin_lock(&vnode->lock);
++			set_bit(AFS_VNODE_MOUNTPOINT, &vnode->flags);
++			spin_unlock(&vnode->lock);
++
++			inode->i_mode	= S_IFDIR | 0555;
++			inode->i_op	= &afs_mntpt_inode_operations;
++			inode->i_fop	= &afs_mntpt_file_operations;
++		} else {
++			inode->i_mode	= S_IFLNK | vnode->status.mode;
++			inode->i_op	= &page_symlink_inode_operations;
++		}
+ 		inode_nohighmem(inode);
+ 		break;
+ 	default:
+@@ -79,18 +92,6 @@ static int afs_inode_map_status(struct afs_vnode *vnode, struct key *key)
+ 	inode->i_generation	= vnode->fid.unique;
+ 	inode->i_version	= vnode->status.data_version;
+ 	inode->i_mapping->a_ops	= &afs_fs_aops;
+-
+-	/* check to see whether a symbolic link is really a mountpoint */
+-	if (vnode->status.type == AFS_FTYPE_SYMLINK) {
+-		afs_mntpt_check_symlink(vnode, key);
+-
+-		if (test_bit(AFS_VNODE_MOUNTPOINT, &vnode->flags)) {
+-			inode->i_mode	= S_IFDIR | vnode->status.mode;
+-			inode->i_op	= &afs_mntpt_inode_operations;
+-			inode->i_fop	= &afs_mntpt_file_operations;
+-		}
+-	}
+-
+ 	return 0;
+ }
+ 
+diff --git a/fs/afs/internal.h b/fs/afs/internal.h
+index af1d91ec7f2c..39de154fb42e 100644
+--- a/fs/afs/internal.h
++++ b/fs/afs/internal.h
+@@ -559,7 +559,6 @@ extern const struct inode_operations afs_autocell_inode_operations;
+ extern const struct file_operations afs_mntpt_file_operations;
+ 
+ extern struct vfsmount *afs_d_automount(struct path *);
+-extern int afs_mntpt_check_symlink(struct afs_vnode *, struct key *);
+ extern void afs_mntpt_kill_timer(void);
+ 
+ /*
+diff --git a/fs/afs/mntpt.c b/fs/afs/mntpt.c
+index d4fb0afc0097..bd3b65cde282 100644
+--- a/fs/afs/mntpt.c
++++ b/fs/afs/mntpt.c
+@@ -46,59 +46,6 @@ static DECLARE_DELAYED_WORK(afs_mntpt_expiry_timer, afs_mntpt_expiry_timed_out);
+ 
+ static unsigned long afs_mntpt_expiry_timeout = 10 * 60;
+ 
+-/*
+- * check a symbolic link to see whether it actually encodes a mountpoint
+- * - sets the AFS_VNODE_MOUNTPOINT flag on the vnode appropriately
+- */
+-int afs_mntpt_check_symlink(struct afs_vnode *vnode, struct key *key)
+-{
+-	struct page *page;
+-	size_t size;
+-	char *buf;
+-	int ret;
+-
+-	_enter("{%x:%u,%u}",
+-	       vnode->fid.vid, vnode->fid.vnode, vnode->fid.unique);
+-
+-	/* read the contents of the symlink into the pagecache */
+-	page = read_cache_page(AFS_VNODE_TO_I(vnode)->i_mapping, 0,
+-			       afs_page_filler, key);
+-	if (IS_ERR(page)) {
+-		ret = PTR_ERR(page);
+-		goto out;
+-	}
+-
+-	ret = -EIO;
+-	if (PageError(page))
+-		goto out_free;
+-
+-	buf = kmap(page);
+-
+-	/* examine the symlink's contents */
+-	size = vnode->status.size;
+-	_debug("symlink to %*.*s", (int) size, (int) size, buf);
+-
+-	if (size > 2 &&
+-	    (buf[0] == '%' || buf[0] == '#') &&
+-	    buf[size - 1] == '.'
+-	    ) {
+-		_debug("symlink is a mountpoint");
+-		spin_lock(&vnode->lock);
+-		set_bit(AFS_VNODE_MOUNTPOINT, &vnode->flags);
+-		vnode->vfs_inode.i_flags |= S_AUTOMOUNT;
+-		spin_unlock(&vnode->lock);
+-	}
+-
+-	ret = 0;
+-
+-	kunmap(page);
+-out_free:
+-	put_page(page);
+-out:
+-	_leave(" = %d", ret);
+-	return ret;
+-}
+-
+ /*
+  * no valid lookup procedure on this sort of dir
+  */

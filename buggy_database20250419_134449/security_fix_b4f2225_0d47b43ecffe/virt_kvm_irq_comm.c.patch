@@ -1,0 +1,70 @@
+commit b4f2225c07dd4d8eef7aa7f5b36a3b72c3cbbe5b
+Author: Yang Zhang <yang.z.zhang@Intel.com>
+Date:   Thu Apr 11 19:21:37 2013 +0800
+
+    KVM: Return destination vcpu on interrupt injection
+    
+    Add a new parameter to know vcpus who received the interrupt.
+    
+    Signed-off-by: Yang Zhang <yang.z.zhang@Intel.com>
+    Reviewed-by: Gleb Natapov <gleb@redhat.com>
+    Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
+
+diff --git a/virt/kvm/irq_comm.c b/virt/kvm/irq_comm.c
+index e9073cf4d040..2f07d2e59a2d 100644
+--- a/virt/kvm/irq_comm.c
++++ b/virt/kvm/irq_comm.c
+@@ -63,7 +63,7 @@ inline static bool kvm_is_dm_lowest_prio(struct kvm_lapic_irq *irq)
+ }
+ 
+ int kvm_irq_delivery_to_apic(struct kvm *kvm, struct kvm_lapic *src,
+-		struct kvm_lapic_irq *irq)
++		struct kvm_lapic_irq *irq, unsigned long *dest_map)
+ {
+ 	int i, r = -1;
+ 	struct kvm_vcpu *vcpu, *lowest = NULL;
+@@ -74,7 +74,7 @@ int kvm_irq_delivery_to_apic(struct kvm *kvm, struct kvm_lapic *src,
+ 		irq->delivery_mode = APIC_DM_FIXED;
+ 	}
+ 
+-	if (kvm_irq_delivery_to_apic_fast(kvm, src, irq, &r))
++	if (kvm_irq_delivery_to_apic_fast(kvm, src, irq, &r, dest_map))
+ 		return r;
+ 
+ 	kvm_for_each_vcpu(i, vcpu, kvm) {
+@@ -88,7 +88,7 @@ int kvm_irq_delivery_to_apic(struct kvm *kvm, struct kvm_lapic *src,
+ 		if (!kvm_is_dm_lowest_prio(irq)) {
+ 			if (r < 0)
+ 				r = 0;
+-			r += kvm_apic_set_irq(vcpu, irq);
++			r += kvm_apic_set_irq(vcpu, irq, dest_map);
+ 		} else if (kvm_lapic_enabled(vcpu)) {
+ 			if (!lowest)
+ 				lowest = vcpu;
+@@ -98,7 +98,7 @@ int kvm_irq_delivery_to_apic(struct kvm *kvm, struct kvm_lapic *src,
+ 	}
+ 
+ 	if (lowest)
+-		r = kvm_apic_set_irq(lowest, irq);
++		r = kvm_apic_set_irq(lowest, irq, dest_map);
+ 
+ 	return r;
+ }
+@@ -130,7 +130,7 @@ int kvm_set_msi(struct kvm_kernel_irq_routing_entry *e,
+ 
+ 	kvm_set_msi_irq(e, &irq);
+ 
+-	return kvm_irq_delivery_to_apic(kvm, NULL, &irq);
++	return kvm_irq_delivery_to_apic(kvm, NULL, &irq, NULL);
+ }
+ 
+ 
+@@ -142,7 +142,7 @@ static int kvm_set_msi_inatomic(struct kvm_kernel_irq_routing_entry *e,
+ 
+ 	kvm_set_msi_irq(e, &irq);
+ 
+-	if (kvm_irq_delivery_to_apic_fast(kvm, NULL, &irq, &r))
++	if (kvm_irq_delivery_to_apic_fast(kvm, NULL, &irq, &r, NULL))
+ 		return r;
+ 	else
+ 		return -EWOULDBLOCK;

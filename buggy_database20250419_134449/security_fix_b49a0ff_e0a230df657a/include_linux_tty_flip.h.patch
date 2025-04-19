@@ -1,0 +1,53 @@
+commit b49a0ff7328f5f9acfd027906f4c7d313a225361
+Author: Jiri Slaby (SUSE) <jirislaby@kernel.org>
+Date:   Wed Aug 16 12:55:27 2023 +0200
+
+    tty: tty_buffer: use __tty_insert_flip_string_flags() in tty_insert_flip_char()
+    
+    Use __tty_insert_flip_string_flags() for the slow path of
+    tty_insert_flip_char(). The former is generic enough, so there is no
+    reason to reimplement the injection once again.
+    
+    So now we have a single function stuffing into tty buffers.
+    
+    Signed-off-by: "Jiri Slaby (SUSE)" <jirislaby@kernel.org>
+    Link: https://lore.kernel.org/r/20230816105530.3335-8-jirislaby@kernel.org
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/include/linux/tty_flip.h b/include/linux/tty_flip.h
+index efd03d9c11f8..af4fce98f64e 100644
+--- a/include/linux/tty_flip.h
++++ b/include/linux/tty_flip.h
+@@ -15,7 +15,6 @@ size_t __tty_insert_flip_string_flags(struct tty_port *port, const u8 *chars,
+ 				      size_t size);
+ size_t tty_prepare_flip_string(struct tty_port *port, u8 **chars, size_t size);
+ void tty_flip_buffer_push(struct tty_port *port);
+-int __tty_insert_flip_char(struct tty_port *port, u8 ch, u8 flag);
+ 
+ /**
+  * tty_insert_flip_string_fixed_flag - add characters to the tty buffer
+@@ -55,7 +54,14 @@ static inline size_t tty_insert_flip_string_flags(struct tty_port *port,
+ 	return __tty_insert_flip_string_flags(port, chars, flags, true, size);
+ }
+ 
+-
++/**
++ * tty_insert_flip_char - add one character to the tty buffer
++ * @port: tty port
++ * @ch: character
++ * @flag: flag byte
++ *
++ * Queue a single byte @ch to the tty buffering, with an optional flag.
++ */
+ static inline size_t tty_insert_flip_char(struct tty_port *port, u8 ch, u8 flag)
+ {
+ 	struct tty_buffer *tb = port->buf.tail;
+@@ -68,7 +74,7 @@ static inline size_t tty_insert_flip_char(struct tty_port *port, u8 ch, u8 flag)
+ 		*char_buf_ptr(tb, tb->used++) = ch;
+ 		return 1;
+ 	}
+-	return __tty_insert_flip_char(port, ch, flag);
++	return __tty_insert_flip_string_flags(port, &ch, &flag, false, 1);
+ }
+ 
+ static inline size_t tty_insert_flip_string(struct tty_port *port,

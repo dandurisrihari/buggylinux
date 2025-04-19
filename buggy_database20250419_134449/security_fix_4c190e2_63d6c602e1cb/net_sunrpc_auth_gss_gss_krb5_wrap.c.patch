@@ -1,0 +1,35 @@
+commit 4c190e2f913f038c9c91ee63b59cd037260ba353
+Author: Jeff Layton <jlayton@kernel.org>
+Date:   Wed Feb 6 08:28:55 2013 -0500
+
+    sunrpc: trim off trailing checksum before returning decrypted or integrity authenticated buffer
+    
+    When GSSAPI integrity signatures are in use, or when we're using GSSAPI
+    privacy with the v2 token format, there is a trailing checksum on the
+    xdr_buf that is returned.
+    
+    It's checked during the authentication stage, and afterward nothing
+    cares about it. Ordinarily, it's not a problem since the XDR code
+    generally ignores it, but it will be when we try to compute a checksum
+    over the buffer to help prevent XID collisions in the duplicate reply
+    cache.
+    
+    Fix the code to trim off the checksums after verifying them. Note that
+    in unwrap_integ_data, we must avoid trying to reverify the checksum if
+    the request was deferred since it will no longer be present when it's
+    revisited.
+    
+    Signed-off-by: Jeff Layton <jlayton@redhat.com>
+
+diff --git a/net/sunrpc/auth_gss/gss_krb5_wrap.c b/net/sunrpc/auth_gss/gss_krb5_wrap.c
+index 107c4528654f..88edec929d73 100644
+--- a/net/sunrpc/auth_gss/gss_krb5_wrap.c
++++ b/net/sunrpc/auth_gss/gss_krb5_wrap.c
+@@ -574,6 +574,8 @@ gss_unwrap_kerberos_v2(struct krb5_ctx *kctx, int offset, struct xdr_buf *buf)
+ 	buf->head[0].iov_len -= GSS_KRB5_TOK_HDR_LEN + headskip;
+ 	buf->len -= GSS_KRB5_TOK_HDR_LEN + headskip;
+ 
++	/* Trim off the checksum blob */
++	xdr_buf_trim(buf, GSS_KRB5_TOK_HDR_LEN + tailskip);
+ 	return GSS_S_COMPLETE;
+ }

@@ -1,0 +1,53 @@
+diff --git a/net/sunrpc/clnt.c b/net/sunrpc/clnt.c
+index 612f0a641f4c..c2a01125be1a 100644
+--- a/net/sunrpc/clnt.c
++++ b/net/sunrpc/clnt.c
+@@ -1799,7 +1799,6 @@ call_allocate(struct rpc_task *task)
+ 
+ 	status = xprt->ops->buf_alloc(task);
+ 	trace_rpc_buf_alloc(task, status);
+-	xprt_inject_disconnect(xprt);
+ 	if (status == 0)
+ 		return;
+ 	if (status != -ENOMEM) {
+diff --git a/net/sunrpc/xprt.c b/net/sunrpc/xprt.c
+index a853f75d4968..80c94ead4aa0 100644
+--- a/net/sunrpc/xprt.c
++++ b/net/sunrpc/xprt.c
+@@ -1485,7 +1485,10 @@ bool xprt_prepare_transmit(struct rpc_task *task)
+ 
+ void xprt_end_transmit(struct rpc_task *task)
+ {
+-	xprt_release_write(task->tk_rqstp->rq_xprt, task);
++	struct rpc_xprt	*xprt = task->tk_rqstp->rq_xprt;
++
++	xprt_inject_disconnect(xprt);
++	xprt_release_write(xprt, task);
+ }
+ 
+ /**
+@@ -1887,7 +1890,6 @@ void xprt_release(struct rpc_task *task)
+ 	spin_unlock(&xprt->transport_lock);
+ 	if (req->rq_buffer)
+ 		xprt->ops->buf_free(task);
+-	xprt_inject_disconnect(xprt);
+ 	xdr_free_bvec(&req->rq_rcv_buf);
+ 	xdr_free_bvec(&req->rq_snd_buf);
+ 	if (req->rq_cred != NULL)
+diff --git a/net/sunrpc/xprtrdma/transport.c b/net/sunrpc/xprtrdma/transport.c
+index 78d29d1bcc20..09953597d055 100644
+--- a/net/sunrpc/xprtrdma/transport.c
++++ b/net/sunrpc/xprtrdma/transport.c
+@@ -262,8 +262,10 @@ xprt_rdma_connect_worker(struct work_struct *work)
+  * xprt_rdma_inject_disconnect - inject a connection fault
+  * @xprt: transport context
+  *
+- * If @xprt is connected, disconnect it to simulate spurious connection
+- * loss.
++ * If @xprt is connected, disconnect it to simulate spurious
++ * connection loss. Caller must hold @xprt's send lock to
++ * ensure that data structures and hardware resources are
++ * stable during the rdma_disconnect() call.
+  */
+ static void
+ xprt_rdma_inject_disconnect(struct rpc_xprt *xprt)

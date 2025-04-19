@@ -1,0 +1,140 @@
+commit 5c6ca9d936654a135b459c846885e08966e5e5bf
+Author: Lukas Wunner <lukas@wunner.de>
+Date:   Sun Apr 7 19:57:40 2024 +0200
+
+    X.509: Introduce scope-based x509_certificate allocation
+    
+    Add a DEFINE_FREE() clause for x509_certificate structs and use it in
+    x509_cert_parse() and x509_key_preparse().  These are the only functions
+    where scope-based x509_certificate allocation currently makes sense.
+    A third user will be introduced with the forthcoming SPDM library
+    (Security Protocol and Data Model) for PCI device authentication.
+    
+    Unlike most other DEFINE_FREE() clauses, this one checks for IS_ERR()
+    instead of NULL before calling x509_free_certificate() at end of scope.
+    That's because the "constructor" of x509_certificate structs,
+    x509_cert_parse(), returns a valid pointer or an ERR_PTR(), but never
+    NULL.
+    
+    Comparing the Assembler output before/after has shown they are identical,
+    save for the fact that gcc-12 always generates two return paths when
+    __cleanup() is used, one for the success case and one for the error case.
+    
+    In x509_cert_parse(), add a hint for the compiler that kzalloc() never
+    returns an ERR_PTR().  Otherwise the compiler adds a gratuitous IS_ERR()
+    check on return.  Introduce an assume() macro for this which can be
+    re-used elsewhere in the kernel to provide hints for the compiler.
+    
+    Suggested-by: Jonathan Cameron <Jonathan.Cameron@Huawei.com>
+    Link: https://lore.kernel.org/all/20231003153937.000034ca@Huawei.com/
+    Link: https://lwn.net/Articles/934679/
+    Signed-off-by: Lukas Wunner <lukas@wunner.de>
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+diff --git a/crypto/asymmetric_keys/x509_cert_parser.c b/crypto/asymmetric_keys/x509_cert_parser.c
+index 964208d1a35f..a814e5f136e2 100644
+--- a/crypto/asymmetric_keys/x509_cert_parser.c
++++ b/crypto/asymmetric_keys/x509_cert_parser.c
+@@ -60,24 +60,24 @@ EXPORT_SYMBOL_GPL(x509_free_certificate);
+  */
+ struct x509_certificate *x509_cert_parse(const void *data, size_t datalen)
+ {
+-	struct x509_certificate *cert;
+-	struct x509_parse_context *ctx;
++	struct x509_certificate *cert __free(x509_free_certificate);
++	struct x509_parse_context *ctx __free(kfree) = NULL;
+ 	struct asymmetric_key_id *kid;
+ 	long ret;
+ 
+-	ret = -ENOMEM;
+ 	cert = kzalloc(sizeof(struct x509_certificate), GFP_KERNEL);
++	assume(!IS_ERR(cert)); /* Avoid gratuitous IS_ERR() check on return */
+ 	if (!cert)
+-		goto error_no_cert;
++		return ERR_PTR(-ENOMEM);
+ 	cert->pub = kzalloc(sizeof(struct public_key), GFP_KERNEL);
+ 	if (!cert->pub)
+-		goto error_no_ctx;
++		return ERR_PTR(-ENOMEM);
+ 	cert->sig = kzalloc(sizeof(struct public_key_signature), GFP_KERNEL);
+ 	if (!cert->sig)
+-		goto error_no_ctx;
++		return ERR_PTR(-ENOMEM);
+ 	ctx = kzalloc(sizeof(struct x509_parse_context), GFP_KERNEL);
+ 	if (!ctx)
+-		goto error_no_ctx;
++		return ERR_PTR(-ENOMEM);
+ 
+ 	ctx->cert = cert;
+ 	ctx->data = (unsigned long)data;
+@@ -85,7 +85,7 @@ struct x509_certificate *x509_cert_parse(const void *data, size_t datalen)
+ 	/* Attempt to decode the certificate */
+ 	ret = asn1_ber_decoder(&x509_decoder, ctx, data, datalen);
+ 	if (ret < 0)
+-		goto error_decode;
++		return ERR_PTR(ret);
+ 
+ 	/* Decode the AuthorityKeyIdentifier */
+ 	if (ctx->raw_akid) {
+@@ -95,20 +95,19 @@ struct x509_certificate *x509_cert_parse(const void *data, size_t datalen)
+ 				       ctx->raw_akid, ctx->raw_akid_size);
+ 		if (ret < 0) {
+ 			pr_warn("Couldn't decode AuthKeyIdentifier\n");
+-			goto error_decode;
++			return ERR_PTR(ret);
+ 		}
+ 	}
+ 
+-	ret = -ENOMEM;
+ 	cert->pub->key = kmemdup(ctx->key, ctx->key_size, GFP_KERNEL);
+ 	if (!cert->pub->key)
+-		goto error_decode;
++		return ERR_PTR(-ENOMEM);
+ 
+ 	cert->pub->keylen = ctx->key_size;
+ 
+ 	cert->pub->params = kmemdup(ctx->params, ctx->params_size, GFP_KERNEL);
+ 	if (!cert->pub->params)
+-		goto error_decode;
++		return ERR_PTR(-ENOMEM);
+ 
+ 	cert->pub->paramlen = ctx->params_size;
+ 	cert->pub->algo = ctx->key_algo;
+@@ -116,33 +115,23 @@ struct x509_certificate *x509_cert_parse(const void *data, size_t datalen)
+ 	/* Grab the signature bits */
+ 	ret = x509_get_sig_params(cert);
+ 	if (ret < 0)
+-		goto error_decode;
++		return ERR_PTR(ret);
+ 
+ 	/* Generate cert issuer + serial number key ID */
+ 	kid = asymmetric_key_generate_id(cert->raw_serial,
+ 					 cert->raw_serial_size,
+ 					 cert->raw_issuer,
+ 					 cert->raw_issuer_size);
+-	if (IS_ERR(kid)) {
+-		ret = PTR_ERR(kid);
+-		goto error_decode;
+-	}
++	if (IS_ERR(kid))
++		return ERR_CAST(kid);
+ 	cert->id = kid;
+ 
+ 	/* Detect self-signed certificates */
+ 	ret = x509_check_for_self_signed(cert);
+ 	if (ret < 0)
+-		goto error_decode;
+-
+-	kfree(ctx);
+-	return cert;
++		return ERR_PTR(ret);
+ 
+-error_decode:
+-	kfree(ctx);
+-error_no_ctx:
+-	x509_free_certificate(cert);
+-error_no_cert:
+-	return ERR_PTR(ret);
++	return_ptr(cert);
+ }
+ EXPORT_SYMBOL_GPL(x509_cert_parse);

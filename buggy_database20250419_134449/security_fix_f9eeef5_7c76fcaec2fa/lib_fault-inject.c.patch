@@ -1,0 +1,68 @@
+commit f9eeef5918bbe1f2545d36280330dced25d6cf97
+Author: Wei Yongjun <weiyongjun1@huawei.com>
+Date:   Wed Aug 17 08:03:32 2022 +0000
+
+    fault-injection: make stacktrace filter works as expected
+    
+    stacktrace filter is checked after others, such as fail-nth, interval and
+    probability.  This make it doesn't work well as expected.
+    
+    Fix to running stacktrace filter before other filters.  It will speed up
+    fault inject testing for driver modules.
+    
+    Link: https://lkml.kernel.org/r/20220817080332.1052710-5-weiyongjun1@huawei.com
+    Signed-off-by: Wei Yongjun <weiyongjun1@huawei.com>
+    Cc: Akinobu Mita <akinobu.mita@gmail.com>
+    Cc: Dan Williams <dan.j.williams@intel.com>
+    Cc: Isabella Basso <isabbasso@riseup.net>
+    Cc: Josh Poimboeuf <jpoimboe@kernel.org>
+    Cc: Kees Cook <keescook@chromium.org>
+    Cc: Miguel Ojeda <ojeda@kernel.org>
+    Cc: Nathan Chancellor <nathan@kernel.org>
+    Cc: Nick Desaulniers <ndesaulniers@google.com>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Rasmus Villemoes <linux@rasmusvillemoes.dk>
+    Cc: Vlastimil Babka <vbabka@suse.cz>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+
+diff --git a/lib/fault-inject.c b/lib/fault-inject.c
+index d7819cacf890..6cff320c4eb4 100644
+--- a/lib/fault-inject.c
++++ b/lib/fault-inject.c
+@@ -102,10 +102,16 @@ static inline bool fail_stacktrace(struct fault_attr *attr)
+ 
+ bool should_fail_ex(struct fault_attr *attr, ssize_t size, int flags)
+ {
++	bool stack_checked = false;
++
+ 	if (in_task()) {
+ 		unsigned int fail_nth = READ_ONCE(current->fail_nth);
+ 
+ 		if (fail_nth) {
++			if (!fail_stacktrace(attr))
++				return false;
++
++			stack_checked = true;
+ 			fail_nth--;
+ 			WRITE_ONCE(current->fail_nth, fail_nth);
+ 			if (!fail_nth)
+@@ -125,6 +131,9 @@ bool should_fail_ex(struct fault_attr *attr, ssize_t size, int flags)
+ 	if (atomic_read(&attr->times) == 0)
+ 		return false;
+ 
++	if (!stack_checked && !fail_stacktrace(attr))
++		return false;
++
+ 	if (atomic_read(&attr->space) > size) {
+ 		atomic_sub(size, &attr->space);
+ 		return false;
+@@ -139,9 +148,6 @@ bool should_fail_ex(struct fault_attr *attr, ssize_t size, int flags)
+ 	if (attr->probability <= get_random_u32_below(100))
+ 		return false;
+ 
+-	if (!fail_stacktrace(attr))
+-		return false;
+-
+ fail:
+ 	if (!(flags & FAULT_NOWARN))
+ 		fail_dump(attr);

@@ -1,0 +1,60 @@
+commit a5ab0de0ebaa65e0a75ec0761a2745c66a9d17dc
+Author: Dave Jiang <dave.jiang@intel.com>
+Date:   Tue Sep 3 17:11:51 2024 -0700
+
+    cxl: Calculate region bandwidth of targets with shared upstream link
+    
+    The current bandwidth calculation aggregates all the targets. This simple
+    method does not take into account where multiple targets sharing under
+    a switch or a root port where the aggregated bandwidth can be greater than
+    the upstream link of the switch.
+    
+    To accurately account for the shared upstream uplink cases, a new update
+    function is introduced by walking from the leaves to the root of the
+    hierarchy and clamp the bandwidth in the process as needed. This process
+    is done when all the targets for a region are present but before the
+    final values are send to the HMAT handling code cached access_coordinate
+    targets.
+    
+    The original perf calculation path was kept to calculate the latency
+    performance data that does not require the shared link consideration.
+    The shared upstream link calculation is done as a second pass when all
+    the endpoints have arrived.
+    
+    Testing is done via qemu with CXL hierarchy. run_qemu[1] is modified to
+    support several CXL hierarchy layouts. The following layouts are tested:
+    
+    HB: Host Bridge
+    RP: Root Port
+    SW: Switch
+    EP: End Point
+    
+    2 HB 2 RP 2 EP: resulting bandwidth: 624
+    1 HB 2 RP 2 EP: resulting bandwidth: 624
+    2 HB 2 RP 2 SW 4 EP: resulting bandwidth: 624
+    
+    Current testing, perf number from SRAT/HMAT is hacked into the kernel
+    code. However with new QEMU support of Generic Target Port that's
+    incoming, the perf data injection is no longer needed.
+    
+    [1]: https://github.com/pmem/run_qemu
+    
+    Suggested-by: Jonathan Cameron <jonathan.cameron@huawei.com>
+    Link: https://lore.kernel.org/linux-cxl/20240501152503.00002e60@Huawei.com/
+    Reviewed-by: Jonathan Cameron <Jonathan.Cameron@huawei.com>
+    Reviewed-by: Alison Schofield <alison.schofield@intel.com>
+    Acked-by: Dan Williams <dan.j.williams@intel.com>
+    Link: https://patch.msgid.link/20240904001316.1688225-3-dave.jiang@intel.com
+    Signed-off-by: Dave Jiang <dave.jiang@intel.com>
+
+diff --git a/drivers/cxl/cxl.h b/drivers/cxl/cxl.h
+index 0fc96f8bf15c..0d8b810a51f0 100644
+--- a/drivers/cxl/cxl.h
++++ b/drivers/cxl/cxl.h
+@@ -891,6 +891,7 @@ int cxl_endpoint_get_perf_coordinates(struct cxl_port *port,
+ 				      struct access_coordinate *coord);
+ void cxl_region_perf_data_calculate(struct cxl_region *cxlr,
+ 				    struct cxl_endpoint_decoder *cxled);
++void cxl_region_shared_upstream_bandwidth_update(struct cxl_region *cxlr);
+ 
+ void cxl_memdev_update_perf(struct cxl_memdev *cxlmd);

@@ -1,0 +1,118 @@
+diff --cc Documentation/feature-removal-schedule.txt
+index 50d82ae09e2a,223fe9fcfd94..4ba1eb7590a7
+--- a/Documentation/feature-removal-schedule.txt
++++ b/Documentation/feature-removal-schedule.txt
+@@@ -561,30 -542,8 +561,37 @@@ Who:	Sasikantha Babu <sasikanth.v19@gma
+  
+  ----------------------------
+  
+ +What:	remove bogus DV presets V4L2_DV_1080I29_97, V4L2_DV_1080I30 and
+ +	V4L2_DV_1080I25
+ +When:	3.6
+ +Why:	These HDTV formats do not exist and were added by a confused mind
+ +	(that was me, to be precise...)
+ +Who:	Hans Verkuil <hans.verkuil@cisco.com>
+ +
+ +----------------------------
+ +
+ +What:	V4L2_CID_HCENTER, V4L2_CID_VCENTER V4L2 controls
+ +When:	3.7
+ +Why:	The V4L2_CID_VCENTER, V4L2_CID_HCENTER controls have been deprecated
+ +	for about 4 years and they are not used by any mainline driver.
+ +	There are newer controls (V4L2_CID_PAN*, V4L2_CID_TILT*) that provide
+ +	similar	functionality.
+ +Who:	Sylwester Nawrocki <sylvester.nawrocki@gmail.com>
+ +
+ +----------------------------
+ +
+ +What:	cgroup option updates via remount
+ +When:	March 2013
+ +Why:	Remount currently allows changing bound subsystems and
+ +	release_agent.  Rebinding is hardly useful as it only works
+ +	when the hierarchy is empty and release_agent itself should be
+ +	replaced with conventional fsnotify.
+ +
+ +----------------------------
+++
++ What:	KVM debugfs statistics
++ When:	2013
++ Why:	KVM tracepoints provide mostly equivalent information in a much more
++         flexible fashion.
++ 
+++----------------------------
+diff --cc arch/powerpc/kernel/head_fsl_booke.S
+index de80e0f9a2bd,89c6d6f36785..1f4434a38608
+--- a/arch/powerpc/kernel/head_fsl_booke.S
++++ b/arch/powerpc/kernel/head_fsl_booke.S
+@@@ -871,9 -906,40 +906,32 @@@ _GLOBAL(__setup_e500mc_ivors
+  	mtspr	SPRN_IVOR36,r3
+  	li	r3,CriticalDoorbell@l
+  	mtspr	SPRN_IVOR37,r3
++ 
++ 	/*
++ 	 * We only want to touch IVOR38-41 if we're running on hardware
++ 	 * that supports category E.HV.  The architectural way to determine
++ 	 * this is MMUCFG[LPIDSIZE].
++ 	 */
++ 	mfspr	r3, SPRN_MMUCFG
++ 	andis.	r3, r3, MMUCFG_LPIDSIZE@h
++ 	beq	no_hv
++ 	li	r3,GuestDoorbell@l
++ 	mtspr	SPRN_IVOR38,r3
++ 	li	r3,CriticalGuestDoorbell@l
++ 	mtspr	SPRN_IVOR39,r3
++ 	li	r3,Hypercall@l
++ 	mtspr	SPRN_IVOR40,r3
++ 	li	r3,Ehvpriv@l
++ 	mtspr	SPRN_IVOR41,r3
++ skip_hv_ivors:
+  	sync
+  	blr
++ no_hv:
++ 	lwz	r3, CPU_SPEC_FEATURES(r5)
++ 	rlwinm	r3, r3, 0, ~CPU_FTR_EMB_HV
++ 	stw	r3, CPU_SPEC_FEATURES(r5)
++ 	b	skip_hv_ivors
+  
+ -/*
+ - * extern void giveup_altivec(struct task_struct *prev)
+ - *
+ - * The e500 core does not have an AltiVec unit.
+ - */
+ -_GLOBAL(giveup_altivec)
+ -	blr
+ -
+  #ifdef CONFIG_SPE
+  /*
+   * extern void giveup_spe(struct task_struct *prev)
+diff --cc arch/x86/include/asm/kvm_para.h
+index 183922e13de1,a7a7a94b94ce..63ab1661d00e
+--- a/arch/x86/include/asm/kvm_para.h
++++ b/arch/x86/include/asm/kvm_para.h
+@@@ -170,17 -178,16 +178,19 @@@ static inline int kvm_para_available(vo
+  	unsigned int eax, ebx, ecx, edx;
+  	char signature[13];
+  
+ +	if (boot_cpu_data.cpuid_level < 0)
+ +		return 0;	/* So we don't blow up on old processors */
+ +
+- 	cpuid(KVM_CPUID_SIGNATURE, &eax, &ebx, &ecx, &edx);
+- 	memcpy(signature + 0, &ebx, 4);
+- 	memcpy(signature + 4, &ecx, 4);
+- 	memcpy(signature + 8, &edx, 4);
+- 	signature[12] = 0;
++ 	if (cpu_has_hypervisor) {
++ 		cpuid(KVM_CPUID_SIGNATURE, &eax, &ebx, &ecx, &edx);
++ 		memcpy(signature + 0, &ebx, 4);
++ 		memcpy(signature + 4, &ecx, 4);
++ 		memcpy(signature + 8, &edx, 4);
++ 		signature[12] = 0;
+  
+- 	if (strcmp(signature, "KVMKVMKVM") == 0)
+- 		return 1;
++ 		if (strcmp(signature, "KVMKVMKVM") == 0)
++ 			return 1;
++ 	}
+  
+  	return 0;
+  }

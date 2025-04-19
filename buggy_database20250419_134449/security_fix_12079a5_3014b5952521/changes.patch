@@ -1,0 +1,260 @@
+diff --git a/Documentation/admin-guide/kernel-parameters.txt b/Documentation/admin-guide/kernel-parameters.txt
+index 1518343bbe22..2fb830453dcc 100644
+--- a/Documentation/admin-guide/kernel-parameters.txt
++++ b/Documentation/admin-guide/kernel-parameters.txt
+@@ -1546,6 +1546,7 @@
+ 	failslab=
+ 	fail_usercopy=
+ 	fail_page_alloc=
++	fail_skb_realloc=
+ 	fail_make_request=[KNL]
+ 			General fault injection mechanism.
+ 			Format: <interval>,<probability>,<space>,<times>
+diff --git a/Documentation/fault-injection/fault-injection.rst b/Documentation/fault-injection/fault-injection.rst
+index 8b8aeea71c68..1c14ba08fbfc 100644
+--- a/Documentation/fault-injection/fault-injection.rst
++++ b/Documentation/fault-injection/fault-injection.rst
+@@ -45,6 +45,32 @@ Available fault injection capabilities
+   ALLOW_ERROR_INJECTION() macro, by setting debugfs entries
+   under /sys/kernel/debug/fail_function. No boot option supported.
+ 
++- fail_skb_realloc
++
++  inject skb (socket buffer) reallocation events into the network path. The
++  primary goal is to identify and prevent issues related to pointer
++  mismanagement in the network subsystem.  By forcing skb reallocation at
++  strategic points, this feature creates scenarios where existing pointers to
++  skb headers become invalid.
++
++  When the fault is injected and the reallocation is triggered, cached pointers
++  to skb headers and data no longer reference valid memory locations. This
++  deliberate invalidation helps expose code paths where proper pointer updating
++  is neglected after a reallocation event.
++
++  By creating these controlled fault scenarios, the system can catch instances
++  where stale pointers are used, potentially leading to memory corruption or
++  system instability.
++
++  To select the interface to act on, write the network name to
++  /sys/kernel/debug/fail_skb_realloc/devname.
++  If this field is left empty (which is the default value), skb reallocation
++  will be forced on all network interfaces.
++
++  The effectiveness of this fault detection is enhanced when KASAN is
++  enabled, as it helps identify invalid memory references and use-after-free
++  (UAF) issues.
++
+ - NVMe fault injection
+ 
+   inject NVMe status code and retry flag on devices permitted by setting
+@@ -216,6 +242,19 @@ configuration of fault-injection capabilities.
+ 	use a negative errno, you better use 'printf' instead of 'echo', e.g.:
+ 	$ printf %#x -12 > retval
+ 
++- /sys/kernel/debug/fail_skb_realloc/devname:
++
++        Specifies the network interface on which to force SKB reallocation.  If
++        left empty, SKB reallocation will be applied to all network interfaces.
++
++        Example usage::
++
++          # Force skb reallocation on eth0
++          echo "eth0" > /sys/kernel/debug/fail_skb_realloc/devname
++
++          # Clear the selection and force skb reallocation on all interfaces
++          echo "" > /sys/kernel/debug/fail_skb_realloc/devname
++
+ Boot option
+ ^^^^^^^^^^^
+ 
+@@ -227,6 +266,7 @@ use the boot option::
+ 	fail_usercopy=
+ 	fail_make_request=
+ 	fail_futex=
++	fail_skb_realloc=
+ 	mmc_core.fail_request=<interval>,<probability>,<space>,<times>
+ 
+ proc entries
+diff --git a/include/linux/skbuff.h b/include/linux/skbuff.h
+index 60535c706851..58009fa66102 100644
+--- a/include/linux/skbuff.h
++++ b/include/linux/skbuff.h
+@@ -2682,6 +2682,12 @@ static inline void skb_assert_len(struct sk_buff *skb)
+ #endif /* CONFIG_DEBUG_NET */
+ }
+ 
++#if defined(CONFIG_FAIL_SKB_REALLOC)
++void skb_might_realloc(struct sk_buff *skb);
++#else
++static inline void skb_might_realloc(struct sk_buff *skb) {}
++#endif
++
+ /*
+  *	Add data to an sk_buff
+  */
+@@ -2782,6 +2788,7 @@ static inline enum skb_drop_reason
+ pskb_may_pull_reason(struct sk_buff *skb, unsigned int len)
+ {
+ 	DEBUG_NET_WARN_ON_ONCE(len > INT_MAX);
++	skb_might_realloc(skb);
+ 
+ 	if (likely(len <= skb_headlen(skb)))
+ 		return SKB_NOT_DROPPED_YET;
+@@ -3240,6 +3247,7 @@ static inline int __pskb_trim(struct sk_buff *skb, unsigned int len)
+ 
+ static inline int pskb_trim(struct sk_buff *skb, unsigned int len)
+ {
++	skb_might_realloc(skb);
+ 	return (len < skb->len) ? __pskb_trim(skb, len) : 0;
+ }
+ 
+@@ -3994,6 +4002,7 @@ int pskb_trim_rcsum_slow(struct sk_buff *skb, unsigned int len);
+ 
+ static inline int pskb_trim_rcsum(struct sk_buff *skb, unsigned int len)
+ {
++	skb_might_realloc(skb);
+ 	if (likely(len >= skb->len))
+ 		return 0;
+ 	return pskb_trim_rcsum_slow(skb, len);
+diff --git a/lib/Kconfig.debug b/lib/Kconfig.debug
+index 7312ae7c3cc5..67b669d2e70e 100644
+--- a/lib/Kconfig.debug
++++ b/lib/Kconfig.debug
+@@ -2115,6 +2115,16 @@ config FAIL_SUNRPC
+ 	  Provide fault-injection capability for SunRPC and
+ 	  its consumers.
+ 
++config FAIL_SKB_REALLOC
++	bool "Fault-injection capability forcing skb to reallocate"
++	depends on FAULT_INJECTION_DEBUG_FS
++	help
++	  Provide fault-injection capability that forces the skb to be
++	  reallocated, catching possible invalid pointers to the skb.
++
++	  For more information, check
++	  Documentation/dev-tools/fault-injection/fault-injection.rst
++
+ config FAULT_INJECTION_CONFIGFS
+ 	bool "Configfs interface for fault-injection capabilities"
+ 	depends on FAULT_INJECTION
+diff --git a/net/core/Makefile b/net/core/Makefile
+index 5a72a87ee0f1..d9326600e289 100644
+--- a/net/core/Makefile
++++ b/net/core/Makefile
+@@ -46,3 +46,4 @@ obj-$(CONFIG_OF)	+= of_net.o
+ obj-$(CONFIG_NET_TEST) += net_test.o
+ obj-$(CONFIG_NET_DEVMEM) += devmem.o
+ obj-$(CONFIG_DEBUG_NET_SMALL_RTNL) += rtnl_net_debug.o
++obj-$(CONFIG_FAIL_SKB_REALLOC) += skb_fault_injection.o
+diff --git a/net/core/skb_fault_injection.c b/net/core/skb_fault_injection.c
+new file mode 100644
+index 000000000000..4235db6bdfad
+--- /dev/null
++++ b/net/core/skb_fault_injection.c
+@@ -0,0 +1,106 @@
++// SPDX-License-Identifier: GPL-2.0-only
++
++#include <linux/debugfs.h>
++#include <linux/fault-inject.h>
++#include <linux/netdevice.h>
++#include <linux/skbuff.h>
++
++static struct {
++	struct fault_attr attr;
++	char devname[IFNAMSIZ];
++	bool filtered;
++} skb_realloc = {
++	.attr = FAULT_ATTR_INITIALIZER,
++	.filtered = false,
++};
++
++static bool should_fail_net_realloc_skb(struct sk_buff *skb)
++{
++	struct net_device *net = skb->dev;
++
++	if (skb_realloc.filtered &&
++	    strncmp(net->name, skb_realloc.devname, IFNAMSIZ))
++		/* device name filter set, but names do not match */
++		return false;
++
++	if (!should_fail(&skb_realloc.attr, 1))
++		return false;
++
++	return true;
++}
++ALLOW_ERROR_INJECTION(should_fail_net_realloc_skb, TRUE);
++
++void skb_might_realloc(struct sk_buff *skb)
++{
++	if (!should_fail_net_realloc_skb(skb))
++		return;
++
++	pskb_expand_head(skb, 0, 0, GFP_ATOMIC);
++}
++EXPORT_SYMBOL(skb_might_realloc);
++
++static int __init fail_skb_realloc_setup(char *str)
++{
++	return setup_fault_attr(&skb_realloc.attr, str);
++}
++__setup("fail_skb_realloc=", fail_skb_realloc_setup);
++
++static void reset_settings(void)
++{
++	skb_realloc.filtered = false;
++	memset(&skb_realloc.devname, 0, IFNAMSIZ);
++}
++
++static ssize_t devname_write(struct file *file, const char __user *buffer,
++			     size_t count, loff_t *ppos)
++{
++	ssize_t ret;
++
++	reset_settings();
++	ret = simple_write_to_buffer(&skb_realloc.devname, IFNAMSIZ,
++				     ppos, buffer, count);
++	if (ret < 0)
++		return ret;
++
++	skb_realloc.devname[IFNAMSIZ - 1] = '\0';
++	/* Remove a possible \n at the end of devname */
++	strim(skb_realloc.devname);
++
++	if (strnlen(skb_realloc.devname, IFNAMSIZ))
++		skb_realloc.filtered = true;
++
++	return count;
++}
++
++static ssize_t devname_read(struct file *file,
++			    char __user *buffer,
++			    size_t size, loff_t *ppos)
++{
++	if (!skb_realloc.filtered)
++		return 0;
++
++	return simple_read_from_buffer(buffer, size, ppos, &skb_realloc.devname,
++				       strlen(skb_realloc.devname));
++}
++
++static const struct file_operations devname_ops = {
++	.write = devname_write,
++	.read = devname_read,
++};
++
++static int __init fail_skb_realloc_debugfs(void)
++{
++	umode_t mode = S_IFREG | 0600;
++	struct dentry *dir;
++
++	dir = fault_create_debugfs_attr("fail_skb_realloc", NULL,
++					&skb_realloc.attr);
++	if (IS_ERR(dir))
++		return PTR_ERR(dir);
++
++	debugfs_create_file("devname", mode, dir, NULL, &devname_ops);
++
++	return 0;
++}
++
++late_initcall(fail_skb_realloc_debugfs);

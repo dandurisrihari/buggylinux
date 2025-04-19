@@ -1,0 +1,82 @@
+commit 2f568dbd6b944c2e8c0c54b53c2211c23995e6a4
+Author: Christian König <christian.koenig@amd.com>
+Date:   Tue Feb 23 12:36:59 2016 +0100
+
+    drm/amdgpu: move get_user_pages out of amdgpu_ttm_tt_pin_userptr v6
+    
+    That avoids lock inversion between the BO reservation lock
+    and the anon_vma lock.
+    
+    v2:
+    * Changed amdgpu_bo_list_entry.user_pages to an array of pointers
+    * Lock mmap_sem only for get_user_pages
+    * Added invalidation of unbound userpointer BOs
+    * Fixed memory leak and page reference leak
+    
+    v3 (chk):
+    * Revert locking mmap_sem only for_get user_pages
+    * Revert adding invalidation of unbound userpointer BOs
+    * Sanitize and fix error handling
+    
+    v4 (chk):
+    * Init userpages pointer everywhere.
+    * Fix error handling when get_user_pages() fails.
+    * Add invalidation of unbound userpointer BOs again.
+    
+    v5 (chk):
+    * Add maximum number of tries.
+    
+    v6 (chk):
+    * Fix error handling when we run out of tries.
+    
+    Signed-off-by: Christian König <christian.koenig@amd.com>
+    Signed-off-by: Felix Kuehling <Felix.Kuehling@amd.com>
+    Reviewed-by: Felix Kuehling <Felix.Kuehling@amd.com> (v4)
+    Acked-by: Alex Deucher <alexander.deucher@amd.com>
+
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_gem.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_gem.c
+index 2e26a517f2d6..cb27754ec07f 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_gem.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_gem.c
+@@ -274,18 +274,23 @@ int amdgpu_gem_userptr_ioctl(struct drm_device *dev, void *data,
+ 
+ 	if (args->flags & AMDGPU_GEM_USERPTR_VALIDATE) {
+ 		down_read(&current->mm->mmap_sem);
++
++		r = amdgpu_ttm_tt_get_user_pages(bo->tbo.ttm,
++						 bo->tbo.ttm->pages);
++		if (r)
++			goto unlock_mmap_sem;
++
+ 		r = amdgpu_bo_reserve(bo, true);
+-		if (r) {
+-			up_read(&current->mm->mmap_sem);
+-			goto release_object;
+-		}
++		if (r)
++			goto free_pages;
+ 
+ 		amdgpu_ttm_placement_from_domain(bo, AMDGPU_GEM_DOMAIN_GTT);
+ 		r = ttm_bo_validate(&bo->tbo, &bo->placement, true, false);
+ 		amdgpu_bo_unreserve(bo);
+-		up_read(&current->mm->mmap_sem);
+ 		if (r)
+-			goto release_object;
++			goto free_pages;
++
++		up_read(&current->mm->mmap_sem);
+ 	}
+ 
+ 	r = drm_gem_handle_create(filp, gobj, &handle);
+@@ -297,6 +302,12 @@ int amdgpu_gem_userptr_ioctl(struct drm_device *dev, void *data,
+ 	args->handle = handle;
+ 	return 0;
+ 
++free_pages:
++	release_pages(bo->tbo.ttm->pages, bo->tbo.ttm->num_pages, false);
++
++unlock_mmap_sem:
++	up_read(&current->mm->mmap_sem);
++
+ release_object:
+ 	drm_gem_object_unreference_unlocked(gobj);

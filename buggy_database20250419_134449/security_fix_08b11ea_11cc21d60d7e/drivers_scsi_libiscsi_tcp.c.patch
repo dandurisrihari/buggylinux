@@ -1,0 +1,49 @@
+commit 08b11eaccfcf86a3bac6755625d933ac15ccc27a
+Author: Vasily Averin <vasily.averin@linux.dev>
+Date:   Thu Feb 21 18:23:17 2019 +0300
+
+    scsi: libiscsi: fall back to sendmsg for slab pages
+    
+    In "XFS over network block device" scenario XFS can create IO requests with
+    slab-based XFS metadata. During processing such requests tcp_sendpage() can
+    merge skb fragments with neighbour slab objects.
+    
+    If receiving side is located on the same host tcp_recvmsg() can trigger
+    BUG_ON in hardening check and crash the host with following message:
+    
+    usercopy: kernel memory exposure attempt detected
+                    from XXXXXXXX (kmalloc-512) (1024 bytes)
+    
+    This patch redirect such requests from sednpage to sendmsg path.  The
+    problem is similar to one described in recent commit 7e241f647dc7
+    ("libceph: fall back to sendmsg for slab pages")
+    
+    Signed-off-by: Vasily Averin <vvs@virtuozzo.com>
+    Acked-by: Chris Leech <cleech@redhat.com>
+    Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+
+diff --git a/drivers/scsi/libiscsi_tcp.c b/drivers/scsi/libiscsi_tcp.c
+index 9923e9e3b884..c3fe3f3a78f5 100644
+--- a/drivers/scsi/libiscsi_tcp.c
++++ b/drivers/scsi/libiscsi_tcp.c
+@@ -129,12 +129,17 @@ static void iscsi_tcp_segment_map(struct iscsi_segment *segment, int recv)
+ 	BUG_ON(sg->length == 0);
+ 
+ 	/*
++	 * We always map for the recv path.
++	 *
+ 	 * If the page count is greater than one it is ok to send
+ 	 * to the network layer's zero copy send path. If not we
+-	 * have to go the slow sendmsg path. We always map for the
+-	 * recv path.
++	 * have to go the slow sendmsg path.
++	 *
++	 * Same goes for slab pages: skb_can_coalesce() allows
++	 * coalescing neighboring slab objects into a single frag which
++	 * triggers one of hardened usercopy checks.
+ 	 */
+-	if (page_count(sg_page(sg)) >= 1 && !recv)
++	if (!recv && page_count(sg_page(sg)) >= 1 && !PageSlab(sg_page(sg)))
+ 		return;
+ 
+ 	if (recv) {

@@ -1,0 +1,46 @@
+commit 022c8328dc8021248047b373b9f67790641b8f2d
+Author: Will Deacon <will@kernel.org>
+Date:   Wed Jul 29 11:28:21 2020 +0100
+
+    KVM: arm64: Move S1PTW S2 fault logic out of io_mem_abort()
+    
+    To allow for re-injection of stage-2 faults on stage-1 page-table walks
+    due to either a missing or read-only memslot, move the triage logic out
+    of io_mem_abort() and into kvm_handle_guest_abort(), where these aborts
+    can be handled before anything else.
+    
+    Signed-off-by: Will Deacon <will@kernel.org>
+    Signed-off-by: Marc Zyngier <maz@kernel.org>
+    Cc: Marc Zyngier <maz@kernel.org>
+    Cc: Quentin Perret <qperret@google.com>
+    Link: https://lore.kernel.org/r/20200729102821.23392-5-will@kernel.org
+
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index 85b0ec9dd9ef..dc8464669efd 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -2105,12 +2105,23 @@ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu, struct kvm_run *run)
+ 	hva = gfn_to_hva_memslot_prot(memslot, gfn, &writable);
+ 	write_fault = kvm_is_write_fault(vcpu);
+ 	if (kvm_is_error_hva(hva) || (write_fault && !writable)) {
++		/*
++		 * The guest has put either its instructions or its page-tables
++		 * somewhere it shouldn't have. Userspace won't be able to do
++		 * anything about this (there's no syndrome for a start), so
++		 * re-inject the abort back into the guest.
++		 */
+ 		if (is_iabt) {
+-			/* Prefetch Abort on I/O address */
+ 			ret = -ENOEXEC;
+ 			goto out;
+ 		}
+ 
++		if (kvm_vcpu_dabt_iss1tw(vcpu)) {
++			kvm_inject_dabt(vcpu, kvm_vcpu_get_hfar(vcpu));
++			ret = 1;
++			goto out_unlock;
++		}
++
+ 		/*
+ 		 * Check for a cache maintenance operation. Since we
+ 		 * ended-up here, we know it is outside of any memory

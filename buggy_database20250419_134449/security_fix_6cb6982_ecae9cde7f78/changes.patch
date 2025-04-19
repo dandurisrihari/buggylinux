@@ -1,0 +1,68 @@
+diff --git a/drivers/misc/lkdtm/bugs.c b/drivers/misc/lkdtm/bugs.c
+index de87693cf557..cc92bc3ed820 100644
+--- a/drivers/misc/lkdtm/bugs.c
++++ b/drivers/misc/lkdtm/bugs.c
+@@ -378,3 +378,39 @@ void lkdtm_DOUBLE_FAULT(void)
+ 	pr_err("XFAIL: this test is ia32-only\n");
+ #endif
+ }
++
++#ifdef CONFIG_ARM64_PTR_AUTH
++static noinline void change_pac_parameters(void)
++{
++	/* Reset the keys of current task */
++	ptrauth_thread_init_kernel(current);
++	ptrauth_thread_switch_kernel(current);
++}
++
++#define CORRUPT_PAC_ITERATE	10
++noinline void lkdtm_CORRUPT_PAC(void)
++{
++	int i;
++
++	if (!system_supports_address_auth()) {
++		pr_err("FAIL: arm64 pointer authentication feature not present\n");
++		return;
++	}
++
++	pr_info("Change the PAC parameters to force function return failure\n");
++	/*
++	 * Pac is a hash value computed from input keys, return address and
++	 * stack pointer. As pac has fewer bits so there is a chance of
++	 * collision, so iterate few times to reduce the collision probability.
++	 */
++	for (i = 0; i < CORRUPT_PAC_ITERATE; i++)
++		change_pac_parameters();
++
++	pr_err("FAIL: %s test failed. Kernel may be unstable from here\n", __func__);
++}
++#else /* !CONFIG_ARM64_PTR_AUTH */
++noinline void lkdtm_CORRUPT_PAC(void)
++{
++	pr_err("FAIL: arm64 pointer authentication config disabled\n");
++}
++#endif
+diff --git a/drivers/misc/lkdtm/core.c b/drivers/misc/lkdtm/core.c
+index ee0d6e721441..5ce4ac8c06fc 100644
+--- a/drivers/misc/lkdtm/core.c
++++ b/drivers/misc/lkdtm/core.c
+@@ -116,6 +116,7 @@ static const struct crashtype crashtypes[] = {
+ 	CRASHTYPE(STACK_GUARD_PAGE_LEADING),
+ 	CRASHTYPE(STACK_GUARD_PAGE_TRAILING),
+ 	CRASHTYPE(UNSET_SMEP),
++	CRASHTYPE(CORRUPT_PAC),
+ 	CRASHTYPE(UNALIGNED_LOAD_STORE_WRITE),
+ 	CRASHTYPE(OVERWRITE_ALLOCATION),
+ 	CRASHTYPE(WRITE_AFTER_FREE),
+diff --git a/drivers/misc/lkdtm/lkdtm.h b/drivers/misc/lkdtm/lkdtm.h
+index c56d23e37643..8d13d0176624 100644
+--- a/drivers/misc/lkdtm/lkdtm.h
++++ b/drivers/misc/lkdtm/lkdtm.h
+@@ -31,6 +31,7 @@ void lkdtm_UNSET_SMEP(void);
+ #ifdef CONFIG_X86_32
+ void lkdtm_DOUBLE_FAULT(void);
+ #endif
++void lkdtm_CORRUPT_PAC(void);
+ 
+ /* lkdtm_heap.c */
+ void __init lkdtm_heap_init(void);

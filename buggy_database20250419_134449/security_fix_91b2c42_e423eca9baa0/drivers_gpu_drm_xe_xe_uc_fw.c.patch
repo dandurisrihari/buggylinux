@@ -1,0 +1,78 @@
+commit 91b2c42c214f570efaff80a666e30b8f6ce4f12b
+Author: Francois Dugast <francois.dugast@intel.com>
+Date:   Fri Sep 27 17:12:06 2024 +0200
+
+    drm/xe: Use fault injection infrastructure to find issues at probe time
+    
+    The kernel fault injection infrastructure is used to test proper error
+    handling during probe. The return code of the functions using
+    ALLOW_ERROR_INJECTION() can be conditionnally modified at runtime by
+    tuning some debugfs entries. This requires CONFIG_FUNCTION_ERROR_INJECTION
+    (among others).
+    
+    One way to use fault injection at probe time by making each of those
+    functions fail one at a time is:
+    
+        FAILTYPE=fail_function
+        DEVICE="0000:00:08.0" # depends on the system
+        ERRNO=-12 # -ENOMEM, can depend on the function
+    
+        echo N > /sys/kernel/debug/$FAILTYPE/task-filter
+        echo 100 > /sys/kernel/debug/$FAILTYPE/probability
+        echo 0 > /sys/kernel/debug/$FAILTYPE/interval
+        echo -1 > /sys/kernel/debug/$FAILTYPE/times
+        echo 0 > /sys/kernel/debug/$FAILTYPE/space
+        echo 1 > /sys/kernel/debug/$FAILTYPE/verbose
+    
+        modprobe xe
+        echo $DEVICE > /sys/bus/pci/drivers/xe/unbind
+    
+        grep -oP "^.* \[xe\]" /sys/kernel/debug/$FAILTYPE/injectable | \
+        cut -d ' ' -f 1 | while read -r FUNCTION ; do
+            echo "Injecting fault in $FUNCTION"
+            echo "" > /sys/kernel/debug/$FAILTYPE/inject
+            echo $FUNCTION > /sys/kernel/debug/$FAILTYPE/inject
+            printf %#x $ERRNO > /sys/kernel/debug/$FAILTYPE/$FUNCTION/retval
+            echo $DEVICE > /sys/bus/pci/drivers/xe/bind
+        done
+    
+        rmmod xe
+    
+    It will also be integrated into IGT for systematic execution by CI.
+    
+    v2: Wrappers are not needed in the cases covered by this patch, so
+        remove them and use ALLOW_ERROR_INJECTION() directly.
+    
+    v3: Document the use of fault injection at probe time in xe_pci_probe
+        and refer to it where ALLOW_ERROR_INJECTION() is used.
+    
+    Signed-off-by: Francois Dugast <francois.dugast@intel.com>
+    Cc: Lucas De Marchi <lucas.demarchi@intel.com>
+    Cc: Matthew Brost <matthew.brost@intel.com>
+    Cc: Rodrigo Vivi <rodrigo.vivi@intel.com>
+    Cc: Michal Wajdeczko <michal.wajdeczko@intel.com>
+    Cc: Jani Nikula <jani.nikula@intel.com>
+    Reviewed-by: Rodrigo Vivi <rodrigo.vivi@intel.com>
+    Link: https://patchwork.freedesktop.org/patch/msgid/20240927151207.399354-1-francois.dugast@intel.com
+    Signed-off-by: Rodrigo Vivi <rodrigo.vivi@intel.com>
+
+diff --git a/drivers/gpu/drm/xe/xe_uc_fw.c b/drivers/gpu/drm/xe/xe_uc_fw.c
+index d339f636f4d5..fb0eda3d5682 100644
+--- a/drivers/gpu/drm/xe/xe_uc_fw.c
++++ b/drivers/gpu/drm/xe/xe_uc_fw.c
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include <linux/bitfield.h>
++#include <linux/fault-inject.h>
+ #include <linux/firmware.h>
+ 
+ #include <drm/drm_managed.h>
+@@ -796,6 +797,7 @@ int xe_uc_fw_init(struct xe_uc_fw *uc_fw)
+ 
+ 	return err;
+ }
++ALLOW_ERROR_INJECTION(xe_uc_fw_init, ERRNO); /* See xe_pci_probe() */
+ 
+ static u32 uc_fw_ggtt_offset(struct xe_uc_fw *uc_fw)
+ {

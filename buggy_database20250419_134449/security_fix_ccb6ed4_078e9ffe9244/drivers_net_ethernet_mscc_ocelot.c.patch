@@ -1,0 +1,136 @@
+commit ccb6ed426f10ac4f742efa7d897c266aa10ac64a
+Author: Vladimir Oltean <vladimir.oltean@nxp.com>
+Date:   Wed Mar 16 22:41:40 2022 +0200
+
+    net: mscc: ocelot: add port mirroring support using tc-matchall
+    
+    Ocelot switches perform port-based ingress mirroring if
+    ANA:PORT:PORT_CFG field SRC_MIRROR_ENA is set, and egress mirroring if
+    the port is in ANA:ANA:EMIRRORPORTS.
+    
+    Both ingress-mirrored and egress-mirrored frames are copied to the port
+    mask from ANA:ANA:MIRRORPORTS.
+    
+    So the choice of limiting to a single mirror port via ocelot_mirror_get()
+    and ocelot_mirror_put() may seem bizarre, but the hardware model doesn't
+    map very well to the user space model. If the user wants to mirror the
+    ingress of swp1 towards swp2 and the ingress of swp3 towards swp4, we'd
+    have to program ANA:ANA:MIRRORPORTS with BIT(2) | BIT(4), and that would
+    make swp1 be mirrored towards swp4 too, and swp3 towards swp2. But there
+    are no tc-matchall rules to describe those actions.
+    
+    Now, we could offload a matchall rule with multiple mirred actions, one
+    per desired mirror port, and force the user to stick to the multi-action
+    rule format for subsequent matchall filters. But both DSA and ocelot
+    have the flow_offload_has_one_action() check for the matchall offload,
+    plus the fact that it will get cumbersome to cross-check matchall
+    mirrors with flower mirrors (which will be added in the next patch).
+    
+    As a result, we limit the configuration to a single mirror port, with
+    the possibility of lifting the restriction in the future.
+    
+    Frames injected from the CPU don't get egress-mirrored, since they are
+    sent with the BYPASS bit in the injection frame header, and this
+    bypasses the analyzer module (effectively also the mirroring logic).
+    I don't know what to do/say about this.
+    
+    Functionality was tested with:
+    
+    tc qdisc add dev swp3 clsact
+    tc filter add dev swp3 ingress \
+            matchall skip_sw \
+            action mirred egress mirror dev swp1
+    
+    and pinging through swp3, while seeing that the ICMP replies are
+    mirrored towards swp1.
+    
+    Signed-off-by: Vladimir Oltean <vladimir.oltean@nxp.com>
+    Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+diff --git a/drivers/net/ethernet/mscc/ocelot.c b/drivers/net/ethernet/mscc/ocelot.c
+index a26d613088ef..d38a9b498490 100644
+--- a/drivers/net/ethernet/mscc/ocelot.c
++++ b/drivers/net/ethernet/mscc/ocelot.c
+@@ -3023,6 +3023,82 @@ int ocelot_port_del_dscp_prio(struct ocelot *ocelot, int port, u8 dscp, u8 prio)
+ }
+ EXPORT_SYMBOL_GPL(ocelot_port_del_dscp_prio);
+ 
++static struct ocelot_mirror *ocelot_mirror_get(struct ocelot *ocelot, int to,
++					       struct netlink_ext_ack *extack)
++{
++	struct ocelot_mirror *m = ocelot->mirror;
++
++	if (m) {
++		if (m->to != to) {
++			NL_SET_ERR_MSG_MOD(extack,
++					   "Mirroring already configured towards different egress port");
++			return ERR_PTR(-EBUSY);
++		}
++
++		refcount_inc(&m->refcount);
++		return m;
++	}
++
++	m = kzalloc(sizeof(*m), GFP_KERNEL);
++	if (!m)
++		return ERR_PTR(-ENOMEM);
++
++	m->to = to;
++	refcount_set(&m->refcount, 1);
++	ocelot->mirror = m;
++
++	/* Program the mirror port to hardware */
++	ocelot_write(ocelot, BIT(to), ANA_MIRRORPORTS);
++
++	return m;
++}
++
++static void ocelot_mirror_put(struct ocelot *ocelot)
++{
++	struct ocelot_mirror *m = ocelot->mirror;
++
++	if (!refcount_dec_and_test(&m->refcount))
++		return;
++
++	ocelot_write(ocelot, 0, ANA_MIRRORPORTS);
++	ocelot->mirror = NULL;
++	kfree(m);
++}
++
++int ocelot_port_mirror_add(struct ocelot *ocelot, int from, int to,
++			   bool ingress, struct netlink_ext_ack *extack)
++{
++	struct ocelot_mirror *m = ocelot_mirror_get(ocelot, to, extack);
++
++	if (IS_ERR(m))
++		return PTR_ERR(m);
++
++	if (ingress) {
++		ocelot_rmw_gix(ocelot, ANA_PORT_PORT_CFG_SRC_MIRROR_ENA,
++			       ANA_PORT_PORT_CFG_SRC_MIRROR_ENA,
++			       ANA_PORT_PORT_CFG, from);
++	} else {
++		ocelot_rmw(ocelot, BIT(from), BIT(from),
++			   ANA_EMIRRORPORTS);
++	}
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(ocelot_port_mirror_add);
++
++void ocelot_port_mirror_del(struct ocelot *ocelot, int from, bool ingress)
++{
++	if (ingress) {
++		ocelot_rmw_gix(ocelot, 0, ANA_PORT_PORT_CFG_SRC_MIRROR_ENA,
++			       ANA_PORT_PORT_CFG, from);
++	} else {
++		ocelot_rmw(ocelot, 0, BIT(from), ANA_EMIRRORPORTS);
++	}
++
++	ocelot_mirror_put(ocelot);
++}
++EXPORT_SYMBOL_GPL(ocelot_port_mirror_del);
++
+ void ocelot_init_port(struct ocelot *ocelot, int port)
+ {
+ 	struct ocelot_port *ocelot_port = ocelot->ports[port];

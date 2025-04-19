@@ -1,0 +1,82 @@
+commit c72a870926c2de694942aaac2b49e59ce789bb74
+Author: Rae Moar <rmoar@google.com>
+Date:   Wed Dec 13 19:44:20 2023 +0000
+
+    kunit: add ability to run tests after boot using debugfs
+    
+    Add functionality to run built-in tests after boot by writing to a
+    debugfs file.
+    
+    Add a new debugfs file labeled "run" for each test suite to use for
+    this purpose.
+    
+    As an example, write to the file using the following:
+    
+    echo "any string" > /sys/kernel/debugfs/kunit/<testsuite>/run
+    
+    This will trigger the test suite to run and will print results to the
+    kernel log.
+    
+    To guard against running tests concurrently with this feature, add a
+    mutex lock around running kunit. This supports the current practice of
+    not allowing tests to be run concurrently on the same kernel.
+    
+    This new functionality could be used to design a parameter
+    injection feature in the future.
+    
+    Fixed up merge conflict duing rebase to Linux 6.7-rc6
+    Signed-off-by: Shuah Khan <skhan@linuxfoundation.org>
+    
+    Reviewed-by: David Gow <davidgow@google.com>
+    Signed-off-by: Rae Moar <rmoar@google.com>
+    Signed-off-by: Shuah Khan <skhan@linuxfoundation.org>
+
+diff --git a/lib/kunit/test.c b/lib/kunit/test.c
+index 6b60d85ce108..088489856db8 100644
+--- a/lib/kunit/test.c
++++ b/lib/kunit/test.c
+@@ -13,6 +13,7 @@
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+ #include <linux/moduleparam.h>
++#include <linux/mutex.h>
+ #include <linux/panic.h>
+ #include <linux/sched/debug.h>
+ #include <linux/sched.h>
+@@ -22,6 +23,8 @@
+ #include "string-stream.h"
+ #include "try-catch-impl.h"
+ 
++static DEFINE_MUTEX(kunit_run_lock);
++
+ /*
+  * Hook to fail the current test and print an error message to the log.
+  */
+@@ -692,6 +695,7 @@ static void kunit_init_suite(struct kunit_suite *suite)
+ 	kunit_debugfs_create_suite(suite);
+ 	suite->status_comment[0] = '\0';
+ 	suite->suite_init_err = 0;
++	string_stream_clear(suite->log);
+ }
+ 
+ bool kunit_enabled(void)
+@@ -710,6 +714,11 @@ int __kunit_test_suites_init(struct kunit_suite * const * const suites, int num_
+ 
+ 	kunit_suite_counter = 1;
+ 
++	/* Use mutex lock to guard against running tests concurrently. */
++	if (mutex_lock_interruptible(&kunit_run_lock)) {
++		pr_err("kunit: test interrupted\n");
++		return -EINTR;
++	}
+ 	static_branch_inc(&kunit_running);
+ 
+ 	for (i = 0; i < num_suites; i++) {
+@@ -718,6 +727,7 @@ int __kunit_test_suites_init(struct kunit_suite * const * const suites, int num_
+ 	}
+ 
+ 	static_branch_dec(&kunit_running);
++	mutex_unlock(&kunit_run_lock);
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(__kunit_test_suites_init);

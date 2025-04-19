@@ -1,0 +1,97 @@
+commit 94749156e6bc0b3c2bb65e2a95babdef44b7d591
+Author: Bjorn Andersson <andersson@kernel.org>
+Date:   Thu Jan 27 18:55:09 2022 -0800
+
+    remoteproc: qcom: pas: Carry PAS metadata context
+    
+    Starting with Qualcomm SM8450 the metadata object shared with the secure
+    world during authentication and booting of a remoteproc needs to be
+    alive from init_image() until auth_and_reset().
+    
+    Use the newly introduced "PAS metadata context" object to track this
+    context from load until the firmware has been booted.
+    
+    In the even that load is performed but the process for some reason
+    doesn't reach auth_and_reset the unprepare callback is used to clean up
+    the allocated memory.
+    
+    Signed-off-by: Bjorn Andersson <bjorn.andersson@linaro.org>
+    Reviewed-by: Dmitry Baryshkov <dmitry.baryshkov@linaro.org>
+    Link: https://lore.kernel.org/r/20220128025513.97188-10-bjorn.andersson@linaro.org
+
+diff --git a/drivers/remoteproc/qcom_q6v5_pas.c b/drivers/remoteproc/qcom_q6v5_pas.c
+index 184bb7cdf95a..5e806f657fec 100644
+--- a/drivers/remoteproc/qcom_q6v5_pas.c
++++ b/drivers/remoteproc/qcom_q6v5_pas.c
+@@ -79,6 +79,8 @@ struct qcom_adsp {
+ 	struct qcom_rproc_subdev smd_subdev;
+ 	struct qcom_rproc_ssr ssr_subdev;
+ 	struct qcom_sysmon *sysmon;
++
++	struct qcom_scm_pas_metadata pas_metadata;
+ };
+ 
+ static void adsp_minidump(struct rproc *rproc)
+@@ -126,14 +128,34 @@ static void adsp_pds_disable(struct qcom_adsp *adsp, struct device **pds,
+ 	}
+ }
+ 
++static int adsp_unprepare(struct rproc *rproc)
++{
++	struct qcom_adsp *adsp = (struct qcom_adsp *)rproc->priv;
++
++	/*
++	 * adsp_load() did pass pas_metadata to the SCM driver for storing
++	 * metadata context. It might have been released already if
++	 * auth_and_reset() was successful, but in other cases clean it up
++	 * here.
++	 */
++	qcom_scm_pas_metadata_release(&adsp->pas_metadata);
++
++	return 0;
++}
++
+ static int adsp_load(struct rproc *rproc, const struct firmware *fw)
+ {
+ 	struct qcom_adsp *adsp = (struct qcom_adsp *)rproc->priv;
+ 	int ret;
+ 
+-	ret = qcom_mdt_load(adsp->dev, fw, rproc->firmware, adsp->pas_id,
+-			    adsp->mem_region, adsp->mem_phys, adsp->mem_size,
+-			    &adsp->mem_reloc);
++	ret = qcom_mdt_pas_init(adsp->dev, fw, rproc->firmware, adsp->pas_id,
++				adsp->mem_phys, &adsp->pas_metadata);
++	if (ret)
++		return ret;
++
++	ret = qcom_mdt_load_no_init(adsp->dev, fw, rproc->firmware, adsp->pas_id,
++				    adsp->mem_region, adsp->mem_phys, adsp->mem_size,
++				    &adsp->mem_reloc);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -185,6 +207,8 @@ static int adsp_start(struct rproc *rproc)
+ 		goto disable_px_supply;
+ 	}
+ 
++	qcom_scm_pas_metadata_release(&adsp->pas_metadata);
++
+ 	return 0;
+ 
+ disable_px_supply:
+@@ -255,6 +279,7 @@ static unsigned long adsp_panic(struct rproc *rproc)
+ }
+ 
+ static const struct rproc_ops adsp_ops = {
++	.unprepare = adsp_unprepare,
+ 	.start = adsp_start,
+ 	.stop = adsp_stop,
+ 	.da_to_va = adsp_da_to_va,
+@@ -264,6 +289,7 @@ static const struct rproc_ops adsp_ops = {
+ };
+ 
+ static const struct rproc_ops adsp_minidump_ops = {
++	.unprepare = adsp_unprepare,
+ 	.start = adsp_start,
+ 	.stop = adsp_stop,
+ 	.da_to_va = adsp_da_to_va,

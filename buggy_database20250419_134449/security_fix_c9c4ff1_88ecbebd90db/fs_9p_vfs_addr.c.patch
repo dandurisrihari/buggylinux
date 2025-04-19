@@ -1,0 +1,69 @@
+commit c9c4ff12df110feb1b91951010f673f4b16e49e8
+Author: David Howells <dhowells@redhat.com>
+Date:   Mon Nov 27 13:58:07 2023 +0000
+
+    netfs: Move pinning-for-writeback from fscache to netfs
+    
+    Move the resource pinning-for-writeback from fscache code to netfslib code.
+    This is used to keep a cache backing object pinned whilst we have dirty
+    pages on the netfs inode in the pagecache such that VM writeback will be
+    able to reach it.
+    
+    Whilst we're at it, switch the parameters of netfs_unpin_writeback() to
+    match ->write_inode() so that it can be used for that directly.
+    
+    Note that this mechanism could be more generically useful than that for
+    network filesystems.  Quite often they have to keep around other resources
+    (e.g. authentication tokens or network connections) until the writeback is
+    complete.
+    
+    Signed-off-by: David Howells <dhowells@redhat.com>
+    Reviewed-by: Jeff Layton <jlayton@kernel.org>
+    cc: linux-cachefs@redhat.com
+    cc: linux-fsdevel@vger.kernel.org
+    cc: linux-mm@kvack.org
+
+diff --git a/fs/9p/vfs_addr.c b/fs/9p/vfs_addr.c
+index 39db7c01e30a..131b83c31f85 100644
+--- a/fs/9p/vfs_addr.c
++++ b/fs/9p/vfs_addr.c
+@@ -317,30 +317,15 @@ static int v9fs_write_end(struct file *filp, struct address_space *mapping,
+ 	return copied;
+ }
+ 
+-#ifdef CONFIG_9P_FSCACHE
+-/*
+- * Mark a page as having been made dirty and thus needing writeback.  We also
+- * need to pin the cache object to write back to.
+- */
+-static bool v9fs_dirty_folio(struct address_space *mapping, struct folio *folio)
+-{
+-	struct v9fs_inode *v9inode = V9FS_I(mapping->host);
+-
+-	return fscache_dirty_folio(mapping, folio, v9fs_inode_cookie(v9inode));
+-}
+-#else
+-#define v9fs_dirty_folio filemap_dirty_folio
+-#endif
+-
+ const struct address_space_operations v9fs_addr_operations = {
+-	.read_folio = netfs_read_folio,
+-	.readahead = netfs_readahead,
+-	.dirty_folio = v9fs_dirty_folio,
+-	.writepage = v9fs_vfs_writepage,
+-	.write_begin = v9fs_write_begin,
+-	.write_end = v9fs_write_end,
+-	.release_folio = v9fs_release_folio,
++	.read_folio	= netfs_read_folio,
++	.readahead	= netfs_readahead,
++	.dirty_folio	= netfs_dirty_folio,
++	.writepage	= v9fs_vfs_writepage,
++	.write_begin	= v9fs_write_begin,
++	.write_end	= v9fs_write_end,
++	.release_folio	= v9fs_release_folio,
+ 	.invalidate_folio = v9fs_invalidate_folio,
+-	.launder_folio = v9fs_launder_folio,
+-	.direct_IO = v9fs_direct_IO,
++	.launder_folio	= v9fs_launder_folio,
++	.direct_IO	= v9fs_direct_IO,
+ };

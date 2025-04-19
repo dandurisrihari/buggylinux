@@ -1,0 +1,60 @@
+commit 69ebc0182406541f0be0f086cdfff13ac56e7385
+Author: Catalin Marinas <catalin.marinas@arm.com>
+Date:   Tue Mar 12 20:00:20 2024 +0000
+
+    Revert "arm64: mm: add support for WXN memory translation attribute"
+    
+    This reverts commit 50e3ed0f93f4f62ed2aa83de5db6cb84ecdd5707.
+    
+    The SCTLR_EL1.WXN control forces execute-never when a page has write
+    permissions. While the idea of hardening such write/exec combinations is
+    good, with permissions indirection enabled (FEAT_PIE) this control
+    becomes RES0. FEAT_PIE introduces a slightly different form of WXN which
+    only has an effect when the base permission is RWX and the write is
+    toggled by the permission overlay (FEAT_POE, not yet supported by the
+    arm64 kernel). Revert the patch for now.
+    
+    Signed-off-by: Catalin Marinas <catalin.marinas@arm.com>
+    Link: https://lore.kernel.org/r/ZfGESD3a91lxH367@arm.com
+
+diff --git a/arch/arm64/kernel/pi/map_kernel.c b/arch/arm64/kernel/pi/map_kernel.c
+index cac1e1f63c44..5fa08e13e17e 100644
+--- a/arch/arm64/kernel/pi/map_kernel.c
++++ b/arch/arm64/kernel/pi/map_kernel.c
+@@ -132,25 +132,6 @@ static void __init map_kernel(u64 kaslr_offset, u64 va_offset, int root_level)
+ 	idmap_cpu_replace_ttbr1(swapper_pg_dir);
+ }
+ 
+-static void noinline __section(".idmap.text") disable_wxn(void)
+-{
+-	u64 sctlr = read_sysreg(sctlr_el1) & ~SCTLR_ELx_WXN;
+-
+-	/*
+-	 * We cannot safely clear the WXN bit while the MMU and caches are on,
+-	 * so turn the MMU off, flush the TLBs and turn it on again but with
+-	 * the WXN bit cleared this time.
+-	 */
+-	asm("	msr	sctlr_el1, %0		;"
+-	    "	isb				;"
+-	    "	tlbi    vmalle1			;"
+-	    "	dsb     nsh			;"
+-	    "	isb				;"
+-	    "	msr     sctlr_el1, %1		;"
+-	    "	isb				;"
+-	    ::	"r"(sctlr & ~SCTLR_ELx_M), "r"(sctlr));
+-}
+-
+ static void noinline __section(".idmap.text") set_ttbr0_for_lpa2(u64 ttbr)
+ {
+ 	u64 sctlr = read_sysreg(sctlr_el1);
+@@ -248,10 +229,6 @@ asmlinkage void __init early_map_kernel(u64 boot_status, void *fdt)
+ 	if (va_bits > VA_BITS_MIN)
+ 		sysreg_clear_set(tcr_el1, TCR_T1SZ_MASK, TCR_T1SZ(va_bits));
+ 
+-	if (IS_ENABLED(CONFIG_ARM64_WXN) &&
+-	    arm64_test_sw_feature_override(ARM64_SW_FEATURE_OVERRIDE_NOWXN))
+-		disable_wxn();
+-
+ 	/*
+ 	 * The virtual KASLR displacement modulo 2MiB is decided by the
+ 	 * physical placement of the image, as otherwise, we might not be able

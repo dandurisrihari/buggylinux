@@ -1,0 +1,107 @@
+diff --cc Documentation/virtual/kvm/api.txt
+index 64b38dfcc243,73a501eb9291..ba6c42c576dd
+--- a/Documentation/virtual/kvm/api.txt
++++ b/Documentation/virtual/kvm/api.txt
+@@@ -3809,8 -3936,8 +3936,8 @@@ to I/O ports
+  
+  4.117 KVM_CLEAR_DIRTY_LOG (vm ioctl)
+  
+- Capability: KVM_CAP_MANUAL_DIRTY_LOG_PROTECT
++ Capability: KVM_CAP_MANUAL_DIRTY_LOG_PROTECT2
+ -Architectures: x86
+ +Architectures: x86, arm, arm64, mips
+  Type: vm ioctl
+  Parameters: struct kvm_dirty_log (in)
+  Returns: 0 on success, -1 on error
+@@@ -4798,9 -4968,9 +4968,9 @@@ and injected exceptions
+  * For the new DR6 bits, note that bit 16 is set iff the #DB exception
+    will clear DR6.RTM.
+  
+- 7.18 KVM_CAP_MANUAL_DIRTY_LOG_PROTECT
++ 7.18 KVM_CAP_MANUAL_DIRTY_LOG_PROTECT2
+  
+ -Architectures: all
+ +Architectures: x86, arm, arm64, mips
+  Parameters: args[0] whether feature should be enabled or not
+  
+  With this capability enabled, KVM_GET_DIRTY_LOG will not automatically
+diff --cc arch/x86/kvm/paging_tmpl.h
+index 08715034e315,c40af67d0f44..367a47df4ba0
+--- a/arch/x86/kvm/paging_tmpl.h
++++ b/arch/x86/kvm/paging_tmpl.h
+@@@ -140,16 -140,36 +140,36 @@@ static int FNAME(cmpxchg_gpte)(struct k
+  	pt_element_t *table;
+  	struct page *page;
+  
+ -	npages = get_user_pages_fast((unsigned long)ptep_user, 1, 1, &page);
+ +	npages = get_user_pages_fast((unsigned long)ptep_user, 1, FOLL_WRITE, &page);
+- 	/* Check if the user is doing something meaningless. */
+- 	if (unlikely(npages != 1))
+- 		return -EFAULT;
+- 
+- 	table = kmap_atomic(page);
+- 	ret = CMPXCHG(&table[index], orig_pte, new_pte);
+- 	kunmap_atomic(table);
+- 
+- 	kvm_release_page_dirty(page);
++ 	if (likely(npages == 1)) {
++ 		table = kmap_atomic(page);
++ 		ret = CMPXCHG(&table[index], orig_pte, new_pte);
++ 		kunmap_atomic(table);
++ 
++ 		kvm_release_page_dirty(page);
++ 	} else {
++ 		struct vm_area_struct *vma;
++ 		unsigned long vaddr = (unsigned long)ptep_user & PAGE_MASK;
++ 		unsigned long pfn;
++ 		unsigned long paddr;
++ 
++ 		down_read(&current->mm->mmap_sem);
++ 		vma = find_vma_intersection(current->mm, vaddr, vaddr + PAGE_SIZE);
++ 		if (!vma || !(vma->vm_flags & VM_PFNMAP)) {
++ 			up_read(&current->mm->mmap_sem);
++ 			return -EFAULT;
++ 		}
++ 		pfn = ((vaddr - vma->vm_start) >> PAGE_SHIFT) + vma->vm_pgoff;
++ 		paddr = pfn << PAGE_SHIFT;
++ 		table = memremap(paddr, PAGE_SIZE, MEMREMAP_WB);
++ 		if (!table) {
++ 			up_read(&current->mm->mmap_sem);
++ 			return -EFAULT;
++ 		}
++ 		ret = CMPXCHG(&table[index], orig_pte, new_pte);
++ 		memunmap(table);
++ 		up_read(&current->mm->mmap_sem);
++ 	}
+  
+  	return (ret != orig_pte);
+  }
+diff --cc arch/x86/kvm/x86.c
+index b9591abde62a,dc621f73e96b..536b78c4af6e
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@@ -6558,22 -6586,11 +6596,22 @@@ static int complete_fast_pio_out(struc
+  static int kvm_fast_pio_out(struct kvm_vcpu *vcpu, int size,
+  			    unsigned short port)
+  {
+- 	unsigned long val = kvm_register_read(vcpu, VCPU_REGS_RAX);
++ 	unsigned long val = kvm_rax_read(vcpu);
+  	int ret = emulator_pio_out_emulated(&vcpu->arch.emulate_ctxt,
+  					    size, port, &val, 1);
+ +	if (ret)
+ +		return ret;
+  
+ -	if (!ret) {
+ +	/*
+ +	 * Workaround userspace that relies on old KVM behavior of %rip being
+ +	 * incremented prior to exiting to userspace to handle "OUT 0x7e".
+ +	 */
+ +	if (port == 0x7e &&
+ +	    kvm_check_has_quirk(vcpu->kvm, KVM_X86_QUIRK_OUT_7E_INC_RIP)) {
+ +		vcpu->arch.complete_userspace_io =
+ +			complete_fast_pio_out_port_0x7e;
+ +		kvm_skip_emulated_instruction(vcpu);
+ +	} else {
+  		vcpu->arch.pio.linear_rip = kvm_get_linear_rip(vcpu);
+  		vcpu->arch.complete_userspace_io = complete_fast_pio_out;
+  	}

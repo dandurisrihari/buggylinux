@@ -1,0 +1,100 @@
+diff --git a/include/net/cfg80211.h b/include/net/cfg80211.h
+index 54a77d906b2d..bcde215475c6 100644
+--- a/include/net/cfg80211.h
++++ b/include/net/cfg80211.h
+@@ -3600,6 +3600,17 @@ struct cfg80211_pmk_conf {
+  *	the real status code for failures. Used only for the authentication
+  *	response command interface (user space to driver).
+  * @pmkid: The identifier to refer a PMKSA.
++ * @mld_addr: MLD address of the peer. Used by the authentication request event
++ *	interface. Driver indicates this to enable MLO during the authentication
++ *	offload to user space. Driver shall look at %NL80211_ATTR_MLO_SUPPORT
++ *	flag capability in NL80211_CMD_CONNECT to know whether the user space
++ *	supports enabling MLO during the authentication offload.
++ *	User space should use the address of the interface (on which the
++ *	authentication request event reported) as self MLD address. User space
++ *	and driver should use MLD addresses in RA, TA and BSSID fields of
++ *	authentication frames sent or received via cfg80211. The driver
++ *	translates the MLD addresses to/from link addresses based on the link
++ *	chosen for the authentication.
+  */
+ struct cfg80211_external_auth_params {
+ 	enum nl80211_external_auth_action action;
+@@ -3608,6 +3619,7 @@ struct cfg80211_external_auth_params {
+ 	unsigned int key_mgmt_suite;
+ 	u16 status;
+ 	const u8 *pmkid;
++	u8 mld_addr[ETH_ALEN] __aligned(2);
+ };
+ 
+ /**
+diff --git a/include/uapi/linux/nl80211.h b/include/uapi/linux/nl80211.h
+index 8ecb0fbee721..a984c6c4cf02 100644
+--- a/include/uapi/linux/nl80211.h
++++ b/include/uapi/linux/nl80211.h
+@@ -1167,6 +1167,23 @@
+  *	%NL80211_ATTR_STATUS_CODE attribute in %NL80211_CMD_EXTERNAL_AUTH
+  *	command interface.
+  *
++ *	Host driver sends MLD address of the AP with %NL80211_ATTR_MLD_ADDR in
++ *	%NL80211_CMD_EXTERNAL_AUTH event to indicate user space to enable MLO
++ *	during the authentication offload in STA mode while connecting to MLD
++ *	APs. Host driver should check %NL80211_ATTR_MLO_SUPPORT flag capability
++ *	in %NL80211_CMD_CONNECT to know whether the user space supports enabling
++ *	MLO during the authentication offload or not.
++ *	User space should enable MLO during the authentication only when it
++ *	receives the AP MLD address in authentication offload request. User
++ *	space shouldn't enable MLO when the authentication offload request
++ *	doesn't indicate the AP MLD address even if the AP is MLO capable.
++ *	User space should use %NL80211_ATTR_MLD_ADDR as peer's MLD address and
++ *	interface address identified by %NL80211_ATTR_IFINDEX as self MLD
++ *	address. User space and host driver to use MLD addresses in RA, TA and
++ *	BSSID fields of the frames between them, and host driver translates the
++ *	MLD addresses to/from link addresses based on the link chosen for the
++ *	authentication.
++ *
+  *	Host driver reports this status on an authentication failure to the
+  *	user space through the connect result as the user space would have
+  *	initiated the connection through the connect request.
+diff --git a/net/wireless/nl80211.c b/net/wireless/nl80211.c
+index 64cf6110ce9d..a0858d747e45 100644
+--- a/net/wireless/nl80211.c
++++ b/net/wireless/nl80211.c
+@@ -19720,7 +19720,9 @@ int cfg80211_external_auth_request(struct net_device *dev,
+ 			params->action) ||
+ 	    nla_put(msg, NL80211_ATTR_BSSID, ETH_ALEN, params->bssid) ||
+ 	    nla_put(msg, NL80211_ATTR_SSID, params->ssid.ssid_len,
+-		    params->ssid.ssid))
++		    params->ssid.ssid) ||
++	    (!is_zero_ether_addr(params->mld_addr) &&
++	     nla_put(msg, NL80211_ATTR_MLD_ADDR, ETH_ALEN, params->mld_addr)))
+ 		goto nla_put_failure;
+ 
+ 	genlmsg_end(msg, hdr);
+diff --git a/net/wireless/trace.h b/net/wireless/trace.h
+index 9660fd94cd92..044b3c5a88ef 100644
+--- a/net/wireless/trace.h
++++ b/net/wireless/trace.h
+@@ -2524,6 +2524,7 @@ TRACE_EVENT(rdev_external_auth,
+ 			     MAC_ENTRY(bssid)
+ 			     __array(u8, ssid, IEEE80211_MAX_SSID_LEN + 1)
+ 			     __field(u16, status)
++			     MAC_ENTRY(mld_addr)
+ 	    ),
+ 	    TP_fast_assign(WIPHY_ASSIGN;
+ 			   NETDEV_ASSIGN;
+@@ -2532,10 +2533,12 @@ TRACE_EVENT(rdev_external_auth,
+ 			   memcpy(__entry->ssid, params->ssid.ssid,
+ 				  params->ssid.ssid_len);
+ 			   __entry->status = params->status;
++			   MAC_ASSIGN(mld_addr, params->mld_addr);
+ 	    ),
+ 	    TP_printk(WIPHY_PR_FMT ", " NETDEV_PR_FMT ", bssid: %pM"
+-		      ", ssid: %s, status: %u", WIPHY_PR_ARG, NETDEV_PR_ARG,
+-		      __entry->bssid, __entry->ssid, __entry->status)
++		      ", ssid: %s, status: %u, mld_addr: %pM",
++		      WIPHY_PR_ARG, NETDEV_PR_ARG, __entry->bssid,
++		      __entry->ssid, __entry->status, __entry->mld_addr)
+ );
+ 
+ TRACE_EVENT(rdev_start_radar_detection,

@@ -1,0 +1,77 @@
+commit 15f73f5b3e5958f2d169fe13c420eeeeae07bbf2
+Author: Christoph Hellwig <hch@lst.de>
+Date:   Thu Jun 11 08:44:47 2020 +0200
+
+    blk-mq: move failure injection out of blk_mq_complete_request
+    
+    Move the call to blk_should_fake_timeout out of blk_mq_complete_request
+    and into the drivers, skipping call sites that are obvious error
+    handlers, and remove the now superflous blk_mq_force_complete_rq helper.
+    This ensures we don't keep injecting errors into completions that just
+    terminate the Linux request after the hardware has been reset or the
+    command has been aborted.
+    
+    Reviewed-by: Daniel Wagner <dwagner@suse.de>
+    Signed-off-by: Christoph Hellwig <hch@lst.de>
+    Signed-off-by: Jens Axboe <axboe@kernel.dk>
+
+diff --git a/block/blk-mq.c b/block/blk-mq.c
+index ce772ab19188..3f4f227cf830 100644
+--- a/block/blk-mq.c
++++ b/block/blk-mq.c
+@@ -655,16 +655,13 @@ static void __blk_mq_complete_request_remote(void *data)
+ }
+ 
+ /**
+- * blk_mq_force_complete_rq() - Force complete the request, bypassing any error
+- * 				injection that could drop the completion.
+- * @rq: Request to be force completed
++ * blk_mq_complete_request - end I/O on a request
++ * @rq:		the request being processed
+  *
+- * Drivers should use blk_mq_complete_request() to complete requests in their
+- * normal IO path. For timeout error recovery, drivers may call this forced
+- * completion routine after they've reclaimed timed out requests to bypass
+- * potentially subsequent fake timeouts.
+- */
+-void blk_mq_force_complete_rq(struct request *rq)
++ * Description:
++ *	Complete a request by scheduling the ->complete_rq operation.
++ **/
++void blk_mq_complete_request(struct request *rq)
+ {
+ 	struct blk_mq_ctx *ctx = rq->mq_ctx;
+ 	struct request_queue *q = rq->q;
+@@ -702,7 +699,7 @@ void blk_mq_force_complete_rq(struct request *rq)
+ 	}
+ 	put_cpu();
+ }
+-EXPORT_SYMBOL_GPL(blk_mq_force_complete_rq);
++EXPORT_SYMBOL(blk_mq_complete_request);
+ 
+ static void hctx_unlock(struct blk_mq_hw_ctx *hctx, int srcu_idx)
+ 	__releases(hctx->srcu)
+@@ -724,23 +721,6 @@ static void hctx_lock(struct blk_mq_hw_ctx *hctx, int *srcu_idx)
+ 		*srcu_idx = srcu_read_lock(hctx->srcu);
+ }
+ 
+-/**
+- * blk_mq_complete_request - end I/O on a request
+- * @rq:		the request being processed
+- *
+- * Description:
+- *	Ends all I/O on a request. It does not handle partial completions.
+- *	The actual completion happens out-of-order, through a IPI handler.
+- **/
+-bool blk_mq_complete_request(struct request *rq)
+-{
+-	if (unlikely(blk_should_fake_timeout(rq->q)))
+-		return false;
+-	blk_mq_force_complete_rq(rq);
+-	return true;
+-}
+-EXPORT_SYMBOL(blk_mq_complete_request);
+-
+ /**
+  * blk_mq_start_request - Start processing a request
+  * @rq: Pointer to request to be started

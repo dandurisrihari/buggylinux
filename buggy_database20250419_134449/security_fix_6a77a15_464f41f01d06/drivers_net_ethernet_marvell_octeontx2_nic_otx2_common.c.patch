@@ -1,0 +1,50 @@
+commit 6a77a158848a8c68930df27b8840660db8531222
+Author: Bharat Bhushan <bbhushan2@marvell.com>
+Date:   Wed Dec 4 11:26:57 2024 +0530
+
+    cn10k-ipsec: Process outbound ipsec crypto offload
+    
+    Prepare and submit crypto hardware (CPT) instruction for
+    outbound ipsec crypto offload. The CPT instruction have
+    authentication offset, IV offset and encapsulation offset
+    in input packet. Also provide SA context pointer which have
+    details about algo, keys, salt etc. Crypto hardware encrypt,
+    authenticate and provide the ESP packet to networking hardware.
+    
+    Signed-off-by: Bharat Bhushan <bbhushan2@marvell.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/marvell/octeontx2/nic/otx2_common.c b/drivers/net/ethernet/marvell/octeontx2/nic/otx2_common.c
+index 4c8774899eaf..bf56888e7fe7 100644
+--- a/drivers/net/ethernet/marvell/octeontx2/nic/otx2_common.c
++++ b/drivers/net/ethernet/marvell/octeontx2/nic/otx2_common.c
+@@ -970,6 +970,29 @@ int otx2_sq_init(struct otx2_nic *pfvf, u16 qidx, u16 sqb_aura)
+ 	if (err)
+ 		return err;
+ 
++	/* Allocate memory for NIX SQE (which includes NIX SG) and CPT SG.
++	 * SG of NIX and CPT are same in size. Allocate memory for CPT SG
++	 * same as NIX SQE for base address alignment.
++	 * Layout of a NIX SQE and CPT SG entry:
++	 *      -----------------------------
++	 *     |     CPT Scatter Gather      |
++	 *     |       (SQE SIZE)            |
++	 *     |                             |
++	 *      -----------------------------
++	 *     |       NIX SQE               |
++	 *     |       (SQE SIZE)            |
++	 *     |                             |
++	 *      -----------------------------
++	 */
++	err = qmem_alloc(pfvf->dev, &sq->sqe_ring, qset->sqe_cnt,
++			 sq->sqe_size * 2);
++	if (err)
++		return err;
++
++	err = qmem_alloc(pfvf->dev, &sq->cpt_resp, qset->sqe_cnt, 64);
++	if (err)
++		return err;
++
+ 	if (qidx < pfvf->hw.tx_queues) {
+ 		err = qmem_alloc(pfvf->dev, &sq->tso_hdrs, qset->sqe_cnt,
+ 				 TSO_HEADER_SIZE);

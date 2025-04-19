@@ -1,0 +1,65 @@
+diff --git a/fs/ecryptfs/ecryptfs_kernel.h b/fs/ecryptfs/ecryptfs_kernel.h
+index 0032a9f5a3a9..59ab793fc01b 100644
+--- a/fs/ecryptfs/ecryptfs_kernel.h
++++ b/fs/ecryptfs/ecryptfs_kernel.h
+@@ -377,6 +377,7 @@ struct ecryptfs_mount_crypt_stat {
+ #define ECRYPTFS_GLOBAL_ENCRYPT_FILENAMES      0x00000010
+ #define ECRYPTFS_GLOBAL_ENCFN_USE_MOUNT_FNEK   0x00000020
+ #define ECRYPTFS_GLOBAL_ENCFN_USE_FEK          0x00000040
++#define ECRYPTFS_GLOBAL_MOUNT_AUTH_TOK_ONLY    0x00000080
+ 	u32 flags;
+ 	struct list_head global_auth_tok_list;
+ 	struct mutex global_auth_tok_list_mutex;
+diff --git a/fs/ecryptfs/keystore.c b/fs/ecryptfs/keystore.c
+index e7f029f00c6b..b1f6858a5223 100644
+--- a/fs/ecryptfs/keystore.c
++++ b/fs/ecryptfs/keystore.c
+@@ -459,6 +459,15 @@ ecryptfs_find_auth_tok_for_sig(
+ 	if (ecryptfs_find_global_auth_tok_for_sig(&global_auth_tok,
+ 						  mount_crypt_stat, sig)) {
+ 
++		/* if the flag ECRYPTFS_GLOBAL_MOUNT_AUTH_TOK_ONLY is set in the
++		 * mount_crypt_stat structure, we prevent to use auth toks that
++		 * are not inserted through the ecryptfs_add_global_auth_tok
++		 * function.
++		 */
++		if (mount_crypt_stat->flags
++				& ECRYPTFS_GLOBAL_MOUNT_AUTH_TOK_ONLY)
++			return -EINVAL;
++
+ 		rc = ecryptfs_keyring_auth_tok_for_sig(auth_tok_key, auth_tok,
+ 						       sig);
+ 	} else
+diff --git a/fs/ecryptfs/main.c b/fs/ecryptfs/main.c
+index cbd4e18adb20..09eb5296aebb 100644
+--- a/fs/ecryptfs/main.c
++++ b/fs/ecryptfs/main.c
+@@ -208,7 +208,8 @@ enum { ecryptfs_opt_sig, ecryptfs_opt_ecryptfs_sig,
+        ecryptfs_opt_passthrough, ecryptfs_opt_xattr_metadata,
+        ecryptfs_opt_encrypted_view, ecryptfs_opt_fnek_sig,
+        ecryptfs_opt_fn_cipher, ecryptfs_opt_fn_cipher_key_bytes,
+-       ecryptfs_opt_unlink_sigs, ecryptfs_opt_err };
++       ecryptfs_opt_unlink_sigs, ecryptfs_opt_mount_auth_tok_only,
++       ecryptfs_opt_err };
+ 
+ static const match_table_t tokens = {
+ 	{ecryptfs_opt_sig, "sig=%s"},
+@@ -223,6 +224,7 @@ static const match_table_t tokens = {
+ 	{ecryptfs_opt_fn_cipher, "ecryptfs_fn_cipher=%s"},
+ 	{ecryptfs_opt_fn_cipher_key_bytes, "ecryptfs_fn_key_bytes=%u"},
+ 	{ecryptfs_opt_unlink_sigs, "ecryptfs_unlink_sigs"},
++	{ecryptfs_opt_mount_auth_tok_only, "ecryptfs_mount_auth_tok_only"},
+ 	{ecryptfs_opt_err, NULL}
+ };
+ 
+@@ -406,6 +408,10 @@ static int ecryptfs_parse_options(struct ecryptfs_sb_info *sbi, char *options)
+ 		case ecryptfs_opt_unlink_sigs:
+ 			mount_crypt_stat->flags |= ECRYPTFS_UNLINK_SIGS;
+ 			break;
++		case ecryptfs_opt_mount_auth_tok_only:
++			mount_crypt_stat->flags |=
++				ECRYPTFS_GLOBAL_MOUNT_AUTH_TOK_ONLY;
++			break;
+ 		case ecryptfs_opt_err:
+ 		default:
+ 			printk(KERN_WARNING

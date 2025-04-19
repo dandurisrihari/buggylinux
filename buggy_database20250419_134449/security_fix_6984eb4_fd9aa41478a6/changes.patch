@@ -1,0 +1,159 @@
+diff --git a/arch/arm64/include/asm/cpucaps.h b/arch/arm64/include/asm/cpucaps.h
+index a89f587d4842..803f388e81d4 100644
+--- a/arch/arm64/include/asm/cpucaps.h
++++ b/arch/arm64/include/asm/cpucaps.h
+@@ -56,7 +56,13 @@
+ #define ARM64_WORKAROUND_1188873		35
+ #define ARM64_HAS_SB				36
+ #define ARM64_WORKAROUND_1165522		37
++#define ARM64_HAS_ADDRESS_AUTH_ARCH		38
++#define ARM64_HAS_ADDRESS_AUTH_IMP_DEF		39
++#define ARM64_HAS_ADDRESS_AUTH			40
++#define ARM64_HAS_GENERIC_AUTH_ARCH		41
++#define ARM64_HAS_GENERIC_AUTH_IMP_DEF		42
++#define ARM64_HAS_GENERIC_AUTH			43
+ 
+-#define ARM64_NCAPS				38
++#define ARM64_NCAPS				44
+ 
+ #endif /* __ASM_CPUCAPS_H */
+diff --git a/arch/arm64/include/asm/cpufeature.h b/arch/arm64/include/asm/cpufeature.h
+index 38e674f6e18b..daec4b50d7fb 100644
+--- a/arch/arm64/include/asm/cpufeature.h
++++ b/arch/arm64/include/asm/cpufeature.h
+@@ -565,6 +565,18 @@ static inline bool system_supports_cnp(void)
+ 		cpus_have_const_cap(ARM64_HAS_CNP);
+ }
+ 
++static inline bool system_supports_address_auth(void)
++{
++	return IS_ENABLED(CONFIG_ARM64_PTR_AUTH) &&
++		cpus_have_const_cap(ARM64_HAS_ADDRESS_AUTH);
++}
++
++static inline bool system_supports_generic_auth(void)
++{
++	return IS_ENABLED(CONFIG_ARM64_PTR_AUTH) &&
++		cpus_have_const_cap(ARM64_HAS_GENERIC_AUTH);
++}
++
+ #define ARM64_SSBD_UNKNOWN		-1
+ #define ARM64_SSBD_FORCE_DISABLE	0
+ #define ARM64_SSBD_KERNEL		1
+diff --git a/arch/arm64/kernel/cpufeature.c b/arch/arm64/kernel/cpufeature.c
+index 7b6f26fd075f..c82ebd8f0087 100644
+--- a/arch/arm64/kernel/cpufeature.c
++++ b/arch/arm64/kernel/cpufeature.c
+@@ -143,9 +143,17 @@ static const struct arm64_ftr_bits ftr_id_aa64isar0[] = {
+ 
+ static const struct arm64_ftr_bits ftr_id_aa64isar1[] = {
+ 	ARM64_FTR_BITS(FTR_VISIBLE, FTR_STRICT, FTR_LOWER_SAFE, ID_AA64ISAR1_SB_SHIFT, 4, 0),
++	ARM64_FTR_BITS(FTR_VISIBLE_IF_IS_ENABLED(CONFIG_ARM64_PTR_AUTH),
++		       FTR_STRICT, FTR_LOWER_SAFE, ID_AA64ISAR1_GPI_SHIFT, 4, 0),
++	ARM64_FTR_BITS(FTR_VISIBLE_IF_IS_ENABLED(CONFIG_ARM64_PTR_AUTH),
++		       FTR_STRICT, FTR_LOWER_SAFE, ID_AA64ISAR1_GPA_SHIFT, 4, 0),
+ 	ARM64_FTR_BITS(FTR_VISIBLE, FTR_STRICT, FTR_LOWER_SAFE, ID_AA64ISAR1_LRCPC_SHIFT, 4, 0),
+ 	ARM64_FTR_BITS(FTR_VISIBLE, FTR_STRICT, FTR_LOWER_SAFE, ID_AA64ISAR1_FCMA_SHIFT, 4, 0),
+ 	ARM64_FTR_BITS(FTR_VISIBLE, FTR_STRICT, FTR_LOWER_SAFE, ID_AA64ISAR1_JSCVT_SHIFT, 4, 0),
++	ARM64_FTR_BITS(FTR_VISIBLE_IF_IS_ENABLED(CONFIG_ARM64_PTR_AUTH),
++		       FTR_STRICT, FTR_LOWER_SAFE, ID_AA64ISAR1_API_SHIFT, 4, 0),
++	ARM64_FTR_BITS(FTR_VISIBLE_IF_IS_ENABLED(CONFIG_ARM64_PTR_AUTH),
++		       FTR_STRICT, FTR_LOWER_SAFE, ID_AA64ISAR1_APA_SHIFT, 4, 0),
+ 	ARM64_FTR_BITS(FTR_VISIBLE, FTR_STRICT, FTR_LOWER_SAFE, ID_AA64ISAR1_DPB_SHIFT, 4, 0),
+ 	ARM64_FTR_END,
+ };
+@@ -1182,6 +1190,36 @@ static void cpu_clear_disr(const struct arm64_cpu_capabilities *__unused)
+ }
+ #endif /* CONFIG_ARM64_RAS_EXTN */
+ 
++#ifdef CONFIG_ARM64_PTR_AUTH
++static bool has_address_auth(const struct arm64_cpu_capabilities *entry,
++			     int __unused)
++{
++	u64 isar1 = read_sanitised_ftr_reg(SYS_ID_AA64ISAR1_EL1);
++	bool api, apa;
++
++	apa = cpuid_feature_extract_unsigned_field(isar1,
++					ID_AA64ISAR1_APA_SHIFT) > 0;
++	api = cpuid_feature_extract_unsigned_field(isar1,
++					ID_AA64ISAR1_API_SHIFT) > 0;
++
++	return apa || api;
++}
++
++static bool has_generic_auth(const struct arm64_cpu_capabilities *entry,
++			     int __unused)
++{
++	u64 isar1 = read_sanitised_ftr_reg(SYS_ID_AA64ISAR1_EL1);
++	bool gpi, gpa;
++
++	gpa = cpuid_feature_extract_unsigned_field(isar1,
++					ID_AA64ISAR1_GPA_SHIFT) > 0;
++	gpi = cpuid_feature_extract_unsigned_field(isar1,
++					ID_AA64ISAR1_GPI_SHIFT) > 0;
++
++	return gpa || gpi;
++}
++#endif /* CONFIG_ARM64_PTR_AUTH */
++
+ static const struct arm64_cpu_capabilities arm64_features[] = {
+ 	{
+ 		.desc = "GIC system register CPU interface",
+@@ -1415,6 +1453,58 @@ static const struct arm64_cpu_capabilities arm64_features[] = {
+ 		.sign = FTR_UNSIGNED,
+ 		.min_field_value = 1,
+ 	},
++#ifdef CONFIG_ARM64_PTR_AUTH
++	{
++		.desc = "Address authentication (architected algorithm)",
++		.capability = ARM64_HAS_ADDRESS_AUTH_ARCH,
++		.type = ARM64_CPUCAP_SYSTEM_FEATURE,
++		.sys_reg = SYS_ID_AA64ISAR1_EL1,
++		.sign = FTR_UNSIGNED,
++		.field_pos = ID_AA64ISAR1_APA_SHIFT,
++		.min_field_value = ID_AA64ISAR1_APA_ARCHITECTED,
++		.matches = has_cpuid_feature,
++	},
++	{
++		.desc = "Address authentication (IMP DEF algorithm)",
++		.capability = ARM64_HAS_ADDRESS_AUTH_IMP_DEF,
++		.type = ARM64_CPUCAP_SYSTEM_FEATURE,
++		.sys_reg = SYS_ID_AA64ISAR1_EL1,
++		.sign = FTR_UNSIGNED,
++		.field_pos = ID_AA64ISAR1_API_SHIFT,
++		.min_field_value = ID_AA64ISAR1_API_IMP_DEF,
++		.matches = has_cpuid_feature,
++	},
++	{
++		.capability = ARM64_HAS_ADDRESS_AUTH,
++		.type = ARM64_CPUCAP_SYSTEM_FEATURE,
++		.matches = has_address_auth,
++	},
++	{
++		.desc = "Generic authentication (architected algorithm)",
++		.capability = ARM64_HAS_GENERIC_AUTH_ARCH,
++		.type = ARM64_CPUCAP_SYSTEM_FEATURE,
++		.sys_reg = SYS_ID_AA64ISAR1_EL1,
++		.sign = FTR_UNSIGNED,
++		.field_pos = ID_AA64ISAR1_GPA_SHIFT,
++		.min_field_value = ID_AA64ISAR1_GPA_ARCHITECTED,
++		.matches = has_cpuid_feature,
++	},
++	{
++		.desc = "Generic authentication (IMP DEF algorithm)",
++		.capability = ARM64_HAS_GENERIC_AUTH_IMP_DEF,
++		.type = ARM64_CPUCAP_SYSTEM_FEATURE,
++		.sys_reg = SYS_ID_AA64ISAR1_EL1,
++		.sign = FTR_UNSIGNED,
++		.field_pos = ID_AA64ISAR1_GPI_SHIFT,
++		.min_field_value = ID_AA64ISAR1_GPI_IMP_DEF,
++		.matches = has_cpuid_feature,
++	},
++	{
++		.capability = ARM64_HAS_GENERIC_AUTH,
++		.type = ARM64_CPUCAP_SYSTEM_FEATURE,
++		.matches = has_generic_auth,
++	},
++#endif /* CONFIG_ARM64_PTR_AUTH */
+ 	{},
+ };

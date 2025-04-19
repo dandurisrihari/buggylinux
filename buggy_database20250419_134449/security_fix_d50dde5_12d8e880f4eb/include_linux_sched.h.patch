@@ -1,0 +1,131 @@
+commit d50dde5a10f305253cbc3855307f608f8a3c5f73
+Author: Dario Faggioli <raistlin@linux.it>
+Date:   Thu Nov 7 14:43:36 2013 +0100
+
+    sched: Add new scheduler syscalls to support an extended scheduling parameters ABI
+    
+    Add the syscalls needed for supporting scheduling algorithms
+    with extended scheduling parameters (e.g., SCHED_DEADLINE).
+    
+    In general, it makes possible to specify a periodic/sporadic task,
+    that executes for a given amount of runtime at each instance, and is
+    scheduled according to the urgency of their own timing constraints,
+    i.e.:
+    
+     - a (maximum/typical) instance execution time,
+     - a minimum interval between consecutive instances,
+     - a time constraint by which each instance must be completed.
+    
+    Thus, both the data structure that holds the scheduling parameters of
+    the tasks and the system calls dealing with it must be extended.
+    Unfortunately, modifying the existing struct sched_param would break
+    the ABI and result in potentially serious compatibility issues with
+    legacy binaries.
+    
+    For these reasons, this patch:
+    
+     - defines the new struct sched_attr, containing all the fields
+       that are necessary for specifying a task in the computational
+       model described above;
+    
+     - defines and implements the new scheduling related syscalls that
+       manipulate it, i.e., sched_setattr() and sched_getattr().
+    
+    Syscalls are introduced for x86 (32 and 64 bits) and ARM only, as a
+    proof of concept and for developing and testing purposes. Making them
+    available on other architectures is straightforward.
+    
+    Since no "user" for these new parameters is introduced in this patch,
+    the implementation of the new system calls is just identical to their
+    already existing counterpart. Future patches that implement scheduling
+    policies able to exploit the new data structure must also take care of
+    modifying the sched_*attr() calls accordingly with their own purposes.
+    
+    Signed-off-by: Dario Faggioli <raistlin@linux.it>
+    [ Rewrote to use sched_attr. ]
+    Signed-off-by: Juri Lelli <juri.lelli@gmail.com>
+    [ Removed sched_setscheduler2() for now. ]
+    Signed-off-by: Peter Zijlstra <peterz@infradead.org>
+    Link: http://lkml.kernel.org/r/1383831828-15501-3-git-send-email-juri.lelli@gmail.com
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index 3a1e9857b393..86025b6c6387 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -56,6 +56,66 @@ struct sched_param {
+ 
+ #include <asm/processor.h>
+ 
++#define SCHED_ATTR_SIZE_VER0	48	/* sizeof first published struct */
++
++/*
++ * Extended scheduling parameters data structure.
++ *
++ * This is needed because the original struct sched_param can not be
++ * altered without introducing ABI issues with legacy applications
++ * (e.g., in sched_getparam()).
++ *
++ * However, the possibility of specifying more than just a priority for
++ * the tasks may be useful for a wide variety of application fields, e.g.,
++ * multimedia, streaming, automation and control, and many others.
++ *
++ * This variant (sched_attr) is meant at describing a so-called
++ * sporadic time-constrained task. In such model a task is specified by:
++ *  - the activation period or minimum instance inter-arrival time;
++ *  - the maximum (or average, depending on the actual scheduling
++ *    discipline) computation time of all instances, a.k.a. runtime;
++ *  - the deadline (relative to the actual activation time) of each
++ *    instance.
++ * Very briefly, a periodic (sporadic) task asks for the execution of
++ * some specific computation --which is typically called an instance--
++ * (at most) every period. Moreover, each instance typically lasts no more
++ * than the runtime and must be completed by time instant t equal to
++ * the instance activation time + the deadline.
++ *
++ * This is reflected by the actual fields of the sched_attr structure:
++ *
++ *  @size		size of the structure, for fwd/bwd compat.
++ *
++ *  @sched_policy	task's scheduling policy
++ *  @sched_flags	for customizing the scheduler behaviour
++ *  @sched_nice		task's nice value      (SCHED_NORMAL/BATCH)
++ *  @sched_priority	task's static priority (SCHED_FIFO/RR)
++ *  @sched_deadline	representative of the task's deadline
++ *  @sched_runtime	representative of the task's runtime
++ *  @sched_period	representative of the task's period
++ *
++ * Given this task model, there are a multiplicity of scheduling algorithms
++ * and policies, that can be used to ensure all the tasks will make their
++ * timing constraints.
++ */
++struct sched_attr {
++	u32 size;
++
++	u32 sched_policy;
++	u64 sched_flags;
++
++	/* SCHED_NORMAL, SCHED_BATCH */
++	s32 sched_nice;
++
++	/* SCHED_FIFO, SCHED_RR */
++	u32 sched_priority;
++
++	/* SCHED_DEADLINE */
++	u64 sched_runtime;
++	u64 sched_deadline;
++	u64 sched_period;
++};
++
+ struct exec_domain;
+ struct futex_pi_state;
+ struct robust_list_head;
+@@ -1958,6 +2018,8 @@ extern int sched_setscheduler(struct task_struct *, int,
+ 			      const struct sched_param *);
+ extern int sched_setscheduler_nocheck(struct task_struct *, int,
+ 				      const struct sched_param *);
++extern int sched_setattr(struct task_struct *,
++			 const struct sched_attr *);
+ extern struct task_struct *idle_task(int cpu);
+ /**
+  * is_idle_task - is the specified task an idle task?

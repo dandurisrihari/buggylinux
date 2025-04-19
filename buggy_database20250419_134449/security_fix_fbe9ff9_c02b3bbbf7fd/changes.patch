@@ -1,0 +1,216 @@
+diff --git a/arch/x86/include/asm/mce.h b/arch/x86/include/asm/mce.h
+index 3f9a3d2a5209..181264989db5 100644
+--- a/arch/x86/include/asm/mce.h
++++ b/arch/x86/include/asm/mce.h
+@@ -285,10 +285,6 @@ int mce_notify_irq(void);
+ 
+ DECLARE_PER_CPU(struct mce, injectm);
+ 
+-extern void register_mce_write_callback(ssize_t (*)(struct file *filp,
+-				    const char __user *ubuf,
+-				    size_t usize, loff_t *off));
+-
+ /* Disable CMCI/polling for MCA bank claimed by firmware */
+ extern void mce_disable_bank(int bank);
+ 
+diff --git a/arch/x86/kernel/cpu/mcheck/dev-mcelog.c b/arch/x86/kernel/cpu/mcheck/dev-mcelog.c
+index 9c632cb88546..a80427c30c93 100644
+--- a/arch/x86/kernel/cpu/mcheck/dev-mcelog.c
++++ b/arch/x86/kernel/cpu/mcheck/dev-mcelog.c
+@@ -17,6 +17,8 @@
+ 
+ #include "mce-internal.h"
+ 
++static BLOCKING_NOTIFIER_HEAD(mce_injector_chain);
++
+ static DEFINE_MUTEX(mce_chrdev_read_mutex);
+ 
+ static char mce_helper[128];
+@@ -345,24 +347,49 @@ static long mce_chrdev_ioctl(struct file *f, unsigned int cmd,
+ 	}
+ }
+ 
+-static ssize_t (*mce_write)(struct file *filp, const char __user *ubuf,
+-			    size_t usize, loff_t *off);
++void mce_register_injector_chain(struct notifier_block *nb)
++{
++	blocking_notifier_chain_register(&mce_injector_chain, nb);
++}
++EXPORT_SYMBOL_GPL(mce_register_injector_chain);
+ 
+-void register_mce_write_callback(ssize_t (*fn)(struct file *filp,
+-			     const char __user *ubuf,
+-			     size_t usize, loff_t *off))
++void mce_unregister_injector_chain(struct notifier_block *nb)
+ {
+-	mce_write = fn;
++	blocking_notifier_chain_unregister(&mce_injector_chain, nb);
+ }
+-EXPORT_SYMBOL_GPL(register_mce_write_callback);
++EXPORT_SYMBOL_GPL(mce_unregister_injector_chain);
+ 
+ static ssize_t mce_chrdev_write(struct file *filp, const char __user *ubuf,
+ 				size_t usize, loff_t *off)
+ {
+-	if (mce_write)
+-		return mce_write(filp, ubuf, usize, off);
+-	else
++	struct mce m;
++
++	if (!capable(CAP_SYS_ADMIN))
++		return -EPERM;
++	/*
++	 * There are some cases where real MSR reads could slip
++	 * through.
++	 */
++	if (!boot_cpu_has(X86_FEATURE_MCE) || !boot_cpu_has(X86_FEATURE_MCA))
++		return -EIO;
++
++	if ((unsigned long)usize > sizeof(struct mce))
++		usize = sizeof(struct mce);
++	if (copy_from_user(&m, ubuf, usize))
++		return -EFAULT;
++
++	if (m.extcpu >= num_possible_cpus() || !cpu_online(m.extcpu))
+ 		return -EINVAL;
++
++	/*
++	 * Need to give user space some time to set everything up,
++	 * so do it a jiffie or two later everywhere.
++	 */
++	schedule_timeout(2);
++
++	blocking_notifier_call_chain(&mce_injector_chain, 0, &m);
++
++	return usize;
+ }
+ 
+ static const struct file_operations mce_chrdev_ops = {
+diff --git a/arch/x86/kernel/cpu/mcheck/mce-inject.c b/arch/x86/kernel/cpu/mcheck/mce-inject.c
+index 7170186938e5..c21c1a73712a 100644
+--- a/arch/x86/kernel/cpu/mcheck/mce-inject.c
++++ b/arch/x86/kernel/cpu/mcheck/mce-inject.c
+@@ -283,42 +283,24 @@ static void __maybe_unused raise_mce(struct mce *m)
+ 	}
+ }
+ 
+-#ifdef CONFIG_X86_MCELOG_LEGACY
+-/* Error injection interface */
+-static ssize_t mce_write(struct file *filp, const char __user *ubuf,
+-			 size_t usize, loff_t *off)
++static int mce_inject_raise(struct notifier_block *nb, unsigned long val,
++			    void *data)
+ {
+-	struct mce m;
+-
+-	if (!capable(CAP_SYS_ADMIN))
+-		return -EPERM;
+-	/*
+-	 * There are some cases where real MSR reads could slip
+-	 * through.
+-	 */
+-	if (!boot_cpu_has(X86_FEATURE_MCE) || !boot_cpu_has(X86_FEATURE_MCA))
+-		return -EIO;
+-
+-	if ((unsigned long)usize > sizeof(struct mce))
+-		usize = sizeof(struct mce);
+-	if (copy_from_user(&m, ubuf, usize))
+-		return -EFAULT;
+-
+-	if (m.extcpu >= num_possible_cpus() || !cpu_online(m.extcpu))
+-		return -EINVAL;
++	struct mce *m = (struct mce *)data;
+ 
+-	/*
+-	 * Need to give user space some time to set everything up,
+-	 * so do it a jiffie or two later everywhere.
+-	 */
+-	schedule_timeout(2);
++	if (!m)
++		return NOTIFY_DONE;
+ 
+ 	mutex_lock(&mce_inject_mutex);
+-	raise_mce(&m);
++	raise_mce(m);
+ 	mutex_unlock(&mce_inject_mutex);
+-	return usize;
++
++	return NOTIFY_DONE;
+ }
+-#endif /* CONFIG_X86_MCELOG_LEGACY */
++
++static struct notifier_block inject_nb = {
++	.notifier_call  = mce_inject_raise,
++};
+ 
+ /*
+  * Caller needs to be make sure this cpu doesn't disappear
+@@ -719,44 +701,34 @@ static int __init inject_init(void)
+ 	if (!alloc_cpumask_var(&mce_inject_cpumask, GFP_KERNEL))
+ 		return -ENOMEM;
+ 
+-#ifdef CONFIG_X86_MCELOG_LEGACY
+-		register_mce_write_callback(mce_write);
+-#endif
+-
+-	register_nmi_handler(NMI_LOCAL, mce_raise_notify, 0, "mce_notify");
+-
+ 	err = debugfs_init();
+ 	if (err) {
+ 		free_cpumask_var(mce_inject_cpumask);
+ 		return err;
+ 	}
+ 
++	register_nmi_handler(NMI_LOCAL, mce_raise_notify, 0, "mce_notify");
++	mce_register_injector_chain(&inject_nb);
++
+ 	pr_info("Machine check injector initialized\n");
+ 
+ 	return 0;
+ }
+ 
+-module_init(inject_init);
+-
+-/*
+- * Cannot tolerate unloading currently because we cannot
+- * guarantee all openers of mce_chrdev will get a reference to us.
+- */
+-#ifndef CONFIG_X86_MCELOG_LEGACY
+ static void __exit inject_exit(void)
+ {
+ 
++	mce_unregister_injector_chain(&inject_nb);
++	unregister_nmi_handler(NMI_LOCAL, "mce_notify");
++
+ 	debugfs_remove_recursive(dfs_inj);
+ 	dfs_inj = NULL;
+ 
+ 	memset(&dfs_fls, 0, sizeof(dfs_fls));
+ 
+-	unregister_nmi_handler(NMI_LOCAL, "mce_notify");
+-
+ 	free_cpumask_var(mce_inject_cpumask);
+ }
+ 
++module_init(inject_init);
+ module_exit(inject_exit);
+-#endif
+-
+ MODULE_LICENSE("GPL");
+diff --git a/arch/x86/kernel/cpu/mcheck/mce-internal.h b/arch/x86/kernel/cpu/mcheck/mce-internal.h
+index 654ad0668d72..098530a93bb7 100644
+--- a/arch/x86/kernel/cpu/mcheck/mce-internal.h
++++ b/arch/x86/kernel/cpu/mcheck/mce-internal.h
+@@ -100,7 +100,11 @@ static inline bool mce_cmp(struct mce *m1, struct mce *m2)
+ extern struct device_attribute dev_attr_trigger;
+ 
+ #ifdef CONFIG_X86_MCELOG_LEGACY
+-extern void mce_work_trigger(void);
++void mce_work_trigger(void);
++void mce_register_injector_chain(struct notifier_block *nb);
++void mce_unregister_injector_chain(struct notifier_block *nb);
+ #else
+ static inline void mce_work_trigger(void)	{ }
++static inline void mce_register_injector_chain(struct notifier_block *nb)	{ }
++static inline void mce_unregister_injector_chain(struct notifier_block *nb)	{ }
+ #endif

@@ -1,0 +1,210 @@
+commit d1e879ec600f9b3bdd253167533959facfefb17b
+Author: Miri Korenblit <miriam.rachel.korenblit@intel.com>
+Date:   Sun Feb 16 11:42:40 2025 +0200
+
+    wifi: iwlwifi: add iwlmld sub-driver
+    
+    iwlwifi is the driver of all Intel wifi devices since 2008.
+    Since then, the hardware has changed a lot, but the firmware
+    API has changed even more. The need to keep one driver that
+    supports all those different APIs led us to introduce a new
+    architecture circa 2012 which allowed us to keep the same
+    interface to the hardware (DMAs, Tx queues, etc...) with a
+    new layer to implement the mid-layer between mac80211 and
+    the firmware. The first component is called the 'transport'
+    and the latter is called 'operation_mode' a.k.a  op_mode.
+    
+    In 2013 we took advantage of the new architecture to
+    introduce iwlmvm which allowed us to implement the, then,
+    new firmware API. This op_mode supports 7260 and up, those
+    devices supports support at least VHT.
+    
+    Since then, wifi evolved and so did the firmware. It became
+    much bigger and took a lot of functionality from the driver.
+    It became increasingly hard to keep the same op_mode for the
+    newest devices and we experienced frequent regressions on
+    older devices. In order to avoid those regressions and keep
+    the code maintainable, we decided it was about time to start
+    a new op_mode.
+    
+    iwlmld is a new op_mode that supports BE200 or newer if the
+    firmware being used is 97.ucode or newer. If the user has
+    an older devices or BE200 with .96.ucode, iwlmvm will be
+    loaded. Of course, this op_mode selection is seamless.
+    
+    All the features supported in iwlmvm are supported in
+    iwlmld besides a few seldom used use cases: injection and
+    Hotspot 2.0. Those are under work.
+    
+    A few points about the implementation:
+     * iwlmld doesn't have any mutexes, it relies on the
+       wiphy_lock
+     * iwlmld is more "resource oriented": stations, links and
+       interfaces are allocated and freed only after all the
+       relevant flows are completed.
+     * Firmware notifications' sizes are validated in a more
+       structured way.
+    
+    We would love to see this new op_mode merged in 6.15. The
+    firmware for this new driver (.97.ucode) is not yet publicly
+    available but it'll be sent very soon.
+    People eager to get an early version of this firmware can
+    contact Emmanuel at:
+    emmanuel.grumbach@intel.com
+    
+    I've listed the people who directly contributed
+    code, but many others from various teams have
+    contributed in other ways.
+    
+    Co-developed-by: Johannes Berg <johannes.berg@intel.com>
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+    Co-developed-by: Avraham Stern <avraham.stern@intel.com>
+    Signed-off-by: Avraham Stern <avraham.stern@intel.com>
+    Co-developed-by: Daniel Gabay <daniel.gabay@intel.com>
+    Signed-off-by: Daniel Gabay <daniel.gabay@intel.com>
+    Co-developed-by: Emmanuel Grumbach <emmanuel.grumbach@intel.com>
+    Signed-off-by: Emmanuel Grumbach <emmanuel.grumbach@intel.com>
+    Co-developed-by: Anjaneyulu <pagadala.yesu.anjaneyulu@intel.com>
+    Signed-off-by: Anjaneyulu <pagadala.yesu.anjaneyulu@intel.com>
+    Co-developed-by: Yedidya Benshimol <yedidya.ben.shimol@intel.com>
+    Signed-off-by: Yedidya Benshimol <yedidya.ben.shimol@intel.com>
+    Co-developed-by: Benjamin Berg <benjamin.berg@intel.com>
+    Signed-off-by: Benjamin Berg <benjamin.berg@intel.com>
+    Co-developed-by: Shaul Triebitz <shaul.triebitz@intel.com>
+    Signed-off-by: Shaul Triebitz <shaul.triebitz@intel.com>
+    Signed-off-by: Miri Korenblit <miriam.rachel.korenblit@intel.com>
+    Link: https://lore.kernel.org/linux-wireless/20250216094321.537988-1-miriam.rachel.korenblit@intel.com/
+    [fix Kconfig, fix api/phy.h includes, SPDX tag and coding
+     style issues, duplicated includes per 0-day robot]
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+diff --git a/drivers/net/wireless/intel/iwlwifi/mld/tests/utils.h b/drivers/net/wireless/intel/iwlwifi/mld/tests/utils.h
+new file mode 100644
+index 000000000000..9b1f2ada997f
+--- /dev/null
++++ b/drivers/net/wireless/intel/iwlwifi/mld/tests/utils.h
+@@ -0,0 +1,124 @@
++/* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
++/*
++ * Copyright (C) 2024-2025 Intel Corporation
++ */
++
++#ifndef __iwl_mld_kunit_utils_h__
++#define __iwl_mld_kunit_utils_h__
++
++#include <net/mac80211.h>
++#include <kunit/test-bug.h>
++
++struct iwl_mld;
++
++int iwlmld_kunit_test_init(struct kunit *test);
++
++enum nl80211_iftype;
++
++struct ieee80211_vif *iwlmld_kunit_add_vif(bool mlo, enum nl80211_iftype type);
++
++struct ieee80211_bss_conf *
++iwlmld_kunit_add_link(struct ieee80211_vif *vif, int link_id);
++
++#define KUNIT_ALLOC_AND_ASSERT_SIZE(test, ptr, size)			\
++do {									\
++	(ptr) = kunit_kzalloc((test), (size), GFP_KERNEL);		\
++	KUNIT_ASSERT_NOT_NULL((test), (ptr));				\
++} while (0)
++
++#define KUNIT_ALLOC_AND_ASSERT(test, ptr)				\
++	KUNIT_ALLOC_AND_ASSERT_SIZE(test, ptr, sizeof(*(ptr)))
++
++#define CHANNEL(_name, _band, _freq)				\
++static struct ieee80211_channel _name = {			\
++	.band = (_band),					\
++	.center_freq = (_freq),					\
++	.hw_value = (_freq),					\
++}
++
++#define CHANDEF(_name, _channel, _freq1, _width)		\
++__maybe_unused static struct cfg80211_chan_def _name = {	\
++	.chan = &(_channel),					\
++	.center_freq1 = (_freq1),				\
++	.width = (_width),					\
++}
++
++CHANNEL(chan_2ghz, NL80211_BAND_2GHZ, 2412);
++CHANNEL(chan_5ghz, NL80211_BAND_5GHZ, 5200);
++CHANNEL(chan_6ghz, NL80211_BAND_6GHZ, 6115);
++/* Feel free to add more */
++
++CHANDEF(chandef_2ghz, chan_2ghz, 2412, NL80211_CHAN_WIDTH_20);
++CHANDEF(chandef_5ghz, chan_5ghz, 5200, NL80211_CHAN_WIDTH_40);
++CHANDEF(chandef_6ghz, chan_6ghz, 6115, NL80211_CHAN_WIDTH_160);
++/* Feel free to add more */
++
++//struct cfg80211_chan_def;
++
++struct ieee80211_chanctx_conf *
++iwlmld_kunit_add_chanctx_from_def(struct cfg80211_chan_def *def);
++
++static inline struct ieee80211_chanctx_conf *
++iwlmld_kunit_add_chanctx(enum nl80211_band band)
++{
++	struct cfg80211_chan_def *chandef;
++
++	switch (band) {
++	case NL80211_BAND_2GHZ:
++		chandef = &chandef_2ghz;
++		break;
++	case NL80211_BAND_5GHZ:
++		chandef = &chandef_5ghz;
++		break;
++	default:
++	case NL80211_BAND_6GHZ:
++		chandef = &chandef_6ghz;
++		break;
++	}
++
++	return iwlmld_kunit_add_chanctx_from_def(chandef);
++}
++
++void iwlmld_kunit_assign_chanctx_to_link(struct ieee80211_vif *vif,
++					 struct ieee80211_bss_conf *link,
++					 struct ieee80211_chanctx_conf *ctx);
++
++/* Allocate a sta, initialize it and move it to the wanted state */
++struct ieee80211_sta *iwlmld_kunit_setup_sta(struct ieee80211_vif *vif,
++					     enum ieee80211_sta_state state,
++					     int link_id);
++
++struct ieee80211_vif *iwlmld_kunit_setup_mlo_assoc(u16 valid_links,
++						   u8 assoc_link_id,
++						   enum nl80211_band band);
++struct ieee80211_vif *iwlmld_kunit_setup_non_mlo_assoc(enum nl80211_band band);
++
++struct iwl_rx_packet *
++_iwl_mld_kunit_create_pkt(const void *notif, size_t notif_sz);
++
++#define iwl_mld_kunit_create_pkt(_notif)	\
++	_iwl_mld_kunit_create_pkt(&(_notif), sizeof(_notif))
++
++struct ieee80211_vif *iwlmld_kunit_assoc_emlsr(u16 valid_links,
++					       enum nl80211_band band1,
++					       enum nl80211_band band2);
++
++struct element *iwlmld_kunit_gen_element(u8 id, const void *data, size_t len);
++
++/**
++ * iwlmld_kunit_get_phy_of_link - Get the phy of a link
++ *
++ * @vif: The vif to get the phy from.
++ * @link_id: The id of the link to get the phy for.
++ *
++ * given a vif and link id, return the phy pointer of that link.
++ * This assumes that the link exists, and that it had a chanctx
++ * assigned.
++ * If this is not the case, the test will fail.
++ *
++ * Return: phy pointer.
++ */
++struct iwl_mld_phy *iwlmld_kunit_get_phy_of_link(struct ieee80211_vif *vif,
++						 u8 link_id);
++
++#endif /* __iwl_mld_kunit_utils_h__ */

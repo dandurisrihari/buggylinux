@@ -1,0 +1,88 @@
+diff --git a/include/linux/memcontrol.h b/include/linux/memcontrol.h
+index d4575a1d6e99..de018766be45 100644
+--- a/include/linux/memcontrol.h
++++ b/include/linux/memcontrol.h
+@@ -141,8 +141,8 @@ static inline bool mem_cgroup_disabled(void)
+ 
+ struct mem_cgroup *mem_cgroup_begin_page_stat(struct page *page, bool *locked,
+ 					      unsigned long *flags);
+-void mem_cgroup_end_page_stat(struct mem_cgroup *memcg, bool locked,
+-			      unsigned long flags);
++void mem_cgroup_end_page_stat(struct mem_cgroup *memcg, bool *locked,
++			      unsigned long *flags);
+ void mem_cgroup_update_page_stat(struct mem_cgroup *memcg,
+ 				 enum mem_cgroup_stat_index idx, int val);
+ 
+@@ -297,7 +297,7 @@ static inline struct mem_cgroup *mem_cgroup_begin_page_stat(struct page *page,
+ }
+ 
+ static inline void mem_cgroup_end_page_stat(struct mem_cgroup *memcg,
+-					bool locked, unsigned long flags)
++					bool *locked, unsigned long *flags)
+ {
+ }
+ 
+diff --git a/mm/memcontrol.c b/mm/memcontrol.c
+index b841bf430179..031ca345677b 100644
+--- a/mm/memcontrol.c
++++ b/mm/memcontrol.c
+@@ -2053,11 +2053,11 @@ struct mem_cgroup *mem_cgroup_begin_page_stat(struct page *page,
+  * @locked: value received from mem_cgroup_begin_page_stat()
+  * @flags: value received from mem_cgroup_begin_page_stat()
+  */
+-void mem_cgroup_end_page_stat(struct mem_cgroup *memcg, bool locked,
+-			      unsigned long flags)
++void mem_cgroup_end_page_stat(struct mem_cgroup *memcg, bool *locked,
++			      unsigned long *flags)
+ {
+-	if (memcg && locked)
+-		spin_unlock_irqrestore(&memcg->move_lock, flags);
++	if (memcg && *locked)
++		spin_unlock_irqrestore(&memcg->move_lock, *flags);
+ 
+ 	rcu_read_unlock();
+ }
+diff --git a/mm/page-writeback.c b/mm/page-writeback.c
+index 19ceae87522d..d5d81f5384d1 100644
+--- a/mm/page-writeback.c
++++ b/mm/page-writeback.c
+@@ -2357,7 +2357,7 @@ int test_clear_page_writeback(struct page *page)
+ 		dec_zone_page_state(page, NR_WRITEBACK);
+ 		inc_zone_page_state(page, NR_WRITTEN);
+ 	}
+-	mem_cgroup_end_page_stat(memcg, locked, memcg_flags);
++	mem_cgroup_end_page_stat(memcg, &locked, &memcg_flags);
+ 	return ret;
+ }
+ 
+@@ -2399,7 +2399,7 @@ int __test_set_page_writeback(struct page *page, bool keep_write)
+ 		mem_cgroup_inc_page_stat(memcg, MEM_CGROUP_STAT_WRITEBACK);
+ 		inc_zone_page_state(page, NR_WRITEBACK);
+ 	}
+-	mem_cgroup_end_page_stat(memcg, locked, memcg_flags);
++	mem_cgroup_end_page_stat(memcg, &locked, &memcg_flags);
+ 	return ret;
+ 
+ }
+diff --git a/mm/rmap.c b/mm/rmap.c
+index 3e4c7213210c..45eba36fd673 100644
+--- a/mm/rmap.c
++++ b/mm/rmap.c
+@@ -1053,7 +1053,7 @@ void page_add_file_rmap(struct page *page)
+ 		__inc_zone_page_state(page, NR_FILE_MAPPED);
+ 		mem_cgroup_inc_page_stat(memcg, MEM_CGROUP_STAT_FILE_MAPPED);
+ 	}
+-	mem_cgroup_end_page_stat(memcg, locked, flags);
++	mem_cgroup_end_page_stat(memcg, &locked, &flags);
+ }
+ 
+ static void page_remove_file_rmap(struct page *page)
+@@ -1083,7 +1083,7 @@ static void page_remove_file_rmap(struct page *page)
+ 	if (unlikely(PageMlocked(page)))
+ 		clear_page_mlock(page);
+ out:
+-	mem_cgroup_end_page_stat(memcg, locked, flags);
++	mem_cgroup_end_page_stat(memcg, &locked, &flags);
+ }
+ 
+ /**

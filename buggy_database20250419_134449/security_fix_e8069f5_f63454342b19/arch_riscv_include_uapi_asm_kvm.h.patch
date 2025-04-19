@@ -1,0 +1,224 @@
+commit e8069f5a8e3bdb5fdeeff895780529388592ee7a
+Merge: eded37770c9f 255006adb3da
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Mon Jul 3 15:32:22 2023 -0700
+
+    Merge tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm
+    
+    Pull kvm updates from Paolo Bonzini:
+     "ARM64:
+    
+       - Eager page splitting optimization for dirty logging, optionally
+         allowing for a VM to avoid the cost of hugepage splitting in the
+         stage-2 fault path.
+    
+       - Arm FF-A proxy for pKVM, allowing a pKVM host to safely interact
+         with services that live in the Secure world. pKVM intervenes on
+         FF-A calls to guarantee the host doesn't misuse memory donated to
+         the hyp or a pKVM guest.
+    
+       - Support for running the split hypervisor with VHE enabled, known as
+         'hVHE' mode. This is extremely useful for testing the split
+         hypervisor on VHE-only systems, and paves the way for new use cases
+         that depend on having two TTBRs available at EL2.
+    
+       - Generalized framework for configurable ID registers from userspace.
+         KVM/arm64 currently prevents arbitrary CPU feature set
+         configuration from userspace, but the intent is to relax this
+         limitation and allow userspace to select a feature set consistent
+         with the CPU.
+    
+       - Enable the use of Branch Target Identification (FEAT_BTI) in the
+         hypervisor.
+    
+       - Use a separate set of pointer authentication keys for the
+         hypervisor when running in protected mode, as the host is untrusted
+         at runtime.
+    
+       - Ensure timer IRQs are consistently released in the init failure
+         paths.
+    
+       - Avoid trapping CTR_EL0 on systems with Enhanced Virtualization
+         Traps (FEAT_EVT), as it is a register commonly read from userspace.
+    
+       - Erratum workaround for the upcoming AmpereOne part, which has
+         broken hardware A/D state management.
+    
+      RISC-V:
+    
+       - Redirect AMO load/store misaligned traps to KVM guest
+    
+       - Trap-n-emulate AIA in-kernel irqchip for KVM guest
+    
+       - Svnapot support for KVM Guest
+    
+      s390:
+    
+       - New uvdevice secret API
+    
+       - CMM selftest and fixes
+    
+       - fix racy access to target CPU for diag 9c
+    
+      x86:
+    
+       - Fix missing/incorrect #GP checks on ENCLS
+    
+       - Use standard mmu_notifier hooks for handling APIC access page
+    
+       - Drop now unnecessary TR/TSS load after VM-Exit on AMD
+    
+       - Print more descriptive information about the status of SEV and
+         SEV-ES during module load
+    
+       - Add a test for splitting and reconstituting hugepages during and
+         after dirty logging
+    
+       - Add support for CPU pinning in demand paging test
+    
+       - Add support for AMD PerfMonV2, with a variety of cleanups and minor
+         fixes included along the way
+    
+       - Add a "nx_huge_pages=never" option to effectively avoid creating NX
+         hugepage recovery threads (because nx_huge_pages=off can be toggled
+         at runtime)
+    
+       - Move handling of PAT out of MTRR code and dedup SVM+VMX code
+    
+       - Fix output of PIC poll command emulation when there's an interrupt
+    
+       - Add a maintainer's handbook to document KVM x86 processes,
+         preferred coding style, testing expectations, etc.
+    
+       - Misc cleanups, fixes and comments
+    
+      Generic:
+    
+       - Miscellaneous bugfixes and cleanups
+    
+      Selftests:
+    
+       - Generate dependency files so that partial rebuilds work as
+         expected"
+    
+    * tag 'for-linus' of git://git.kernel.org/pub/scm/virt/kvm/kvm: (153 commits)
+      Documentation/process: Add a maintainer handbook for KVM x86
+      Documentation/process: Add a label for the tip tree handbook's coding style
+      KVM: arm64: Fix misuse of KVM_ARM_VCPU_POWER_OFF bit index
+      RISC-V: KVM: Remove unneeded semicolon
+      RISC-V: KVM: Allow Svnapot extension for Guest/VM
+      riscv: kvm: define vcpu_sbi_ext_pmu in header
+      RISC-V: KVM: Expose IMSIC registers as attributes of AIA irqchip
+      RISC-V: KVM: Add in-kernel virtualization of AIA IMSIC
+      RISC-V: KVM: Expose APLIC registers as attributes of AIA irqchip
+      RISC-V: KVM: Add in-kernel emulation of AIA APLIC
+      RISC-V: KVM: Implement device interface for AIA irqchip
+      RISC-V: KVM: Skeletal in-kernel AIA irqchip support
+      RISC-V: KVM: Set kvm_riscv_aia_nr_hgei to zero
+      RISC-V: KVM: Add APLIC related defines
+      RISC-V: KVM: Add IMSIC related defines
+      RISC-V: KVM: Implement guest external interrupt line management
+      KVM: x86: Remove PRIx* definitions as they are solely for user space
+      s390/uv: Update query for secret-UVCs
+      s390/uv: replace scnprintf with sysfs_emit
+      s390/uvdevice: Add 'Lock Secret Store' UVC
+      ...
+
+diff --cc arch/riscv/include/uapi/asm/kvm.h
+index 855c047e86d4,a1ca18408bbd..930fdc4101cd
+--- a/arch/riscv/include/uapi/asm/kvm.h
++++ b/arch/riscv/include/uapi/asm/kvm.h
+@@@ -121,7 -122,7 +122,8 @@@ enum KVM_RISCV_ISA_EXT_ID 
+  	KVM_RISCV_ISA_EXT_ZICBOZ,
+  	KVM_RISCV_ISA_EXT_ZBB,
+  	KVM_RISCV_ISA_EXT_SSAIA,
+ +	KVM_RISCV_ISA_EXT_V,
++ 	KVM_RISCV_ISA_EXT_SVNAPOT,
+  	KVM_RISCV_ISA_EXT_MAX,
+  };
+  
+@@@ -204,13 -205,77 +206,84 @@@ enum KVM_RISCV_SBI_EXT_ID 
+  #define KVM_REG_RISCV_SBI_MULTI_REG_LAST	\
+  		KVM_REG_RISCV_SBI_MULTI_REG(KVM_RISCV_SBI_EXT_MAX - 1)
+  
+ +/* V extension registers are mapped as type 9 */
+ +#define KVM_REG_RISCV_VECTOR		(0x09 << KVM_REG_RISCV_TYPE_SHIFT)
+ +#define KVM_REG_RISCV_VECTOR_CSR_REG(name)	\
+ +		(offsetof(struct __riscv_v_ext_state, name) / sizeof(unsigned long))
+ +#define KVM_REG_RISCV_VECTOR_REG(n)	\
+ +		((n) + sizeof(struct __riscv_v_ext_state) / sizeof(unsigned long))
+ +
++ /* Device Control API: RISC-V AIA */
++ #define KVM_DEV_RISCV_APLIC_ALIGN		0x1000
++ #define KVM_DEV_RISCV_APLIC_SIZE		0x4000
++ #define KVM_DEV_RISCV_APLIC_MAX_HARTS		0x4000
++ #define KVM_DEV_RISCV_IMSIC_ALIGN		0x1000
++ #define KVM_DEV_RISCV_IMSIC_SIZE		0x1000
++ 
++ #define KVM_DEV_RISCV_AIA_GRP_CONFIG		0
++ #define KVM_DEV_RISCV_AIA_CONFIG_MODE		0
++ #define KVM_DEV_RISCV_AIA_CONFIG_IDS		1
++ #define KVM_DEV_RISCV_AIA_CONFIG_SRCS		2
++ #define KVM_DEV_RISCV_AIA_CONFIG_GROUP_BITS	3
++ #define KVM_DEV_RISCV_AIA_CONFIG_GROUP_SHIFT	4
++ #define KVM_DEV_RISCV_AIA_CONFIG_HART_BITS	5
++ #define KVM_DEV_RISCV_AIA_CONFIG_GUEST_BITS	6
++ 
++ /*
++  * Modes of RISC-V AIA device:
++  * 1) EMUL (aka Emulation): Trap-n-emulate IMSIC
++  * 2) HWACCEL (aka HW Acceleration): Virtualize IMSIC using IMSIC guest files
++  * 3) AUTO (aka Automatic): Virtualize IMSIC using IMSIC guest files whenever
++  *    available otherwise fallback to trap-n-emulation
++  */
++ #define KVM_DEV_RISCV_AIA_MODE_EMUL		0
++ #define KVM_DEV_RISCV_AIA_MODE_HWACCEL		1
++ #define KVM_DEV_RISCV_AIA_MODE_AUTO		2
++ 
++ #define KVM_DEV_RISCV_AIA_IDS_MIN		63
++ #define KVM_DEV_RISCV_AIA_IDS_MAX		2048
++ #define KVM_DEV_RISCV_AIA_SRCS_MAX		1024
++ #define KVM_DEV_RISCV_AIA_GROUP_BITS_MAX	8
++ #define KVM_DEV_RISCV_AIA_GROUP_SHIFT_MIN	24
++ #define KVM_DEV_RISCV_AIA_GROUP_SHIFT_MAX	56
++ #define KVM_DEV_RISCV_AIA_HART_BITS_MAX		16
++ #define KVM_DEV_RISCV_AIA_GUEST_BITS_MAX	8
++ 
++ #define KVM_DEV_RISCV_AIA_GRP_ADDR		1
++ #define KVM_DEV_RISCV_AIA_ADDR_APLIC		0
++ #define KVM_DEV_RISCV_AIA_ADDR_IMSIC(__vcpu)	(1 + (__vcpu))
++ #define KVM_DEV_RISCV_AIA_ADDR_MAX		\
++ 		(1 + KVM_DEV_RISCV_APLIC_MAX_HARTS)
++ 
++ #define KVM_DEV_RISCV_AIA_GRP_CTRL		2
++ #define KVM_DEV_RISCV_AIA_CTRL_INIT		0
++ 
++ /*
++  * The device attribute type contains the memory mapped offset of the
++  * APLIC register (range 0x0000-0x3FFF) and it must be 4-byte aligned.
++  */
++ #define KVM_DEV_RISCV_AIA_GRP_APLIC		3
++ 
++ /*
++  * The lower 12-bits of the device attribute type contains the iselect
++  * value of the IMSIC register (range 0x70-0xFF) whereas the higher order
++  * bits contains the VCPU id.
++  */
++ #define KVM_DEV_RISCV_AIA_GRP_IMSIC		4
++ #define KVM_DEV_RISCV_AIA_IMSIC_ISEL_BITS	12
++ #define KVM_DEV_RISCV_AIA_IMSIC_ISEL_MASK	\
++ 		((1U << KVM_DEV_RISCV_AIA_IMSIC_ISEL_BITS) - 1)
++ #define KVM_DEV_RISCV_AIA_IMSIC_MKATTR(__vcpu, __isel)	\
++ 		(((__vcpu) << KVM_DEV_RISCV_AIA_IMSIC_ISEL_BITS) | \
++ 		 ((__isel) & KVM_DEV_RISCV_AIA_IMSIC_ISEL_MASK))
++ #define KVM_DEV_RISCV_AIA_IMSIC_GET_ISEL(__attr)	\
++ 		((__attr) & KVM_DEV_RISCV_AIA_IMSIC_ISEL_MASK)
++ #define KVM_DEV_RISCV_AIA_IMSIC_GET_VCPU(__attr)	\
++ 		((__attr) >> KVM_DEV_RISCV_AIA_IMSIC_ISEL_BITS)
++ 
++ /* One single KVM irqchip, ie. the AIA */
++ #define KVM_NR_IRQCHIPS			1
++ 
+  #endif
+  
+  #endif /* __LINUX_KVM_RISCV_H */

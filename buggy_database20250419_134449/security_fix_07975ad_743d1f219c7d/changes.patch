@@ -1,0 +1,161 @@
+diff --git a/Documentation/virtual/kvm/api.txt b/Documentation/virtual/kvm/api.txt
+index 81ff39f6248d..a1552210b16d 100644
+--- a/Documentation/virtual/kvm/api.txt
++++ b/Documentation/virtual/kvm/api.txt
+@@ -1689,6 +1689,27 @@ where the guest will clear the flag: when the soft lockup watchdog timer resets
+ itself or when a soft lockup is detected.  This ioctl can be called any time
+ after pausing the vcpu, but before it is resumed.
+ 
++4.71 KVM_SIGNAL_MSI
++
++Capability: KVM_CAP_SIGNAL_MSI
++Architectures: x86
++Type: vm ioctl
++Parameters: struct kvm_msi (in)
++Returns: >0 on delivery, 0 if guest blocked the MSI, and -1 on error
++
++Directly inject a MSI message. Only valid with in-kernel irqchip that handles
++MSI messages.
++
++struct kvm_msi {
++	__u32 address_lo;
++	__u32 address_hi;
++	__u32 data;
++	__u32 flags;
++	__u8  pad[16];
++};
++
++No flags are defined so far. The corresponding field must be 0.
++
+ 5. The kvm_run structure
+ 
+ Application code obtains a pointer to the kvm_run structure by
+diff --git a/arch/x86/kvm/Kconfig b/arch/x86/kvm/Kconfig
+index 1a7fe868f375..a28f338843ea 100644
+--- a/arch/x86/kvm/Kconfig
++++ b/arch/x86/kvm/Kconfig
+@@ -36,6 +36,7 @@ config KVM
+ 	select TASKSTATS
+ 	select TASK_DELAY_ACCT
+ 	select PERF_EVENTS
++	select HAVE_KVM_MSI
+ 	---help---
+ 	  Support hosting fully virtualized guest machines using hardware
+ 	  virtualization extensions.  You will need a fairly recent
+diff --git a/include/linux/kvm.h b/include/linux/kvm.h
+index 7a9dd4b3dede..225b452e1d1d 100644
+--- a/include/linux/kvm.h
++++ b/include/linux/kvm.h
+@@ -590,6 +590,7 @@ struct kvm_ppc_pvinfo {
+ #define KVM_CAP_SYNC_REGS 74
+ #define KVM_CAP_PCI_2_3 75
+ #define KVM_CAP_KVMCLOCK_CTRL 76
++#define KVM_CAP_SIGNAL_MSI 77
+ 
+ #ifdef KVM_CAP_IRQ_ROUTING
+ 
+@@ -715,6 +716,14 @@ struct kvm_one_reg {
+ 	__u64 addr;
+ };
+ 
++struct kvm_msi {
++	__u32 address_lo;
++	__u32 address_hi;
++	__u32 data;
++	__u32 flags;
++	__u8  pad[16];
++};
++
+ /*
+  * ioctls for VM fds
+  */
+@@ -789,6 +798,8 @@ struct kvm_s390_ucas_mapping {
+ /* Available with KVM_CAP_PCI_2_3 */
+ #define KVM_ASSIGN_SET_INTX_MASK  _IOW(KVMIO,  0xa4, \
+ 				       struct kvm_assigned_pci_dev)
++/* Available with KVM_CAP_SIGNAL_MSI */
++#define KVM_SIGNAL_MSI            _IOW(KVMIO,  0xa5, struct kvm_msi)
+ 
+ /*
+  * ioctls for vcpu fds
+diff --git a/include/linux/kvm_host.h b/include/linux/kvm_host.h
+index 186ffab0b9f0..6f343307d72b 100644
+--- a/include/linux/kvm_host.h
++++ b/include/linux/kvm_host.h
+@@ -802,6 +802,8 @@ int kvm_set_irq_routing(struct kvm *kvm,
+ 			unsigned flags);
+ void kvm_free_irq_routing(struct kvm *kvm);
+ 
++int kvm_send_userspace_msi(struct kvm *kvm, struct kvm_msi *msi);
++
+ #else
+ 
+ static inline void kvm_free_irq_routing(struct kvm *kvm) {}
+diff --git a/virt/kvm/Kconfig b/virt/kvm/Kconfig
+index f63ccb0a5982..28694f4a9139 100644
+--- a/virt/kvm/Kconfig
++++ b/virt/kvm/Kconfig
+@@ -18,3 +18,6 @@ config KVM_MMIO
+ 
+ config KVM_ASYNC_PF
+        bool
++
++config HAVE_KVM_MSI
++       bool
+diff --git a/virt/kvm/irq_comm.c b/virt/kvm/irq_comm.c
+index 9f614b4e365f..a6a0365475ed 100644
+--- a/virt/kvm/irq_comm.c
++++ b/virt/kvm/irq_comm.c
+@@ -138,6 +138,20 @@ int kvm_set_msi(struct kvm_kernel_irq_routing_entry *e,
+ 	return kvm_irq_delivery_to_apic(kvm, NULL, &irq);
+ }
+ 
++int kvm_send_userspace_msi(struct kvm *kvm, struct kvm_msi *msi)
++{
++	struct kvm_kernel_irq_routing_entry route;
++
++	if (!irqchip_in_kernel(kvm) || msi->flags != 0)
++		return -EINVAL;
++
++	route.msi.address_lo = msi->address_lo;
++	route.msi.address_hi = msi->address_hi;
++	route.msi.data = msi->data;
++
++	return kvm_set_msi(&route, kvm, KVM_USERSPACE_IRQ_SOURCE_ID, 1);
++}
++
+ /*
+  * Return value:
+  *  < 0   Interrupt was ignored (masked or not delivered for other reasons)
+diff --git a/virt/kvm/kvm_main.c b/virt/kvm/kvm_main.c
+index 9eb7936e491d..1847c762d8d9 100644
+--- a/virt/kvm/kvm_main.c
++++ b/virt/kvm/kvm_main.c
+@@ -2059,6 +2059,17 @@ static long kvm_vm_ioctl(struct file *filp,
+ 			kvm->bsp_vcpu_id = arg;
+ 		mutex_unlock(&kvm->lock);
+ 		break;
++#endif
++#ifdef CONFIG_HAVE_KVM_MSI
++	case KVM_SIGNAL_MSI: {
++		struct kvm_msi msi;
++
++		r = -EFAULT;
++		if (copy_from_user(&msi, argp, sizeof msi))
++			goto out;
++		r = kvm_send_userspace_msi(kvm, &msi);
++		break;
++	}
+ #endif
+ 	default:
+ 		r = kvm_arch_vm_ioctl(filp, ioctl, arg);
+@@ -2188,6 +2199,9 @@ static long kvm_dev_ioctl_check_extension_generic(long arg)
+ 	case KVM_CAP_SET_BOOT_CPU_ID:
+ #endif
+ 	case KVM_CAP_INTERNAL_ERROR_DATA:
++#ifdef CONFIG_HAVE_KVM_MSI
++	case KVM_CAP_SIGNAL_MSI:
++#endif
+ 		return 1;
+ #ifdef CONFIG_HAVE_KVM_IRQCHIP
+ 	case KVM_CAP_IRQ_ROUTING:

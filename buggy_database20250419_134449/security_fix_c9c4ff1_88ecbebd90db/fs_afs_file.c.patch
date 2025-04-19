@@ -1,0 +1,51 @@
+commit c9c4ff12df110feb1b91951010f673f4b16e49e8
+Author: David Howells <dhowells@redhat.com>
+Date:   Mon Nov 27 13:58:07 2023 +0000
+
+    netfs: Move pinning-for-writeback from fscache to netfs
+    
+    Move the resource pinning-for-writeback from fscache code to netfslib code.
+    This is used to keep a cache backing object pinned whilst we have dirty
+    pages on the netfs inode in the pagecache such that VM writeback will be
+    able to reach it.
+    
+    Whilst we're at it, switch the parameters of netfs_unpin_writeback() to
+    match ->write_inode() so that it can be used for that directly.
+    
+    Note that this mechanism could be more generically useful than that for
+    network filesystems.  Quite often they have to keep around other resources
+    (e.g. authentication tokens or network connections) until the writeback is
+    complete.
+    
+    Signed-off-by: David Howells <dhowells@redhat.com>
+    Reviewed-by: Jeff Layton <jlayton@kernel.org>
+    cc: linux-cachefs@redhat.com
+    cc: linux-fsdevel@vger.kernel.org
+    cc: linux-mm@kvack.org
+
+diff --git a/fs/afs/file.c b/fs/afs/file.c
+index 8c17e37c2e59..9142fda7dbd6 100644
+--- a/fs/afs/file.c
++++ b/fs/afs/file.c
+@@ -55,7 +55,7 @@ const struct inode_operations afs_file_inode_operations = {
+ const struct address_space_operations afs_file_aops = {
+ 	.read_folio	= netfs_read_folio,
+ 	.readahead	= netfs_readahead,
+-	.dirty_folio	= afs_dirty_folio,
++	.dirty_folio	= netfs_dirty_folio,
+ 	.launder_folio	= afs_launder_folio,
+ 	.release_folio	= afs_release_folio,
+ 	.invalidate_folio = afs_invalidate_folio,
+@@ -386,12 +386,6 @@ const struct netfs_request_ops afs_req_ops = {
+ 	.issue_read		= afs_issue_read,
+ };
+ 
+-int afs_write_inode(struct inode *inode, struct writeback_control *wbc)
+-{
+-	fscache_unpin_writeback(wbc, afs_vnode_cache(AFS_FS_I(inode)));
+-	return 0;
+-}
+-
+ /*
+  * Adjust the dirty region of the page on truncation or full invalidation,
+  * getting rid of the markers altogether if the region is entirely invalidated.

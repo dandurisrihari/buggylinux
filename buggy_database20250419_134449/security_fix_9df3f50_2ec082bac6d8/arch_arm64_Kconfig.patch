@@ -1,0 +1,74 @@
+commit 9df3f5082ff94c55e84523a28c040445220b2f64
+Author: Mark Rutland <mark.rutland@arm.com>
+Date:   Wed Apr 12 17:01:32 2023 +0100
+
+    arm64: avoid redundant PAC stripping in __builtin_return_address()
+    
+    In old versions of GCC and Clang, __builtin_return_address() did not
+    strip the PAC. This was not the behaviour we desired, and so we wrapped
+    this with code to strip the PAC in commit:
+    
+      689eae42afd7a916 ("arm64: mask PAC bits of __builtin_return_address")
+    
+    Since then, both GCC and Clang decided that __builtin_return_address()
+    *should* strip the PAC, and the existing behaviour was a bug.
+    
+    GCC was fixed in 11.1.0, with those fixes backported to 10.2.0, 9.4.0,
+    8.5.0, but not earlier:
+    
+      https://gcc.gnu.org/bugzilla/show_bug.cgi?id=94891
+    
+    Clang was fixed in 12.0.0, though this was not backported:
+    
+      https://reviews.llvm.org/D75044
+    
+    When using a compiler whose __builtin_return_address() strips the PAC,
+    our wrapper to strip the PAC is redundant. Similarly, when pointer
+    authentication is not in use within the kernel pointers will not have a
+    PAC, and so there's no point stripping those pointers.
+    
+    To avoid this redundant work, this patch updates the
+    __builtin_return_address() wrapper to only be used when in-kernel
+    pointer authentication is configured and the compiler's
+    __builtin_return_address() does not strip the PAC.
+    
+    This is a cleanup/optimization, and not a fix that requires backporting.
+    Stripping a PAC should be an idempotent operation, and so redundantly
+    stripping the PAC is not harmful.
+    
+    There should be no functional change as a result of this patch.
+    
+    Signed-off-by: Mark Rutland <mark.rutland@arm.com>
+    Cc: Amit Daniel Kachhap <amit.kachhap@arm.com>
+    Cc: Catalin Marinas <catalin.marinas@arm.com>
+    Cc: James Morse <james.morse@arm.com>
+    Cc: Kristina Martsenko <kristina.martsenko@arm.com>
+    Cc: Will Deacon <will@kernel.org>
+    Link: https://lore.kernel.org/r/20230412160134.306148-2-mark.rutland@arm.com
+    Signed-off-by: Will Deacon <will@kernel.org>
+
+diff --git a/arch/arm64/Kconfig b/arch/arm64/Kconfig
+index 1023e896d46b..d69b624b3083 100644
+--- a/arch/arm64/Kconfig
++++ b/arch/arm64/Kconfig
+@@ -362,6 +362,20 @@ config ARCH_PROC_KCORE_TEXT
+ config BROKEN_GAS_INST
+ 	def_bool !$(as-instr,1:\n.inst 0\n.rept . - 1b\n\nnop\n.endr\n)
+ 
++config BUILTIN_RETURN_ADDRESS_STRIPS_PAC
++	bool
++	# Clang's __builtin_return_adddress() strips the PAC since 12.0.0
++	# https://reviews.llvm.org/D75044
++	default y if CC_IS_CLANG && (CLANG_VERSION >= 120000)
++	# GCC's __builtin_return_address() strips the PAC since 11.1.0,
++	# and this was backported to 10.2.0, 9.4.0, 8.5.0, but not earlier
++	# https://gcc.gnu.org/bugzilla/show_bug.cgi?id=94891
++	default y if CC_IS_GCC && (GCC_VERSION >= 110100)
++	default y if CC_IS_GCC && (GCC_VERSION >= 100200) && (GCC_VERSION < 110000)
++	default y if CC_IS_GCC && (GCC_VERSION >=  90400) && (GCC_VERSION < 100000)
++	default y if CC_IS_GCC && (GCC_VERSION >=  80500) && (GCC_VERSION <  90000)
++	default n
++
+ config KASAN_SHADOW_OFFSET
+ 	hex
+ 	depends on KASAN_GENERIC || KASAN_SW_TAGS

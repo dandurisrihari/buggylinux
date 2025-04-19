@@ -1,0 +1,49 @@
+commit 5f2da19714465739da2449253b13ac06cb353a26
+Author: Dan Williams <dan.j.williams@intel.com>
+Date:   Wed Oct 4 16:49:36 2023 -0700
+
+    cxl/pci: Fix sanitize notifier setup
+    
+    Fix a race condition between the mailbox-background command interrupt
+    firing and the security-state sysfs attribute being removed.
+    
+    The race is difficult to see due to the awkward placement of the
+    sanitize-notifier setup code and the multiple places the teardown calls
+    are made, cxl_memdev_security_init() and cxl_memdev_security_shutdown().
+    
+    Unify setup in one place, cxl_sanitize_setup_notifier(). Arrange for
+    the paired cxl_sanitize_teardown_notifier() to safely quiet the notifier
+    and let the cxl_memdev + irq be unregistered later in the flow.
+    
+    Note: The special wrinkle of the sanitize notifier is that it interacts
+    with interrupts, which are enabled early in the flow, and it interacts
+    with memdev sysfs which is not initialized until late in the flow. Hence
+    why this setup routine takes an @cxlmd argument, and not just @mds.
+    
+    This fix is also needed as a preparation fix for a memdev unregistration
+    crash.
+    
+    Reported-by: Jonathan Cameron <Jonathan.Cameron@Huawei.com>
+    Closes: http://lore.kernel.org/r/20230929100316.00004546@Huawei.com
+    Cc: Dave Jiang <dave.jiang@intel.com>
+    Cc: Davidlohr Bueso <dave@stgolabs.net>
+    Fixes: 0c36b6ad436a ("cxl/mbox: Add sanitization handling machinery")
+    Reviewed-by: Dave Jiang <dave.jiang@intel.com>
+    Reviewed-by: Ira Weiny <ira.weiny@intel.com>
+    Reviewed-by: Davidlohr Bueso <dave@stgolabs.net>
+    Reviewed-by: Jonathan Cameron <Jonathan.Cameron@huawei.com>
+    Signed-off-by: Dan Williams <dan.j.williams@intel.com>
+
+diff --git a/drivers/cxl/cxlmem.h b/drivers/cxl/cxlmem.h
+index fdb2c8dd98d0..fbdee1d63717 100644
+--- a/drivers/cxl/cxlmem.h
++++ b/drivers/cxl/cxlmem.h
+@@ -86,6 +86,8 @@ static inline bool is_cxl_endpoint(struct cxl_port *port)
+ 
+ struct cxl_memdev *devm_cxl_add_memdev(struct device *host,
+ 				       struct cxl_dev_state *cxlds);
++int devm_cxl_sanitize_setup_notifier(struct device *host,
++				     struct cxl_memdev *cxlmd);
+ struct cxl_memdev_state;
+ int devm_cxl_setup_fw_upload(struct device *host, struct cxl_memdev_state *mds);
+ int devm_cxl_dpa_reserve(struct cxl_endpoint_decoder *cxled,

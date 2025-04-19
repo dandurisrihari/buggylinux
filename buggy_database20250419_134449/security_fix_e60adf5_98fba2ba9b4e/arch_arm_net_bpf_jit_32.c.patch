@@ -1,0 +1,72 @@
+commit e60adf513275c3a38e5cb67f7fd12387e43a3ff5
+Author: Christophe Leroy <christophe.leroy@csgroup.eu>
+Date:   Fri Mar 8 06:38:08 2024 +0100
+
+    bpf: Take return from set_memory_rox() into account with bpf_jit_binary_lock_ro()
+    
+    set_memory_rox() can fail, leaving memory unprotected.
+    
+    Check return and bail out when bpf_jit_binary_lock_ro() returns
+    an error.
+    
+    Link: https://github.com/KSPP/linux/issues/7
+    Signed-off-by: Christophe Leroy <christophe.leroy@csgroup.eu>
+    Cc: linux-hardening@vger.kernel.org <linux-hardening@vger.kernel.org>
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Reviewed-by: Puranjay Mohan <puranjay12@gmail.com>
+    Reviewed-by: Ilya Leoshkevich <iii@linux.ibm.com>  # s390x
+    Acked-by: Tiezhu Yang <yangtiezhu@loongson.cn>  # LoongArch
+    Reviewed-by: Johan Almbladh <johan.almbladh@anyfinetworks.com> # MIPS Part
+    Message-ID: <036b6393f23a2032ce75a1c92220b2afcb798d5d.1709850515.git.christophe.leroy@csgroup.eu>
+    Signed-off-by: Alexei Starovoitov <ast@kernel.org>
+
+diff --git a/arch/arm/net/bpf_jit_32.c b/arch/arm/net/bpf_jit_32.c
+index 1d672457d02f..01516f83a95a 100644
+--- a/arch/arm/net/bpf_jit_32.c
++++ b/arch/arm/net/bpf_jit_32.c
+@@ -2222,28 +2222,21 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *prog)
+ 	/* If building the body of the JITed code fails somehow,
+ 	 * we fall back to the interpretation.
+ 	 */
+-	if (build_body(&ctx) < 0) {
+-		image_ptr = NULL;
+-		bpf_jit_binary_free(header);
+-		prog = orig_prog;
+-		goto out_imms;
+-	}
++	if (build_body(&ctx) < 0)
++		goto out_free;
+ 	build_epilogue(&ctx);
+ 
+ 	/* 3.) Extra pass to validate JITed Code */
+-	if (validate_code(&ctx)) {
+-		image_ptr = NULL;
+-		bpf_jit_binary_free(header);
+-		prog = orig_prog;
+-		goto out_imms;
+-	}
++	if (validate_code(&ctx))
++		goto out_free;
+ 	flush_icache_range((u32)header, (u32)(ctx.target + ctx.idx));
+ 
+ 	if (bpf_jit_enable > 1)
+ 		/* there are 2 passes here */
+ 		bpf_jit_dump(prog->len, image_size, 2, ctx.target);
+ 
+-	bpf_jit_binary_lock_ro(header);
++	if (bpf_jit_binary_lock_ro(header))
++		goto out_free;
+ 	prog->bpf_func = (void *)ctx.target;
+ 	prog->jited = 1;
+ 	prog->jited_len = image_size;
+@@ -2260,5 +2253,11 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *prog)
+ 		bpf_jit_prog_release_other(prog, prog == orig_prog ?
+ 					   tmp : orig_prog);
+ 	return prog;
++
++out_free:
++	image_ptr = NULL;
++	bpf_jit_binary_free(header);
++	prog = orig_prog;
++	goto out_imms;
+ }

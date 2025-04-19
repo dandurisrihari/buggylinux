@@ -1,0 +1,53 @@
+commit aa44b2f3ecd41f90b7e477158036648a49d21a32
+Author: Carl Huang <quic_cjhuang@quicinc.com>
+Date:   Fri Dec 11 00:13:58 2020 -0500
+
+    ath11k: start vdev if a bss peer is already created
+    
+    For QCA6390, bss peer must be created before vdev is to start. This
+    change is to start vdev if a bss peer is created. Otherwise, ath11k
+    delays to start vdev.
+    
+    This fixes an issue in a case where HT/VHT/HE settings change between
+    authentication and association, e.g., due to the user space request
+    to disable HT.
+    
+    Tested-on: QCA6390 hw2.0 PCI WLAN.HST.1.0.1-01740-QCAHSTSWPLZ_V2_TO_X86-1
+    
+    Signed-off-by: Carl Huang <cjhuang@codeaurora.org>
+    Signed-off-by: Kalle Valo <kvalo@codeaurora.org>
+    Link: https://lore.kernel.org/r/20201211051358.9191-1-cjhuang@codeaurora.org
+
+diff --git a/drivers/net/wireless/ath/ath11k/mac.c b/drivers/net/wireless/ath/ath11k/mac.c
+index 5c175e3e09b2..c1608f64ea95 100644
+--- a/drivers/net/wireless/ath/ath11k/mac.c
++++ b/drivers/net/wireless/ath/ath11k/mac.c
+@@ -3021,6 +3021,7 @@ static int ath11k_mac_station_add(struct ath11k *ar,
+ 	}
+ 
+ 	if (ab->hw_params.vdev_start_delay &&
++	    !arvif->is_started &&
+ 	    arvif->vdev_type != WMI_VDEV_TYPE_AP) {
+ 		ret = ath11k_start_vdev_delay(ar->hw, vif);
+ 		if (ret) {
+@@ -5284,7 +5285,8 @@ ath11k_mac_op_assign_vif_chanctx(struct ieee80211_hw *hw,
+ 	/* for QCA6390 bss peer must be created before vdev_start */
+ 	if (ab->hw_params.vdev_start_delay &&
+ 	    arvif->vdev_type != WMI_VDEV_TYPE_AP &&
+-	    arvif->vdev_type != WMI_VDEV_TYPE_MONITOR) {
++	    arvif->vdev_type != WMI_VDEV_TYPE_MONITOR &&
++	    !ath11k_peer_find_by_vdev_id(ab, arvif->vdev_id)) {
+ 		memcpy(&arvif->chanctx, ctx, sizeof(*ctx));
+ 		ret = 0;
+ 		goto out;
+@@ -5295,7 +5297,9 @@ ath11k_mac_op_assign_vif_chanctx(struct ieee80211_hw *hw,
+ 		goto out;
+ 	}
+ 
+-	if (ab->hw_params.vdev_start_delay) {
++	if (ab->hw_params.vdev_start_delay &&
++	    (arvif->vdev_type == WMI_VDEV_TYPE_AP ||
++	    arvif->vdev_type == WMI_VDEV_TYPE_MONITOR)) {
+ 		param.vdev_id = arvif->vdev_id;
+ 		param.peer_type = WMI_PEER_TYPE_DEFAULT;
+ 		param.peer_addr = ar->mac_addr;

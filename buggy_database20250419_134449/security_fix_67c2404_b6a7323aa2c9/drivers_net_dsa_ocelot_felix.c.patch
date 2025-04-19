@@ -1,0 +1,75 @@
+commit 67c2404922c2c3f9cc0898aafaa4e3bea2bde084
+Author: Vladimir Oltean <vladimir.oltean@nxp.com>
+Date:   Mon Jul 13 19:57:04 2020 +0300
+
+    net: dsa: felix: create a template for the DSA tags on xmit
+    
+    With this patch we try to kill 2 birds with 1 stone.
+    
+    First of all, some switches that use tag_ocelot.c don't have the exact
+    same bitfield layout for the DSA tags. The destination ports field is
+    different for Seville VSC9953 for example. So the choices are to either
+    duplicate tag_ocelot.c into a new tag_seville.c (sub-optimal) or somehow
+    take into account a supposed ocelot->dest_ports_offset when packing this
+    field into the DSA injection header (again not ideal).
+    
+    Secondly, tag_ocelot.c already needs to memset a 128-bit area to zero
+    and call some packing() functions of dubious performance in the
+    fastpath. And most of the values it needs to pack are pretty much
+    constant (BYPASS=1, SRC_PORT=CPU, DEST=port index). So it would be good
+    if we could improve that.
+    
+    The proposed solution is to allocate a memory area per port at probe
+    time, initialize that with the statically defined bits as per chip
+    hardware revision, and just perform a simpler memcpy in the fastpath.
+    
+    Other alternatives have been analyzed, such as:
+    - Create a separate tag_seville.c: too much code duplication for just 1
+      bit field difference.
+    - Create a separate DSA_TAG_PROTO_SEVILLE under tag_ocelot.c, just like
+      tag_brcm.c, which would have a separate .xmit function. Again, too
+      much code duplication for just 1 bit field difference.
+    - Allocate the template from the init function of the tag_ocelot.c
+      module, instead of from the driver: couldn't figure out a method of
+      accessing the correct port template corresponding to the correct
+      tagger in the .xmit function.
+    
+    Signed-off-by: Vladimir Oltean <vladimir.oltean@nxp.com>
+    Reviewed-by: Florian Fainelli <f.fainelli@gmail.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/dsa/ocelot/felix.c b/drivers/net/dsa/ocelot/felix.c
+index 4b255ed614e4..b9981d8c4c98 100644
+--- a/drivers/net/dsa/ocelot/felix.c
++++ b/drivers/net/dsa/ocelot/felix.c
+@@ -522,6 +522,7 @@ static int felix_init_structs(struct felix *felix, int num_phys_ports)
+ 	for (port = 0; port < num_phys_ports; port++) {
+ 		struct ocelot_port *ocelot_port;
+ 		struct regmap *target;
++		u8 *template;
+ 
+ 		ocelot_port = devm_kzalloc(ocelot->dev,
+ 					   sizeof(struct ocelot_port),
+@@ -547,10 +548,22 @@ static int felix_init_structs(struct felix *felix, int num_phys_ports)
+ 			return PTR_ERR(target);
+ 		}
+ 
++		template = devm_kzalloc(ocelot->dev, OCELOT_TAG_LEN,
++					GFP_KERNEL);
++		if (!template) {
++			dev_err(ocelot->dev,
++				"Failed to allocate memory for DSA tag\n");
++			kfree(port_phy_modes);
++			return -ENOMEM;
++		}
++
+ 		ocelot_port->phy_mode = port_phy_modes[port];
+ 		ocelot_port->ocelot = ocelot;
+ 		ocelot_port->target = target;
++		ocelot_port->xmit_template = template;
+ 		ocelot->ports[port] = ocelot_port;
++
++		felix->info->xmit_template_populate(ocelot, port);
+ 	}
+ 
+ 	kfree(port_phy_modes);

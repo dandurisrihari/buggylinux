@@ -1,0 +1,83 @@
+commit 1fc44d9b1afb0afe46acd99bdfdf793805a850e1
+Author: Chris Wilson <chris@chris-wilson.co.uk>
+Date:   Thu May 17 22:26:32 2018 +0100
+
+    drm/i915: Store a pointer to intel_context in i915_request
+    
+    To ease the frequent and ugly pointer dance of
+    &request->gem_context->engine[request->engine->id] during request
+    submission, store that pointer as request->hw_context. One major
+    advantage that we will exploit later is that this decouples the logical
+    context state from the engine itself.
+    
+    v2: Set mock_context->ops so we don't crash and burn in selftests.
+        Cleanups from Tvrtko.
+    
+    Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+    Acked-by: Zhenyu Wang <zhenyuw@linux.intel.com>
+    Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+    Link: https://patchwork.freedesktop.org/patch/msgid/20180517212633.24934-3-chris@chris-wilson.co.uk
+
+diff --git a/drivers/gpu/drm/i915/i915_gem_context.h b/drivers/gpu/drm/i915/i915_gem_context.h
+index ace3b129c189..749a4ff566f5 100644
+--- a/drivers/gpu/drm/i915/i915_gem_context.h
++++ b/drivers/gpu/drm/i915/i915_gem_context.h
+@@ -45,6 +45,11 @@ struct intel_ring;
+ 
+ #define DEFAULT_CONTEXT_HANDLE 0
+ 
++struct intel_context_ops {
++	void (*unpin)(struct intel_context *ce);
++	void (*destroy)(struct intel_context *ce);
++};
++
+ /**
+  * struct i915_gem_context - client state
+  *
+@@ -144,11 +149,14 @@ struct i915_gem_context {
+ 
+ 	/** engine: per-engine logical HW state */
+ 	struct intel_context {
++		struct i915_gem_context *gem_context;
+ 		struct i915_vma *state;
+ 		struct intel_ring *ring;
+ 		u32 *lrc_reg_state;
+ 		u64 lrc_desc;
+ 		int pin_count;
++
++		const struct intel_context_ops *ops;
+ 	} __engine[I915_NUM_ENGINES];
+ 
+ 	/** ring_size: size for allocating the per-engine ring buffer */
+@@ -263,25 +271,22 @@ to_intel_context(struct i915_gem_context *ctx,
+ 	return &ctx->__engine[engine->id];
+ }
+ 
+-static inline struct intel_ring *
++static inline struct intel_context *
+ intel_context_pin(struct i915_gem_context *ctx, struct intel_engine_cs *engine)
+ {
+ 	return engine->context_pin(engine, ctx);
+ }
+ 
+-static inline void __intel_context_pin(struct i915_gem_context *ctx,
+-				       const struct intel_engine_cs *engine)
++static inline void __intel_context_pin(struct intel_context *ce)
+ {
+-	struct intel_context *ce = to_intel_context(ctx, engine);
+-
+ 	GEM_BUG_ON(!ce->pin_count);
+ 	ce->pin_count++;
+ }
+ 
+-static inline void intel_context_unpin(struct i915_gem_context *ctx,
+-				       struct intel_engine_cs *engine)
++static inline void intel_context_unpin(struct intel_context *ce)
+ {
+-	engine->context_unpin(engine, ctx);
++	GEM_BUG_ON(!ce->ops);
++	ce->ops->unpin(ce);
+ }
+ 
+ /* i915_gem_context.c */

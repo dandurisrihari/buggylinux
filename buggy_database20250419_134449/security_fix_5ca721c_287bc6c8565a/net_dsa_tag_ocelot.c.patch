@@ -1,0 +1,118 @@
+commit 5ca721c54d86d52cb5617c5ae5ccf72ad9da2be1
+Author: Vladimir Oltean <vladimir.oltean@nxp.com>
+Date:   Fri Oct 1 18:15:28 2021 +0300
+
+    net: dsa: tag_ocelot: set the classified VLAN during xmit
+    
+    Currently, all packets injected into Ocelot switches are classified to
+    VLAN 0, regardless of whether they are VLAN-tagged or not. This is
+    because the switch only looks at the VLAN TCI from the DSA tag.
+    
+    VLAN 0 is then stripped on egress due to REW_TAG_CFG_TAG_CFG. There are
+    2 cases really, below is the explanation for ocelot_port_set_native_vlan:
+    
+    - Port is VLAN-aware, we set REW_TAG_CFG_TAG_CFG to 1 (egress-tag all
+      frames except VID 0 and the native VLAN) if a native VLAN exists, or
+      to 3 otherwise (tag all frames, including VID 0).
+    
+    - Port is VLAN-unaware, we set REW_TAG_CFG_TAG_CFG to 0 (port tagging
+      disabled, classified VLAN never appears in the packet).
+    
+    One can already see an inconsistency: when a native VLAN exists, VID 0
+    is egress-untagged, but when it doesn't, VID 0 is egress-tagged.
+    
+    So when we do this:
+    ip link add br0 type bridge vlan_filtering 1
+    ip link set swp0 master br0
+    bridge vlan del dev swp0 vid 1
+    bridge vlan add dev swp0 vid 1 pvid # but not untagged
+    
+    and we ping through swp0, packets will look like this:
+    
+    MAC > 33:33:00:00:00:02, ethertype 802.1Q (0x8100): vlan 0, p 0,
+            ethertype 802.1Q (0x8100), vlan 1, p 0, ethertype IPv6 (0x86dd),
+            ICMP6, router solicitation, length 16
+    
+    So VID 1 frames (sent that way by the Linux bridge) are encapsulated in
+    a VID 0 header - the classified VLAN of the packets as far as the hw is
+    concerned. To avoid that, what we really need to do is stop injecting
+    packets using the classified VLAN of 0.
+    
+    This patch strips the VLAN header from the skb payload, if that VLAN
+    exists and if the port is under a VLAN-aware bridge. Then it copies that
+    VLAN header into the DSA injection frame header.
+    
+    A positive side effect is that VCAP ES0 VLAN rewriting rules now work
+    for packets injected from the CPU into a port that's under a VLAN-aware
+    bridge, and we are able to match those packets by the VLAN ID that was
+    sent by the network stack, and not by VLAN ID 0.
+    
+    Signed-off-by: Vladimir Oltean <vladimir.oltean@nxp.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/dsa/tag_ocelot.c b/net/dsa/tag_ocelot.c
+index 8025ed778d33..d1d070523ea3 100644
+--- a/net/dsa/tag_ocelot.c
++++ b/net/dsa/tag_ocelot.c
+@@ -5,15 +5,52 @@
+ #include <soc/mscc/ocelot.h>
+ #include "dsa_priv.h"
+ 
++/* If the port is under a VLAN-aware bridge, remove the VLAN header from the
++ * payload and move it into the DSA tag, which will make the switch classify
++ * the packet to the bridge VLAN. Otherwise, leave the classified VLAN at zero,
++ * which is the pvid of standalone and VLAN-unaware bridge ports.
++ */
++static void ocelot_xmit_get_vlan_info(struct sk_buff *skb, struct dsa_port *dp,
++				      u64 *vlan_tci, u64 *tag_type)
++{
++	struct net_device *br = READ_ONCE(dp->bridge_dev);
++	struct vlan_ethhdr *hdr;
++	u16 proto, tci;
++
++	if (!br || !br_vlan_enabled(br)) {
++		*vlan_tci = 0;
++		*tag_type = IFH_TAG_TYPE_C;
++		return;
++	}
++
++	hdr = (struct vlan_ethhdr *)skb_mac_header(skb);
++	br_vlan_get_proto(br, &proto);
++
++	if (ntohs(hdr->h_vlan_proto) == proto) {
++		__skb_vlan_pop(skb, &tci);
++		*vlan_tci = tci;
++	} else {
++		rcu_read_lock();
++		br_vlan_get_pvid_rcu(br, &tci);
++		rcu_read_unlock();
++		*vlan_tci = tci;
++	}
++
++	*tag_type = (proto != ETH_P_8021Q) ? IFH_TAG_TYPE_S : IFH_TAG_TYPE_C;
++}
++
+ static void ocelot_xmit_common(struct sk_buff *skb, struct net_device *netdev,
+ 			       __be32 ifh_prefix, void **ifh)
+ {
+ 	struct dsa_port *dp = dsa_slave_to_port(netdev);
+ 	struct dsa_switch *ds = dp->ds;
++	u64 vlan_tci, tag_type;
+ 	void *injection;
+ 	__be32 *prefix;
+ 	u32 rew_op = 0;
+ 
++	ocelot_xmit_get_vlan_info(skb, dp, &vlan_tci, &tag_type);
++
+ 	injection = skb_push(skb, OCELOT_TAG_LEN);
+ 	prefix = skb_push(skb, OCELOT_SHORT_PREFIX_LEN);
+ 
+@@ -22,6 +59,8 @@ static void ocelot_xmit_common(struct sk_buff *skb, struct net_device *netdev,
+ 	ocelot_ifh_set_bypass(injection, 1);
+ 	ocelot_ifh_set_src(injection, ds->num_ports);
+ 	ocelot_ifh_set_qos_class(injection, skb->priority);
++	ocelot_ifh_set_vlan_tci(injection, vlan_tci);
++	ocelot_ifh_set_tag_type(injection, tag_type);
+ 
+ 	rew_op = ocelot_ptp_rew_op(skb);
+ 	if (rew_op)

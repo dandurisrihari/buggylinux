@@ -1,0 +1,112 @@
+commit 40cbfa90218bc570a7959b436b9d48a18c361041
+Author: Srinivas Dasari <dasaris@qti.qualcomm.com>
+Date:   Thu Jan 25 17:13:38 2018 +0200
+
+    cfg80211/nl80211: Optional authentication offload to userspace
+    
+    This interface allows the host driver to offload the authentication to
+    user space. This is exclusively defined for host drivers that do not
+    define separate commands for authentication and association, but rely on
+    userspace SME (e.g., in wpa_supplicant for the ~WPA_DRIVER_FLAGS_SME
+    case) for the authentication to happen. This can be used to implement
+    SAE without full implementation in the kernel/firmware while still being
+    able to use NL80211_CMD_CONNECT with driver-based BSS selection.
+    
+    Host driver sends NL80211_CMD_EXTERNAL_AUTH event to start/abort
+    authentication to the port on which connect is triggered and status
+    of authentication is further indicated by user space to host
+    driver through the same command response interface.
+    
+    User space entities advertise this capability through the
+    NL80211_ATTR_EXTERNAL_AUTH_SUPP flag in the NL80211_CMD_CONNECT request.
+    Host drivers shall look at this capability to offload the authentication.
+    
+    Signed-off-by: Srinivas Dasari <dasaris@qti.qualcomm.com>
+    Signed-off-by: Jouni Malinen <jouni@qca.qualcomm.com>
+    [add socket connection ownership check]
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+diff --git a/include/uapi/linux/nl80211.h b/include/uapi/linux/nl80211.h
+index 6f60503fa617..c2342456cf16 100644
+--- a/include/uapi/linux/nl80211.h
++++ b/include/uapi/linux/nl80211.h
+@@ -992,6 +992,27 @@
+  *
+  * @NL80211_CMD_RELOAD_REGDB: Request that the regdb firmware file is reloaded.
+  *
++ * @NL80211_CMD_EXTERNAL_AUTH: This interface is exclusively defined for host
++ *	drivers that do not define separate commands for authentication and
++ *	association, but rely on user space for the authentication to happen.
++ *	This interface acts both as the event request (driver to user space)
++ *	to trigger the authentication and command response (userspace to
++ *	driver) to indicate the authentication status.
++ *
++ *	User space uses the %NL80211_CMD_CONNECT command to the host driver to
++ *	trigger a connection. The host driver selects a BSS and further uses
++ *	this interface to offload only the authentication part to the user
++ *	space. Authentication frames are passed between the driver and user
++ *	space through the %NL80211_CMD_FRAME interface. Host driver proceeds
++ *	further with the association after getting successful authentication
++ *	status. User space indicates the authentication status through
++ *	%NL80211_ATTR_STATUS_CODE attribute in %NL80211_CMD_EXTERNAL_AUTH
++ *	command interface.
++ *
++ *	Host driver reports this status on an authentication failure to the
++ *	user space through the connect result as the user space would have
++ *	initiated the connection through the connect request.
++ *
+  * @NL80211_CMD_MAX: highest used command number
+  * @__NL80211_CMD_AFTER_LAST: internal use
+  */
+@@ -1198,6 +1219,8 @@ enum nl80211_commands {
+ 
+ 	NL80211_CMD_RELOAD_REGDB,
+ 
++	NL80211_CMD_EXTERNAL_AUTH,
++
+ 	/* add new commands above here */
+ 
+ 	/* used to define NL80211_CMD_MAX below */
+@@ -2153,6 +2176,16 @@ enum nl80211_commands {
+  * @NL80211_ATTR_PMKR0_NAME: PMK-R0 Name for offloaded FT.
+  * @NL80211_ATTR_PORT_AUTHORIZED: (reserved)
+  *
++ * @NL80211_ATTR_EXTERNAL_AUTH_ACTION: Identify the requested external
++ *     authentication operation (u32 attribute with an
++ *     &enum nl80211_external_auth_action value). This is used with the
++ *     &NL80211_CMD_EXTERNAL_AUTH request event.
++ * @NL80211_ATTR_EXTERNAL_AUTH_SUPPORT: Flag attribute indicating that the user
++ *     space supports external authentication. This attribute shall be used
++ *     only with %NL80211_CMD_CONNECT request. The driver may offload
++ *     authentication processing to user space if this capability is indicated
++ *     in NL80211_CMD_CONNECT requests from the user space.
++ *
+  * @NUM_NL80211_ATTR: total number of nl80211_attrs available
+  * @NL80211_ATTR_MAX: highest attribute number currently defined
+  * @__NL80211_ATTR_AFTER_LAST: internal use
+@@ -2579,6 +2612,9 @@ enum nl80211_attrs {
+ 	NL80211_ATTR_PMKR0_NAME,
+ 	NL80211_ATTR_PORT_AUTHORIZED,
+ 
++	NL80211_ATTR_EXTERNAL_AUTH_ACTION,
++	NL80211_ATTR_EXTERNAL_AUTH_SUPPORT,
++
+ 	/* add attributes here, update the policy in nl80211.c */
+ 
+ 	__NL80211_ATTR_AFTER_LAST,
+@@ -5495,4 +5531,15 @@ enum nl80211_nan_match_attributes {
+ 	NL80211_NAN_MATCH_ATTR_MAX = NUM_NL80211_NAN_MATCH_ATTR - 1
+ };
+ 
++/**
++ * nl80211_external_auth_action - Action to perform with external
++ *     authentication request. Used by NL80211_ATTR_EXTERNAL_AUTH_ACTION.
++ * @NL80211_EXTERNAL_AUTH_START: Start the authentication.
++ * @NL80211_EXTERNAL_AUTH_ABORT: Abort the ongoing authentication.
++ */
++enum nl80211_external_auth_action {
++	NL80211_EXTERNAL_AUTH_START,
++	NL80211_EXTERNAL_AUTH_ABORT,
++};
++
+ #endif /* __LINUX_NL80211_H */

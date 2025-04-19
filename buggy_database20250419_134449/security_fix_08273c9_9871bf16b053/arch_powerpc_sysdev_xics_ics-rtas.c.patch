@@ -1,0 +1,52 @@
+commit 08273c9f619cb32fb041935724f576e607101f3b
+Author: Nathan Lynch <nathanl@linux.ibm.com>
+Date:   Fri Feb 10 12:42:08 2023 -0600
+
+    powerpc/rtas: arch-wide function token lookup conversions
+    
+    With the tokens for all implemented RTAS functions now available via
+    rtas_function_token(), which is optimal and safe for arbitrary
+    contexts, there is no need to use rtas_token() or cache its result.
+    
+    Most conversions are trivial, but a few are worth describing in more
+    detail:
+    
+    * Error injection token comparisons for lockdown purposes are
+      consolidated into a simple predicate: token_is_restricted_errinjct().
+    
+    * A couple of special cases in block_rtas_call() do not use
+      rtas_token() but perform string comparisons against names in the
+      function table. These are converted to compare against token values
+      instead, which is logically equivalent but less expensive.
+    
+    * The lookup for the ibm,os-term token can be deferred until needed,
+      instead of caching it at boot to avoid device tree traversal during
+      panic.
+    
+    * Since rtas_function_token() accesses a read-only data structure
+      without taking any locks, xmon's lookup of set-indicator can be
+      performed as needed instead of cached at startup.
+    
+    Signed-off-by: Nathan Lynch <nathanl@linux.ibm.com>
+    Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+    Link: https://lore.kernel.org/r/20230125-b4-powerpc-rtas-queue-v3-20-26929c8cce78@linux.ibm.com
+
+diff --git a/arch/powerpc/sysdev/xics/ics-rtas.c b/arch/powerpc/sysdev/xics/ics-rtas.c
+index f8320f8e5bc7..b772a833d9b7 100644
+--- a/arch/powerpc/sysdev/xics/ics-rtas.c
++++ b/arch/powerpc/sysdev/xics/ics-rtas.c
+@@ -200,10 +200,10 @@ static struct ics ics_rtas = {
+ 
+ __init int ics_rtas_init(void)
+ {
+-	ibm_get_xive = rtas_token("ibm,get-xive");
+-	ibm_set_xive = rtas_token("ibm,set-xive");
+-	ibm_int_on  = rtas_token("ibm,int-on");
+-	ibm_int_off = rtas_token("ibm,int-off");
++	ibm_get_xive = rtas_function_token(RTAS_FN_IBM_GET_XIVE);
++	ibm_set_xive = rtas_function_token(RTAS_FN_IBM_SET_XIVE);
++	ibm_int_on  = rtas_function_token(RTAS_FN_IBM_INT_ON);
++	ibm_int_off = rtas_function_token(RTAS_FN_IBM_INT_OFF);
+ 
+ 	/* We enable the RTAS "ICS" if RTAS is present with the
+ 	 * appropriate tokens

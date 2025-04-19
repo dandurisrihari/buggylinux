@@ -1,0 +1,49 @@
+commit 77331115e220925af1f52e18ac99e37a0b0c10ad
+Author: Javed Hasan <jhasan@marvell.com>
+Date:   Thu Mar 26 22:48:47 2020 -0700
+
+    scsi: bnx2fc: Process the RQE with CQE in interrupt context
+    
+    Filesystem goes to read-only after continuous error injection because RQE
+    was handled in deferred context, leading to mismatch between CQE and RQE.
+    
+    Specifically, this patch makes the following changes:
+    
+     - Process the RQE with CQE in interrupt context, before putting it into
+       the work queue.
+    
+     - Producer and consumer indices are also updated in the interrupt context
+       to guarantee the the order of processing.
+    
+    [mkp: fixed bad indentation]
+    
+    Link: https://lore.kernel.org/r/20200327054849.15947-2-skashyap@marvell.com
+    Signed-off-by: Javed Hasan <jhasan@marvell.com>
+    Signed-off-by: Saurav Kashyap <skashyap@marvell.com>
+    Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+
+diff --git a/drivers/scsi/bnx2fc/bnx2fc_fcoe.c b/drivers/scsi/bnx2fc/bnx2fc_fcoe.c
+index b4bfab5edf8f..1cbb431fa682 100644
+--- a/drivers/scsi/bnx2fc/bnx2fc_fcoe.c
++++ b/drivers/scsi/bnx2fc/bnx2fc_fcoe.c
+@@ -660,7 +660,10 @@ static int bnx2fc_percpu_io_thread(void *arg)
+ 
+ 			list_for_each_entry_safe(work, tmp, &work_list, list) {
+ 				list_del_init(&work->list);
+-				bnx2fc_process_cq_compl(work->tgt, work->wqe);
++				bnx2fc_process_cq_compl(work->tgt, work->wqe,
++							work->rq_data,
++							work->num_rq,
++							work->task);
+ 				kfree(work);
+ 			}
+ 
+@@ -2655,7 +2658,8 @@ static int bnx2fc_cpu_offline(unsigned int cpu)
+ 	/* Free all work in the list */
+ 	list_for_each_entry_safe(work, tmp, &p->work_list, list) {
+ 		list_del_init(&work->list);
+-		bnx2fc_process_cq_compl(work->tgt, work->wqe);
++		bnx2fc_process_cq_compl(work->tgt, work->wqe, work->rq_data,
++					work->num_rq, work->task);
+ 		kfree(work);
+ 	}

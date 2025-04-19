@@ -1,0 +1,56 @@
+commit a45d5cf09d49ed46c1cf1150ed5a891878a161f3
+Author: Justin Stitt <justinstitt@google.com>
+Date:   Fri Aug 25 22:09:51 2023 +0000
+
+    accel/habanalabs: refactor deprecated strncpy to strscpy_pad
+    
+    `strncpy` is deprecated for use on NUL-terminated destination strings [1].
+    
+    We see that `prop->cpucp_info.card_name` is supposed to be
+    NUL-terminated based on its usage within `__hwmon_device_register()`
+    (wherein it's called "name"):
+    |       if (name && (!strlen(name) || strpbrk(name, "-* \t\n")))
+    |               dev_warn(dev,
+    |                        "hwmon: '%s' is not a valid name attribute, please fix\n",
+    |                        name);
+    
+    A suitable replacement is `strscpy_pad` [2] due to the fact that it
+    guarantees both NUL-termination and NUL-padding on its destination
+    buffer.
+    
+    NUL-padding on `prop->cpucp_info.card_name` is not strictly necessary as
+    `hdev->prop` is explicitly zero-initialized but should be used
+    regardless as it gets copied out to userspace directly -- as per Kees'
+    suggestion.
+    
+    Link: https://www.kernel.org/doc/html/latest/process/deprecated.html#strncpy-on-nul-terminated-strings [1]
+    Link: https://manpages.debian.org/testing/linux-manual-4.8/strscpy.9.en.html [2]
+    Link: https://github.com/KSPP/linux/issues/90
+    Cc: linux-hardening@vger.kernel.org
+    Signed-off-by: Justin Stitt <justinstitt@google.com>
+    Suggested-by: Kees Cook <keescook@chromium.org>
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Signed-off-by: Oded Gabbay <ogabbay@kernel.org>
+
+diff --git a/drivers/accel/habanalabs/gaudi/gaudi.c b/drivers/accel/habanalabs/gaudi/gaudi.c
+index e0f6541eb3d6..29fb71c8b47f 100644
+--- a/drivers/accel/habanalabs/gaudi/gaudi.c
++++ b/drivers/accel/habanalabs/gaudi/gaudi.c
+@@ -664,7 +664,7 @@ static int gaudi_set_fixed_properties(struct hl_device *hdev)
+ 	prop->pcie_dbi_base_address = mmPCIE_DBI_BASE;
+ 	prop->pcie_aux_dbi_reg_addr = CFG_BASE + mmPCIE_AUX_DBI;
+ 
+-	strncpy(prop->cpucp_info.card_name, GAUDI_DEFAULT_CARD_NAME,
++	strscpy_pad(prop->cpucp_info.card_name, GAUDI_DEFAULT_CARD_NAME,
+ 					CARD_NAME_MAX_LEN);
+ 
+ 	prop->max_pending_cs = GAUDI_MAX_PENDING_CS;
+@@ -8004,7 +8004,7 @@ static int gaudi_cpucp_info_get(struct hl_device *hdev)
+ 		return rc;
+ 
+ 	if (!strlen(prop->cpucp_info.card_name))
+-		strncpy(prop->cpucp_info.card_name, GAUDI_DEFAULT_CARD_NAME,
++		strscpy_pad(prop->cpucp_info.card_name, GAUDI_DEFAULT_CARD_NAME,
+ 				CARD_NAME_MAX_LEN);
+ 
+ 	hdev->card_type = le32_to_cpu(hdev->asic_prop.cpucp_info.card_type);

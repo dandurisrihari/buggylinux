@@ -1,0 +1,63 @@
+commit 14a56ec65bab351a3e1535882f15a6af21912cac
+Author: Gao Xiang <xiang@kernel.org>
+Date:   Mon Mar 25 11:40:09 2019 +0800
+
+    staging: erofs: support IO read error injection
+    
+    Used to simulate disk IO read error for testing fatal
+    error tolerance.
+    
+    Here are the details,
+    1) use bio->bi_private to indicate super_block
+       for non-compressed bios since some (mainly meta)
+       pages can be of the corresponding bdev inode;
+    2) get super_block dynamically for compressed bios,
+       therefore it could not inject bios full of staging
+       pages, yet it doesn't affect the normal usage.
+    
+    Signed-off-by: Gao Xiang <gaoxiang25@huawei.com>
+    Reviewed-by: Chao Yu <yuchao0@huawei.com>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/staging/erofs/unzip_vle.c b/drivers/staging/erofs/unzip_vle.c
+index 8e720bb882c7..566835cf6f2f 100644
+--- a/drivers/staging/erofs/unzip_vle.c
++++ b/drivers/staging/erofs/unzip_vle.c
+@@ -844,8 +844,8 @@ static void z_erofs_vle_unzip_kickoff(void *ptr, int bios)
+ 
+ static inline void z_erofs_vle_read_endio(struct bio *bio)
+ {
+-	const blk_status_t err = bio->bi_status;
+ 	struct erofs_sb_info *sbi = NULL;
++	blk_status_t err = bio->bi_status;
+ 	unsigned int i;
+ 	struct bio_vec *bvec;
+ 	struct bvec_iter_all iter_all;
+@@ -857,9 +857,15 @@ static inline void z_erofs_vle_read_endio(struct bio *bio)
+ 		DBG_BUGON(PageUptodate(page));
+ 		DBG_BUGON(!page->mapping);
+ 
+-		if (unlikely(!sbi && !z_erofs_is_stagingpage(page)))
++		if (unlikely(!sbi && !z_erofs_is_stagingpage(page))) {
+ 			sbi = EROFS_SB(page->mapping->host->i_sb);
+ 
++			if (time_to_inject(sbi, FAULT_READ_IO)) {
++				erofs_show_injection_info(FAULT_READ_IO);
++				err = BLK_STS_IOERR;
++			}
++		}
++
+ 		/* sbi should already be gotten if the page is managed */
+ 		if (sbi)
+ 			cachemngd = erofs_page_is_managed(sbi, page);
+@@ -1430,10 +1436,8 @@ static bool z_erofs_vle_submit_all(struct super_block *sb,
+ 
+ 		if (!bio) {
+ 			bio = erofs_grab_bio(sb, first_index + i,
+-					     BIO_MAX_PAGES,
++					     BIO_MAX_PAGES, bi_private,
+ 					     z_erofs_vle_read_endio, true);
+-			bio->bi_private = bi_private;
+-
+ 			++nr_bios;
+ 		}

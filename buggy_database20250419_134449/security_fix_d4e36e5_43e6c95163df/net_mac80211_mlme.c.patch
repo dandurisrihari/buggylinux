@@ -1,0 +1,93 @@
+commit d4e36e5554eb92f3ec7fedad3efb602570584df4
+Author: Ilan Peer <ilan.peer@intel.com>
+Date:   Fri Apr 20 13:49:25 2018 +0300
+
+    mac80211: Support adding duration for prepare_tx() callback
+    
+    There are specific cases, such as SAE authentication exchange, that
+    might require long duration to complete. For such cases, add support
+    for indicating to the driver the required duration of the prepare_tx()
+    operation, so the driver would still be able to complete the frame
+    exchange.
+    
+    Currently, indicate the duration only for SAE authentication exchange,
+    as SAE authentication can take up to 2000 msec (as defined in IEEE
+    P802.11-REVmd D1.0 p. 3504).
+    
+    As the patch modified the prepare_tx() callback API, also modify
+    the relevant code in iwlwifi.
+    
+    Signed-off-by: Ilan Peer <ilan.peer@intel.com>
+    Signed-off-by: Luca Coelho <luciano.coelho@intel.com>
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+diff --git a/net/mac80211/mlme.c b/net/mac80211/mlme.c
+index 233068756502..a59187c016e0 100644
+--- a/net/mac80211/mlme.c
++++ b/net/mac80211/mlme.c
+@@ -864,7 +864,7 @@ static void ieee80211_send_assoc(struct ieee80211_sub_if_data *sdata)
+ 		return;
+ 	}
+ 
+-	drv_mgd_prepare_tx(local, sdata);
++	drv_mgd_prepare_tx(local, sdata, 0);
+ 
+ 	IEEE80211_SKB_CB(skb)->flags |= IEEE80211_TX_INTFL_DONT_ENCRYPT;
+ 	if (ieee80211_hw_check(&local->hw, REPORTS_TX_ACK_STATUS))
+@@ -2022,7 +2022,7 @@ static void ieee80211_set_disassoc(struct ieee80211_sub_if_data *sdata,
+ 		 */
+ 		if (ieee80211_hw_check(&local->hw, DEAUTH_NEED_MGD_TX_PREP) &&
+ 		    !ifmgd->have_beacon)
+-			drv_mgd_prepare_tx(sdata->local, sdata);
++			drv_mgd_prepare_tx(sdata->local, sdata, 0);
+ 
+ 		ieee80211_send_deauth_disassoc(sdata, ifmgd->bssid, stype,
+ 					       reason, tx, frame_buf);
+@@ -2560,7 +2560,7 @@ static void ieee80211_auth_challenge(struct ieee80211_sub_if_data *sdata,
+ 	if (!elems.challenge)
+ 		return;
+ 	auth_data->expected_transaction = 4;
+-	drv_mgd_prepare_tx(sdata->local, sdata);
++	drv_mgd_prepare_tx(sdata->local, sdata, 0);
+ 	if (ieee80211_hw_check(&local->hw, REPORTS_TX_ACK_STATUS))
+ 		tx_flags = IEEE80211_TX_CTL_REQ_TX_STATUS |
+ 			   IEEE80211_TX_INTFL_MLME_CONN_TX;
+@@ -3769,6 +3769,7 @@ static int ieee80211_auth(struct ieee80211_sub_if_data *sdata)
+ 	u32 tx_flags = 0;
+ 	u16 trans = 1;
+ 	u16 status = 0;
++	u16 prepare_tx_duration = 0;
+ 
+ 	sdata_assert_lock(sdata);
+ 
+@@ -3790,7 +3791,11 @@ static int ieee80211_auth(struct ieee80211_sub_if_data *sdata)
+ 		return -ETIMEDOUT;
+ 	}
+ 
+-	drv_mgd_prepare_tx(local, sdata);
++	if (auth_data->algorithm == WLAN_AUTH_SAE)
++		prepare_tx_duration =
++			jiffies_to_msecs(IEEE80211_AUTH_TIMEOUT_SAE);
++
++	drv_mgd_prepare_tx(local, sdata, prepare_tx_duration);
+ 
+ 	sdata_info(sdata, "send auth to %pM (try %d/%d)\n",
+ 		   auth_data->bss->bssid, auth_data->tries,
+@@ -4994,7 +4999,7 @@ int ieee80211_mgd_deauth(struct ieee80211_sub_if_data *sdata,
+ 			   req->bssid, req->reason_code,
+ 			   ieee80211_get_reason_code_string(req->reason_code));
+ 
+-		drv_mgd_prepare_tx(sdata->local, sdata);
++		drv_mgd_prepare_tx(sdata->local, sdata, 0);
+ 		ieee80211_send_deauth_disassoc(sdata, req->bssid,
+ 					       IEEE80211_STYPE_DEAUTH,
+ 					       req->reason_code, tx,
+@@ -5014,7 +5019,7 @@ int ieee80211_mgd_deauth(struct ieee80211_sub_if_data *sdata,
+ 			   req->bssid, req->reason_code,
+ 			   ieee80211_get_reason_code_string(req->reason_code));
+ 
+-		drv_mgd_prepare_tx(sdata->local, sdata);
++		drv_mgd_prepare_tx(sdata->local, sdata, 0);
+ 		ieee80211_send_deauth_disassoc(sdata, req->bssid,
+ 					       IEEE80211_STYPE_DEAUTH,
+ 					       req->reason_code, tx,

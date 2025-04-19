@@ -1,0 +1,61 @@
+commit ee6a569d3bf64c9676eee3eecb861fb01cc11311
+Author: Michael Mueller <mimu@linux.ibm.com>
+Date:   Wed Feb 9 16:22:17 2022 +0100
+
+    KVM: s390: pv: make use of ultravisor AIV support
+    
+    This patch enables the ultravisor adapter interruption vitualization
+    support indicated by UV feature BIT_UV_FEAT_AIV. This allows ISC
+    interruption injection directly into the GISA IPM for PV kvm guests.
+    
+    Hardware that does not support this feature will continue to use the
+    UV interruption interception method to deliver ISC interruptions to
+    PV kvm guests. For this purpose, the ECA_AIV bit for all guest cpus
+    will be cleared and the GISA will be disabled during PV CPU setup.
+    
+    In addition a check in __inject_io() has been removed. That reduces the
+    required instructions for interruption handling for PV and traditional
+    kvm guests.
+    
+    Signed-off-by: Michael Mueller <mimu@linux.ibm.com>
+    Reviewed-by: Janosch Frank <frankja@linux.ibm.com>
+    Link: https://lore.kernel.org/r/20220209152217.1793281-2-mimu@linux.ibm.com
+    Reviewed-by: Christian Borntraeger <borntraeger@linux.ibm.com>
+    Signed-off-by: Christian Borntraeger <borntraeger@linux.ibm.com>
+
+diff --git a/arch/s390/kvm/kvm-s390.c b/arch/s390/kvm/kvm-s390.c
+index e056ad86ccd2..b5ea95cf8686 100644
+--- a/arch/s390/kvm/kvm-s390.c
++++ b/arch/s390/kvm/kvm-s390.c
+@@ -2195,6 +2195,9 @@ static int kvm_s390_cpus_from_pv(struct kvm *kvm, u16 *rcp, u16 *rrcp)
+ 		}
+ 		mutex_unlock(&vcpu->mutex);
+ 	}
++	/* Ensure that we re-enable gisa if the non-PV guest used it but the PV guest did not. */
++	if (use_gisa)
++		kvm_s390_gisa_enable(kvm);
+ 	return ret;
+ }
+ 
+@@ -2206,6 +2209,10 @@ static int kvm_s390_cpus_to_pv(struct kvm *kvm, u16 *rc, u16 *rrc)
+ 
+ 	struct kvm_vcpu *vcpu;
+ 
++	/* Disable the GISA if the ultravisor does not support AIV. */
++	if (!test_bit_inv(BIT_UV_FEAT_AIV, &uv_info.uv_feature_indications))
++		kvm_s390_gisa_disable(kvm);
++
+ 	kvm_for_each_vcpu(i, vcpu, kvm) {
+ 		mutex_lock(&vcpu->mutex);
+ 		r = kvm_s390_pv_create_cpu(vcpu, rc, rrc);
+@@ -3350,9 +3357,7 @@ int kvm_arch_vcpu_create(struct kvm_vcpu *vcpu)
+ 
+ 	vcpu->arch.sie_block->icpua = vcpu->vcpu_id;
+ 	spin_lock_init(&vcpu->arch.local_int.lock);
+-	vcpu->arch.sie_block->gd = (u32)(u64)vcpu->kvm->arch.gisa_int.origin;
+-	if (vcpu->arch.sie_block->gd && sclp.has_gisaf)
+-		vcpu->arch.sie_block->gd |= GISA_FORMAT1;
++	vcpu->arch.sie_block->gd = kvm_s390_get_gisa_desc(vcpu->kvm);
+ 	seqcount_init(&vcpu->arch.cputm_seqcount);
+ 
+ 	vcpu->arch.pfault_token = KVM_S390_PFAULT_TOKEN_INVALID;

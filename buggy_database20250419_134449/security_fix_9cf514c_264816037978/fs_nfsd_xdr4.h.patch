@@ -1,0 +1,118 @@
+commit 9cf514ccfacb301f3b1b4509a8ce25dffad55880
+Author: Christoph Hellwig <hch@lst.de>
+Date:   Mon May 5 13:11:59 2014 +0200
+
+    nfsd: implement pNFS operations
+    
+    Add support for the GETDEVICEINFO, LAYOUTGET, LAYOUTCOMMIT and
+    LAYOUTRETURN NFSv4.1 operations, as well as backing code to manage
+    outstanding layouts and devices.
+    
+    Layout management is very straight forward, with a nfs4_layout_stateid
+    structure that extends nfs4_stid to manage layout stateids as the
+    top-level structure.  It is linked into the nfs4_file and nfs4_client
+    structures like the other stateids, and contains a linked list of
+    layouts that hang of the stateid.  The actual layout operations are
+    implemented in layout drivers that are not part of this commit, but
+    will be added later.
+    
+    The worst part of this commit is the management of the pNFS device IDs,
+    which suffers from a specification that is not sanely implementable due
+    to the fact that the device-IDs are global and not bound to an export,
+    and have a small enough size so that we can't store the fsid portion of
+    a file handle, and must never be reused.  As we still do need perform all
+    export authentication and validation checks on a device ID passed to
+    GETDEVICEINFO we are caught between a rock and a hard place.  To work
+    around this issue we add a new hash that maps from a 64-bit integer to a
+    fsid so that we can look up the export to authenticate against it,
+    a 32-bit integer as a generation that we can bump when changing the device,
+    and a currently unused 32-bit integer that could be used in the future
+    to handle more than a single device per export.  Entries in this hash
+    table are never deleted as we can't reuse the ids anyway, and would have
+    a severe lifetime problem anyway as Linux export structures are temporary
+    structures that can go away under load.
+    
+    Parts of the XDR data, structures and marshaling/unmarshaling code, as
+    well as many concepts are derived from the old pNFS server implementation
+    from Andy Adamson, Benny Halevy, Dean Hildebrand, Marc Eshel, Fred Isaman,
+    Mike Sager, Ricardo Labiaga and many others.
+    
+    Signed-off-by: Christoph Hellwig <hch@lst.de>
+
+diff --git a/fs/nfsd/xdr4.h b/fs/nfsd/xdr4.h
+index 90a5925bd6ab..0bda93e58e1b 100644
+--- a/fs/nfsd/xdr4.h
++++ b/fs/nfsd/xdr4.h
+@@ -428,6 +428,61 @@ struct nfsd4_reclaim_complete {
+ 	u32 rca_one_fs;
+ };
+ 
++struct nfsd4_deviceid {
++	u64			fsid_idx;
++	u32			generation;
++	u32			pad;
++};
++
++struct nfsd4_layout_seg {
++	u32			iomode;
++	u64			offset;
++	u64			length;
++};
++
++struct nfsd4_getdeviceinfo {
++	struct nfsd4_deviceid	gd_devid;	/* request */
++	u32			gd_layout_type;	/* request */
++	u32			gd_maxcount;	/* request */
++	u32			gd_notify_types;/* request - response */
++	void			*gd_device;	/* response */
++};
++
++struct nfsd4_layoutget {
++	u64			lg_minlength;	/* request */
++	u32			lg_signal;	/* request */
++	u32			lg_layout_type;	/* request */
++	u32			lg_maxcount;	/* request */
++	stateid_t		lg_sid;		/* request/response */
++	struct nfsd4_layout_seg	lg_seg;		/* request/response */
++	void			*lg_content;	/* response */
++};
++
++struct nfsd4_layoutcommit {
++	stateid_t		lc_sid;		/* request */
++	struct nfsd4_layout_seg	lc_seg;		/* request */
++	u32			lc_reclaim;	/* request */
++	u32			lc_newoffset;	/* request */
++	u64			lc_last_wr;	/* request */
++	struct timespec		lc_mtime;	/* request */
++	u32			lc_layout_type;	/* request */
++	u32			lc_up_len;	/* layout length */
++	void			*lc_up_layout;	/* decoded by callback */
++	u32			lc_size_chg;	/* boolean for response */
++	u64			lc_newsize;	/* response */
++};
++
++struct nfsd4_layoutreturn {
++	u32			lr_return_type;	/* request */
++	u32			lr_layout_type;	/* request */
++	struct nfsd4_layout_seg	lr_seg;		/* request */
++	u32			lr_reclaim;	/* request */
++	u32			lrf_body_len;	/* request */
++	void			*lrf_body;	/* request */
++	stateid_t		lr_sid;		/* request/response */
++	u32			lrs_present;	/* response */
++};
++
+ struct nfsd4_fallocate {
+ 	/* request */
+ 	stateid_t	falloc_stateid;
+@@ -491,6 +546,10 @@ struct nfsd4_op {
+ 		struct nfsd4_reclaim_complete	reclaim_complete;
+ 		struct nfsd4_test_stateid	test_stateid;
+ 		struct nfsd4_free_stateid	free_stateid;
++		struct nfsd4_getdeviceinfo	getdeviceinfo;
++		struct nfsd4_layoutget		layoutget;
++		struct nfsd4_layoutcommit	layoutcommit;
++		struct nfsd4_layoutreturn	layoutreturn;
+ 
+ 		/* NFSv4.2 */
+ 		struct nfsd4_fallocate		allocate;

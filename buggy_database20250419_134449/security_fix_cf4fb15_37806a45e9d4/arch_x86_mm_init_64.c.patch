@@ -1,0 +1,121 @@
+commit cf4fb15b3110df070fe9829a1ef38fef8316fb90
+Author: Yinghai Lu <yinghai@kernel.org>
+Date:   Fri May 6 15:01:34 2016 -0700
+
+    x86/boot: Split out kernel_ident_mapping_init()
+    
+    In order to support on-demand page table creation when moving the
+    kernel for KASLR, we need to use kernel_ident_mapping_init() in the
+    decompression code.
+    
+    This splits it out into its own file for use outside of init_64.c.
+    Additionally, checking for __pa/__va defines is added since they
+    need to be overridden in the decompression code.
+    
+    [kees: rewrote changelog]
+    Signed-off-by: Yinghai Lu <yinghai@kernel.org>
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+    Cc: Andrew Morton <akpm@linux-foundation.org>
+    Cc: Andy Lutomirski <luto@amacapital.net>
+    Cc: Andy Lutomirski <luto@kernel.org>
+    Cc: Baoquan He <bhe@redhat.com>
+    Cc: Borislav Petkov <bp@alien8.de>
+    Cc: Borislav Petkov <bp@suse.de>
+    Cc: Brian Gerst <brgerst@gmail.com>
+    Cc: Dave Young <dyoung@redhat.com>
+    Cc: Denys Vlasenko <dvlasenk@redhat.com>
+    Cc: H. Peter Anvin <hpa@zytor.com>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Vivek Goyal <vgoyal@redhat.com>
+    Cc: kernel-hardening@lists.openwall.com
+    Cc: lasse.collin@tukaani.org
+    Link: http://lkml.kernel.org/r/1462572095-11754-3-git-send-email-keescook@chromium.org
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+diff --git a/arch/x86/mm/init_64.c b/arch/x86/mm/init_64.c
+index 214afda97911..65cfbeefbec4 100644
+--- a/arch/x86/mm/init_64.c
++++ b/arch/x86/mm/init_64.c
+@@ -58,79 +58,7 @@
+ 
+ #include "mm_internal.h"
+ 
+-static void ident_pmd_init(unsigned long pmd_flag, pmd_t *pmd_page,
+-			   unsigned long addr, unsigned long end)
+-{
+-	addr &= PMD_MASK;
+-	for (; addr < end; addr += PMD_SIZE) {
+-		pmd_t *pmd = pmd_page + pmd_index(addr);
+-
+-		if (!pmd_present(*pmd))
+-			set_pmd(pmd, __pmd(addr | pmd_flag));
+-	}
+-}
+-static int ident_pud_init(struct x86_mapping_info *info, pud_t *pud_page,
+-			  unsigned long addr, unsigned long end)
+-{
+-	unsigned long next;
+-
+-	for (; addr < end; addr = next) {
+-		pud_t *pud = pud_page + pud_index(addr);
+-		pmd_t *pmd;
+-
+-		next = (addr & PUD_MASK) + PUD_SIZE;
+-		if (next > end)
+-			next = end;
+-
+-		if (pud_present(*pud)) {
+-			pmd = pmd_offset(pud, 0);
+-			ident_pmd_init(info->pmd_flag, pmd, addr, next);
+-			continue;
+-		}
+-		pmd = (pmd_t *)info->alloc_pgt_page(info->context);
+-		if (!pmd)
+-			return -ENOMEM;
+-		ident_pmd_init(info->pmd_flag, pmd, addr, next);
+-		set_pud(pud, __pud(__pa(pmd) | _KERNPG_TABLE));
+-	}
+-
+-	return 0;
+-}
+-
+-int kernel_ident_mapping_init(struct x86_mapping_info *info, pgd_t *pgd_page,
+-			      unsigned long addr, unsigned long end)
+-{
+-	unsigned long next;
+-	int result;
+-	int off = info->kernel_mapping ? pgd_index(__PAGE_OFFSET) : 0;
+-
+-	for (; addr < end; addr = next) {
+-		pgd_t *pgd = pgd_page + pgd_index(addr) + off;
+-		pud_t *pud;
+-
+-		next = (addr & PGDIR_MASK) + PGDIR_SIZE;
+-		if (next > end)
+-			next = end;
+-
+-		if (pgd_present(*pgd)) {
+-			pud = pud_offset(pgd, 0);
+-			result = ident_pud_init(info, pud, addr, next);
+-			if (result)
+-				return result;
+-			continue;
+-		}
+-
+-		pud = (pud_t *)info->alloc_pgt_page(info->context);
+-		if (!pud)
+-			return -ENOMEM;
+-		result = ident_pud_init(info, pud, addr, next);
+-		if (result)
+-			return result;
+-		set_pgd(pgd, __pgd(__pa(pud) | _KERNPG_TABLE));
+-	}
+-
+-	return 0;
+-}
++#include "ident_map.c"
+ 
+ /*
+  * NOTE: pagetable_init alloc all the fixmap pagetables contiguous on the

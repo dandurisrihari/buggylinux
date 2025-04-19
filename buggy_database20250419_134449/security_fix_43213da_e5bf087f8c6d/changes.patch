@@ -1,0 +1,61 @@
+diff --git a/drivers/net/ethernet/mellanox/mlx5/core/en_tx.c b/drivers/net/ethernet/mellanox/mlx5/core/en_tx.c
+index 2dc48406cd08..5855d8f9c509 100644
+--- a/drivers/net/ethernet/mellanox/mlx5/core/en_tx.c
++++ b/drivers/net/ethernet/mellanox/mlx5/core/en_tx.c
+@@ -386,7 +386,13 @@ mlx5e_sq_xmit_wqe(struct mlx5e_txqsq *sq, struct sk_buff *skb,
+ 			stats->added_vlan_packets++;
+ 		} else {
+ 			eseg->inline_hdr.sz |= cpu_to_be16(attr->ihs);
+-			memcpy(eseg->inline_hdr.start, skb->data, attr->ihs);
++			unsafe_memcpy(eseg->inline_hdr.start, skb->data, attr->ihs,
++				/* This copy has been bounds-checked earlier in
++				 * mlx5i_sq_calc_wqe_attr() and intentionally
++				 * crosses a flex array boundary. Since it is
++				 * performance sensitive, splitting the copy is
++				 * undesirable.
++				 */);
+ 		}
+ 		dseg += wqe_attr->ds_cnt_inl;
+ 	} else if (skb_vlan_tag_present(skb)) {
+diff --git a/include/linux/fortify-string.h b/include/linux/fortify-string.h
+index 295637a66c46..3b401fa0f374 100644
+--- a/include/linux/fortify-string.h
++++ b/include/linux/fortify-string.h
+@@ -52,6 +52,22 @@ extern char *__underlying_strncpy(char *p, const char *q, __kernel_size_t size)
+ #define __underlying_strncpy	__builtin_strncpy
+ #endif
+ 
++/**
++ * unsafe_memcpy - memcpy implementation with no FORTIFY bounds checking
++ *
++ * @dst: Destination memory address to write to
++ * @src: Source memory address to read from
++ * @bytes: How many bytes to write to @dst from @src
++ * @justification: Free-form text or comment describing why the use is needed
++ *
++ * This should be used for corner cases where the compiler cannot do the
++ * right thing, or during transitions between APIs, etc. It should be used
++ * very rarely, and includes a place for justification detailing where bounds
++ * checking has happened, and why existing solutions cannot be employed.
++ */
++#define unsafe_memcpy(dst, src, bytes, justification)		\
++	__underlying_memcpy(dst, src, bytes)
++
+ /*
+  * Clang's use of __builtin_object_size() within inlines needs hinting via
+  * __pass_object_size(). The preference is to only ever use type 1 (member
+diff --git a/include/linux/string.h b/include/linux/string.h
+index b6572aeca2f5..61ec7e4f6311 100644
+--- a/include/linux/string.h
++++ b/include/linux/string.h
+@@ -252,6 +252,10 @@ static inline const char *kbasename(const char *path)
+ #if !defined(__NO_FORTIFY) && defined(__OPTIMIZE__) && defined(CONFIG_FORTIFY_SOURCE)
+ #include <linux/fortify-string.h>
+ #endif
++#ifndef unsafe_memcpy
++#define unsafe_memcpy(dst, src, bytes, justification)		\
++	memcpy(dst, src, bytes)
++#endif
+ 
+ void memcpy_and_pad(void *dest, size_t dest_len, const void *src, size_t count,
+ 		    int pad);

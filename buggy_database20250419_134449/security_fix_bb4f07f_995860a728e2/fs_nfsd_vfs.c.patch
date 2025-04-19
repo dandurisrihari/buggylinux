@@ -1,0 +1,54 @@
+commit bb4f07f2409c26c01e97e6f9b432545f353e3b66
+Author: Pali Rohár <pali@kernel.org>
+Date:   Sat Oct 5 18:40:39 2024 +0200
+
+    nfsd: Fix NFSD_MAY_BYPASS_GSS and NFSD_MAY_BYPASS_GSS_ON_ROOT
+    
+    Currently NFSD_MAY_BYPASS_GSS and NFSD_MAY_BYPASS_GSS_ON_ROOT do not bypass
+    only GSS, but bypass any method. This is a problem specially for NFS3
+    AUTH_NULL-only exports.
+    
+    The purpose of NFSD_MAY_BYPASS_GSS_ON_ROOT is described in RFC 2623,
+    section 2.3.2, to allow mounting NFS2/3 GSS-only export without
+    authentication. So few procedures which do not expose security risk used
+    during mount time can be called also with AUTH_NONE or AUTH_SYS, to allow
+    client mount operation to finish successfully.
+    
+    The problem with current implementation is that for AUTH_NULL-only exports,
+    the NFSD_MAY_BYPASS_GSS_ON_ROOT is active also for NFS3 AUTH_UNIX mount
+    attempts which confuse NFS3 clients, and make them think that AUTH_UNIX is
+    enabled and is working. Linux NFS3 client never switches from AUTH_UNIX to
+    AUTH_NONE on active mount, which makes the mount inaccessible.
+    
+    Fix the NFSD_MAY_BYPASS_GSS and NFSD_MAY_BYPASS_GSS_ON_ROOT implementation
+    and really allow to bypass only exports which have enabled some real
+    authentication (GSS, TLS, or any other).
+    
+    The result would be: For AUTH_NULL-only export if client attempts to do
+    mount with AUTH_UNIX flavor then it will receive access errors, which
+    instruct client that AUTH_UNIX flavor is not usable and will either try
+    other auth flavor (AUTH_NULL if enabled) or fails mount procedure.
+    Similarly if client attempt to do mount with AUTH_NULL flavor and only
+    AUTH_UNIX flavor is enabled then the client will receive access error.
+    
+    This should fix problems with AUTH_NULL-only or AUTH_UNIX-only exports if
+    client attempts to mount it with other auth flavor (e.g. with AUTH_NULL for
+    AUTH_UNIX-only export, or with AUTH_UNIX for AUTH_NULL-only export).
+    
+    Signed-off-by: Pali Rohár <pali@kernel.org>
+    Reviewed-by: NeilBrown <neilb@suse.de>
+    Signed-off-by: Chuck Lever <chuck.lever@oracle.com>
+
+diff --git a/fs/nfsd/vfs.c b/fs/nfsd/vfs.c
+index e0692401da33..1f8540148c4a 100644
+--- a/fs/nfsd/vfs.c
++++ b/fs/nfsd/vfs.c
+@@ -321,7 +321,7 @@ nfsd_lookup(struct svc_rqst *rqstp, struct svc_fh *fhp, const char *name,
+ 	err = nfsd_lookup_dentry(rqstp, fhp, name, len, &exp, &dentry);
+ 	if (err)
+ 		return err;
+-	err = check_nfsd_access(exp, rqstp);
++	err = check_nfsd_access(exp, rqstp, false);
+ 	if (err)
+ 		goto out;
+ 	/*

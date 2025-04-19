@@ -1,0 +1,54 @@
+diff --git a/net/llc/af_llc.c b/net/llc/af_llc.c
+index d6cfe84d521b..2652ead96c64 100644
+--- a/net/llc/af_llc.c
++++ b/net/llc/af_llc.c
+@@ -784,24 +784,20 @@ static int llc_ui_recvmsg(struct kiocb *iocb, struct socket *sock,
+ 		copied += used;
+ 		len -= used;
+ 
+-		if (used + offset < skb->len)
+-			continue;
+-
+ 		if (!(flags & MSG_PEEK)) {
+ 			sk_eat_skb(sk, skb, 0);
+ 			*seq = 0;
+ 		}
++
++		/* For non stream protcols we get one packet per recvmsg call */
++		if (sk->sk_type != SOCK_STREAM)
++			goto copy_uaddr;
++
++		/* Partial read */
++		if (used + offset < skb->len)
++			continue;
+ 	} while (len > 0);
+ 
+-	/* 
+-	 * According to UNIX98, msg_name/msg_namelen are ignored
+-	 * on connected socket. -ANK
+-	 * But... af_llc still doesn't have separate sets of methods for
+-	 * SOCK_DGRAM and SOCK_STREAM :-( So we have to do this test, will
+-	 * eventually fix this tho :-) -acme
+-	 */
+-	if (sk->sk_type == SOCK_DGRAM)
+-		goto copy_uaddr;
+ out:
+ 	release_sock(sk);
+ 	return copied;
+diff --git a/net/llc/llc_sap.c b/net/llc/llc_sap.c
+index 20c4eb5c1ac6..42eb0c3a9780 100644
+--- a/net/llc/llc_sap.c
++++ b/net/llc/llc_sap.c
+@@ -51,10 +51,10 @@ void llc_save_primitive(struct sock *sk, struct sk_buff* skb, u8 prim)
+ {
+ 	struct sockaddr_llc *addr;
+ 
+-	if (skb->sk->sk_type == SOCK_STREAM) /* See UNIX98 */
+-		return;
+        /* save primitive for use by the user. */
+ 	addr		  = llc_ui_skb_cb(skb);
++
++	memset(addr, 0, sizeof(*addr));
+ 	addr->sllc_family = sk->sk_family;
+ 	addr->sllc_arphrd = skb->dev->type;
+ 	addr->sllc_test   = prim == LLC_TEST_PRIM;

@@ -1,0 +1,56 @@
+commit 71c02379c762cb616c00fd5c4ed253fbf6bbe11b
+Author: Christoph Paasch <cpaasch@apple.com>
+Date:   Mon Oct 23 13:22:23 2017 -0700
+
+    tcp: Configure TFO without cookie per socket and/or per route
+    
+    We already allow to enable TFO without a cookie by using the
+    fastopen-sysctl and setting it to TFO_SERVER_COOKIE_NOT_REQD (or
+    TFO_CLIENT_NO_COOKIE).
+    This is safe to do in certain environments where we know that there
+    isn't a malicous host (aka., data-centers) or when the
+    application-protocol already provides an authentication mechanism in the
+    first flight of data.
+    
+    A server however might be providing multiple services or talking to both
+    sides (public Internet and data-center). So, this server would want to
+    enable cookie-less TFO for certain services and/or for connections that
+    go to the data-center.
+    
+    This patch exposes a socket-option and a per-route attribute to enable such
+    fine-grained configurations.
+    
+    Signed-off-by: Christoph Paasch <cpaasch@apple.com>
+    Reviewed-by: Yuchung Cheng <ycheng@google.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/ipv4/tcp.c b/net/ipv4/tcp.c
+index be07e9b6dbdd..8f36277e82e9 100644
+--- a/net/ipv4/tcp.c
++++ b/net/ipv4/tcp.c
+@@ -2836,6 +2836,14 @@ static int do_tcp_setsockopt(struct sock *sk, int level,
+ 			err = -EOPNOTSUPP;
+ 		}
+ 		break;
++	case TCP_FASTOPEN_NO_COOKIE:
++		if (val > 1 || val < 0)
++			err = -EINVAL;
++		else if (!((1 << sk->sk_state) & (TCPF_CLOSE | TCPF_LISTEN)))
++			err = -EINVAL;
++		else
++			tp->fastopen_no_cookie = val;
++		break;
+ 	case TCP_TIMESTAMP:
+ 		if (!tp->repair)
+ 			err = -EPERM;
+@@ -3256,6 +3264,10 @@ static int do_tcp_getsockopt(struct sock *sk, int level,
+ 		val = tp->fastopen_connect;
+ 		break;
+ 
++	case TCP_FASTOPEN_NO_COOKIE:
++		val = tp->fastopen_no_cookie;
++		break;
++
+ 	case TCP_TIMESTAMP:
+ 		val = tcp_time_stamp_raw() + tp->tsoffset;
+ 		break;

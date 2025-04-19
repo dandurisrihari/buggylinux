@@ -1,0 +1,104 @@
+commit 10615907e9b51c9ae92f3a6ecabd01c482f20f32
+Author: Steen Hegelund <steen.hegelund@microchip.com>
+Date:   Thu Aug 19 09:39:39 2021 +0200
+
+    net: sparx5: switchdev: adding frame DMA functionality
+    
+    This add frame DMA functionality to the Sparx5 platform.
+    
+    Ethernet frames can be extracted or injected autonomously to or from the
+    device’s DDR3/DDR3L memory and/or PCIe memory space. Linked list data
+    structures in memory are used for injecting or extracting Ethernet frames.
+    The FDMA generates interrupts when frame extraction or injection is done
+    and when the linked lists need updating.
+    
+    The FDMA implements two extraction channels, one per switch core port
+    towards the VCore CPU system and a total of six injection channels.
+    Extraction channels are mapped one-to-one to the CPU ports, while injection
+    channels can be individually assigned to any CPU port.
+    
+    - FDMA channel 0 through 5 corresponds to CPU port 0 injection direction
+      FDMA_CH_CFG[channel].CH_INJ_PORT is set to 0.
+    - FDMA channel 0 through 5 corresponds to CPU port 1 injection direction when
+      FDMA_CH_CFG[channel].CH_INJ_PORT is set to 1.
+    - FDMA channel 6 corresponds to CPU port 0 extraction direction.
+    - FDMA channel 7 corresponds to CPU port 1 extraction direction.
+    
+    The FDMA implements a strict priority scheme among channels. Extraction
+    channels are prioritized over injection channels and secondarily channels
+    with higher channel number are prioritized over channels with lower number.
+    On the other hand, ports are being served on an equal-bandwidth principle
+    both on injection and extraction directions.  The equal-bandwidth principle
+    will not force an equal bandwidth. Instead, it ensures that the ports
+    perform at their best considering the operating conditions.
+    
+    When more than one injection channel is enabled for injection on the same
+    CPU port, priority determines which channel can inject data. Ownership
+    is re-arbitrated on frame boundaries.
+    
+    The FDMA processes linked lists of DMA Control Block Structures (DCBs). The
+    DCBs have the same basic structure for both injection and extraction. A DCB
+    must be placed on a 64-bit word-aligned address in memory. Each DCB has a
+    per-channel configurable amount of associated data blocks in memory, where
+    the frame data is stored.
+    
+    The data blocks that are used by extraction channels must be placed on
+    64-bit word aligned addresses in memory, and their length must be a
+    multiple of 128 bytes.
+    
+    A DCB carries the pointer to the next DCB of the linked list, the INFO word
+    which holds information for the DCB, and a pair of status word and memory
+    pointer for every data block that it is associated with.
+    
+    Signed-off-by: Steen Hegelund <steen.hegelund@microchip.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/microchip/sparx5/sparx5_main.c b/drivers/net/ethernet/microchip/sparx5/sparx5_main.c
+index f666133a15de..cbece6e9bff2 100644
+--- a/drivers/net/ethernet/microchip/sparx5/sparx5_main.c
++++ b/drivers/net/ethernet/microchip/sparx5/sparx5_main.c
+@@ -640,8 +640,23 @@ static int sparx5_start(struct sparx5 *sparx5)
+ 	sparx5_board_init(sparx5);
+ 	err = sparx5_register_notifier_blocks(sparx5);
+ 
+-	/* Start register based INJ/XTR */
++	/* Start Frame DMA with fallback to register based INJ/XTR */
+ 	err = -ENXIO;
++	if (sparx5->fdma_irq >= 0) {
++		if (GCB_CHIP_ID_REV_ID_GET(sparx5->chip_id) > 0)
++			err = devm_request_threaded_irq(sparx5->dev,
++							sparx5->fdma_irq,
++							NULL,
++							sparx5_fdma_handler,
++							IRQF_ONESHOT,
++							"sparx5-fdma", sparx5);
++		if (!err)
++			err = sparx5_fdma_start(sparx5);
++		if (err)
++			sparx5->fdma_irq = -ENXIO;
++	} else {
++		sparx5->fdma_irq = -ENXIO;
++	}
+ 	if (err && sparx5->xtr_irq >= 0) {
+ 		err = devm_request_irq(sparx5->dev, sparx5->xtr_irq,
+ 				       sparx5_xtr_handler, IRQF_SHARED,
+@@ -766,6 +781,7 @@ static int mchp_sparx5_probe(struct platform_device *pdev)
+ 		sparx5->base_mac[5] = 0;
+ 	}
+ 
++	sparx5->fdma_irq = platform_get_irq_byname(sparx5->pdev, "fdma");
+ 	sparx5->xtr_irq = platform_get_irq_byname(sparx5->pdev, "xtr");
+ 
+ 	/* Read chip ID to check CPU interface */
+@@ -824,6 +840,11 @@ static int mchp_sparx5_remove(struct platform_device *pdev)
+ 		disable_irq(sparx5->xtr_irq);
+ 		sparx5->xtr_irq = -ENXIO;
+ 	}
++	if (sparx5->fdma_irq) {
++		disable_irq(sparx5->fdma_irq);
++		sparx5->fdma_irq = -ENXIO;
++	}
++	sparx5_fdma_stop(sparx5);
+ 	sparx5_cleanup_ports(sparx5);
+ 	/* Unregister netdevs */
+ 	sparx5_unregister_notifier_blocks(sparx5);

@@ -1,0 +1,86 @@
+commit 6e8af15ccdc4e138a5b529c1901a0013e1dcaa09
+Author: Dave Chinner <dchinner@redhat.com>
+Date:   Tue Nov 29 09:09:17 2022 +1100
+
+    xfs: drop write error injection is unfixable, remove it
+    
+    With the changes to scan the page cache for dirty data to avoid data
+    corruptions from partial write cleanup racing with other page cache
+    operations, the drop writes error injection no longer works the same
+    way it used to and causes xfs/196 to fail. This is because xfs/196
+    writes to the file and populates the page cache before it turns on
+    the error injection and starts failing -overwrites-.
+    
+    The result is that the original drop-writes code failed writes only
+    -after- overwriting the data in the cache, followed by invalidates
+    the cached data, then punching out the delalloc extent from under
+    that data.
+    
+    On the surface, this looks fine. The problem is that page cache
+    invalidation *doesn't guarantee that it removes anything from the
+    page cache* and it doesn't change the dirty state of the folio. When
+    block size == page size and we do page aligned IO (as xfs/196 does)
+    everything happens to align perfectly and page cache invalidation
+    removes the single page folios that span the written data. Hence the
+    followup delalloc punch pass does not find cached data over that
+    range and it can punch the extent out.
+    
+    IOWs, xfs/196 "works" for block size == page size with the new
+    code. I say "works", because it actually only works for the case
+    where IO is page aligned, and no data was read from disk before
+    writes occur. Because the moment we actually read data first, the
+    readahead code allocates multipage folios and suddenly the
+    invalidate code goes back to zeroing subfolio ranges without
+    changing dirty state.
+    
+    Hence, with multipage folios in play, block size == page size is
+    functionally identical to block size < page size behaviour, and
+    drop-writes is manifestly broken w.r.t to this case. Invalidation of
+    a subfolio range doesn't result in the folio being removed from the
+    cache, just the range gets zeroed. Hence after we've sequentially
+    walked over a folio that we've dirtied (via write data) and then
+    invalidated, we end up with a dirty folio full of zeroed data.
+    
+    And because the new code skips punching ranges that have dirty
+    folios covering them, we end up leaving the delalloc range intact
+    after failing all the writes. Hence failed writes now end up
+    writing zeroes to disk in the cases where invalidation zeroes folios
+    rather than removing them from cache.
+    
+    This is a fundamental change of behaviour that is needed to avoid
+    the data corruption vectors that exist in the old write fail path,
+    and it renders the drop-writes injection non-functional and
+    unworkable as it stands.
+    
+    As it is, I think the error injection is also now unnecessary, as
+    partial writes that need delalloc extent are going to be a lot more
+    common with stale iomap detection in place. Hence this patch removes
+    the drop-writes error injection completely. xfs/196 can remain for
+    testing kernels that don't have this data corruption fix, but those
+    that do will report:
+    
+    xfs/196 3s ... [not run] XFS error injection drop_writes unknown on this kernel.
+    
+    Signed-off-by: Dave Chinner <dchinner@redhat.com>
+    Reviewed-by: Darrick J. Wong <djwong@kernel.org>
+
+diff --git a/fs/xfs/xfs_iomap.c b/fs/xfs/xfs_iomap.c
+index 26ca3cc1a048..1bdd7afc1010 100644
+--- a/fs/xfs/xfs_iomap.c
++++ b/fs/xfs/xfs_iomap.c
+@@ -1190,15 +1190,6 @@ xfs_buffered_write_iomap_end(
+ 	struct xfs_mount	*mp = XFS_M(inode->i_sb);
+ 	int			error;
+ 
+-	/*
+-	 * Behave as if the write failed if drop writes is enabled. Set the NEW
+-	 * flag to force delalloc cleanup.
+-	 */
+-	if (XFS_TEST_ERROR(false, mp, XFS_ERRTAG_DROP_WRITES)) {
+-		iomap->flags |= IOMAP_F_NEW;
+-		written = 0;
+-	}
+-
+ 	error = iomap_file_buffered_write_punch_delalloc(inode, iomap, offset,
+ 			length, written, &xfs_buffered_write_delalloc_punch);
+ 	if (error && !xfs_is_shutdown(mp)) {

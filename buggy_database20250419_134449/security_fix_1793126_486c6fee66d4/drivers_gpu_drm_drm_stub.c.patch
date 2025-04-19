@@ -1,0 +1,91 @@
+commit 1793126fcebd7c18834f95d43b55e387a8803aa8
+Author: David Rheinsberg <david@readahead.eu>
+Date:   Sun Aug 25 18:29:00 2013 +0200
+
+    drm: implement experimental render nodes
+    
+    Render nodes provide an API for userspace to use non-privileged GPU
+    commands without any running DRM-Master. It is useful for offscreen
+    rendering, GPGPU clients, and normal render clients which do not perform
+    modesetting.
+    
+    Compared to legacy clients, render clients no longer need any
+    authentication to perform client ioctls. Instead, user-space controls
+    render/client access to GPUs via filesystem access-modes on the
+    render-node. Once a render-node was opened, a client has full access to
+    the client/render operations on the GPU. However, no modesetting or ioctls
+    that affect global state are allowed on render nodes.
+    
+    To prevent privilege-escalation, drivers must explicitly state that they
+    support render nodes. They must mark their render-only ioctls as
+    DRM_RENDER_ALLOW so render clients can use them. Furthermore, they must
+    support clients without any attached master.
+    
+    If filesystem access-modes are not enough for fine-grained access control
+    to render nodes (very unlikely, considering the versaitlity of FS-ACLs),
+    you may still fall-back to fd-passing from server to client (which allows
+    arbitrary access-control). However, note that revoking access is
+    currently impossible and unlikely to get implemented.
+    
+    Note: Render clients no longer have any associated DRM-Master as they are
+    supposed to be independent of any server state. DRM core highly depends on
+    file_priv->master to be non-NULL for modesetting/ctx/etc. commands.
+    Therefore, drivers must be very careful to not require DRM-Master if they
+    support DRIVER_RENDER.
+    
+    So far render-nodes are protected by "drm_rnodes". As long as this
+    module-parameter is not set to 1, a driver will not create render nodes.
+    This allows us to experiment with the API a bit before we stabilize it.
+    
+    v2: drop insecure GEM_FLINK to force use of dmabuf
+    
+    Signed-off-by: David Herrmann <dh.herrmann@gmail.com>
+    Signed-off-by: Dave Airlie <airlied@redhat.com>
+
+diff --git a/drivers/gpu/drm/drm_stub.c b/drivers/gpu/drm/drm_stub.c
+index e30bb0d7c67a..e7eb0276f7f1 100644
+--- a/drivers/gpu/drm/drm_stub.c
++++ b/drivers/gpu/drm/drm_stub.c
+@@ -40,6 +40,9 @@
+ unsigned int drm_debug = 0;	/* 1 to enable debug output */
+ EXPORT_SYMBOL(drm_debug);
+ 
++unsigned int drm_rnodes = 0;	/* 1 to enable experimental render nodes API */
++EXPORT_SYMBOL(drm_rnodes);
++
+ unsigned int drm_vblank_offdelay = 5000;    /* Default to 5000 msecs. */
+ EXPORT_SYMBOL(drm_vblank_offdelay);
+ 
+@@ -56,11 +59,13 @@ MODULE_AUTHOR(CORE_AUTHOR);
+ MODULE_DESCRIPTION(CORE_DESC);
+ MODULE_LICENSE("GPL and additional rights");
+ MODULE_PARM_DESC(debug, "Enable debug output");
++MODULE_PARM_DESC(rnodes, "Enable experimental render nodes API");
+ MODULE_PARM_DESC(vblankoffdelay, "Delay until vblank irq auto-disable [msecs]");
+ MODULE_PARM_DESC(timestamp_precision_usec, "Max. error on timestamps [usecs]");
+ MODULE_PARM_DESC(timestamp_monotonic, "Use monotonic timestamps");
+ 
+ module_param_named(debug, drm_debug, int, 0600);
++module_param_named(rnodes, drm_rnodes, int, 0600);
+ module_param_named(vblankoffdelay, drm_vblank_offdelay, int, 0600);
+ module_param_named(timestamp_precision_usec, drm_timestamp_precision, int, 0600);
+ module_param_named(timestamp_monotonic, drm_timestamp_monotonic, int, 0600);
+@@ -446,6 +451,9 @@ void drm_put_dev(struct drm_device *dev)
+ 	if (drm_core_check_feature(dev, DRIVER_MODESET))
+ 		drm_put_minor(&dev->control);
+ 
++	if (dev->render)
++		drm_put_minor(&dev->render);
++
+ 	if (driver->driver_features & DRIVER_GEM)
+ 		drm_gem_destroy(dev);
+ 
+@@ -462,6 +470,8 @@ void drm_unplug_dev(struct drm_device *dev)
+ 	/* for a USB device */
+ 	if (drm_core_check_feature(dev, DRIVER_MODESET))
+ 		drm_unplug_minor(dev->control);
++	if (dev->render)
++		drm_unplug_minor(dev->render);
+ 	drm_unplug_minor(dev->primary);
+ 
+ 	mutex_lock(&drm_global_mutex);

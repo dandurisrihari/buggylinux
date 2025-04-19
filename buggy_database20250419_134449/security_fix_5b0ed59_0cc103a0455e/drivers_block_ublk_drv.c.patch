@@ -1,0 +1,217 @@
+commit 5b0ed5964928b0aaf0d644c17c886c7f5ea4bb3f
+Merge: 553637f73c31 0aa2988e4fd2
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Mon Feb 20 14:27:21 2023 -0800
+
+    Merge tag 'for-6.3/block-2023-02-16' of git://git.kernel.dk/linux
+    
+    Pull block updates from Jens Axboe:
+    
+     - NVMe updates via Christoph:
+          - Small improvements to the logging functionality (Amit Engel)
+          - Authentication cleanups (Hannes Reinecke)
+          - Cleanup and optimize the DMA mapping cod in the PCIe driver
+            (Keith Busch)
+          - Work around the command effects for Format NVM (Keith Busch)
+          - Misc cleanups (Keith Busch, Christoph Hellwig)
+          - Fix and cleanup freeing single sgl (Keith Busch)
+    
+     - MD updates via Song:
+          - Fix a rare crash during the takeover process
+          - Don't update recovery_cp when curr_resync is ACTIVE
+          - Free writes_pending in md_stop
+          - Change active_io to percpu
+    
+     - Updates to drbd, inching us closer to unifying the out-of-tree driver
+       with the in-tree one (Andreas, Christoph, Lars, Robert)
+    
+     - BFQ update adding support for multi-actuator drives (Paolo, Federico,
+       Davide)
+    
+     - Make brd compliant with REQ_NOWAIT (me)
+    
+     - Fix for IOPOLL and queue entering, fixing stalled IO waiting on
+       timeouts (me)
+    
+     - Fix for REQ_NOWAIT with multiple bios (me)
+    
+     - Fix memory leak in blktrace cleanup (Greg)
+    
+     - Clean up sbitmap and fix a potential hang (Kemeng)
+    
+     - Clean up some bits in BFQ, and fix a bug in the request injection
+       (Kemeng)
+    
+     - Clean up the request allocation and issue code, and fix some bugs
+       related to that (Kemeng)
+    
+     - ublk updates and fixes:
+          - Add support for unprivileged ublk (Ming)
+          - Improve device deletion handling (Ming)
+          - Misc (Liu, Ziyang)
+    
+     - s390 dasd fixes (Alexander, Qiheng)
+    
+     - Improve utility of request caching and fixes (Anuj, Xiao)
+    
+     - zoned cleanups (Pankaj)
+    
+     - More constification for kobjs (Thomas)
+    
+     - blk-iocost cleanups (Yu)
+    
+     - Remove bio splitting from drivers that don't need it (Christoph)
+    
+     - Switch blk-cgroups to use struct gendisk. Some of this is now
+       incomplete as select late reverts were done. (Christoph)
+    
+     - Add bvec initialization helpers, and convert callers to use that
+       rather than open-coding it (Christoph)
+    
+     - Misc fixes and cleanups (Jinke, Keith, Arnd, Bart, Li, Martin,
+       Matthew, Ulf, Zhong)
+    
+    * tag 'for-6.3/block-2023-02-16' of git://git.kernel.dk/linux: (169 commits)
+      brd: use radix_tree_maybe_preload instead of radix_tree_preload
+      block: use proper return value from bio_failfast()
+      block: bio-integrity: Copy flags when bio_integrity_payload is cloned
+      block: Fix io statistics for cgroup in throttle path
+      brd: mark as nowait compatible
+      brd: check for REQ_NOWAIT and set correct page allocation mask
+      brd: return 0/-error from brd_insert_page()
+      block: sync mixed merged request's failfast with 1st bio's
+      Revert "blk-cgroup: pin the gendisk in struct blkcg_gq"
+      Revert "blk-cgroup: pass a gendisk to blkg_lookup"
+      Revert "blk-cgroup: delay blk-cgroup initialization until add_disk"
+      Revert "blk-cgroup: delay calling blkcg_exit_disk until disk_release"
+      Revert "blk-cgroup: move the cgroup information to struct gendisk"
+      nvme-pci: remove iod use_sgls
+      nvme-pci: fix freeing single sgl
+      block: ublk: check IO buffer based on flag need_get_data
+      s390/dasd: Fix potential memleak in dasd_eckd_init()
+      s390/dasd: sort out physical vs virtual pointers usage
+      block: Remove the ALLOC_CACHE_SLACK constant
+      block: make kobj_type structures constant
+      ...
+
+diff --cc drivers/block/ublk_drv.c
+index 6368b56eacf1,f48d213fb65e..b9c759cef00e
+--- a/drivers/block/ublk_drv.c
++++ b/drivers/block/ublk_drv.c
+@@@ -1982,7 -2053,115 +2053,115 @@@ static int ublk_ctrl_end_recovery(struc
+  	ret = 0;
+   out_unlock:
+  	mutex_unlock(&ub->mutex);
+- 	ublk_put_device(ub);
++ 	return ret;
++ }
++ 
++ /*
++  * All control commands are sent via /dev/ublk-control, so we have to check
++  * the destination device's permission
++  */
++ static int ublk_char_dev_permission(struct ublk_device *ub,
++ 		const char *dev_path, int mask)
++ {
++ 	int err;
++ 	struct path path;
++ 	struct kstat stat;
++ 
++ 	err = kern_path(dev_path, LOOKUP_FOLLOW, &path);
++ 	if (err)
++ 		return err;
++ 
++ 	err = vfs_getattr(&path, &stat, STATX_TYPE, AT_STATX_SYNC_AS_STAT);
++ 	if (err)
++ 		goto exit;
++ 
++ 	err = -EPERM;
++ 	if (stat.rdev != ub->cdev_dev.devt || !S_ISCHR(stat.mode))
++ 		goto exit;
++ 
+ -	err = inode_permission(&init_user_ns,
+++	err = inode_permission(&nop_mnt_idmap,
++ 			d_backing_inode(path.dentry), mask);
++ exit:
++ 	path_put(&path);
++ 	return err;
++ }
++ 
++ static int ublk_ctrl_uring_cmd_permission(struct ublk_device *ub,
++ 		struct io_uring_cmd *cmd)
++ {
++ 	struct ublksrv_ctrl_cmd *header = (struct ublksrv_ctrl_cmd *)cmd->cmd;
++ 	bool unprivileged = ub->dev_info.flags & UBLK_F_UNPRIVILEGED_DEV;
++ 	void __user *argp = (void __user *)(unsigned long)header->addr;
++ 	char *dev_path = NULL;
++ 	int ret = 0;
++ 	int mask;
++ 
++ 	if (!unprivileged) {
++ 		if (!capable(CAP_SYS_ADMIN))
++ 			return -EPERM;
++ 		/*
++ 		 * The new added command of UBLK_CMD_GET_DEV_INFO2 includes
++ 		 * char_dev_path in payload too, since userspace may not
++ 		 * know if the specified device is created as unprivileged
++ 		 * mode.
++ 		 */
++ 		if (cmd->cmd_op != UBLK_CMD_GET_DEV_INFO2)
++ 			return 0;
++ 	}
++ 
++ 	/*
++ 	 * User has to provide the char device path for unprivileged ublk
++ 	 *
++ 	 * header->addr always points to the dev path buffer, and
++ 	 * header->dev_path_len records length of dev path buffer.
++ 	 */
++ 	if (!header->dev_path_len || header->dev_path_len > PATH_MAX)
++ 		return -EINVAL;
++ 
++ 	if (header->len < header->dev_path_len)
++ 		return -EINVAL;
++ 
++ 	dev_path = kmalloc(header->dev_path_len + 1, GFP_KERNEL);
++ 	if (!dev_path)
++ 		return -ENOMEM;
++ 
++ 	ret = -EFAULT;
++ 	if (copy_from_user(dev_path, argp, header->dev_path_len))
++ 		goto exit;
++ 	dev_path[header->dev_path_len] = 0;
++ 
++ 	ret = -EINVAL;
++ 	switch (cmd->cmd_op) {
++ 	case UBLK_CMD_GET_DEV_INFO:
++ 	case UBLK_CMD_GET_DEV_INFO2:
++ 	case UBLK_CMD_GET_QUEUE_AFFINITY:
++ 	case UBLK_CMD_GET_PARAMS:
++ 		mask = MAY_READ;
++ 		break;
++ 	case UBLK_CMD_START_DEV:
++ 	case UBLK_CMD_STOP_DEV:
++ 	case UBLK_CMD_ADD_DEV:
++ 	case UBLK_CMD_DEL_DEV:
++ 	case UBLK_CMD_SET_PARAMS:
++ 	case UBLK_CMD_START_USER_RECOVERY:
++ 	case UBLK_CMD_END_USER_RECOVERY:
++ 		mask = MAY_READ | MAY_WRITE;
++ 		break;
++ 	default:
++ 		goto exit;
++ 	}
++ 
++ 	ret = ublk_char_dev_permission(ub, dev_path, mask);
++ 	if (!ret) {
++ 		header->len -= header->dev_path_len;
++ 		header->addr += header->dev_path_len;
++ 	}
++ 	pr_devel("%s: dev id %d cmd_op %x uid %d gid %d path %s ret %d\n",
++ 			__func__, ub->ub_number, cmd->cmd_op,
++ 			ub->dev_info.owner_uid, ub->dev_info.owner_gid,
++ 			dev_path, ret);
++ exit:
++ 	kfree(dev_path);
+  	return ret;
+  }

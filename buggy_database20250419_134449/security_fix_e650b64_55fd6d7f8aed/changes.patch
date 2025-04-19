@@ -1,0 +1,117 @@
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index 0672b3db6121..7a1faf917f3c 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -407,9 +407,33 @@ struct kvm_vcpu_arch {
+ #define KVM_ARM64_GUEST_HAS_SVE		(1 << 5) /* SVE exposed to guest */
+ #define KVM_ARM64_VCPU_SVE_FINALIZED	(1 << 6) /* SVE config completed */
+ #define KVM_ARM64_GUEST_HAS_PTRAUTH	(1 << 7) /* PTRAUTH exposed to guest */
+-#define KVM_ARM64_INCREMENT_PC		(1 << 8) /* Increment PC */
++#define KVM_ARM64_PENDING_EXCEPTION	(1 << 8) /* Exception pending */
++#define KVM_ARM64_EXCEPT_MASK		(7 << 9) /* Target EL/MODE */
+ 
+-#define vcpu_has_sve(vcpu) (system_supports_sve() && \
++/*
++ * When KVM_ARM64_PENDING_EXCEPTION is set, KVM_ARM64_EXCEPT_MASK can
++ * take the following values:
++ *
++ * For AArch32 EL1:
++ */
++#define KVM_ARM64_EXCEPT_AA32_UND	(0 << 9)
++#define KVM_ARM64_EXCEPT_AA32_IABT	(1 << 9)
++#define KVM_ARM64_EXCEPT_AA32_DABT	(2 << 9)
++/* For AArch64: */
++#define KVM_ARM64_EXCEPT_AA64_ELx_SYNC	(0 << 9)
++#define KVM_ARM64_EXCEPT_AA64_ELx_IRQ	(1 << 9)
++#define KVM_ARM64_EXCEPT_AA64_ELx_FIQ	(2 << 9)
++#define KVM_ARM64_EXCEPT_AA64_ELx_SERR	(3 << 9)
++#define KVM_ARM64_EXCEPT_AA64_EL1	(0 << 11)
++#define KVM_ARM64_EXCEPT_AA64_EL2	(1 << 11)
++
++/*
++ * Overlaps with KVM_ARM64_EXCEPT_MASK on purpose so that it can't be
++ * set together with an exception...
++ */
++#define KVM_ARM64_INCREMENT_PC		(1 << 9) /* Increment PC */
++
++#define vcpu_has_sve(vcpu) (system_supports_sve() &&			\
+ 			    ((vcpu)->arch.flags & KVM_ARM64_GUEST_HAS_SVE))
+ 
+ #ifdef CONFIG_ARM64_PTR_AUTH
+diff --git a/arch/arm64/kvm/hyp/exception.c b/arch/arm64/kvm/hyp/exception.c
+new file mode 100644
+index 000000000000..6533a9270850
+--- /dev/null
++++ b/arch/arm64/kvm/hyp/exception.c
+@@ -0,0 +1,17 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Fault injection for both 32 and 64bit guests.
++ *
++ * Copyright (C) 2012,2013 - ARM Ltd
++ * Author: Marc Zyngier <marc.zyngier@arm.com>
++ *
++ * Based on arch/arm/kvm/emulate.c
++ * Copyright (C) 2012 - Virtual Open Systems and Columbia University
++ * Author: Christoffer Dall <c.dall@virtualopensystems.com>
++ */
++
++#include <hyp/adjust_pc.h>
++
++void kvm_inject_exception(struct kvm_vcpu *vcpu)
++{
++}
+diff --git a/arch/arm64/kvm/hyp/include/hyp/adjust_pc.h b/arch/arm64/kvm/hyp/include/hyp/adjust_pc.h
+index d3043b07e78e..b1f60923a8fe 100644
+--- a/arch/arm64/kvm/hyp/include/hyp/adjust_pc.h
++++ b/arch/arm64/kvm/hyp/include/hyp/adjust_pc.h
+@@ -13,6 +13,8 @@
+ #include <asm/kvm_emulate.h>
+ #include <asm/kvm_host.h>
+ 
++void kvm_inject_exception(struct kvm_vcpu *vcpu);
++
+ static inline void kvm_skip_instr(struct kvm_vcpu *vcpu)
+ {
+ 	if (vcpu_mode_is_32bit(vcpu)) {
+@@ -43,11 +45,15 @@ static inline void __kvm_skip_instr(struct kvm_vcpu *vcpu)
+ 
+ /*
+  * Adjust the guest PC on entry, depending on flags provided by EL1
+- * for the purpose of emulation (MMIO, sysreg).
++ * for the purpose of emulation (MMIO, sysreg) or exception injection.
+  */
+ static inline void __adjust_pc(struct kvm_vcpu *vcpu)
+ {
+-	if (vcpu->arch.flags & KVM_ARM64_INCREMENT_PC) {
++	if (vcpu->arch.flags & KVM_ARM64_PENDING_EXCEPTION) {
++		kvm_inject_exception(vcpu);
++		vcpu->arch.flags &= ~(KVM_ARM64_PENDING_EXCEPTION |
++				      KVM_ARM64_EXCEPT_MASK);
++	} else 	if (vcpu->arch.flags & KVM_ARM64_INCREMENT_PC) {
+ 		kvm_skip_instr(vcpu);
+ 		vcpu->arch.flags &= ~KVM_ARM64_INCREMENT_PC;
+ 	}
+diff --git a/arch/arm64/kvm/hyp/nvhe/Makefile b/arch/arm64/kvm/hyp/nvhe/Makefile
+index ddde15fe85f2..77b8c4e06f2f 100644
+--- a/arch/arm64/kvm/hyp/nvhe/Makefile
++++ b/arch/arm64/kvm/hyp/nvhe/Makefile
+@@ -8,7 +8,7 @@ ccflags-y := -D__KVM_NVHE_HYPERVISOR__
+ 
+ obj-y := timer-sr.o sysreg-sr.o debug-sr.o switch.o tlb.o hyp-init.o host.o hyp-main.o
+ obj-y += ../vgic-v3-sr.o ../aarch32.o ../vgic-v2-cpuif-proxy.o ../entry.o \
+-	 ../fpsimd.o ../hyp-entry.o
++	 ../fpsimd.o ../hyp-entry.o ../exception.o
+ 
+ ##
+ ## Build rules for compiling nVHE hyp code
+diff --git a/arch/arm64/kvm/hyp/vhe/Makefile b/arch/arm64/kvm/hyp/vhe/Makefile
+index 461e97c375cc..96bec0ecf9dd 100644
+--- a/arch/arm64/kvm/hyp/vhe/Makefile
++++ b/arch/arm64/kvm/hyp/vhe/Makefile
+@@ -8,4 +8,4 @@ ccflags-y := -D__KVM_VHE_HYPERVISOR__
+ 
+ obj-y := timer-sr.o sysreg-sr.o debug-sr.o switch.o tlb.o
+ obj-y += ../vgic-v3-sr.o ../aarch32.o ../vgic-v2-cpuif-proxy.o ../entry.o \
+-	 ../fpsimd.o ../hyp-entry.o
++	 ../fpsimd.o ../hyp-entry.o ../exception.o

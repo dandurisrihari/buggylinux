@@ -1,0 +1,233 @@
+diff --git a/drivers/net/wireless/ath/ath10k/core.h b/drivers/net/wireless/ath/ath10k/core.h
+index fe531ea6926c..d1ea936d14b7 100644
+--- a/drivers/net/wireless/ath/ath10k/core.h
++++ b/drivers/net/wireless/ath/ath10k/core.h
+@@ -234,6 +234,8 @@ struct ath10k_vif {
+ 	struct sk_buff *beacon;
+ 	/* protected by data_lock */
+ 	bool beacon_sent;
++	void *beacon_buf;
++	dma_addr_t beacon_paddr;
+ 
+ 	struct ath10k *ar;
+ 	struct ieee80211_vif *vif;
+diff --git a/drivers/net/wireless/ath/ath10k/mac.c b/drivers/net/wireless/ath/ath10k/mac.c
+index c708c100e361..fe00a71a4dba 100644
+--- a/drivers/net/wireless/ath/ath10k/mac.c
++++ b/drivers/net/wireless/ath/ath10k/mac.c
+@@ -479,6 +479,40 @@ static void ath10k_peer_cleanup_all(struct ath10k *ar)
+ /* Interface management */
+ /************************/
+ 
++void ath10k_mac_vif_beacon_free(struct ath10k_vif *arvif)
++{
++	struct ath10k *ar = arvif->ar;
++
++	lockdep_assert_held(&ar->data_lock);
++
++	if (!arvif->beacon)
++		return;
++
++	if (!arvif->beacon_buf)
++		dma_unmap_single(ar->dev, ATH10K_SKB_CB(arvif->beacon)->paddr,
++				 arvif->beacon->len, DMA_TO_DEVICE);
++
++	dev_kfree_skb_any(arvif->beacon);
++
++	arvif->beacon = NULL;
++	arvif->beacon_sent = false;
++}
++
++static void ath10k_mac_vif_beacon_cleanup(struct ath10k_vif *arvif)
++{
++	struct ath10k *ar = arvif->ar;
++
++	lockdep_assert_held(&ar->data_lock);
++
++	ath10k_mac_vif_beacon_free(arvif);
++
++	if (arvif->beacon_buf) {
++		dma_free_coherent(ar->dev, IEEE80211_MAX_FRAME_LEN,
++				  arvif->beacon_buf, arvif->beacon_paddr);
++		arvif->beacon_buf = NULL;
++	}
++}
++
+ static inline int ath10k_vdev_setup_sync(struct ath10k *ar)
+ {
+ 	int ret;
+@@ -909,15 +943,7 @@ static void ath10k_control_beaconing(struct ath10k_vif *arvif,
+ 		arvif->is_up = false;
+ 
+ 		spin_lock_bh(&arvif->ar->data_lock);
+-		if (arvif->beacon) {
+-			dma_unmap_single(arvif->ar->dev,
+-					 ATH10K_SKB_CB(arvif->beacon)->paddr,
+-					 arvif->beacon->len, DMA_TO_DEVICE);
+-			dev_kfree_skb_any(arvif->beacon);
+-
+-			arvif->beacon = NULL;
+-			arvif->beacon_sent = false;
+-		}
++		ath10k_mac_vif_beacon_free(arvif);
+ 		spin_unlock_bh(&arvif->ar->data_lock);
+ 
+ 		return;
+@@ -2376,16 +2402,8 @@ void ath10k_halt(struct ath10k *ar)
+ 	ath10k_hif_power_down(ar);
+ 
+ 	spin_lock_bh(&ar->data_lock);
+-	list_for_each_entry(arvif, &ar->arvifs, list) {
+-		if (!arvif->beacon)
+-			continue;
+-
+-		dma_unmap_single(arvif->ar->dev,
+-				 ATH10K_SKB_CB(arvif->beacon)->paddr,
+-				 arvif->beacon->len, DMA_TO_DEVICE);
+-		dev_kfree_skb_any(arvif->beacon);
+-		arvif->beacon = NULL;
+-	}
++	list_for_each_entry(arvif, &ar->arvifs, list)
++		ath10k_mac_vif_beacon_cleanup(arvif);
+ 	spin_unlock_bh(&ar->data_lock);
+ }
+ 
+@@ -2804,8 +2822,39 @@ static int ath10k_add_interface(struct ieee80211_hw *hw,
+ 		break;
+ 	}
+ 
+-	ath10k_dbg(ar, ATH10K_DBG_MAC, "mac vdev create %d (add interface) type %d subtype %d\n",
+-		   arvif->vdev_id, arvif->vdev_type, arvif->vdev_subtype);
++	/* Some firmware revisions don't wait for beacon tx completion before
++	 * sending another SWBA event. This could lead to hardware using old
++	 * (freed) beacon data in some cases, e.g. tx credit starvation
++	 * combined with missed TBTT. This is very very rare.
++	 *
++	 * On non-IOMMU-enabled hosts this could be a possible security issue
++	 * because hw could beacon some random data on the air.  On
++	 * IOMMU-enabled hosts DMAR faults would occur in most cases and target
++	 * device would crash.
++	 *
++	 * Since there are no beacon tx completions (implicit nor explicit)
++	 * propagated to host the only workaround for this is to allocate a
++	 * DMA-coherent buffer for a lifetime of a vif and use it for all
++	 * beacon tx commands. Worst case for this approach is some beacons may
++	 * become corrupted, e.g. have garbled IEs or out-of-date TIM bitmap.
++	 */
++	if (vif->type == NL80211_IFTYPE_ADHOC ||
++	    vif->type == NL80211_IFTYPE_AP) {
++		arvif->beacon_buf = dma_zalloc_coherent(ar->dev,
++							IEEE80211_MAX_FRAME_LEN,
++							&arvif->beacon_paddr,
++							GFP_KERNEL);
++		if (!arvif->beacon_buf) {
++			ret = -ENOMEM;
++			ath10k_warn(ar, "failed to allocate beacon buffer: %d\n",
++				    ret);
++			goto err;
++		}
++	}
++
++	ath10k_dbg(ar, ATH10K_DBG_MAC, "mac vdev create %d (add interface) type %d subtype %d bcnmode %s\n",
++		   arvif->vdev_id, arvif->vdev_type, arvif->vdev_subtype,
++		   arvif->beacon_buf ? "single-buf" : "per-skb");
+ 
+ 	ret = ath10k_wmi_vdev_create(ar, arvif->vdev_id, arvif->vdev_type,
+ 				     arvif->vdev_subtype, vif->addr);
+@@ -2912,6 +2961,12 @@ static int ath10k_add_interface(struct ieee80211_hw *hw,
+ 	list_del(&arvif->list);
+ 
+ err:
++	if (arvif->beacon_buf) {
++		dma_free_coherent(ar->dev, IEEE80211_MAX_FRAME_LEN,
++				  arvif->beacon_buf, arvif->beacon_paddr);
++		arvif->beacon_buf = NULL;
++	}
++
+ 	mutex_unlock(&ar->conf_mutex);
+ 
+ 	return ret;
+@@ -2929,14 +2984,7 @@ static void ath10k_remove_interface(struct ieee80211_hw *hw,
+ 	cancel_work_sync(&arvif->wep_key_work);
+ 
+ 	spin_lock_bh(&ar->data_lock);
+-	if (arvif->beacon) {
+-		dma_unmap_single(arvif->ar->dev,
+-				 ATH10K_SKB_CB(arvif->beacon)->paddr,
+-				 arvif->beacon->len, DMA_TO_DEVICE);
+-		dev_kfree_skb_any(arvif->beacon);
+-		arvif->beacon = NULL;
+-	}
+-
++	ath10k_mac_vif_beacon_cleanup(arvif);
+ 	spin_unlock_bh(&ar->data_lock);
+ 
+ 	ret = ath10k_spectral_vif_stop(arvif);
+diff --git a/drivers/net/wireless/ath/ath10k/mac.h b/drivers/net/wireless/ath/ath10k/mac.h
+index 6c80eeada3e2..965c51117499 100644
+--- a/drivers/net/wireless/ath/ath10k/mac.h
++++ b/drivers/net/wireless/ath/ath10k/mac.h
+@@ -39,6 +39,7 @@ void ath10k_offchan_tx_work(struct work_struct *work);
+ void ath10k_mgmt_over_wmi_tx_purge(struct ath10k *ar);
+ void ath10k_mgmt_over_wmi_tx_work(struct work_struct *work);
+ void ath10k_halt(struct ath10k *ar);
++void ath10k_mac_vif_beacon_free(struct ath10k_vif *arvif);
+ 
+ static inline struct ath10k_vif *ath10k_vif_to_arvif(struct ieee80211_vif *vif)
+ {
+diff --git a/drivers/net/wireless/ath/ath10k/wmi.c b/drivers/net/wireless/ath/ath10k/wmi.c
+index 2c42bd504b79..66392f6f1ab1 100644
+--- a/drivers/net/wireless/ath/ath10k/wmi.c
++++ b/drivers/net/wireless/ath/ath10k/wmi.c
+@@ -1579,6 +1579,7 @@ static void ath10k_wmi_event_host_swba(struct ath10k *ar, struct sk_buff *skb)
+ 	struct wmi_bcn_info *bcn_info;
+ 	struct ath10k_vif *arvif;
+ 	struct sk_buff *bcn;
++	dma_addr_t paddr;
+ 	int ret, vdev_id = 0;
+ 
+ 	ev = (struct wmi_host_swba_event *)skb->data;
+@@ -1647,22 +1648,29 @@ static void ath10k_wmi_event_host_swba(struct ath10k *ar, struct sk_buff *skb)
+ 				ath10k_warn(ar, "SWBA overrun on vdev %d\n",
+ 					    arvif->vdev_id);
+ 
+-			dma_unmap_single(arvif->ar->dev,
+-					 ATH10K_SKB_CB(arvif->beacon)->paddr,
+-					 arvif->beacon->len, DMA_TO_DEVICE);
+-			dev_kfree_skb_any(arvif->beacon);
+-			arvif->beacon = NULL;
++			ath10k_mac_vif_beacon_free(arvif);
+ 		}
+ 
+-		ATH10K_SKB_CB(bcn)->paddr = dma_map_single(arvif->ar->dev,
+-							   bcn->data, bcn->len,
+-							   DMA_TO_DEVICE);
+-		ret = dma_mapping_error(arvif->ar->dev,
+-					ATH10K_SKB_CB(bcn)->paddr);
+-		if (ret) {
+-			ath10k_warn(ar, "failed to map beacon: %d\n", ret);
+-			dev_kfree_skb_any(bcn);
+-			goto skip;
++		if (!arvif->beacon_buf) {
++			paddr = dma_map_single(arvif->ar->dev, bcn->data,
++					       bcn->len, DMA_TO_DEVICE);
++			ret = dma_mapping_error(arvif->ar->dev, paddr);
++			if (ret) {
++				ath10k_warn(ar, "failed to map beacon: %d\n",
++					    ret);
++				dev_kfree_skb_any(bcn);
++				goto skip;
++			}
++
++			ATH10K_SKB_CB(bcn)->paddr = paddr;
++		} else {
++			if (bcn->len > IEEE80211_MAX_FRAME_LEN) {
++				ath10k_warn(ar, "trimming beacon %d -> %d bytes!\n",
++					    bcn->len, IEEE80211_MAX_FRAME_LEN);
++				skb_trim(bcn, IEEE80211_MAX_FRAME_LEN);
++			}
++			memcpy(arvif->beacon_buf, bcn->data, bcn->len);
++			ATH10K_SKB_CB(bcn)->paddr = arvif->beacon_paddr;
+ 		}
+ 
+ 		arvif->beacon = bcn;

@@ -1,0 +1,55 @@
+commit b6ef70f33ca2a3084b4fea12414550724a9114dc
+Author: Salyzyn, Mark <Mark_Salyzyn@adaptec.com>
+Date:   Tue Jan 8 13:26:43 2008 -0800
+
+    [SCSI] aacraid: OS panic after Adapter panic (hardening).
+    
+    In experiments in the lab we managed to trigger an Adapter firmware
+    panic (BlinkLED) coincidentally while several pass-through ioctl
+    command from the management software were outstanding on a bug only
+    present on a class of RAID Adapters that require a hardware reset
+    rather than a commanded reset. The net result was an attempt to time
+    out the management software command as if it came from the SCSI layer
+    resulting in an OS panic.
+    
+    Adapters that use commanded reset, management commands are returned
+    failed by the Adapter correctly. The adapter firmware panic that
+    resulted in this condition was also resolved, and there were no
+    adapters in the field with this specific firmware bug so we do not
+    expect any field reports. This is a rare or unlikely corner condition,
+    and no reports have ever been forwarded from the field.
+    
+    Signed-off-by: Mark Salyzyn <aacraid@adaptec.com>
+    Signed-off-by: James Bottomley <James.Bottomley@HansenPartnership.com>
+
+diff --git a/drivers/scsi/aacraid/commsup.c b/drivers/scsi/aacraid/commsup.c
+index e82d89ccaf15..3a3017d8dc65 100644
+--- a/drivers/scsi/aacraid/commsup.c
++++ b/drivers/scsi/aacraid/commsup.c
+@@ -171,6 +171,7 @@ struct fib *aac_fib_alloc(struct aac_dev *dev)
+ 	 *	each I/O
+ 	 */
+ 	fibptr->hw_fib_va->header.XferState = 0;
++	fibptr->flags = 0;
+ 	fibptr->callback = NULL;
+ 	fibptr->callback_data = NULL;
+ 
+@@ -402,6 +403,7 @@ int aac_fib_send(u16 command, struct fib *fibptr, unsigned long size,
+ 	 *	will have a debug mode where the adapter can notify the host
+ 	 *	it had a problem and the host can log that fact.
+ 	 */
++	fibptr->flags = 0;
+ 	if (wait && !reply) {
+ 		return -EINVAL;
+ 	} else if (!wait && reply) {
+@@ -450,10 +452,10 @@ int aac_fib_send(u16 command, struct fib *fibptr, unsigned long size,
+ 	if (!wait) {
+ 		fibptr->callback = callback;
+ 		fibptr->callback_data = callback_data;
++		fibptr->flags = FIB_CONTEXT_FLAG;
+ 	}
+ 
+ 	fibptr->done = 0;
+-	fibptr->flags = 0;
+ 
+ 	FIB_COUNTER_INCREMENT(aac_config.FibsSent);

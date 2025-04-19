@@ -1,0 +1,120 @@
+diff --git a/arch/x86/kvm/lapic.c b/arch/x86/kvm/lapic.c
+index 7ed2400b2777..9fa5b8164961 100644
+--- a/arch/x86/kvm/lapic.c
++++ b/arch/x86/kvm/lapic.c
+@@ -385,12 +385,8 @@ EXPORT_SYMBOL_GPL(__kvm_apic_update_irr);
+ int kvm_apic_update_irr(struct kvm_vcpu *vcpu, u32 *pir)
+ {
+ 	struct kvm_lapic *apic = vcpu->arch.apic;
+-	int max_irr;
+ 
+-	max_irr = __kvm_apic_update_irr(pir, apic->regs);
+-
+-	kvm_make_request(KVM_REQ_EVENT, vcpu);
+-	return max_irr;
++	return __kvm_apic_update_irr(pir, apic->regs);
+ }
+ EXPORT_SYMBOL_GPL(kvm_apic_update_irr);
+ 
+@@ -423,9 +419,10 @@ static inline void apic_clear_irr(int vec, struct kvm_lapic *apic)
+ 	vcpu = apic->vcpu;
+ 
+ 	if (unlikely(vcpu->arch.apicv_active)) {
+-		/* try to update RVI */
++		/* need to update RVI */
+ 		apic_clear_vector(vec, apic->regs + APIC_IRR);
+-		kvm_make_request(KVM_REQ_EVENT, vcpu);
++		kvm_x86_ops->hwapic_irr_update(vcpu,
++				apic_find_highest_irr(apic));
+ 	} else {
+ 		apic->irr_pending = false;
+ 		apic_clear_vector(vec, apic->regs + APIC_IRR);
+diff --git a/arch/x86/kvm/vmx.c b/arch/x86/kvm/vmx.c
+index d03cb62b70d2..fd8cd50e9dc6 100644
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -5051,9 +5051,11 @@ static void vmx_deliver_posted_interrupt(struct kvm_vcpu *vcpu, int vector)
+ 	if (pi_test_and_set_pir(vector, &vmx->pi_desc))
+ 		return;
+ 
+-	r = pi_test_and_set_on(&vmx->pi_desc);
+-	kvm_make_request(KVM_REQ_EVENT, vcpu);
+-	if (r || !kvm_vcpu_trigger_posted_interrupt(vcpu))
++	/* If a previous notification has sent the IPI, nothing to do.  */
++	if (pi_test_and_set_on(&vmx->pi_desc))
++		return;
++
++	if (!kvm_vcpu_trigger_posted_interrupt(vcpu))
+ 		kvm_vcpu_kick(vcpu);
+ }
+ 
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 75b0f30d75ee..63a89a51dcc9 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -6813,19 +6813,6 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 			kvm_hv_process_stimers(vcpu);
+ 	}
+ 
+-	/*
+-	 * KVM_REQ_EVENT is not set when posted interrupts are set by
+-	 * VT-d hardware, so we have to update RVI unconditionally.
+-	 */
+-	if (kvm_lapic_enabled(vcpu)) {
+-		/*
+-		 * Update architecture specific hints for APIC
+-		 * virtual interrupt delivery.
+-		 */
+-		if (kvm_x86_ops->sync_pir_to_irr && vcpu->arch.apicv_active)
+-			kvm_x86_ops->sync_pir_to_irr(vcpu);
+-	}
+-
+ 	if (kvm_check_request(KVM_REQ_EVENT, vcpu) || req_int_win) {
+ 		++vcpu->stat.req_event;
+ 		kvm_apic_accept_events(vcpu);
+@@ -6870,20 +6857,39 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 	kvm_x86_ops->prepare_guest_switch(vcpu);
+ 	if (vcpu->fpu_active)
+ 		kvm_load_guest_fpu(vcpu);
++
++	/*
++	 * Disable IRQs before setting IN_GUEST_MODE.  Posted interrupt
++	 * IPI are then delayed after guest entry, which ensures that they
++	 * result in virtual interrupt delivery.
++	 */
++	local_irq_disable();
+ 	vcpu->mode = IN_GUEST_MODE;
+ 
+ 	srcu_read_unlock(&vcpu->kvm->srcu, vcpu->srcu_idx);
+ 
+ 	/*
+-	 * We should set ->mode before check ->requests,
+-	 * Please see the comment in kvm_make_all_cpus_request.
+-	 * This also orders the write to mode from any reads
+-	 * to the page tables done while the VCPU is running.
+-	 * Please see the comment in kvm_flush_remote_tlbs.
++	 * 1) We should set ->mode before checking ->requests.  Please see
++	 * the comment in kvm_make_all_cpus_request.
++	 *
++	 * 2) For APICv, we should set ->mode before checking PIR.ON.  This
++	 * pairs with the memory barrier implicit in pi_test_and_set_on
++	 * (see vmx_deliver_posted_interrupt).
++	 *
++	 * 3) This also orders the write to mode from any reads to the page
++	 * tables done while the VCPU is running.  Please see the comment
++	 * in kvm_flush_remote_tlbs.
+ 	 */
+ 	smp_mb__after_srcu_read_unlock();
+ 
+-	local_irq_disable();
++	/*
++	 * This handles the case where a posted interrupt was
++	 * notified with kvm_vcpu_kick.
++	 */
++	if (kvm_lapic_enabled(vcpu)) {
++		if (kvm_x86_ops->sync_pir_to_irr && vcpu->arch.apicv_active)
++			kvm_x86_ops->sync_pir_to_irr(vcpu);
++	}
+ 
+ 	if (vcpu->mode == EXITING_GUEST_MODE || vcpu->requests
+ 	    || need_resched() || signal_pending(current)) {

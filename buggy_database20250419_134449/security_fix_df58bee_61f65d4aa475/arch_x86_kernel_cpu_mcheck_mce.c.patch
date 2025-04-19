@@ -1,0 +1,76 @@
+commit df58bee21ed218cb7dfb561a590b1bd2a99531cf
+Merge: dcbf77b9e86e e34e77ce348f
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Thu Sep 17 21:07:08 2009 -0700
+
+    Merge branch 'x86-mce-for-linus' of git://git.kernel.org/pub/scm/linux/kernel/git/tip/linux-2.6-tip
+    
+    * 'x86-mce-for-linus' of git://git.kernel.org/pub/scm/linux/kernel/git/tip/linux-2.6-tip: (21 commits)
+      x86, mce: Fix compilation with !CONFIG_DEBUG_FS in mce-severity.c
+      x86, mce: CE in last bank prevents panic by unknown MCE
+      x86, mce: Fake panic support for MCE testing
+      x86, mce: Move debugfs mce dir creating to mce.c
+      x86, mce: Support specifying raise mode for software MCE injection
+      x86, mce: Support specifying context for software mce injection
+      x86, mce: fix reporting of Thermal Monitoring mechanism enabled
+      x86, mce: remove never executed code
+      x86, mce: add missing __cpuinit tags
+      x86, mce: fix "mce" boot option handling for CONFIG_X86_NEW_MCE
+      x86, mce: don't log boot MCEs on Pentium M (model == 13) CPUs
+      x86: mce: Lower maximum number of banks to architecture limit
+      x86: mce: macros to compute banks MSRs
+      x86: mce: Move per bank data in a single datastructure
+      x86: mce: Move code in mce.c
+      x86: mce: Rename CONFIG_X86_NEW_MCE to CONFIG_X86_MCE
+      x86: mce: Remove old i386 machine check code
+      x86: mce: Update X86_MCE description in x86/Kconfig
+      x86: mce: Make CONFIG_X86_ANCIENT_MCE dependent on CONFIG_X86_MCE
+      x86, mce: use atomic_inc_return() instead of add by 1
+      ...
+    
+    Manually fixed up trivial conflicts:
+            Documentation/feature-removal-schedule.txt
+            arch/x86/kernel/cpu/mcheck/mce.c
+
+diff --cc arch/x86/kernel/cpu/mcheck/mce.c
+index fdd51b554355,325559d1aa58..2f5aab26320e
+--- a/arch/x86/kernel/cpu/mcheck/mce.c
++++ b/arch/x86/kernel/cpu/mcheck/mce.c
+@@@ -1236,13 -1235,8 +1245,13 @@@ static void mce_init(void
+  }
+  
+  /* Add per CPU specific workarounds here */
+- static int mce_cpu_quirks(struct cpuinfo_x86 *c)
+ -static void __cpuinit mce_cpu_quirks(struct cpuinfo_x86 *c)
+++static int __cpuinit mce_cpu_quirks(struct cpuinfo_x86 *c)
+  {
+ +	if (c->x86_vendor == X86_VENDOR_UNKNOWN) {
+ +		pr_info("MCE: unknown CPU type - not enabling MCE support.\n");
+ +		return -EOPNOTSUPP;
+ +	}
+ +
+  	/* This should be disabled by the BIOS, but isn't always */
+  	if (c->x86_vendor == X86_VENDOR_AMD) {
+  		if (c->x86 == 15 && banks > 4) {
+@@@ -1345,9 -1334,20 +1354,20 @@@ static void mce_init_timer(void
+  		return;
+  	setup_timer(t, mcheck_timer, smp_processor_id());
+  	t->expires = round_jiffies(jiffies + *n);
+ -	add_timer(t);
+ +	add_timer_on(t, smp_processor_id());
+  }
+  
++ /* Handle unconfigured int18 (should never happen) */
++ static void unexpected_machine_check(struct pt_regs *regs, long error_code)
++ {
++ 	printk(KERN_ERR "CPU#%d: Unexpected int18 (Machine Check).\n",
++ 	       smp_processor_id());
++ }
++ 
++ /* Call the installed machine check handler for this CPU setup. */
++ void (*machine_check_vector)(struct pt_regs *, long error_code) =
++ 						unexpected_machine_check;
++ 
+  /*
+   * Called for each booted CPU to set up machine checks.
+   * Must be called with preempt off:

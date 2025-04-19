@@ -1,0 +1,36 @@
+commit 3cf57fed216e2c1b6fdfeccb792650bab72a350a
+Author: Marcelo Tosatti <mtosatti@redhat.com>
+Date:   Sat Jul 26 17:01:01 2008 -0300
+
+    KVM: PIT: fix injection logic and count
+    
+    The PIT injection logic is problematic under the following cases:
+    
+    1) If there is a higher priority vector to be delivered by the time
+    kvm_pit_timer_intr_post is invoked ps->inject_pending won't be set.
+    This opens the possibility for missing many PIT event injections (say if
+    guest executes hlt at this point).
+    
+    2) ps->inject_pending is racy with more than two vcpus. Since there's no locking
+    around read/dec of pt->pending, two vcpu's can inject two interrupts for a single
+    pt->pending count.
+    
+    Fix 1 by using an irq ack notifier: only reinject when the previous irq
+    has been acked. Fix 2 with appropriate locking around manipulation of
+    pending count and irq_ack by the injection / ack paths.
+    
+    Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
+    Signed-off-by: Avi Kivity <avi@qumranet.com>
+
+diff --git a/arch/x86/kvm/irq.c b/arch/x86/kvm/irq.c
+index 3c508afaa285..8c1b9c5def78 100644
+--- a/arch/x86/kvm/irq.c
++++ b/arch/x86/kvm/irq.c
+@@ -90,7 +90,6 @@ EXPORT_SYMBOL_GPL(kvm_inject_pending_timer_irqs);
+ void kvm_timer_intr_post(struct kvm_vcpu *vcpu, int vec)
+ {
+ 	kvm_apic_timer_intr_post(vcpu, vec);
+-	kvm_pit_timer_intr_post(vcpu, vec);
+ 	/* TODO: PIT, RTC etc. */
+ }
+ EXPORT_SYMBOL_GPL(kvm_timer_intr_post);

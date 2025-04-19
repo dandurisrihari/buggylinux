@@ -1,0 +1,44 @@
+commit c20383ad1656b0f6354dd50e4acd894f9d94090d
+Author: Julian Wiedmann <jwi@linux.ibm.com>
+Date:   Tue Mar 9 17:52:19 2021 +0100
+
+    s390/qeth: improve completion of pending TX buffers
+    
+    The current design attaches a pending TX buffer to a custom
+    single-linked list, which is anchored at the buffer's slot on the
+    TX ring. The buffer is then checked for final completion whenever
+    this slot is processed during a subsequent TX NAPI poll cycle.
+    
+    But if there's insufficient traffic on the ring, we might never make
+    enough progress to get back to this ring slot and discover the pending
+    buffer's final TX completion. In particular if this missing TX
+    completion blocks the application from sending further traffic.
+    
+    So convert the custom single-linked list code to a per-queue list_head,
+    and scan this list on every TX NAPI cycle.
+    
+    Fixes: 0da9581ddb0f ("qeth: exploit asynchronous delivery of storage blocks")
+    Signed-off-by: Julian Wiedmann <jwi@linux.ibm.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/s390/net/qeth_core.h b/drivers/s390/net/qeth_core.h
+index a1da83b0b0ef..91acff493612 100644
+--- a/drivers/s390/net/qeth_core.h
++++ b/drivers/s390/net/qeth_core.h
+@@ -436,7 +436,7 @@ struct qeth_qdio_out_buffer {
+ 	int is_header[QDIO_MAX_ELEMENTS_PER_BUFFER];
+ 
+ 	struct qeth_qdio_out_q *q;
+-	struct qeth_qdio_out_buffer *next_pending;
++	struct list_head list_entry;
+ };
+ 
+ struct qeth_card;
+@@ -500,6 +500,7 @@ struct qeth_qdio_out_q {
+ 	struct qdio_buffer *qdio_bufs[QDIO_MAX_BUFFERS_PER_Q];
+ 	struct qeth_qdio_out_buffer *bufs[QDIO_MAX_BUFFERS_PER_Q];
+ 	struct qdio_outbuf_state *bufstates; /* convenience pointer */
++	struct list_head pending_bufs;
+ 	struct qeth_out_q_stats stats;
+ 	spinlock_t lock;
+ 	unsigned int priority;

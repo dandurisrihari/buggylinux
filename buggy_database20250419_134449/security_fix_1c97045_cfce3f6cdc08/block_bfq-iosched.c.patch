@@ -1,0 +1,47 @@
+commit 1c970450a7fd8be0298758c4e2c631e4a739292d
+Author: Kemeng Shi <shikemeng@huaweicloud.com>
+Date:   Mon Jan 16 17:51:48 2023 +0800
+
+    block, bfq: initialize bfqq->decrease_time_jif correctly
+    
+    Inject limit is updated or reset when time_is_before_eq_jiffies(
+    decrease_time_jif + several msecs) or think-time state changes.
+    decrease_time_jif is initialized to 0 and will be set to current jiffies
+    when inject limit is updated or reset. If the jiffies is slightly greater
+    than LONG_MAX, time_is_after_eq_jiffies(0) will keep for a long time, so as
+    time_is_after_eq_jiffies(decrease_time_jif + several msecs). If the
+    think-time state never chages, then the injection will not work as expected
+    for long time.
+    
+    To be more specific:
+    Function bfq_update_inject_limit maybe triggered when jiffies pasts
+    decrease_time_jif + msecs_to_jiffies(10) in bfq_add_request by setting
+    bfqd->wait_dispatch to true.
+    Function bfq_reset_inject_limit are called in two conditions:
+    1. jiffies pasts bfqq->decrease_time_jif + msecs_to_jiffies(1000) in
+    function bfq_add_request.
+    2. jiffies pasts bfqq->decrease_time_jif + msecs_to_jiffies(100) or
+    bfq think-time state change from short to long.
+    
+    Fix this by initializing bfqq->decrease_time_jif to current jiffies
+    to trigger service injection soon when service injection conditions
+    are met.
+    
+    Signed-off-by: Kemeng Shi <shikemeng@huaweicloud.com>
+    Reviewed-by: Jan Kara <jack@suse.cz>
+    Link: https://lore.kernel.org/r/20230116095153.3810101-4-shikemeng@huaweicloud.com
+    Signed-off-by: Jens Axboe <axboe@kernel.dk>
+
+diff --git a/block/bfq-iosched.c b/block/bfq-iosched.c
+index f038b4d16d86..698c5918ad10 100644
+--- a/block/bfq-iosched.c
++++ b/block/bfq-iosched.c
+@@ -5654,6 +5654,8 @@ static void bfq_init_bfqq(struct bfq_data *bfqd, struct bfq_queue *bfqq,
+ 
+ 	/* first request is almost certainly seeky */
+ 	bfqq->seek_history = 1;
++
++	bfqq->decrease_time_jif = jiffies;
+ }
+ 
+ static struct bfq_queue **bfq_async_queue_prio(struct bfq_data *bfqd,

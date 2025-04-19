@@ -1,0 +1,163 @@
+commit e8f69799810c32dd40c6724d829eccc70baad07f
+Author: Ilya Lesokhin <ilyal@mellanox.com>
+Date:   Mon Apr 30 10:16:16 2018 +0300
+
+    net/tls: Add generic NIC offload infrastructure
+    
+    This patch adds a generic infrastructure to offload TLS crypto to a
+    network device. It enables the kernel TLS socket to skip encryption
+    and authentication operations on the transmit side of the data path.
+    Leaving those computationally expensive operations to the NIC.
+    
+    The NIC offload infrastructure builds TLS records and pushes them to
+    the TCP layer just like the SW KTLS implementation and using the same
+    API.
+    TCP segmentation is mostly unaffected. Currently the only exception is
+    that we prevent mixed SKBs where only part of the payload requires
+    offload. In the future we are likely to add a similar restriction
+    following a change cipher spec record.
+    
+    The notable differences between SW KTLS and NIC offloaded TLS
+    implementations are as follows:
+    1. The offloaded implementation builds "plaintext TLS record", those
+    records contain plaintext instead of ciphertext and place holder bytes
+    instead of authentication tags.
+    2. The offloaded implementation maintains a mapping from TCP sequence
+    number to TLS records. Thus given a TCP SKB sent from a NIC offloaded
+    TLS socket, we can use the tls NIC offload infrastructure to obtain
+    enough context to encrypt the payload of the SKB.
+    A TLS record is released when the last byte of the record is ack'ed,
+    this is done through the new icsk_clean_acked callback.
+    
+    The infrastructure should be extendable to support various NIC offload
+    implementations.  However it is currently written with the
+    implementation below in mind:
+    The NIC assumes that packets from each offloaded stream are sent as
+    plaintext and in-order. It keeps track of the TLS records in the TCP
+    stream. When a packet marked for offload is transmitted, the NIC
+    encrypts the payload in-place and puts authentication tags in the
+    relevant place holders.
+    
+    The responsibility for handling out-of-order packets (i.e. TCP
+    retransmission, qdisc drops) falls on the netdev driver.
+    
+    The netdev driver keeps track of the expected TCP SN from the NIC's
+    perspective.  If the next packet to transmit matches the expected TCP
+    SN, the driver advances the expected TCP SN, and transmits the packet
+    with TLS offload indication.
+    
+    If the next packet to transmit does not match the expected TCP SN. The
+    driver calls the TLS layer to obtain the TLS record that includes the
+    TCP of the packet for transmission. Using this TLS record, the driver
+    posts a work entry on the transmit queue to reconstruct the NIC TLS
+    state required for the offload of the out-of-order packet. It updates
+    the expected TCP SN accordingly and transmits the now in-order packet.
+    The same queue is used for packet transmission and TLS context
+    reconstruction to avoid the need for flushing the transmit queue before
+    issuing the context reconstruction request.
+    
+    Signed-off-by: Ilya Lesokhin <ilyal@mellanox.com>
+    Signed-off-by: Boris Pismenny <borisp@mellanox.com>
+    Signed-off-by: Aviad Yehezkel <aviadye@mellanox.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/include/net/tls.h b/include/net/tls.h
+index 95a8c60b36be..8c56809eb384 100644
+--- a/include/net/tls.h
++++ b/include/net/tls.h
+@@ -116,6 +116,37 @@ struct tls_sw_context_rx {
+ 	bool decrypted;
+ };
+ 
++struct tls_record_info {
++	struct list_head list;
++	u32 end_seq;
++	int len;
++	int num_frags;
++	skb_frag_t frags[MAX_SKB_FRAGS];
++};
++
++struct tls_offload_context {
++	struct crypto_aead *aead_send;
++	spinlock_t lock;	/* protects records list */
++	struct list_head records_list;
++	struct tls_record_info *open_record;
++	struct tls_record_info *retransmit_hint;
++	u64 hint_record_sn;
++	u64 unacked_record_sn;
++
++	struct scatterlist sg_tx_data[MAX_SKB_FRAGS];
++	void (*sk_destruct)(struct sock *sk);
++	u8 driver_state[];
++	/* The TLS layer reserves room for driver specific state
++	 * Currently the belief is that there is not enough
++	 * driver specific state to justify another layer of indirection
++	 */
++#define TLS_DRIVER_STATE_SIZE (max_t(size_t, 8, sizeof(void *)))
++};
++
++#define TLS_OFFLOAD_CONTEXT_SIZE                                               \
++	(ALIGN(sizeof(struct tls_offload_context), sizeof(void *)) +           \
++	 TLS_DRIVER_STATE_SIZE)
++
+ enum {
+ 	TLS_PENDING_CLOSED_RECORD
+ };
+@@ -195,9 +226,28 @@ ssize_t tls_sw_splice_read(struct socket *sock, loff_t *ppos,
+ 			   struct pipe_inode_info *pipe,
+ 			   size_t len, unsigned int flags);
+ 
+-void tls_sk_destruct(struct sock *sk, struct tls_context *ctx);
+-void tls_icsk_clean_acked(struct sock *sk);
++int tls_set_device_offload(struct sock *sk, struct tls_context *ctx);
++int tls_device_sendmsg(struct sock *sk, struct msghdr *msg, size_t size);
++int tls_device_sendpage(struct sock *sk, struct page *page,
++			int offset, size_t size, int flags);
++void tls_device_sk_destruct(struct sock *sk);
++void tls_device_init(void);
++void tls_device_cleanup(void);
++
++struct tls_record_info *tls_get_record(struct tls_offload_context *context,
++				       u32 seq, u64 *p_record_sn);
++
++static inline bool tls_record_is_start_marker(struct tls_record_info *rec)
++{
++	return rec->len == 0;
++}
++
++static inline u32 tls_record_start_seq(struct tls_record_info *rec)
++{
++	return rec->end_seq - rec->len;
++}
+ 
++void tls_sk_destruct(struct sock *sk, struct tls_context *ctx);
+ int tls_push_sg(struct sock *sk, struct tls_context *ctx,
+ 		struct scatterlist *sg, u16 first_offset,
+ 		int flags);
+@@ -234,6 +284,13 @@ static inline bool tls_is_pending_open_record(struct tls_context *tls_ctx)
+ 	return tls_ctx->pending_open_record_frags;
+ }
+ 
++static inline bool tls_is_sk_tx_device_offloaded(struct sock *sk)
++{
++	return sk_fullsock(sk) &&
++	       /* matches smp_store_release in tls_set_device_offload */
++	       smp_load_acquire(&sk->sk_destruct) == &tls_device_sk_destruct;
++}
++
+ static inline void tls_err_abort(struct sock *sk, int err)
+ {
+ 	sk->sk_err = err;
+@@ -329,4 +386,12 @@ int tls_proccess_cmsg(struct sock *sk, struct msghdr *msg,
+ void tls_register_device(struct tls_device *device);
+ void tls_unregister_device(struct tls_device *device);
+ 
++struct sk_buff *tls_validate_xmit_skb(struct sock *sk,
++				      struct net_device *dev,
++				      struct sk_buff *skb);
++
++int tls_sw_fallback_init(struct sock *sk,
++			 struct tls_offload_context *offload_ctx,
++			 struct tls_crypto_info *crypto_info);
++
+ #endif /* _TLS_OFFLOAD_H */

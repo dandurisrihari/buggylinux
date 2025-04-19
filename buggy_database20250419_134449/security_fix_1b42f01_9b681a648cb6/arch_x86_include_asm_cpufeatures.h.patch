@@ -1,0 +1,70 @@
+commit 1b42f017415b46c317e71d41c34ec088417a1883
+Author: Pawan Gupta <pawan.kumar.gupta@linux.intel.com>
+Date:   Wed Oct 23 11:30:45 2019 +0200
+
+    x86/speculation/taa: Add mitigation for TSX Async Abort
+    
+    TSX Async Abort (TAA) is a side channel vulnerability to the internal
+    buffers in some Intel processors similar to Microachitectural Data
+    Sampling (MDS). In this case, certain loads may speculatively pass
+    invalid data to dependent operations when an asynchronous abort
+    condition is pending in a TSX transaction.
+    
+    This includes loads with no fault or assist condition. Such loads may
+    speculatively expose stale data from the uarch data structures as in
+    MDS. Scope of exposure is within the same-thread and cross-thread. This
+    issue affects all current processors that support TSX, but do not have
+    ARCH_CAP_TAA_NO (bit 8) set in MSR_IA32_ARCH_CAPABILITIES.
+    
+    On CPUs which have their IA32_ARCH_CAPABILITIES MSR bit MDS_NO=0,
+    CPUID.MD_CLEAR=1 and the MDS mitigation is clearing the CPU buffers
+    using VERW or L1D_FLUSH, there is no additional mitigation needed for
+    TAA. On affected CPUs with MDS_NO=1 this issue can be mitigated by
+    disabling the Transactional Synchronization Extensions (TSX) feature.
+    
+    A new MSR IA32_TSX_CTRL in future and current processors after a
+    microcode update can be used to control the TSX feature. There are two
+    bits in that MSR:
+    
+    * TSX_CTRL_RTM_DISABLE disables the TSX sub-feature Restricted
+    Transactional Memory (RTM).
+    
+    * TSX_CTRL_CPUID_CLEAR clears the RTM enumeration in CPUID. The other
+    TSX sub-feature, Hardware Lock Elision (HLE), is unconditionally
+    disabled with updated microcode but still enumerated as present by
+    CPUID(EAX=7).EBX{bit4}.
+    
+    The second mitigation approach is similar to MDS which is clearing the
+    affected CPU buffers on return to user space and when entering a guest.
+    Relevant microcode update is required for the mitigation to work.  More
+    details on this approach can be found here:
+    
+      https://www.kernel.org/doc/html/latest/admin-guide/hw-vuln/mds.html
+    
+    The TSX feature can be controlled by the "tsx" command line parameter.
+    If it is force-enabled then "Clear CPU buffers" (MDS mitigation) is
+    deployed. The effective mitigation state can be read from sysfs.
+    
+     [ bp:
+       - massage + comments cleanup
+       - s/TAA_MITIGATION_TSX_DISABLE/TAA_MITIGATION_TSX_DISABLED/g - Josh.
+       - remove partial TAA mitigation in update_mds_branch_idle() - Josh.
+       - s/tsx_async_abort_cmdline/tsx_async_abort_parse_cmdline/g
+     ]
+    
+    Signed-off-by: Pawan Gupta <pawan.kumar.gupta@linux.intel.com>
+    Signed-off-by: Borislav Petkov <bp@suse.de>
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Reviewed-by: Josh Poimboeuf <jpoimboe@redhat.com>
+
+diff --git a/arch/x86/include/asm/cpufeatures.h b/arch/x86/include/asm/cpufeatures.h
+index 0652d3eed9bd..989e03544f18 100644
+--- a/arch/x86/include/asm/cpufeatures.h
++++ b/arch/x86/include/asm/cpufeatures.h
+@@ -399,5 +399,6 @@
+ #define X86_BUG_MDS			X86_BUG(19) /* CPU is affected by Microarchitectural data sampling */
+ #define X86_BUG_MSBDS_ONLY		X86_BUG(20) /* CPU is only affected by the  MSDBS variant of BUG_MDS */
+ #define X86_BUG_SWAPGS			X86_BUG(21) /* CPU is affected by speculation through SWAPGS */
++#define X86_BUG_TAA			X86_BUG(22) /* CPU is affected by TSX Async Abort(TAA) */
+ 
+ #endif /* _ASM_X86_CPUFEATURES_H */

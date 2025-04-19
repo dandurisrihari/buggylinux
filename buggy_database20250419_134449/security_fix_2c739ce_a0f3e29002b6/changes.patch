@@ -1,0 +1,147 @@
+diff --git a/Documentation/admin-guide/kernel-parameters.txt b/Documentation/admin-guide/kernel-parameters.txt
+index f7ac0e663976..6d9afb221ff7 100644
+--- a/Documentation/admin-guide/kernel-parameters.txt
++++ b/Documentation/admin-guide/kernel-parameters.txt
+@@ -1343,6 +1343,7 @@
+ 			current integrity status.
+ 
+ 	failslab=
++	fail_usercopy=
+ 	fail_page_alloc=
+ 	fail_make_request=[KNL]
+ 			General fault injection mechanism.
+diff --git a/Documentation/fault-injection/fault-injection.rst b/Documentation/fault-injection/fault-injection.rst
+index f850ad018b70..31ecfe44e5b4 100644
+--- a/Documentation/fault-injection/fault-injection.rst
++++ b/Documentation/fault-injection/fault-injection.rst
+@@ -16,6 +16,10 @@ Available fault injection capabilities
+ 
+   injects page allocation failures. (alloc_pages(), get_free_pages(), ...)
+ 
++- fail_usercopy
++
++  injects failures in user memory access functions. (copy_from_user(), get_user(), ...)
++
+ - fail_futex
+ 
+   injects futex deadlock and uaddr fault errors.
+@@ -177,6 +181,7 @@ use the boot option::
+ 
+ 	failslab=
+ 	fail_page_alloc=
++	fail_usercopy=
+ 	fail_make_request=
+ 	fail_futex=
+ 	mmc_core.fail_request=<interval>,<probability>,<space>,<times>
+@@ -222,7 +227,7 @@ How to add new fault injection capability
+ 
+ - debugfs entries
+ 
+-  failslab, fail_page_alloc, and fail_make_request use this way.
++  failslab, fail_page_alloc, fail_usercopy, and fail_make_request use this way.
+   Helper functions:
+ 
+ 	fault_create_debugfs_attr(name, parent, attr);
+diff --git a/include/linux/fault-inject-usercopy.h b/include/linux/fault-inject-usercopy.h
+new file mode 100644
+index 000000000000..56c3a693fdd9
+--- /dev/null
++++ b/include/linux/fault-inject-usercopy.h
+@@ -0,0 +1,22 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef __LINUX_FAULT_INJECT_USERCOPY_H__
++#define __LINUX_FAULT_INJECT_USERCOPY_H__
++
++/*
++ * This header provides a wrapper for injecting failures to user space memory
++ * access functions.
++ */
++
++#include <linux/types.h>
++
++#ifdef CONFIG_FAULT_INJECTION_USERCOPY
++
++bool should_fail_usercopy(void);
++
++#else
++
++static inline bool should_fail_usercopy(void) { return false; }
++
++#endif /* CONFIG_FAULT_INJECTION_USERCOPY */
++
++#endif /* __LINUX_FAULT_INJECT_USERCOPY_H__ */
+diff --git a/lib/Kconfig.debug b/lib/Kconfig.debug
+index 491789a793ae..ebe5ab111e65 100644
+--- a/lib/Kconfig.debug
++++ b/lib/Kconfig.debug
+@@ -1768,6 +1768,13 @@ config FAIL_PAGE_ALLOC
+ 	help
+ 	  Provide fault-injection capability for alloc_pages().
+ 
++config FAULT_INJECTION_USERCOPY
++	bool "Fault injection capability for usercopy functions"
++	depends on FAULT_INJECTION
++	help
++	  Provides fault-injection capability to inject failures
++	  in usercopy functions (copy_from_user(), get_user(), ...).
++
+ config FAIL_MAKE_REQUEST
+ 	bool "Fault-injection capability for disk IO"
+ 	depends on FAULT_INJECTION && BLOCK
+diff --git a/lib/Makefile b/lib/Makefile
+index 49a2a9e36224..1c7577b2e86a 100644
+--- a/lib/Makefile
++++ b/lib/Makefile
+@@ -210,6 +210,7 @@ obj-$(CONFIG_AUDIT_COMPAT_GENERIC) += compat_audit.o
+ 
+ obj-$(CONFIG_IOMMU_HELPER) += iommu-helper.o
+ obj-$(CONFIG_FAULT_INJECTION) += fault-inject.o
++obj-$(CONFIG_FAULT_INJECTION_USERCOPY) += fault-inject-usercopy.o
+ obj-$(CONFIG_NOTIFIER_ERROR_INJECTION) += notifier-error-inject.o
+ obj-$(CONFIG_PM_NOTIFIER_ERROR_INJECT) += pm-notifier-error-inject.o
+ obj-$(CONFIG_NETDEV_NOTIFIER_ERROR_INJECT) += netdev-notifier-error-inject.o
+diff --git a/lib/fault-inject-usercopy.c b/lib/fault-inject-usercopy.c
+new file mode 100644
+index 000000000000..77558b6c29ca
+--- /dev/null
++++ b/lib/fault-inject-usercopy.c
+@@ -0,0 +1,39 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#include <linux/fault-inject.h>
++#include <linux/fault-inject-usercopy.h>
++
++static struct {
++	struct fault_attr attr;
++} fail_usercopy = {
++	.attr = FAULT_ATTR_INITIALIZER,
++};
++
++static int __init setup_fail_usercopy(char *str)
++{
++	return setup_fault_attr(&fail_usercopy.attr, str);
++}
++__setup("fail_usercopy=", setup_fail_usercopy);
++
++#ifdef CONFIG_FAULT_INJECTION_DEBUG_FS
++
++static int __init fail_usercopy_debugfs(void)
++{
++	struct dentry *dir;
++
++	dir = fault_create_debugfs_attr("fail_usercopy", NULL,
++					&fail_usercopy.attr);
++	if (IS_ERR(dir))
++		return PTR_ERR(dir);
++
++	return 0;
++}
++
++late_initcall(fail_usercopy_debugfs);
++
++#endif /* CONFIG_FAULT_INJECTION_DEBUG_FS */
++
++bool should_fail_usercopy(void)
++{
++	return should_fail(&fail_usercopy.attr, 1);
++}
++EXPORT_SYMBOL_GPL(should_fail_usercopy);

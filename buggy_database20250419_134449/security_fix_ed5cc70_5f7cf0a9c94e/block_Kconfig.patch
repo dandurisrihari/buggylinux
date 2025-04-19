@@ -1,0 +1,65 @@
+commit ed5cc702d311c14b653323d76062b0294effa66e
+Author: Jan Kara <jack@suse.cz>
+Date:   Wed Nov 1 18:43:08 2023 +0100
+
+    block: Add config option to not allow writing to mounted devices
+    
+    Writing to mounted devices is dangerous and can lead to filesystem
+    corruption as well as crashes. Furthermore syzbot comes with more and
+    more involved examples how to corrupt block device under a mounted
+    filesystem leading to kernel crashes and reports we can do nothing
+    about. Add tracking of writers to each block device and a kernel cmdline
+    argument which controls whether other writeable opens to block devices
+    open with BLK_OPEN_RESTRICT_WRITES flag are allowed. We will make
+    filesystems use this flag for used devices.
+    
+    Note that this effectively only prevents modification of the particular
+    block device's page cache by other writers. The actual device content
+    can still be modified by other means - e.g. by issuing direct scsi
+    commands, by doing writes through devices lower in the storage stack
+    (e.g. in case loop devices, DM, or MD are involved) etc. But blocking
+    direct modifications of the block device page cache is enough to give
+    filesystems a chance to perform data validation when loading data from
+    the underlying storage and thus prevent kernel crashes.
+    
+    Syzbot can use this cmdline argument option to avoid uninteresting
+    crashes. Also users whose userspace setup does not need writing to
+    mounted block devices can set this option for hardening.
+    
+    Link: https://lore.kernel.org/all/60788e5d-5c7c-1142-e554-c21d709acfd9@linaro.org
+    Signed-off-by: Jan Kara <jack@suse.cz>
+    Link: https://lore.kernel.org/r/20231101174325.10596-3-jack@suse.cz
+    Reviewed-by: Jens Axboe <axboe@kernel.dk>
+    Signed-off-by: Christian Brauner <brauner@kernel.org>
+
+diff --git a/block/Kconfig b/block/Kconfig
+index 55ae2286a4de..1de4682d48cc 100644
+--- a/block/Kconfig
++++ b/block/Kconfig
+@@ -78,6 +78,26 @@ config BLK_DEV_INTEGRITY_T10
+ 	select CRC_T10DIF
+ 	select CRC64_ROCKSOFT
+ 
++config BLK_DEV_WRITE_MOUNTED
++	bool "Allow writing to mounted block devices"
++	default y
++	help
++	When a block device is mounted, writing to its buffer cache is very
++	likely going to cause filesystem corruption. It is also rather easy to
++	crash the kernel in this way since the filesystem has no practical way
++	of detecting these writes to buffer cache and verifying its metadata
++	integrity. However there are some setups that need this capability
++	like running fsck on read-only mounted root device, modifying some
++	features on mounted ext4 filesystem, and similar. If you say N, the
++	kernel will prevent processes from writing to block devices that are
++	mounted by filesystems which provides some more protection from runaway
++	privileged processes and generally makes it much harder to crash
++	filesystem drivers. Note however that this does not prevent
++	underlying device(s) from being modified by other means, e.g. by
++	directly submitting SCSI commands or through access to lower layers of
++	storage stack. If in doubt, say Y. The configuration can be overridden
++	with the bdev_allow_write_mounted boot option.
++
+ config BLK_DEV_ZONED
+ 	bool "Zoned block device support"
+ 	select MQ_IOSCHED_DEADLINE

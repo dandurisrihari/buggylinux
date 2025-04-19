@@ -1,0 +1,85 @@
+commit 597f03f9d133e9837d00965016170271d4f87dcf
+Merge: 999dcbe2414e 0bf71e4d02ff
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Mon Oct 3 19:43:08 2016 -0700
+
+    Merge branch 'smp-hotplug-for-linus' of git://git.kernel.org/pub/scm/linux/kernel/git/tip/tip
+    
+    Pull CPU hotplug updates from Thomas Gleixner:
+     "Yet another batch of cpu hotplug core updates and conversions:
+    
+       - Provide core infrastructure for multi instance drivers so the
+         drivers do not have to keep custom lists.
+    
+       - Convert custom lists to the new infrastructure. The block-mq custom
+         list conversion comes through the block tree and makes the diffstat
+         tip over to more lines removed than added.
+    
+       - Handle unbalanced hotplug enable/disable calls more gracefully.
+    
+       - Remove the obsolete CPU_STARTING/DYING notifier support.
+    
+       - Convert another batch of notifier users.
+    
+       The relayfs changes which conflicted with the conversion have been
+       shipped to me by Andrew.
+    
+       The remaining lot is targeted for 4.10 so that we finally can remove
+       the rest of the notifiers"
+    
+    * 'smp-hotplug-for-linus' of git://git.kernel.org/pub/scm/linux/kernel/git/tip/tip: (46 commits)
+      cpufreq: Fix up conversion to hotplug state machine
+      blk/mq: Reserve hotplug states for block multiqueue
+      x86/apic/uv: Convert to hotplug state machine
+      s390/mm/pfault: Convert to hotplug state machine
+      mips/loongson/smp: Convert to hotplug state machine
+      mips/octeon/smp: Convert to hotplug state machine
+      fault-injection/cpu: Convert to hotplug state machine
+      padata: Convert to hotplug state machine
+      cpufreq: Convert to hotplug state machine
+      ACPI/processor: Convert to hotplug state machine
+      virtio scsi: Convert to hotplug state machine
+      oprofile/timer: Convert to hotplug state machine
+      block/softirq: Convert to hotplug state machine
+      lib/irq_poll: Convert to hotplug state machine
+      x86/microcode: Convert to hotplug state machine
+      sh/SH-X3 SMP: Convert to hotplug state machine
+      ia64/mca: Convert to hotplug state machine
+      ARM/OMAP/wakeupgen: Convert to hotplug state machine
+      ARM/shmobile: Convert to hotplug state machine
+      arm64/FP/SIMD: Convert to hotplug state machine
+      ...
+
+diff --cc drivers/cpufreq/cpufreq.c
+index 3a64136bf21b,8b44de4d7438..6e6c1fb60fbc
+--- a/drivers/cpufreq/cpufreq.c
++++ b/drivers/cpufreq/cpufreq.c
+@@@ -1286,8 -1331,6 +1286,8 @@@ out_free_policy
+  	return ret;
+  }
+  
+- static void cpufreq_offline(unsigned int cpu);
+++static int cpufreq_offline(unsigned int cpu);
+ +
+  /**
+   * cpufreq_add_dev - the cpufreq interface for a CPU device.
+   * @dev: CPU device.
+@@@ -1312,16 -1355,10 +1312,16 @@@ static int cpufreq_add_dev(struct devic
+  	if (!policy || cpumask_test_and_set_cpu(cpu, policy->real_cpus))
+  		return 0;
+  
+ -	return add_cpu_dev_symlink(policy, cpu);
+ +	ret = add_cpu_dev_symlink(policy, dev);
+ +	if (ret) {
+ +		cpumask_clear_cpu(cpu, policy->real_cpus);
+ +		cpufreq_offline(cpu);
+ +	}
+ +
+ +	return ret;
+  }
+  
+- static void cpufreq_offline(unsigned int cpu)
++ static int cpufreq_offline(unsigned int cpu)
+  {
+  	struct cpufreq_policy *policy;
+  	int ret;

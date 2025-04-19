@@ -1,0 +1,52 @@
+commit 4f1df628d4ec22b04f67e068e6d02538d3dd557b
+Author: Marc Zyngier <maz@kernel.org>
+Date:   Thu Nov 26 17:27:13 2020 +0000
+
+    KVM: arm64: Advertise ID_AA64PFR0_EL1.CSV3=1 if the CPUs are Meltdown-safe
+    
+    Cores that predate the introduction of ID_AA64PFR0_EL1.CSV3 to
+    the ARMv8 architecture have this field set to 0, even of some of
+    them are not affected by the vulnerability.
+    
+    The kernel maintains a list of unaffected cores (A53, A55 and a few
+    others) so that it doesn't impose an expensive mitigation uncessarily.
+    
+    As we do for CSV2, let's expose the CSV3 property to guests that run
+    on HW that is effectively not vulnerable. This can be reset to zero
+    by writing to the ID register from userspace, ensuring that VMs can
+    be migrated despite the new property being set.
+    
+    Reported-by: Will Deacon <will@kernel.org>
+    Signed-off-by: Marc Zyngier <maz@kernel.org>
+
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index c0ffb019ca8b..dc3fa6a0f9e5 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -102,7 +102,7 @@ static int kvm_arm_default_max_vcpus(void)
+ 	return vgic_present ? kvm_vgic_get_max_vcpus() : KVM_MAX_VCPUS;
+ }
+ 
+-static void set_default_csv2(struct kvm *kvm)
++static void set_default_spectre(struct kvm *kvm)
+ {
+ 	/*
+ 	 * The default is to expose CSV2 == 1 if the HW isn't affected.
+@@ -114,6 +114,8 @@ static void set_default_csv2(struct kvm *kvm)
+ 	 */
+ 	if (arm64_get_spectre_v2_state() == SPECTRE_UNAFFECTED)
+ 		kvm->arch.pfr0_csv2 = 1;
++	if (arm64_get_meltdown_state() == SPECTRE_UNAFFECTED)
++		kvm->arch.pfr0_csv3 = 1;
+ }
+ 
+ /**
+@@ -141,7 +143,7 @@ int kvm_arch_init_vm(struct kvm *kvm, unsigned long type)
+ 	/* The maximum number of VCPUs is limited by the host's GIC model */
+ 	kvm->arch.max_vcpus = kvm_arm_default_max_vcpus();
+ 
+-	set_default_csv2(kvm);
++	set_default_spectre(kvm);
+ 
+ 	return ret;
+ out_free_stage2_pgd:

@@ -1,0 +1,105 @@
+diff --git a/drivers/target/target_core_fabric_configfs.c b/drivers/target/target_core_fabric_configfs.c
+index 04c775cb3e65..eb56eb129563 100644
+--- a/drivers/target/target_core_fabric_configfs.c
++++ b/drivers/target/target_core_fabric_configfs.c
+@@ -965,6 +965,19 @@ TF_CIT_SETUP(tpg_attrib, &target_fabric_tpg_attrib_item_ops, NULL, NULL);
+ 
+ /* End of tfc_tpg_attrib_cit */
+ 
++/* Start of tfc_tpg_auth_cit */
++
++CONFIGFS_EATTR_OPS(target_fabric_tpg_auth, se_portal_group, tpg_auth_group);
++
++static struct configfs_item_operations target_fabric_tpg_auth_item_ops = {
++	.show_attribute		= target_fabric_tpg_auth_attr_show,
++	.store_attribute	= target_fabric_tpg_auth_attr_store,
++};
++
++TF_CIT_SETUP(tpg_auth, &target_fabric_tpg_auth_item_ops, NULL, NULL);
++
++/* End of tfc_tpg_attrib_cit */
++
+ /* Start of tfc_tpg_param_cit */
+ 
+ CONFIGFS_EATTR_OPS(target_fabric_tpg_param, se_portal_group, tpg_param_group);
+@@ -1030,8 +1043,9 @@ static struct config_group *target_fabric_make_tpg(
+ 	se_tpg->tpg_group.default_groups[1] = &se_tpg->tpg_np_group;
+ 	se_tpg->tpg_group.default_groups[2] = &se_tpg->tpg_acl_group;
+ 	se_tpg->tpg_group.default_groups[3] = &se_tpg->tpg_attrib_group;
+-	se_tpg->tpg_group.default_groups[4] = &se_tpg->tpg_param_group;
+-	se_tpg->tpg_group.default_groups[5] = NULL;
++	se_tpg->tpg_group.default_groups[4] = &se_tpg->tpg_auth_group;
++	se_tpg->tpg_group.default_groups[5] = &se_tpg->tpg_param_group;
++	se_tpg->tpg_group.default_groups[6] = NULL;
+ 
+ 	config_group_init_type_name(&se_tpg->tpg_group, name,
+ 			&TF_CIT_TMPL(tf)->tfc_tpg_base_cit);
+@@ -1043,6 +1057,8 @@ static struct config_group *target_fabric_make_tpg(
+ 			&TF_CIT_TMPL(tf)->tfc_tpg_nacl_cit);
+ 	config_group_init_type_name(&se_tpg->tpg_attrib_group, "attrib",
+ 			&TF_CIT_TMPL(tf)->tfc_tpg_attrib_cit);
++	config_group_init_type_name(&se_tpg->tpg_auth_group, "auth",
++			&TF_CIT_TMPL(tf)->tfc_tpg_auth_cit);
+ 	config_group_init_type_name(&se_tpg->tpg_param_group, "param",
+ 			&TF_CIT_TMPL(tf)->tfc_tpg_param_cit);
+ 
+@@ -1202,6 +1218,7 @@ int target_fabric_setup_cits(struct target_fabric_configfs *tf)
+ 	target_fabric_setup_tpg_np_cit(tf);
+ 	target_fabric_setup_tpg_np_base_cit(tf);
+ 	target_fabric_setup_tpg_attrib_cit(tf);
++	target_fabric_setup_tpg_auth_cit(tf);
+ 	target_fabric_setup_tpg_param_cit(tf);
+ 	target_fabric_setup_tpg_nacl_cit(tf);
+ 	target_fabric_setup_tpg_nacl_base_cit(tf);
+diff --git a/include/target/target_core_base.h b/include/target/target_core_base.h
+index 9fd7a60f47f0..d92ec6765f5d 100644
+--- a/include/target/target_core_base.h
++++ b/include/target/target_core_base.h
+@@ -795,11 +795,12 @@ struct se_portal_group {
+ 	struct target_core_fabric_ops *se_tpg_tfo;
+ 	struct se_wwn		*se_tpg_wwn;
+ 	struct config_group	tpg_group;
+-	struct config_group	*tpg_default_groups[6];
++	struct config_group	*tpg_default_groups[7];
+ 	struct config_group	tpg_lun_group;
+ 	struct config_group	tpg_np_group;
+ 	struct config_group	tpg_acl_group;
+ 	struct config_group	tpg_attrib_group;
++	struct config_group	tpg_auth_group;
+ 	struct config_group	tpg_param_group;
+ };
+ 
+diff --git a/include/target/target_core_configfs.h b/include/target/target_core_configfs.h
+index 612509592ffd..713c5004f4ae 100644
+--- a/include/target/target_core_configfs.h
++++ b/include/target/target_core_configfs.h
+@@ -23,6 +23,7 @@ struct target_fabric_configfs_template {
+ 	struct config_item_type tfc_tpg_np_cit;
+ 	struct config_item_type tfc_tpg_np_base_cit;
+ 	struct config_item_type tfc_tpg_attrib_cit;
++	struct config_item_type tfc_tpg_auth_cit;
+ 	struct config_item_type tfc_tpg_param_cit;
+ 	struct config_item_type tfc_tpg_nacl_cit;
+ 	struct config_item_type tfc_tpg_nacl_base_cit;
+diff --git a/include/target/target_core_fabric_configfs.h b/include/target/target_core_fabric_configfs.h
+index a26fb7586a09..b32a14905cfa 100644
+--- a/include/target/target_core_fabric_configfs.h
++++ b/include/target/target_core_fabric_configfs.h
+@@ -62,6 +62,17 @@ static struct target_fabric_tpg_attrib_attribute _fabric##_tpg_attrib_##_name =
+ 	_fabric##_tpg_attrib_show_##_name,				\
+ 	_fabric##_tpg_attrib_store_##_name);
+ 
++CONFIGFS_EATTR_STRUCT(target_fabric_tpg_auth, se_portal_group);
++#define TF_TPG_AUTH_ATTR(_fabric, _name, _mode) 			\
++static struct target_fabric_tpg_auth_attribute _fabric##_tpg_auth_##_name = \
++	__CONFIGFS_EATTR(_name, _mode,					\
++	_fabric##_tpg_auth_show_##_name,				\
++	_fabric##_tpg_auth_store_##_name);
++
++#define TF_TPG_AUTH_ATTR_RO(_fabric, _name)				\
++static struct target_fabric_tpg_auth_attribute _fabric##_tpg_auth_##_name = \
++	__CONFIGFS_EATTR_RO(_name,					\
++	_fabric##_tpg_auth_show_##_name);
+ 
+ CONFIGFS_EATTR_STRUCT(target_fabric_tpg_param, se_portal_group);
+ #define TF_TPG_PARAM_ATTR(_fabric, _name, _mode)			\

@@ -1,0 +1,55 @@
+commit 1b06b99f25e0c957feb488ff8117a37f592c3866
+Author: Marc Zyngier <maz@kernel.org>
+Date:   Fri Apr 19 11:29:21 2024 +0100
+
+    KVM: arm64: Harden __ctxt_sys_reg() against out-of-range values
+    
+    The unsuspecting kernel tinkerer can be easily confused into
+    writing something that looks like this:
+    
+            ikey.lo = __vcpu_sys_reg(vcpu, SYS_APIAKEYLO_EL1);
+    
+    which seems vaguely sensible, until you realise that the second
+    parameter is the encoding of a sysreg, and not the index into
+    the vcpu sysreg file... Debugging what happens in this case is
+    an interesting exercise in head<->wall interactions.
+    
+    As they often say: "Any resemblance to actual persons, living
+    or dead, or actual events is purely coincidental".
+    
+    In order to save people's time, add some compile-time hardening
+    that will at least weed out the "stupidly out of range" values.
+    This will *not* catch anything that isn't a compile-time constant.
+    
+    Reviewed-by: Joey Gouly <joey.gouly@arm.com>
+    Reviewed-by: Oliver Upton <oliver.upton@linux.dev>
+    Link: https://lore.kernel.org/r/20240419102935.1935571-2-maz@kernel.org
+    Signed-off-by: Marc Zyngier <maz@kernel.org>
+
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index 9e8a496fb284..8eb04c9eb259 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -896,7 +896,7 @@ struct kvm_vcpu_arch {
+  * Don't bother with VNCR-based accesses in the nVHE code, it has no
+  * business dealing with NV.
+  */
+-static inline u64 *__ctxt_sys_reg(const struct kvm_cpu_context *ctxt, int r)
++static inline u64 *___ctxt_sys_reg(const struct kvm_cpu_context *ctxt, int r)
+ {
+ #if !defined (__KVM_NVHE_HYPERVISOR__)
+ 	if (unlikely(cpus_have_final_cap(ARM64_HAS_NESTED_VIRT) &&
+@@ -906,6 +906,13 @@ static inline u64 *__ctxt_sys_reg(const struct kvm_cpu_context *ctxt, int r)
+ 	return (u64 *)&ctxt->sys_regs[r];
+ }
+ 
++#define __ctxt_sys_reg(c,r)						\
++	({								\
++		BUILD_BUG_ON(__builtin_constant_p(r) &&			\
++			     (r) >= NR_SYS_REGS);			\
++		___ctxt_sys_reg(c, r);					\
++	})
++
+ #define ctxt_sys_reg(c,r)	(*__ctxt_sys_reg(c,r))
+ 
+ u64 kvm_vcpu_sanitise_vncr_reg(const struct kvm_vcpu *, enum vcpu_sysreg);

@@ -1,0 +1,69 @@
+commit c6c3187d66bc4e87086036266def4170742d7214
+Author: Robert Richter <rrichter@amd.com>
+Date:   Sat Feb 17 22:39:46 2024 +0100
+
+    lib/firmware_table: Provide buffer length argument to cdat_table_parse()
+    
+    There exist card implementations with a CDAT table using a fixed size
+    buffer, but with entries filled in that do not fill the whole table
+    length size. Then, the last entry in the CDAT table may not mark the
+    end of the CDAT table buffer specified by the length field in the CDAT
+    header. It can be shorter with trailing unused (zero'ed) data. The
+    actual table length is determined while reading all CDAT entries of
+    the table with DOE.
+    
+    If the table is greater than expected (containing zero'ed trailing
+    data), the CDAT parser fails with:
+    
+     [   48.691717] Malformed DSMAS table length: (24:0)
+     [   48.702084] [CDAT:0x00] Invalid zero length
+     [   48.711460] cxl_port endpoint1: Failed to parse CDAT: -22
+    
+    In addition, a check of the table buffer length is missing to prevent
+    an out-of-bound access then parsing the CDAT table.
+    
+    Hardening code against device returning borked table. Fix that by
+    providing an optional buffer length argument to
+    acpi_parse_entries_array() that can be used by cdat_table_parse() to
+    propagate the buffer size down to its users to check the buffer
+    length. This also prevents a possible out-of-bound access mentioned.
+    
+    Add a check to warn about a malformed CDAT table length.
+    
+    Cc: Rafael J. Wysocki <rafael@kernel.org>
+    Cc: Len Brown <lenb@kernel.org>
+    Reviewed-by: Dave Jiang <dave.jiang@intel.com>
+    Signed-off-by: Robert Richter <rrichter@amd.com>
+    Reviewed-by: Jonathan Cameron <Jonathan.Cameron@huawei.com>
+    Link: https://lore.kernel.org/r/ZdEnopFO0Tl3t2O1@rric.localdomain
+    Signed-off-by: Dan Williams <dan.j.williams@intel.com>
+
+diff --git a/drivers/cxl/core/pci.c b/drivers/cxl/core/pci.c
+index 184deff887d0..0df09bd79408 100644
+--- a/drivers/cxl/core/pci.c
++++ b/drivers/cxl/core/pci.c
+@@ -623,7 +623,7 @@ void read_cdat_data(struct cxl_port *port)
+ 	struct pci_dev *pdev = NULL;
+ 	struct cxl_memdev *cxlmd;
+ 	struct cdat_doe_rsp *buf;
+-	size_t length;
++	size_t table_length, length;
+ 	int rc;
+ 
+ 	if (is_cxl_memdev(uport)) {
+@@ -662,10 +662,16 @@ void read_cdat_data(struct cxl_port *port)
+ 	if (!buf)
+ 		goto err;
+ 
++	table_length = length;
++
+ 	rc = cxl_cdat_read_table(dev, doe_mb, buf, &length);
+ 	if (rc)
+ 		goto err;
+ 
++	if (table_length != length)
++		dev_warn(dev, "Malformed CDAT table length (%zu:%zu), discarding trailing data\n",
++			table_length, length);
++
+ 	if (cdat_checksum(buf->data, length))
+ 		goto err;

@@ -1,0 +1,67 @@
+commit f2fe1154542e69976f859e573dc4d9aa0b76a495
+Author: Eric Biggers <ebiggers@google.com>
+Date:   Sun Jun 2 22:45:16 2019 -0700
+
+    crypto: aead - un-inline encrypt and decrypt functions
+    
+    crypto_aead_encrypt() and crypto_aead_decrypt() have grown to be more
+    than a single indirect function call.  They now also check whether a key
+    has been set, the decryption side checks whether the input is at least
+    as long as the authentication tag length, and with CONFIG_CRYPTO_STATS=y
+    they also update the crypto statistics.  That can add up to a lot of
+    bloat at every call site.  Moreover, these always involve a function
+    call anyway, which greatly limits the benefits of inlining.
+    
+    So change them to be non-inline.
+    
+    Signed-off-by: Eric Biggers <ebiggers@google.com>
+    Acked-by: Ard Biesheuvel <ard.biesheuvel@linaro.org>
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+diff --git a/crypto/aead.c b/crypto/aead.c
+index 4908b5e846f0..fc1d7ad8a487 100644
+--- a/crypto/aead.c
++++ b/crypto/aead.c
+@@ -89,6 +89,42 @@ int crypto_aead_setauthsize(struct crypto_aead *tfm, unsigned int authsize)
+ }
+ EXPORT_SYMBOL_GPL(crypto_aead_setauthsize);
+ 
++int crypto_aead_encrypt(struct aead_request *req)
++{
++	struct crypto_aead *aead = crypto_aead_reqtfm(req);
++	struct crypto_alg *alg = aead->base.__crt_alg;
++	unsigned int cryptlen = req->cryptlen;
++	int ret;
++
++	crypto_stats_get(alg);
++	if (crypto_aead_get_flags(aead) & CRYPTO_TFM_NEED_KEY)
++		ret = -ENOKEY;
++	else
++		ret = crypto_aead_alg(aead)->encrypt(req);
++	crypto_stats_aead_encrypt(cryptlen, alg, ret);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(crypto_aead_encrypt);
++
++int crypto_aead_decrypt(struct aead_request *req)
++{
++	struct crypto_aead *aead = crypto_aead_reqtfm(req);
++	struct crypto_alg *alg = aead->base.__crt_alg;
++	unsigned int cryptlen = req->cryptlen;
++	int ret;
++
++	crypto_stats_get(alg);
++	if (crypto_aead_get_flags(aead) & CRYPTO_TFM_NEED_KEY)
++		ret = -ENOKEY;
++	else if (req->cryptlen < crypto_aead_authsize(aead))
++		ret = -EINVAL;
++	else
++		ret = crypto_aead_alg(aead)->decrypt(req);
++	crypto_stats_aead_decrypt(cryptlen, alg, ret);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(crypto_aead_decrypt);
++
+ static void crypto_aead_exit_tfm(struct crypto_tfm *tfm)
+ {
+ 	struct crypto_aead *aead = __crypto_aead_cast(tfm);

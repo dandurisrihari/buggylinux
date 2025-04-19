@@ -1,0 +1,82 @@
+commit c5d9ab85ebf3a42d5127ffdedf9094325465e852
+Merge: 0d7ca657df77 eb70d5a6c932
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Mon Mar 18 11:26:00 2024 -0700
+
+    Merge tag 'f2fs-for-6.9-rc1' of git://git.kernel.org/pub/scm/linux/kernel/git/jaegeuk/f2fs
+    
+    Pull f2fs update from Jaegeuk Kim:
+     "In this round, there are a number of updates on mainly two areas:
+      Zoned block device support and Per-file compression. For example,
+      we've found several issues to support Zoned block device especially
+      having large sections regarding to GC and file pinning used for
+      Android devices. In compression side, we've fixed many corner race
+      conditions that had broken the design assumption.
+    
+      Enhancements:
+       - Support file pinning for Zoned block device having large section
+       - Enhance the data recovery after sudden power cut on Zoned block
+         device
+       - Add more error injection cases to easily detect the kernel panics
+       - add a proc entry show the entire disk layout
+       - Improve various error paths paniced by BUG_ON in block allocation
+         and GC
+       - support SEEK_DATA and SEEK_HOLE for compression files
+    
+      Bug fixes:
+       - avoid use-after-free issue in f2fs_filemap_fault
+       - fix some race conditions to break the atomic write design
+         assumption
+       - fix to truncate meta inode pages forcely
+       - resolve various per-file compression issues wrt the space
+         management and compression policies
+       - fix some swap-related bugs
+    
+      In addition, we removed deprecated codes such as io_bits and
+      heap_allocation, and also fixed minor error handling routines with
+      neat debugging messages"
+    
+    * tag 'f2fs-for-6.9-rc1' of git://git.kernel.org/pub/scm/linux/kernel/git/jaegeuk/f2fs: (60 commits)
+      f2fs: fix to avoid use-after-free issue in f2fs_filemap_fault
+      f2fs: truncate page cache before clearing flags when aborting atomic write
+      f2fs: mark inode dirty for FI_ATOMIC_COMMITTED flag
+      f2fs: prevent atomic write on pinned file
+      f2fs: fix to handle error paths of {new,change}_curseg()
+      f2fs: unify the error handling of f2fs_is_valid_blkaddr
+      f2fs: zone: fix to remove pow2 check condition for zoned block device
+      f2fs: fix to truncate meta inode pages forcely
+      f2fs: compress: fix reserve_cblocks counting error when out of space
+      f2fs: compress: relocate some judgments in f2fs_reserve_compress_blocks
+      f2fs: add a proc entry show disk layout
+      f2fs: introduce SEGS_TO_BLKS/BLKS_TO_SEGS for cleanup
+      f2fs: fix to check return value of f2fs_gc_range
+      f2fs: fix to check return value __allocate_new_segment
+      f2fs: fix to do sanity check in update_sit_entry
+      f2fs: fix to reset fields for unloaded curseg
+      f2fs: clean up new_curseg()
+      f2fs: relocate f2fs_precache_extents() in f2fs_swap_activate()
+      f2fs: fix blkofs_end correctly in f2fs_migrate_blocks()
+      f2fs: ro: don't start discard thread for readonly image
+      ...
+
+diff --cc fs/f2fs/segment.c
+index e1065ba70207,e9e8b9bb3ce9..4fd76e867e0a
+--- a/fs/f2fs/segment.c
++++ b/fs/f2fs/segment.c
+@@@ -4916,13 -5021,11 +5028,13 @@@ static int check_zone_write_pointer(str
+  	 * selected for write operation until it get discarded.
+  	 */
+  	f2fs_notice(sbi, "Valid blocks are not aligned with write "
+- 		    "pointer: valid block[0x%x,0x%x] cond[0x%x]",
+- 		    zone_segno, valid_block_cnt, zone->cond);
++ 		    "pointer: valid block[0x%x,0x%x] cond[%s]",
++ 		    zone_segno, valid_block_cnt, f2fs_zone_status[zone->cond]);
+  
+ +	nofs_flags = memalloc_nofs_save();
+  	ret = blkdev_zone_mgmt(fdev->bdev, REQ_OP_ZONE_FINISH,
+ -				zone->start, zone->len, GFP_NOFS);
+ +				zone->start, zone->len);
+ +	memalloc_nofs_restore(nofs_flags);
+  	if (ret == -EOPNOTSUPP) {
+  		ret = blkdev_issue_zeroout(fdev->bdev, zone->wp,
+  					zone->len - (zone->wp - zone->start),

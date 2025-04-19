@@ -1,0 +1,50 @@
+commit 0977cfac6e76fa976618129a4585bcf53784cc87
+Author: Santosh Shukla <santosh.shukla@amd.com>
+Date:   Mon Feb 27 14:10:16 2023 +0530
+
+    KVM: nSVM: Implement support for nested VNMI
+    
+    Allow L1 to use vNMI to accelerate its injection of NMI to L2 by
+    propagating vNMI int_ctl bits from/to vmcb12 to/from vmcb02.
+    
+    To handle both the case where vNMI is enabled for L1 and L2, and where
+    vNMI is enabled for L1 but _not_ L2, move pending L1 vNMIs to nmi_pending
+    on nested VM-Entry and raise KVM_REQ_EVENT, i.e. rely on existing code to
+    route the NMI to the correct domain.
+    
+    On nested VM-Exit, reverse the process and set/clear V_NMI_PENDING for L1
+    based one whether nmi_pending is zero or non-zero.  There is no need to
+    consider vmcb02 in this case, as V_NMI_PENDING can be set in vmcb02 if
+    vNMI is disabled for L2, and if vNMI is enabled for L2, then L1 and L2
+    have different NMI contexts.
+    
+    Co-developed-by: Maxim Levitsky <mlevitsk@redhat.com>
+    Signed-off-by: Maxim Levitsky <mlevitsk@redhat.com>
+    Signed-off-by: Santosh Shukla <santosh.shukla@amd.com>
+    Link: https://lore.kernel.org/r/20230227084016.3368-12-santosh.shukla@amd.com
+    [sean: massage changelog to match the code]
+    Signed-off-by: Sean Christopherson <seanjc@google.com>
+
+diff --git a/arch/x86/kvm/svm/svm.c b/arch/x86/kvm/svm/svm.c
+index 7a14c937a36d..e0ec95f1f068 100644
+--- a/arch/x86/kvm/svm/svm.c
++++ b/arch/x86/kvm/svm/svm.c
+@@ -4246,6 +4246,8 @@ static void svm_vcpu_after_set_cpuid(struct kvm_vcpu *vcpu)
+ 
+ 	svm->vgif_enabled = vgif && guest_cpuid_has(vcpu, X86_FEATURE_VGIF);
+ 
++	svm->vnmi_enabled = vnmi && guest_cpuid_has(vcpu, X86_FEATURE_VNMI);
++
+ 	svm_recalc_instruction_intercepts(vcpu, svm);
+ 
+ 	/* For sev guests, the memory encryption bit is not reserved in CR3.  */
+@@ -5001,6 +5003,9 @@ static __init void svm_set_cpu_caps(void)
+ 		if (vgif)
+ 			kvm_cpu_cap_set(X86_FEATURE_VGIF);
+ 
++		if (vnmi)
++			kvm_cpu_cap_set(X86_FEATURE_VNMI);
++
+ 		/* Nested VM can receive #VMEXIT instead of triggering #GP */
+ 		kvm_cpu_cap_set(X86_FEATURE_SVME_ADDR_CHK);
+ 	}

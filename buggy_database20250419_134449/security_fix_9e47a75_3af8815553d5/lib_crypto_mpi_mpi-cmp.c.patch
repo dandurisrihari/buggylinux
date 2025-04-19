@@ -1,0 +1,35 @@
+commit 9e47a758b70167c9301d2b44d2569f86c7796f2d
+Author: Mark O'Donovan <shiftee@posteo.net>
+Date:   Fri Aug 4 09:32:18 2023 +0000
+
+    crypto: lib/mpi - avoid null pointer deref in mpi_cmp_ui()
+    
+    During NVMeTCP Authentication a controller can trigger a kernel
+    oops by specifying the 8192 bit Diffie Hellman group and passing
+    a correctly sized, but zeroed Diffie Hellamn value.
+    mpi_cmp_ui() was detecting this if the second parameter was 0,
+    but 1 is passed from dh_is_pubkey_valid(). This causes the null
+    pointer u->d to be dereferenced towards the end of mpi_cmp_ui()
+    
+    Signed-off-by: Mark O'Donovan <shiftee@posteo.net>
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+diff --git a/lib/crypto/mpi/mpi-cmp.c b/lib/crypto/mpi/mpi-cmp.c
+index c4cfa3ff0581..0835b6213235 100644
+--- a/lib/crypto/mpi/mpi-cmp.c
++++ b/lib/crypto/mpi/mpi-cmp.c
+@@ -25,8 +25,12 @@ int mpi_cmp_ui(MPI u, unsigned long v)
+ 	mpi_limb_t limb = v;
+ 
+ 	mpi_normalize(u);
+-	if (!u->nlimbs && !limb)
+-		return 0;
++	if (u->nlimbs == 0) {
++		if (v == 0)
++			return 0;
++		else
++			return -1;
++	}
+ 	if (u->sign)
+ 		return -1;
+ 	if (u->nlimbs > 1)

@@ -1,0 +1,65 @@
+commit ca6a6f93867a9763bdf8685c788e2e558d10975f
+Author: Jakub Sitnicki <jakub@cloudflare.com>
+Date:   Mon Dec 9 20:38:04 2024 +0100
+
+    tcp: Add sysctl to configure TIME-WAIT reuse delay
+    
+    Today we have a hardcoded delay of 1 sec before a TIME-WAIT socket can be
+    reused by reopening a connection. This is a safe choice based on an
+    assumption that the other TCP timestamp clock frequency, which is unknown
+    to us, may be as low as 1 Hz (RFC 7323, section 5.4).
+    
+    However, this means that in the presence of short lived connections with an
+    RTT of couple of milliseconds, the time during which a 4-tuple is blocked
+    from reuse can be orders of magnitude longer that the connection lifetime.
+    Combined with a reduced pool of ephemeral ports, when using
+    IP_LOCAL_PORT_RANGE to share an egress IP address between hosts [1], the
+    long TIME-WAIT reuse delay can lead to port exhaustion, where all available
+    4-tuples are tied up in TIME-WAIT state.
+    
+    Turn the reuse delay into a per-netns setting so that sysadmins can make
+    more aggressive assumptions about remote TCP timestamp clock frequency and
+    shorten the delay in order to allow connections to reincarnate faster.
+    
+    Note that applications can completely bypass the TIME-WAIT delay protection
+    already today by locking the local port with bind() before connecting. Such
+    immediate connection reuse may result in PAWS failing to detect old
+    duplicate segments, leaving us with just the sequence number check as a
+    safety net.
+    
+    This new configurable offers a trade off where the sysadmin can balance
+    between the risk of PAWS detection failing to act versus exhausting ports
+    by having sockets tied up in TIME-WAIT state for too long.
+    
+    [1] https://lpc.events/event/16/contributions/1349/
+    
+    Signed-off-by: Jakub Sitnicki <jakub@cloudflare.com>
+    Reviewed-by: Eric Dumazet <edumazet@google.com>
+    Reviewed-by: Jason Xing <kerneljasonxing@gmail.com>
+    Link: https://patch.msgid.link/20241209-jakub-krn-909-poc-msec-tw-tstamp-v2-2-66aca0eed03e@cloudflare.com
+    Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+diff --git a/Documentation/networking/ip-sysctl.rst b/Documentation/networking/ip-sysctl.rst
+index eacf8983e230..2f2b00295836 100644
+--- a/Documentation/networking/ip-sysctl.rst
++++ b/Documentation/networking/ip-sysctl.rst
+@@ -1000,6 +1000,20 @@ tcp_tw_reuse - INTEGER
+ 
+ 	Default: 2
+ 
++tcp_tw_reuse_delay - UNSIGNED INTEGER
++        The delay in milliseconds before a TIME-WAIT socket can be reused by a
++        new connection, if TIME-WAIT socket reuse is enabled. The actual reuse
++        threshold is within [N, N+1] range, where N is the requested delay in
++        milliseconds, to ensure the delay interval is never shorter than the
++        configured value.
++
++        This setting contains an assumption about the other TCP timestamp clock
++        tick interval. It should not be set to a value lower than the peer's
++        clock tick for PAWS (Protection Against Wrapped Sequence numbers)
++        mechanism work correctly for the reused connection.
++
++        Default: 1000 (milliseconds)
++
+ tcp_window_scaling - BOOLEAN
+ 	Enable window scaling as defined in RFC1323.

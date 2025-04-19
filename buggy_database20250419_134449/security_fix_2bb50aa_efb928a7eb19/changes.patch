@@ -1,0 +1,75 @@
+diff --git a/fs/nfs/callback_xdr.c b/fs/nfs/callback_xdr.c
+index 03a20f5716c7..79ff172eb1c8 100644
+--- a/fs/nfs/callback_xdr.c
++++ b/fs/nfs/callback_xdr.c
+@@ -18,6 +18,7 @@
+ #include "callback.h"
+ #include "internal.h"
+ #include "nfs4session.h"
++#include "nfs4trace.h"
+ 
+ #define CB_OP_TAGLEN_MAXSZ		(512)
+ #define CB_OP_HDR_RES_MAXSZ		(2 * 4) // opcode, status
+@@ -946,9 +947,13 @@ static __be32 nfs4_callback_compound(struct svc_rqst *rqstp)
+ 
+ 	if (hdr_arg.minorversion == 0) {
+ 		cps.clp = nfs4_find_client_ident(SVC_NET(rqstp), hdr_arg.cb_ident);
+-		if (!cps.clp || !check_gss_callback_principal(cps.clp, rqstp)) {
+-			if (cps.clp)
+-				nfs_put_client(cps.clp);
++		if (!cps.clp) {
++			trace_nfs_cb_no_clp(rqstp->rq_xid, hdr_arg.cb_ident);
++			goto out_invalidcred;
++		}
++		if (!check_gss_callback_principal(cps.clp, rqstp)) {
++			trace_nfs_cb_badprinc(rqstp->rq_xid, hdr_arg.cb_ident);
++			nfs_put_client(cps.clp);
+ 			goto out_invalidcred;
+ 		}
+ 	}
+diff --git a/fs/nfs/nfs4trace.h b/fs/nfs/nfs4trace.h
+index e60b6fbd5ada..e3586c16ef59 100644
+--- a/fs/nfs/nfs4trace.h
++++ b/fs/nfs/nfs4trace.h
+@@ -691,6 +691,41 @@ TRACE_EVENT(nfs4_xdr_status,
+ 		)
+ );
+ 
++DECLARE_EVENT_CLASS(nfs4_cb_error_class,
++		TP_PROTO(
++			__be32 xid,
++			u32 cb_ident
++		),
++
++		TP_ARGS(xid, cb_ident),
++
++		TP_STRUCT__entry(
++			__field(u32, xid)
++			__field(u32, cbident)
++		),
++
++		TP_fast_assign(
++			__entry->xid = be32_to_cpu(xid);
++			__entry->cbident = cb_ident;
++		),
++
++		TP_printk(
++			"xid=0x%08x cb_ident=0x%08x",
++			__entry->xid, __entry->cbident
++		)
++);
++
++#define DEFINE_CB_ERROR_EVENT(name) \
++	DEFINE_EVENT(nfs4_cb_error_class, nfs_cb_##name, \
++			TP_PROTO( \
++				__be32 xid, \
++				u32 cb_ident \
++			), \
++			TP_ARGS(xid, cb_ident))
++
++DEFINE_CB_ERROR_EVENT(no_clp);
++DEFINE_CB_ERROR_EVENT(badprinc);
++
+ DECLARE_EVENT_CLASS(nfs4_open_event,
+ 		TP_PROTO(
+ 			const struct nfs_open_context *ctx,

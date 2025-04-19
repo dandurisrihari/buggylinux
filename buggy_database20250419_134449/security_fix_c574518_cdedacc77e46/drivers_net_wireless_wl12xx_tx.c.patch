@@ -1,0 +1,75 @@
+commit c5745187a4812f2991a58e469a866582a7326d91
+Author: Ohad Ben-Cohen <ohad@wizery.com>
+Date:   Wed Mar 30 16:35:59 2011 +0200
+
+    wl12xx: fix roaming
+    
+    The wl12xx device normally drops all frames coming from BSSID
+    it is not joined with.
+    
+    This behavior is configured today by the wl12xx driver in response
+    to a handful of ieee80211_bss_change and ieee80211_conf_changed
+    notification flags, such as BSS_CHANGED_ASSOC, BSS_CHANGED_BSSID,
+    IEEE80211_CONF_CHANGE_IDLE, etc..
+    
+    This breaks when we roam to a new BSSID, where authentication frames
+    are sent before any BSS_CHANGED/CONF_CHANGED flags are received.
+    When this happens the hardware silently drops the authentication
+    responses, and the roaming fails.
+    
+    Ideally this aggressive filtering behavior of the device should be disabled
+    upon a notification from mac80211. Such notification will take place
+    after multi-channel support will be added: mac80211 will likely send a
+    remain-on-channel notification to drivers when entering sensitive
+    states (like authentication), otherwise the firmware might jump to
+    different channels (to serve a different role).
+    
+    Until those notifications materialize, disable the hw BSSID filter
+    when authentication requests are sent, so roaming would work.
+    
+    Signed-off-by: Ohad Ben-Cohen <ohad@wizery.com>
+    Reviewed-by: Luciano Coelho <coelho@ti.com>
+    Signed-off-by: Luciano Coelho <coelho@ti.com>
+
+diff --git a/drivers/net/wireless/wl12xx/tx.c b/drivers/net/wireless/wl12xx/tx.c
+index 2019ed9ebfc4..7686bc1ff16a 100644
+--- a/drivers/net/wireless/wl12xx/tx.c
++++ b/drivers/net/wireless/wl12xx/tx.c
+@@ -70,6 +70,28 @@ static void wl1271_free_tx_id(struct wl1271 *wl, int id)
+ 	}
+ }
+ 
++static int wl1271_tx_update_filters(struct wl1271 *wl,
++						 struct sk_buff *skb)
++{
++	struct ieee80211_hdr *hdr;
++
++	hdr = (struct ieee80211_hdr *)(skb->data +
++				       sizeof(struct wl1271_tx_hw_descr));
++
++	/*
++	 * stop bssid-based filtering before transmitting authentication
++	 * requests. this way the hw will never drop authentication
++	 * responses coming from BSSIDs it isn't familiar with (e.g. on
++	 * roaming)
++	 */
++	if (!ieee80211_is_auth(hdr->frame_control))
++		return 0;
++
++	wl1271_configure_filters(wl, FIF_OTHER_BSS);
++
++	return wl1271_acx_rx_config(wl, wl->rx_config, wl->rx_filter);
++}
++
+ static void wl1271_tx_ap_update_inconnection_sta(struct wl1271 *wl,
+ 						 struct sk_buff *skb)
+ {
+@@ -350,6 +372,8 @@ static int wl1271_prepare_tx_frame(struct wl1271 *wl, struct sk_buff *skb,
+ 	if (wl->bss_type == BSS_TYPE_AP_BSS) {
+ 		wl1271_tx_ap_update_inconnection_sta(wl, skb);
+ 		wl1271_tx_regulate_link(wl, hlid);
++	} else {
++		wl1271_tx_update_filters(wl, skb);
+ 	}
+ 
+ 	wl1271_tx_fill_hdr(wl, skb, extra, info, hlid);

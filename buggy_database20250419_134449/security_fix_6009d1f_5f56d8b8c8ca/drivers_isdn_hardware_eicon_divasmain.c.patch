@@ -1,0 +1,95 @@
+commit 6009d1fe6ba3bb2dab55921da60465329cc1cd89
+Author: Wenwen Wang <wang6495@umn.edu>
+Date:   Mon May 21 01:58:07 2018 -0500
+
+    isdn: eicon: fix a missing-check bug
+    
+    In divasmain.c, the function divas_write() firstly invokes the function
+    diva_xdi_open_adapter() to open the adapter that matches with the adapter
+    number provided by the user, and then invokes the function diva_xdi_write()
+    to perform the write operation using the matched adapter. The two functions
+    diva_xdi_open_adapter() and diva_xdi_write() are located in diva.c.
+    
+    In diva_xdi_open_adapter(), the user command is copied to the object 'msg'
+    from the userspace pointer 'src' through the function pointer 'cp_fn',
+    which eventually calls copy_from_user() to do the copy. Then, the adapter
+    number 'msg.adapter' is used to find out a matched adapter from the
+    'adapter_queue'. A matched adapter will be returned if it is found.
+    Otherwise, NULL is returned to indicate the failure of the verification on
+    the adapter number.
+    
+    As mentioned above, if a matched adapter is returned, the function
+    diva_xdi_write() is invoked to perform the write operation. In this
+    function, the user command is copied once again from the userspace pointer
+    'src', which is the same as the 'src' pointer in diva_xdi_open_adapter() as
+    both of them are from the 'buf' pointer in divas_write(). Similarly, the
+    copy is achieved through the function pointer 'cp_fn', which finally calls
+    copy_from_user(). After the successful copy, the corresponding command
+    processing handler of the matched adapter is invoked to perform the write
+    operation.
+    
+    It is obvious that there are two copies here from userspace, one is in
+    diva_xdi_open_adapter(), and one is in diva_xdi_write(). Plus, both of
+    these two copies share the same source userspace pointer, i.e., the 'buf'
+    pointer in divas_write(). Given that a malicious userspace process can race
+    to change the content pointed by the 'buf' pointer, this can pose potential
+    security issues. For example, in the first copy, the user provides a valid
+    adapter number to pass the verification process and a valid adapter can be
+    found. Then the user can modify the adapter number to an invalid number.
+    This way, the user can bypass the verification process of the adapter
+    number and inject inconsistent data.
+    
+    This patch reuses the data copied in
+    diva_xdi_open_adapter() and passes it to diva_xdi_write(). This way, the
+    above issues can be avoided.
+    
+    Signed-off-by: Wenwen Wang <wang6495@umn.edu>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/isdn/hardware/eicon/divasmain.c b/drivers/isdn/hardware/eicon/divasmain.c
+index b9980e84f9db..b6a3950b2564 100644
+--- a/drivers/isdn/hardware/eicon/divasmain.c
++++ b/drivers/isdn/hardware/eicon/divasmain.c
+@@ -591,19 +591,22 @@ static int divas_release(struct inode *inode, struct file *file)
+ static ssize_t divas_write(struct file *file, const char __user *buf,
+ 			   size_t count, loff_t *ppos)
+ {
++	diva_xdi_um_cfg_cmd_t msg;
+ 	int ret = -EINVAL;
+ 
+ 	if (!file->private_data) {
+ 		file->private_data = diva_xdi_open_adapter(file, buf,
+-							   count,
++							   count, &msg,
+ 							   xdi_copy_from_user);
+-	}
+-	if (!file->private_data) {
+-		return (-ENODEV);
++		if (!file->private_data)
++			return (-ENODEV);
++		ret = diva_xdi_write(file->private_data, file,
++				     buf, count, &msg, xdi_copy_from_user);
++	} else {
++		ret = diva_xdi_write(file->private_data, file,
++				     buf, count, NULL, xdi_copy_from_user);
+ 	}
+ 
+-	ret = diva_xdi_write(file->private_data, file,
+-			     buf, count, xdi_copy_from_user);
+ 	switch (ret) {
+ 	case -1:		/* Message should be removed from rx mailbox first */
+ 		ret = -EBUSY;
+@@ -622,11 +625,12 @@ static ssize_t divas_write(struct file *file, const char __user *buf,
+ static ssize_t divas_read(struct file *file, char __user *buf,
+ 			  size_t count, loff_t *ppos)
+ {
++	diva_xdi_um_cfg_cmd_t msg;
+ 	int ret = -EINVAL;
+ 
+ 	if (!file->private_data) {
+ 		file->private_data = diva_xdi_open_adapter(file, buf,
+-							   count,
++							   count, &msg,
+ 							   xdi_copy_from_user);
+ 	}
+ 	if (!file->private_data) {

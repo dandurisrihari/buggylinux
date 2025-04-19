@@ -1,0 +1,62 @@
+commit 9e26297a56453315ae6829aec609b5a6309af7b4
+Author: Johannes Berg <johannes.berg@intel.com>
+Date:   Thu Jul 7 18:45:03 2011 +0200
+
+    mac80211: simplify RX PN/IV handling
+    
+    The current rx->queue value is slightly confusing.
+    It is set to 16 on non-QoS frames, including data,
+    and then used for sequence number and PN/IV checks.
+    Until recently, we had a TKIP IV checking bug that
+    had been introduced in 2008 to fix a seqno issue.
+    Before that, we always used TID 0 for checking the
+    PN or IV on non-QoS packets.
+    
+    Go back to the old status for PN/IV checks using
+    the TID 0 counter for non-QoS by splitting up the
+    rx->queue value into "seqno_idx" and "security_idx"
+    in order to avoid confusion in the future. They
+    each have special rules on the value used for non-
+    QoS data frames.
+    
+    Since the handling is now unified, also revert the
+    special TKIP handling from my patch
+    "mac80211: fix TKIP replay vulnerability".
+    
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/mac80211/wpa.c b/net/mac80211/wpa.c
+index 01684234b704..7bc8702808fa 100644
+--- a/net/mac80211/wpa.c
++++ b/net/mac80211/wpa.c
+@@ -149,8 +149,8 @@ ieee80211_rx_h_michael_mic_verify(struct ieee80211_rx_data *rx)
+ 
+ update_iv:
+ 	/* update IV in key information to be able to detect replays */
+-	rx->key->u.tkip.rx[rx->queue].iv32 = rx->tkip_iv32;
+-	rx->key->u.tkip.rx[rx->queue].iv16 = rx->tkip_iv16;
++	rx->key->u.tkip.rx[rx->security_idx].iv32 = rx->tkip_iv32;
++	rx->key->u.tkip.rx[rx->security_idx].iv16 = rx->tkip_iv16;
+ 
+ 	return RX_CONTINUE;
+ 
+@@ -263,7 +263,7 @@ ieee80211_crypto_tkip_decrypt(struct ieee80211_rx_data *rx)
+ 	res = ieee80211_tkip_decrypt_data(rx->local->wep_rx_tfm,
+ 					  key, skb->data + hdrlen,
+ 					  skb->len - hdrlen, rx->sta->sta.addr,
+-					  hdr->addr1, hwaccel, rx->queue,
++					  hdr->addr1, hwaccel, rx->security_idx,
+ 					  &rx->tkip_iv32,
+ 					  &rx->tkip_iv16);
+ 	if (res != TKIP_DECRYPT_OK)
+@@ -478,8 +478,7 @@ ieee80211_crypto_ccmp_decrypt(struct ieee80211_rx_data *rx)
+ 
+ 	ccmp_hdr2pn(pn, skb->data + hdrlen);
+ 
+-	queue = ieee80211_is_mgmt(hdr->frame_control) ?
+-		NUM_RX_DATA_QUEUES : rx->queue;
++	queue = rx->security_idx;
+ 
+ 	if (memcmp(pn, key->u.ccmp.rx_pn[queue], CCMP_PN_LEN) <= 0) {
+ 		key->u.ccmp.replays++;

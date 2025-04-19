@@ -1,0 +1,53 @@
+commit fb2d14add4f813c73bd9d28b750315ccb3f5f0ea
+Author: Kees Cook <kees@kernel.org>
+Date:   Tue Sep 27 14:17:36 2022 -0700
+
+    Drivers: hv: vmbus: Split memcpy of flex-array
+    
+    To work around a misbehavior of the compiler's ability to see into
+    composite flexible array structs (as detailed in the coming memcpy()
+    hardening series[1]), split the memcpy() of the header and the payload
+    so no false positive run-time overflow warning will be generated. This
+    results in the already inlined memcpy getting unrolled a little more,
+    which very slightly increases text size:
+    
+    $ size drivers/hv/vmbus_drv.o.before drivers/hv/vmbus_drv.o
+       text    data     bss     dec     hex filename
+      22968    5239     232   28439    6f17 drivers/hv/vmbus_drv.o.before
+      23032    5239     232   28503    6f57 drivers/hv/vmbus_drv.o
+    
+    Avoids the run-time false-positive warning:
+    
+      memcpy: detected field-spanning write (size 212) of single field "&ctx->msg" at drivers/hv/vmbus_drv.c:1133 (size 16)
+    
+    [1] https://lore.kernel.org/linux-hardening/20220901065914.1417829-2-keescook@chromium.org/
+    
+    Cc: "K. Y. Srinivasan" <kys@microsoft.com>
+    Cc: Haiyang Zhang <haiyangz@microsoft.com>
+    Cc: Stephen Hemminger <sthemmin@microsoft.com>
+    Cc: Wei Liu <wei.liu@kernel.org>
+    Cc: Dexuan Cui <decui@microsoft.com>
+    Cc: linux-hyperv@vger.kernel.org
+    Reported-by: Nathan Chancellor <nathan@kernel.org>
+    Reported-by: "Gustavo A. R. Silva" <gustavoars@kernel.org>
+    Tested-by: Nathan Chancellor <nathan@kernel.org>
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+    Reviewed-by: Gustavo A. R. Silva <gustavoars@kernel.org>
+    Reviewed-by: Michael Kelley <mikelley@microsoft.com>
+    Link: https://lore.kernel.org/r/20220927211736.3241175-1-keescook@chromium.org
+    Signed-off-by: Wei Liu <wei.liu@kernel.org>
+
+diff --git a/drivers/hv/vmbus_drv.c b/drivers/hv/vmbus_drv.c
+index cfc231beb52a..bbbc92994e94 100644
+--- a/drivers/hv/vmbus_drv.c
++++ b/drivers/hv/vmbus_drv.c
+@@ -1130,7 +1130,8 @@ void vmbus_on_msg_dpc(unsigned long data)
+ 			return;
+ 
+ 		INIT_WORK(&ctx->work, vmbus_onmessage_work);
+-		memcpy(&ctx->msg, &msg_copy, sizeof(msg->header) + payload_size);
++		ctx->msg.header = msg_copy.header;
++		memcpy(&ctx->msg.payload, msg_copy.u.payload, payload_size);
+ 
+ 		/*
+ 		 * The host can generate a rescind message while we

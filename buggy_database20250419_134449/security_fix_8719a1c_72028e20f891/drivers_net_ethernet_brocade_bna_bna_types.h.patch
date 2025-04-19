@@ -1,0 +1,120 @@
+commit 8719a1c30d3a1b4f347afca8e78be201d66d5c49
+Author: Gustavo A. R. Silva <gustavoars@kernel.org>
+Date:   Wed Nov 16 10:59:44 2022 -0600
+
+    bna: Avoid clashing function prototypes
+    
+    When built with Control Flow Integrity, function prototypes between
+    caller and function declaration must match. These mismatches are visible
+    at compile time with the new -Wcast-function-type-strict in Clang[1].
+    
+    Fix a total of 227 warnings like these:
+    
+    drivers/net/ethernet/brocade/bna/bna_enet.c:519:3: warning: cast from 'void (*)(struct bna_ethport *, enum bna_ethport_event)' to 'bfa_fsm_t' (aka 'void (*)(void *, int)') converts to incompatible function type [-Wcast-function-type-strict]
+                    bfa_fsm_set_state(ethport, bna_ethport_sm_down);
+                    ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    
+    The bna state machine code heavily overloads its state machine functions,
+    so these have been separated into their own sets of structs, enums,
+    typedefs, and helper functions. There are almost zero binary code changes,
+    all seem to be related to header file line numbers changing, or the
+    addition of the new stats helper.
+    
+    Important to mention is that while I was manually implementing this changes
+    I was staring at this[2] patch from Kees Cook. Thanks, Kees. :)
+    
+    Link: https://github.com/KSPP/linux/issues/240
+    [1] https://reviews.llvm.org/D134831
+    [2] https://lore.kernel.org/linux-hardening/20220929230334.2109344-1-keescook@chromium.org/
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Signed-off-by: Gustavo A. R. Silva <gustavoars@kernel.org>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/brocade/bna/bna_types.h b/drivers/net/ethernet/brocade/bna/bna_types.h
+index 666b6922e24d..a5ebd7110e07 100644
+--- a/drivers/net/ethernet/brocade/bna/bna_types.h
++++ b/drivers/net/ethernet/brocade/bna/bna_types.h
+@@ -312,8 +312,10 @@ struct bna_attr {
+ 
+ /* IOCEth */
+ 
++enum bna_ioceth_event;
++
+ struct bna_ioceth {
+-	bfa_fsm_t		fsm;
++	void (*fsm)(struct bna_ioceth *s, enum bna_ioceth_event e);
+ 	struct bfa_ioc ioc;
+ 
+ 	struct bna_attr attr;
+@@ -334,8 +336,10 @@ struct bna_pause_config {
+ 	enum bna_status rx_pause;
+ };
+ 
++enum bna_enet_event;
++
+ struct bna_enet {
+-	bfa_fsm_t		fsm;
++	void (*fsm)(struct bna_enet *s, enum bna_enet_event e);
+ 	enum bna_enet_flags flags;
+ 
+ 	enum bna_enet_type type;
+@@ -360,8 +364,10 @@ struct bna_enet {
+ 
+ /* Ethport */
+ 
++enum bna_ethport_event;
++
+ struct bna_ethport {
+-	bfa_fsm_t		fsm;
++	void (*fsm)(struct bna_ethport *s, enum bna_ethport_event e);
+ 	enum bna_ethport_flags flags;
+ 
+ 	enum bna_link_status link_status;
+@@ -454,13 +460,16 @@ struct bna_txq {
+ };
+ 
+ /* Tx object */
++
++enum bna_tx_event;
++
+ struct bna_tx {
+ 	/* This should be the first one */
+ 	struct list_head			qe;
+ 	int			rid;
+ 	int			hw_id;
+ 
+-	bfa_fsm_t		fsm;
++	void (*fsm)(struct bna_tx *s, enum bna_tx_event e);
+ 	enum bna_tx_flags flags;
+ 
+ 	enum bna_tx_type type;
+@@ -698,8 +707,11 @@ struct bna_rxp {
+ };
+ 
+ /* RxF structure (hardware Rx Function) */
++
++enum bna_rxf_event;
++
+ struct bna_rxf {
+-	bfa_fsm_t		fsm;
++	void (*fsm)(struct bna_rxf *s, enum bna_rxf_event e);
+ 
+ 	struct bfa_msgq_cmd_entry msgq_cmd;
+ 	union {
+@@ -769,13 +781,16 @@ struct bna_rxf {
+ };
+ 
+ /* Rx object */
++
++enum bna_rx_event;
++
+ struct bna_rx {
+ 	/* This should be the first one */
+ 	struct list_head			qe;
+ 	int			rid;
+ 	int			hw_id;
+ 
+-	bfa_fsm_t		fsm;
++	void (*fsm)(struct bna_rx *s, enum bna_rx_event e);
+ 
+ 	enum bna_rx_type type;

@@ -1,0 +1,44 @@
+commit fa205589d5e9fc2d1b2f8d31f665152da04160bc
+Author: Martin Kaiser <martin@kaiser.cx>
+Date:   Sat Nov 26 17:01:27 2022 +0100
+
+    staging: r8188eu: stop beacon processing if kmalloc fails
+    
+    If we cannot allocate a struct wlan_bssid_ex in the OnBeacon function, we
+    should stop processing the incoming beacon message and return.
+    
+    For kmalloc failures, the current code just skips the update of network
+    and beacon info and tries to continue with the authentication. The update
+    would set the encryption algorithm that should be used for the
+    authentication.
+    
+    Tested-by: Philipp Hortmann <philipp.g.hortmann@gmail.com> # Edimax N150
+    Signed-off-by: Martin Kaiser <martin@kaiser.cx>
+    Link: https://lore.kernel.org/r/20221126160129.178697-9-martin@kaiser.cx
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/staging/r8188eu/core/rtw_mlme_ext.c b/drivers/staging/r8188eu/core/rtw_mlme_ext.c
+index a15998d912a7..76424bcba416 100644
+--- a/drivers/staging/r8188eu/core/rtw_mlme_ext.c
++++ b/drivers/staging/r8188eu/core/rtw_mlme_ext.c
+@@ -575,13 +575,14 @@ static void OnBeacon(struct adapter *padapter, struct recv_frame *precv_frame)
+ 	if (pmlmeinfo->state & WIFI_FW_AUTH_NULL) {
+ 		/* we should update current network before auth, or some IE is wrong */
+ 		pbss = kmalloc(sizeof(struct wlan_bssid_ex), GFP_ATOMIC);
+-		if (pbss) {
+-			if (collect_bss_info(padapter, precv_frame, pbss) == _SUCCESS) {
+-				update_network(&pmlmepriv->cur_network.network, pbss, padapter, true);
+-				rtw_get_bcn_info(&pmlmepriv->cur_network);
+-			}
+-			kfree(pbss);
++		if (!pbss)
++			return;
++
++		if (collect_bss_info(padapter, precv_frame, pbss) == _SUCCESS) {
++			update_network(&pmlmepriv->cur_network.network, pbss, padapter, true);
++			rtw_get_bcn_info(&pmlmepriv->cur_network);
+ 		}
++		kfree(pbss);
+ 
+ 		/* check the vendor of the assoc AP */
+ 		pmlmeinfo->assoc_AP_vendor = check_assoc_AP(pframe + sizeof(struct ieee80211_hdr_3addr), len - sizeof(struct ieee80211_hdr_3addr));

@@ -1,0 +1,84 @@
+commit 98d2722a85c4ad5f2baf2272cbb0fab67f797b69
+Author: Daniele Ceraolo Spurio <daniele.ceraolospurio@intel.com>
+Date:   Wed May 31 16:54:12 2023 -0700
+
+    drm/i915/huc: differentiate the 2 steps of the MTL HuC auth flow
+    
+    Before we add the second step of the MTL HuC auth (via GSC), we need to
+    have the ability to differentiate between them. To do so, the huc
+    authentication check is duplicated for GuC and GSC auth, with
+    GSC-enabled binaries being considered fully authenticated only after
+    the GSC auth step.
+    
+    To report the difference between the 2 auth steps, a new case is added
+    to the HuC getparam. This way, the clear media driver can start
+    submitting before full auth, as partial auth is enough for those
+    workloads.
+    
+    v2: fix authentication status check for DG2
+    
+    v3: add a better comment at the top of the HuC file to explain the
+        different approaches to load and auth (John)
+    
+    v4: update call to intel_huc_is_authenticated in the pxp code to check
+    for GSC authentication
+    
+    v5: drop references to meu and esclamation mark in huc_auth print (John)
+    
+    Signed-off-by: Daniele Ceraolo Spurio <daniele.ceraolospurio@intel.com>
+    Cc: Alan Previn <alan.previn.teres.alexis@intel.com>
+    Cc: John Harrison <John.C.Harrison@Intel.com>
+    Reviewed-by: Alan Previn <alan.previn.teres.alexis@intel.com> #v2
+    Reviewed-by: John Harrison <John.C.Harrison@Intel.com>
+    Link: https://patchwork.freedesktop.org/patch/msgid/20230531235415.1467475-5-daniele.ceraolospurio@intel.com
+
+diff --git a/drivers/gpu/drm/i915/gt/uc/intel_huc.h b/drivers/gpu/drm/i915/gt/uc/intel_huc.h
+index 112f0dce4702..3f6aa7c37abc 100644
+--- a/drivers/gpu/drm/i915/gt/uc/intel_huc.h
++++ b/drivers/gpu/drm/i915/gt/uc/intel_huc.h
+@@ -22,6 +22,12 @@ enum intel_huc_delayed_load_status {
+ 	INTEL_HUC_DELAYED_LOAD_ERROR,
+ };
+ 
++enum intel_huc_authentication_type {
++	INTEL_HUC_AUTH_BY_GUC = 0,
++	INTEL_HUC_AUTH_BY_GSC,
++	INTEL_HUC_AUTH_MAX_MODES
++};
++
+ struct intel_huc {
+ 	/* Generic uC firmware management */
+ 	struct intel_uc_fw fw;
+@@ -31,7 +37,7 @@ struct intel_huc {
+ 		i915_reg_t reg;
+ 		u32 mask;
+ 		u32 value;
+-	} status;
++	} status[INTEL_HUC_AUTH_MAX_MODES];
+ 
+ 	struct {
+ 		struct i915_sw_fence fence;
+@@ -49,10 +55,12 @@ int intel_huc_init(struct intel_huc *huc);
+ void intel_huc_fini(struct intel_huc *huc);
+ void intel_huc_suspend(struct intel_huc *huc);
+ int intel_huc_auth(struct intel_huc *huc);
+-int intel_huc_wait_for_auth_complete(struct intel_huc *huc);
++int intel_huc_wait_for_auth_complete(struct intel_huc *huc,
++				     enum intel_huc_authentication_type type);
++bool intel_huc_is_authenticated(struct intel_huc *huc,
++				enum intel_huc_authentication_type type);
+ int intel_huc_check_status(struct intel_huc *huc);
+ void intel_huc_update_auth_status(struct intel_huc *huc);
+-bool intel_huc_is_authenticated(struct intel_huc *huc);
+ 
+ void intel_huc_register_gsc_notifier(struct intel_huc *huc, const struct bus_type *bus);
+ void intel_huc_unregister_gsc_notifier(struct intel_huc *huc, const struct bus_type *bus);
+@@ -81,7 +89,7 @@ static inline bool intel_huc_is_loaded_by_gsc(const struct intel_huc *huc)
+ static inline bool intel_huc_wait_required(struct intel_huc *huc)
+ {
+ 	return intel_huc_is_used(huc) && intel_huc_is_loaded_by_gsc(huc) &&
+-	       !intel_huc_is_authenticated(huc);
++	       !intel_huc_is_authenticated(huc, INTEL_HUC_AUTH_BY_GSC);
+ }
+ 
+ void intel_huc_load_status(struct intel_huc *huc, struct drm_printer *p);

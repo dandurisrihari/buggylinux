@@ -1,0 +1,55 @@
+commit 6982934e19f8ebb4152ba77308facdb1a38533f9
+Author: Kristina Martsenko <kristina.martsenko@arm.com>
+Date:   Fri Mar 13 14:34:55 2020 +0530
+
+    arm64: enable ptrauth earlier
+    
+    When the kernel is compiled with pointer auth instructions, the boot CPU
+    needs to start using address auth very early, so change the cpucap to
+    account for this.
+    
+    Pointer auth must be enabled before we call C functions, because it is
+    not possible to enter a function with pointer auth disabled and exit it
+    with pointer auth enabled. Note, mismatches between architected and
+    IMPDEF algorithms will still be caught by the cpufeature framework (the
+    separate *_ARCH and *_IMP_DEF cpucaps).
+    
+    Note the change in behavior: if the boot CPU has address auth and a
+    late CPU does not, then the late CPU is parked by the cpufeature
+    framework. This is possible as kernel will only have NOP space intructions
+    for PAC so such mismatched late cpu will silently ignore those
+    instructions in C functions. Also, if the boot CPU does not have address
+    auth and the late CPU has then the late cpu will still boot but with
+    ptrauth feature disabled.
+    
+    Leave generic authentication as a "system scope" cpucap for now, since
+    initially the kernel will only use address authentication.
+    
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Reviewed-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+    Reviewed-by: Vincenzo Frascino <Vincenzo.Frascino@arm.com>
+    Signed-off-by: Kristina Martsenko <kristina.martsenko@arm.com>
+    [Amit: Re-worked ptrauth setup logic, comments]
+    Signed-off-by: Amit Daniel Kachhap <amit.kachhap@arm.com>
+    Signed-off-by: Catalin Marinas <catalin.marinas@arm.com>
+
+diff --git a/arch/arm64/include/asm/cpufeature.h b/arch/arm64/include/asm/cpufeature.h
+index 46388e65bbcd..2b5a088053e4 100644
+--- a/arch/arm64/include/asm/cpufeature.h
++++ b/arch/arm64/include/asm/cpufeature.h
+@@ -291,6 +291,15 @@ extern struct arm64_ftr_reg arm64_ftr_reg_ctrel0;
+ #define ARM64_CPUCAP_STRICT_BOOT_CPU_FEATURE		\
+ 	(ARM64_CPUCAP_SCOPE_BOOT_CPU | ARM64_CPUCAP_PANIC_ON_CONFLICT)
+ 
++/*
++ * CPU feature used early in the boot based on the boot CPU. It is safe for a
++ * late CPU to have this feature even though the boot CPU hasn't enabled it,
++ * although the feature will not be used by Linux in this case. If the boot CPU
++ * has enabled this feature already, then every late CPU must have it.
++ */
++#define ARM64_CPUCAP_BOOT_CPU_FEATURE                  \
++	(ARM64_CPUCAP_SCOPE_BOOT_CPU | ARM64_CPUCAP_PERMITTED_FOR_LATE_CPU)
++
+ struct arm64_cpu_capabilities {
+ 	const char *desc;
+ 	u16 capability;

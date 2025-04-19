@@ -1,0 +1,69 @@
+commit 4a06825839889cc1756d0dd8a52d6b1071ee0263
+Author: Chuck Lever <chuck.lever@oracle.com>
+Date:   Mon May 11 14:02:25 2015 -0400
+
+    SUNRPC: Transport fault injection
+    
+    It has been exceptionally useful to exercise the logic that handles
+    local immediate errors and RDMA connection loss.  To enable
+    developers to test this regularly and repeatably, add logic to
+    simulate connection loss every so often.
+    
+    Fault injection is disabled by default. It is enabled with
+    
+      $ sudo echo xxx > /sys/kernel/debug/sunrpc/inject_fault/disconnect
+    
+    where "xxx" is a large positive number of transport method calls
+    before a disconnect. A value of several thousand is usually a good
+    number that allows reasonable forward progress while still causing a
+    lot of connection drops.
+    
+    These hooks are disabled when SUNRPC_DEBUG is turned off.
+    
+    Signed-off-by: Chuck Lever <chuck.lever@oracle.com>
+    Signed-off-by: Trond Myklebust <trond.myklebust@primarydata.com>
+
+diff --git a/include/linux/sunrpc/xprt.h b/include/linux/sunrpc/xprt.h
+index b6096592b1d4..0fb9acbb4780 100644
+--- a/include/linux/sunrpc/xprt.h
++++ b/include/linux/sunrpc/xprt.h
+@@ -135,6 +135,7 @@ struct rpc_xprt_ops {
+ 	void		(*print_stats)(struct rpc_xprt *xprt, struct seq_file *seq);
+ 	int		(*enable_swap)(struct rpc_xprt *xprt);
+ 	void		(*disable_swap)(struct rpc_xprt *xprt);
++	void		(*inject_disconnect)(struct rpc_xprt *xprt);
+ };
+ 
+ /*
+@@ -244,6 +245,7 @@ struct rpc_xprt {
+ 	const char		*address_strings[RPC_DISPLAY_MAX];
+ #if IS_ENABLED(CONFIG_SUNRPC_DEBUG)
+ 	struct dentry		*debugfs;		/* debugfs directory */
++	atomic_t		inject_disconnect;
+ #endif
+ };
+ 
+@@ -445,6 +447,23 @@ static inline int xprt_test_and_set_binding(struct rpc_xprt *xprt)
+ 	return test_and_set_bit(XPRT_BINDING, &xprt->state);
+ }
+ 
++#if IS_ENABLED(CONFIG_SUNRPC_DEBUG)
++extern unsigned int rpc_inject_disconnect;
++static inline void xprt_inject_disconnect(struct rpc_xprt *xprt)
++{
++	if (!rpc_inject_disconnect)
++		return;
++	if (atomic_dec_return(&xprt->inject_disconnect))
++		return;
++	atomic_set(&xprt->inject_disconnect, rpc_inject_disconnect);
++	xprt->ops->inject_disconnect(xprt);
++}
++#else
++static inline void xprt_inject_disconnect(struct rpc_xprt *xprt)
++{
++}
++#endif
++
+ #endif /* __KERNEL__*/
+ 
+ #endif /* _LINUX_SUNRPC_XPRT_H */

@@ -1,0 +1,258 @@
+commit 26299b3f6ba26bfc234b73126d14bdf4dec5275a
+Author: Mark Rutland <mark.rutland@arm.com>
+Date:   Thu Nov 3 17:05:20 2022 +0000
+
+    ftrace: arm64: move from REGS to ARGS
+    
+    This commit replaces arm64's support for FTRACE_WITH_REGS with support
+    for FTRACE_WITH_ARGS. This removes some overhead and complexity, and
+    removes some latent issues with inconsistent presentation of struct
+    pt_regs (which can only be reliably saved/restored at exception
+    boundaries).
+    
+    FTRACE_WITH_REGS has been supported on arm64 since commit:
+    
+      3b23e4991fb66f6d ("arm64: implement ftrace with regs")
+    
+    As noted in the commit message, the major reasons for implementing
+    FTRACE_WITH_REGS were:
+    
+    (1) To make it possible to use the ftrace graph tracer with pointer
+        authentication, where it's necessary to snapshot/manipulate the LR
+        before it is signed by the instrumented function.
+    
+    (2) To make it possible to implement LIVEPATCH in future, where we need
+        to hook function entry before an instrumented function manipulates
+        the stack or argument registers. Practically speaking, we need to
+        preserve the argument/return registers, PC, LR, and SP.
+    
+    Neither of these need a struct pt_regs, and only require the set of
+    registers which are live at function call/return boundaries. Our calling
+    convention is defined by "Procedure Call Standard for the Arm® 64-bit
+    Architecture (AArch64)" (AKA "AAPCS64"), which can currently be found
+    at:
+    
+      https://github.com/ARM-software/abi-aa/blob/main/aapcs64/aapcs64.rst
+    
+    Per AAPCS64, all function call argument and return values are held in
+    the following GPRs:
+    
+    * X0 - X7 : parameter / result registers
+    * X8      : indirect result location register
+    * SP      : stack pointer (AKA SP)
+    
+    Additionally, ad function call boundaries, the following GPRs hold
+    context/return information:
+    
+    * X29 : frame pointer (AKA FP)
+    * X30 : link register (AKA LR)
+    
+    ... and for ftrace we need to capture the instrumented address:
+    
+     * PC  : program counter
+    
+    No other GPRs are relevant, as none of the other arguments hold
+    parameters or return values:
+    
+    * X9  - X17 : temporaries, may be clobbered
+    * X18       : shadow call stack pointer (or temorary)
+    * X19 - X28 : callee saved
+    
+    This patch implements FTRACE_WITH_ARGS for arm64, only saving/restoring
+    the minimal set of registers necessary. This is always sufficient to
+    manipulate control flow (e.g. for live-patching) or to manipulate
+    function arguments and return values.
+    
+    This reduces the necessary stack usage from 336 bytes for pt_regs down
+    to 112 bytes for ftrace_regs + 32 bytes for two frame records, freeing
+    up 188 bytes. This could be reduced further with changes to the
+    unwinder.
+    
+    As there is no longer a need to save different sets of registers for
+    different features, we no longer need distinct `ftrace_caller` and
+    `ftrace_regs_caller` trampolines. This allows the trampoline assembly to
+    be simpler, and simplifies code which previously had to handle the two
+    trampolines.
+    
+    I've tested this with the ftrace selftests, where there are no
+    unexpected failures.
+    
+    Co-developed-by: Florent Revest <revest@chromium.org>
+    Signed-off-by: Mark Rutland <mark.rutland@arm.com>
+    Signed-off-by: Florent Revest <revest@chromium.org>
+    Cc: Catalin Marinas <catalin.marinas@arm.com>
+    Cc: Masami Hiramatsu <mhiramat@kernel.org>
+    Cc: Steven Rostedt <rostedt@goodmis.org>
+    Cc: Will Deacon <will@kernel.org>
+    Reviewed-by: Masami Hiramatsu (Google) <mhiramat@kernel.org>
+    Reviewed-by: Steven Rostedt (Google) <rostedt@goodmis.org>
+    Link: https://lore.kernel.org/r/20221103170520.931305-5-mark.rutland@arm.com
+    Signed-off-by: Will Deacon <will@kernel.org>
+
+diff --git a/arch/arm64/kernel/entry-ftrace.S b/arch/arm64/kernel/entry-ftrace.S
+index 795344ab4ec4..4d3050549aa6 100644
+--- a/arch/arm64/kernel/entry-ftrace.S
++++ b/arch/arm64/kernel/entry-ftrace.S
+@@ -13,83 +13,58 @@
+ #include <asm/ftrace.h>
+ #include <asm/insn.h>
+ 
+-#ifdef CONFIG_DYNAMIC_FTRACE_WITH_REGS
++#ifdef CONFIG_DYNAMIC_FTRACE_WITH_ARGS
+ /*
+  * Due to -fpatchable-function-entry=2, the compiler has placed two NOPs before
+  * the regular function prologue. For an enabled callsite, ftrace_init_nop() and
+  * ftrace_make_call() have patched those NOPs to:
+  *
+  * 	MOV	X9, LR
+- * 	BL	<entry>
+- *
+- * ... where <entry> is either ftrace_caller or ftrace_regs_caller.
++ * 	BL	ftrace_caller
+  *
+  * Each instrumented function follows the AAPCS, so here x0-x8 and x18-x30 are
+  * live (x18 holds the Shadow Call Stack pointer), and x9-x17 are safe to
+  * clobber.
+  *
+- * We save the callsite's context into a pt_regs before invoking any ftrace
+- * callbacks. So that we can get a sensible backtrace, we create a stack record
+- * for the callsite and the ftrace entry assembly. This is not sufficient for
+- * reliable stacktrace: until we create the callsite stack record, its caller
+- * is missing from the LR and existing chain of frame records.
++ * We save the callsite's context into a struct ftrace_regs before invoking any
++ * ftrace callbacks. So that we can get a sensible backtrace, we create frame
++ * records for the callsite and the ftrace entry assembly. This is not
++ * sufficient for reliable stacktrace: until we create the callsite stack
++ * record, its caller is missing from the LR and existing chain of frame
++ * records.
+  */
+-	.macro  ftrace_regs_entry, allregs=0
+-	/* Make room for pt_regs, plus a callee frame */
+-	sub	sp, sp, #(PT_REGS_SIZE + 16)
+-
+-	/* Save function arguments (and x9 for simplicity) */
+-	stp	x0, x1, [sp, #S_X0]
+-	stp	x2, x3, [sp, #S_X2]
+-	stp	x4, x5, [sp, #S_X4]
+-	stp	x6, x7, [sp, #S_X6]
+-	stp	x8, x9, [sp, #S_X8]
+-
+-	/* Optionally save the callee-saved registers, always save the FP */
+-	.if \allregs == 1
+-	stp	x10, x11, [sp, #S_X10]
+-	stp	x12, x13, [sp, #S_X12]
+-	stp	x14, x15, [sp, #S_X14]
+-	stp	x16, x17, [sp, #S_X16]
+-	stp	x18, x19, [sp, #S_X18]
+-	stp	x20, x21, [sp, #S_X20]
+-	stp	x22, x23, [sp, #S_X22]
+-	stp	x24, x25, [sp, #S_X24]
+-	stp	x26, x27, [sp, #S_X26]
+-	stp	x28, x29, [sp, #S_X28]
+-	.else
+-	str	x29, [sp, #S_FP]
+-	.endif
+-
+-	/* Save the callsite's SP and LR */
+-	add	x10, sp, #(PT_REGS_SIZE + 16)
+-	stp	x9, x10, [sp, #S_LR]
++SYM_CODE_START(ftrace_caller)
++	bti	c
+ 
+-	/* Save the PC after the ftrace callsite */
+-	str	x30, [sp, #S_PC]
++	/* Save original SP */
++	mov	x10, sp
+ 
+-	/* Create a frame record for the callsite above pt_regs */
+-	stp	x29, x9, [sp, #PT_REGS_SIZE]
+-	add	x29, sp, #PT_REGS_SIZE
++	/* Make room for ftrace regs, plus two frame records */
++	sub	sp, sp, #(FREGS_SIZE + 32)
+ 
+-	/* Create our frame record within pt_regs. */
+-	stp	x29, x30, [sp, #S_STACKFRAME]
+-	add	x29, sp, #S_STACKFRAME
+-	.endm
++	/* Save function arguments */
++	stp	x0, x1, [sp, #FREGS_X0]
++	stp	x2, x3, [sp, #FREGS_X2]
++	stp	x4, x5, [sp, #FREGS_X4]
++	stp	x6, x7, [sp, #FREGS_X6]
++	str	x8,     [sp, #FREGS_X8]
+ 
+-SYM_CODE_START(ftrace_regs_caller)
+-	bti	c
+-	ftrace_regs_entry	1
+-	b	ftrace_common
+-SYM_CODE_END(ftrace_regs_caller)
++	/* Save the callsite's FP, LR, SP */
++	str	x29, [sp, #FREGS_FP]
++	str	x9,  [sp, #FREGS_LR]
++	str	x10, [sp, #FREGS_SP]
+ 
+-SYM_CODE_START(ftrace_caller)
+-	bti	c
+-	ftrace_regs_entry	0
+-	b	ftrace_common
+-SYM_CODE_END(ftrace_caller)
++	/* Save the PC after the ftrace callsite */
++	str	x30, [sp, #FREGS_PC]
++
++	/* Create a frame record for the callsite above the ftrace regs */
++	stp	x29, x9, [sp, #FREGS_SIZE + 16]
++	add	x29, sp, #FREGS_SIZE + 16
++
++	/* Create our frame record above the ftrace regs */
++	stp	x29, x30, [sp, #FREGS_SIZE]
++	add	x29, sp, #FREGS_SIZE
+ 
+-SYM_CODE_START(ftrace_common)
+ 	sub	x0, x30, #AARCH64_INSN_SIZE	// ip (callsite's BL insn)
+ 	mov	x1, x9				// parent_ip (callsite's LR)
+ 	ldr_l	x2, function_trace_op		// op
+@@ -104,24 +79,24 @@ SYM_INNER_LABEL(ftrace_call, SYM_L_GLOBAL)
+  * to restore x0-x8, x29, and x30.
+  */
+ 	/* Restore function arguments */
+-	ldp	x0, x1, [sp]
+-	ldp	x2, x3, [sp, #S_X2]
+-	ldp	x4, x5, [sp, #S_X4]
+-	ldp	x6, x7, [sp, #S_X6]
+-	ldr	x8, [sp, #S_X8]
++	ldp	x0, x1, [sp, #FREGS_X0]
++	ldp	x2, x3, [sp, #FREGS_X2]
++	ldp	x4, x5, [sp, #FREGS_X4]
++	ldp	x6, x7, [sp, #FREGS_X6]
++	ldr	x8,     [sp, #FREGS_X8]
+ 
+ 	/* Restore the callsite's FP, LR, PC */
+-	ldr	x29, [sp, #S_FP]
+-	ldr	x30, [sp, #S_LR]
+-	ldr	x9, [sp, #S_PC]
++	ldr	x29, [sp, #FREGS_FP]
++	ldr	x30, [sp, #FREGS_LR]
++	ldr	x9,  [sp, #FREGS_PC]
+ 
+ 	/* Restore the callsite's SP */
+-	add	sp, sp, #PT_REGS_SIZE + 16
++	add	sp, sp, #FREGS_SIZE + 32
+ 
+ 	ret	x9
+-SYM_CODE_END(ftrace_common)
++SYM_CODE_END(ftrace_caller)
+ 
+-#else /* CONFIG_DYNAMIC_FTRACE_WITH_REGS */
++#else /* CONFIG_DYNAMIC_FTRACE_WITH_ARGS */
+ 
+ /*
+  * Gcc with -pg will put the following code in the beginning of each function:
+@@ -293,7 +268,7 @@ SYM_FUNC_START(ftrace_graph_caller)
+ 	mcount_exit
+ SYM_FUNC_END(ftrace_graph_caller)
+ #endif /* CONFIG_FUNCTION_GRAPH_TRACER */
+-#endif /* CONFIG_DYNAMIC_FTRACE_WITH_REGS */
++#endif /* CONFIG_DYNAMIC_FTRACE_WITH_ARGS */
+ 
+ SYM_TYPED_FUNC_START(ftrace_stub)
+ 	ret

@@ -1,0 +1,48 @@
+commit 3b619e22c4601b444ed2d6a5458271f72625ac89
+Author: Ard Biesheuvel <ardb@kernel.org>
+Date:   Thu Oct 27 17:59:08 2022 +0200
+
+    arm64: implement dynamic shadow call stack for Clang
+    
+    Implement dynamic shadow call stack support on Clang, by parsing the
+    unwind tables at init time to locate all occurrences of PACIASP/AUTIASP
+    instructions, and replacing them with the shadow call stack push and pop
+    instructions, respectively.
+    
+    This is useful because the overhead of the shadow call stack is
+    difficult to justify on hardware that implements pointer authentication
+    (PAC), and given that the PAC instructions are executed as NOPs on
+    hardware that doesn't, we can just replace them without breaking
+    anything. As PACIASP/AUTIASP are guaranteed to be paired with respect to
+    manipulations of the return address, replacing them 1:1 with shadow call
+    stack pushes and pops is guaranteed to result in the desired behavior.
+    
+    Signed-off-by: Ard Biesheuvel <ardb@kernel.org>
+    Reviewed-by: Sami Tolvanen <samitolvanen@google.com>
+    Tested-by: Sami Tolvanen <samitolvanen@google.com>
+    Link: https://lore.kernel.org/r/20221027155908.1940624-4-ardb@kernel.org
+    Signed-off-by: Will Deacon <will@kernel.org>
+
+diff --git a/arch/arm64/Makefile b/arch/arm64/Makefile
+index 7868a176993f..4d272ad1df1f 100644
+--- a/arch/arm64/Makefile
++++ b/arch/arm64/Makefile
+@@ -77,10 +77,16 @@ branch-prot-flags-$(CONFIG_CC_HAS_SIGN_RETURN_ADDRESS) := -msign-return-address=
+ # We enable additional protection for leaf functions as there is some
+ # narrow potential for ROP protection benefits and no substantial
+ # performance impact has been observed.
++PACRET-y := pac-ret+leaf
++
++# Using a shadow call stack in leaf functions is too costly, so avoid PAC there
++# as well when we may be patching PAC into SCS
++PACRET-$(CONFIG_UNWIND_PATCH_PAC_INTO_SCS) := pac-ret
++
+ ifeq ($(CONFIG_ARM64_BTI_KERNEL),y)
+-branch-prot-flags-$(CONFIG_CC_HAS_BRANCH_PROT_PAC_RET_BTI) := -mbranch-protection=pac-ret+leaf+bti
++branch-prot-flags-$(CONFIG_CC_HAS_BRANCH_PROT_PAC_RET_BTI) := -mbranch-protection=$(PACRET-y)+bti
+ else
+-branch-prot-flags-$(CONFIG_CC_HAS_BRANCH_PROT_PAC_RET) := -mbranch-protection=pac-ret+leaf
++branch-prot-flags-$(CONFIG_CC_HAS_BRANCH_PROT_PAC_RET) := -mbranch-protection=$(PACRET-y)
+ endif
+ # -march=armv8.3-a enables the non-nops instructions for PAC, to avoid the
+ # compiler to generate them and consequently to break the single image contract

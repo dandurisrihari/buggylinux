@@ -1,0 +1,125 @@
+diff --git a/arch/x86/include/asm/kvm_host.h b/arch/x86/include/asm/kvm_host.h
+index 642273712e6a..6093ff1f3bdb 100644
+--- a/arch/x86/include/asm/kvm_host.h
++++ b/arch/x86/include/asm/kvm_host.h
+@@ -1180,7 +1180,7 @@ struct kvm_x86_ops {
+ 	bool (*pt_supported)(void);
+ 	bool (*pku_supported)(void);
+ 
+-	int (*check_nested_events)(struct kvm_vcpu *vcpu, bool external_intr);
++	int (*check_nested_events)(struct kvm_vcpu *vcpu);
+ 	void (*request_immediate_exit)(struct kvm_vcpu *vcpu);
+ 
+ 	void (*sched_in)(struct kvm_vcpu *kvm, int cpu);
+diff --git a/arch/x86/kvm/vmx/nested.c b/arch/x86/kvm/vmx/nested.c
+index 966a5c394c06..300d87ff23c2 100644
+--- a/arch/x86/kvm/vmx/nested.c
++++ b/arch/x86/kvm/vmx/nested.c
+@@ -3603,7 +3603,7 @@ static void nested_vmx_update_pending_dbg(struct kvm_vcpu *vcpu)
+ 			    vcpu->arch.exception.payload);
+ }
+ 
+-static int vmx_check_nested_events(struct kvm_vcpu *vcpu, bool external_intr)
++static int vmx_check_nested_events(struct kvm_vcpu *vcpu)
+ {
+ 	struct vcpu_vmx *vmx = to_vmx(vcpu);
+ 	unsigned long exit_qual;
+@@ -3679,8 +3679,7 @@ static int vmx_check_nested_events(struct kvm_vcpu *vcpu, bool external_intr)
+ 		return 0;
+ 	}
+ 
+-	if ((kvm_cpu_has_interrupt(vcpu) || external_intr) &&
+-	    nested_exit_on_intr(vcpu)) {
++	if (kvm_cpu_has_interrupt(vcpu) && nested_exit_on_intr(vcpu)) {
+ 		if (block_nested_events)
+ 			return -EBUSY;
+ 		nested_vmx_vmexit(vcpu, EXIT_REASON_EXTERNAL_INTERRUPT, 0, 0);
+@@ -4328,17 +4327,8 @@ void nested_vmx_vmexit(struct kvm_vcpu *vcpu, u32 exit_reason,
+ 	vcpu->arch.mp_state = KVM_MP_STATE_RUNNABLE;
+ 
+ 	if (likely(!vmx->fail)) {
+-		/*
+-		 * TODO: SDM says that with acknowledge interrupt on
+-		 * exit, bit 31 of the VM-exit interrupt information
+-		 * (valid interrupt) is always set to 1 on
+-		 * EXIT_REASON_EXTERNAL_INTERRUPT, so we shouldn't
+-		 * need kvm_cpu_has_interrupt().  See the commit
+-		 * message for details.
+-		 */
+-		if (nested_exit_intr_ack_set(vcpu) &&
+-		    exit_reason == EXIT_REASON_EXTERNAL_INTERRUPT &&
+-		    kvm_cpu_has_interrupt(vcpu)) {
++		if (exit_reason == EXIT_REASON_EXTERNAL_INTERRUPT &&
++		    nested_exit_intr_ack_set(vcpu)) {
+ 			int irq = kvm_cpu_get_interrupt(vcpu);
+ 			WARN_ON(irq < 0);
+ 			vmcs12->vm_exit_intr_info = irq |
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index a7314b28ee3a..de4bf790b3f4 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -4493,8 +4493,13 @@ static int vmx_nmi_allowed(struct kvm_vcpu *vcpu)
+ 
+ static int vmx_interrupt_allowed(struct kvm_vcpu *vcpu)
+ {
+-	return (!to_vmx(vcpu)->nested.nested_run_pending &&
+-		vmcs_readl(GUEST_RFLAGS) & X86_EFLAGS_IF) &&
++	if (to_vmx(vcpu)->nested.nested_run_pending)
++		return false;
++
++	if (is_guest_mode(vcpu) && nested_exit_on_intr(vcpu))
++		return true;
++
++	return (vmcs_readl(GUEST_RFLAGS) & X86_EFLAGS_IF) &&
+ 		!(vmcs_read32(GUEST_INTERRUPTIBILITY_INFO) &
+ 			(GUEST_INTR_STATE_STI | GUEST_INTR_STATE_MOV_SS));
+ }
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 78e34c968ab5..b15092c9593d 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -7579,7 +7579,7 @@ static void update_cr8_intercept(struct kvm_vcpu *vcpu)
+ 	kvm_x86_ops->update_cr8_intercept(vcpu, tpr, max_irr);
+ }
+ 
+-static int inject_pending_event(struct kvm_vcpu *vcpu, bool req_int_win)
++static int inject_pending_event(struct kvm_vcpu *vcpu)
+ {
+ 	int r;
+ 
+@@ -7615,7 +7615,7 @@ static int inject_pending_event(struct kvm_vcpu *vcpu, bool req_int_win)
+ 	 * from L2 to L1.
+ 	 */
+ 	if (is_guest_mode(vcpu) && kvm_x86_ops->check_nested_events) {
+-		r = kvm_x86_ops->check_nested_events(vcpu, req_int_win);
++		r = kvm_x86_ops->check_nested_events(vcpu);
+ 		if (r != 0)
+ 			return r;
+ 	}
+@@ -7677,7 +7677,7 @@ static int inject_pending_event(struct kvm_vcpu *vcpu, bool req_int_win)
+ 		 * KVM_REQ_EVENT only on certain events and not unconditionally?
+ 		 */
+ 		if (is_guest_mode(vcpu) && kvm_x86_ops->check_nested_events) {
+-			r = kvm_x86_ops->check_nested_events(vcpu, req_int_win);
++			r = kvm_x86_ops->check_nested_events(vcpu);
+ 			if (r != 0)
+ 				return r;
+ 		}
+@@ -8210,7 +8210,7 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 			goto out;
+ 		}
+ 
+-		if (inject_pending_event(vcpu, req_int_win) != 0)
++		if (inject_pending_event(vcpu) != 0)
+ 			req_immediate_exit = true;
+ 		else {
+ 			/* Enable SMI/NMI/IRQ window open exits if needed.
+@@ -8438,7 +8438,7 @@ static inline int vcpu_block(struct kvm *kvm, struct kvm_vcpu *vcpu)
+ static inline bool kvm_vcpu_running(struct kvm_vcpu *vcpu)
+ {
+ 	if (is_guest_mode(vcpu) && kvm_x86_ops->check_nested_events)
+-		kvm_x86_ops->check_nested_events(vcpu, false);
++		kvm_x86_ops->check_nested_events(vcpu);
+ 
+ 	return (vcpu->arch.mp_state == KVM_MP_STATE_RUNNABLE &&
+ 		!vcpu->arch.apf.halted);

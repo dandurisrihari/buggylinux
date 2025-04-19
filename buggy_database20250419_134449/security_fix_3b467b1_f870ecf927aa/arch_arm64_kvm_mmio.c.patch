@@ -1,0 +1,49 @@
+commit 3b467b16582c077f57fab244cf0801ecea7914b6
+Author: Marc Zyngier <maz@kernel.org>
+Date:   Tue Apr 23 16:05:38 2024 +0100
+
+    KVM: arm64: Force injection of a data abort on NISV MMIO exit
+    
+    If a vcpu exits for a data abort with an invalid syndrome, the
+    expectations are that userspace has a chance to save the day if
+    it has requested to see such exits.
+    
+    However, this is completely futile in the case of a protected VM,
+    as none of the state is available. In this particular case, inject
+    a data abort directly into the vcpu, consistent with what userspace
+    could do.
+    
+    This also helps with pKVM, which discards all syndrome information when
+    forwarding data aborts that are not known to be MMIO.
+    
+    Finally, document this tweak to the API.
+    
+    Signed-off-by: Fuad Tabba <tabba@google.com>
+    Acked-by: Oliver Upton <oliver.upton@linux.dev>
+    Link: https://lore.kernel.org/r/20240423150538.2103045-31-tabba@google.com
+    Signed-off-by: Marc Zyngier <maz@kernel.org>
+
+diff --git a/arch/arm64/kvm/mmio.c b/arch/arm64/kvm/mmio.c
+index 5e1ffb0d5363..cd6b7b83e2c3 100644
+--- a/arch/arm64/kvm/mmio.c
++++ b/arch/arm64/kvm/mmio.c
+@@ -133,11 +133,19 @@ int io_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa)
+ 	/*
+ 	 * No valid syndrome? Ask userspace for help if it has
+ 	 * volunteered to do so, and bail out otherwise.
++	 *
++	 * In the protected VM case, there isn't much userspace can do
++	 * though, so directly deliver an exception to the guest.
+ 	 */
+ 	if (!kvm_vcpu_dabt_isvalid(vcpu)) {
+ 		trace_kvm_mmio_nisv(*vcpu_pc(vcpu), kvm_vcpu_get_esr(vcpu),
+ 				    kvm_vcpu_get_hfar(vcpu), fault_ipa);
+ 
++		if (vcpu_is_protected(vcpu)) {
++			kvm_inject_dabt(vcpu, kvm_vcpu_get_hfar(vcpu));
++			return 1;
++		}
++
+ 		if (test_bit(KVM_ARCH_FLAG_RETURN_NISV_IO_ABORT_TO_USER,
+ 			     &vcpu->kvm->arch.flags)) {
+ 			run->exit_reason = KVM_EXIT_ARM_NISV;

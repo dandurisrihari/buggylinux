@@ -1,0 +1,53 @@
+commit a4a13f582c6d36b78b1c0459ee0b28f17bb2fb06
+Author: Chao Yu <chao@kernel.org>
+Date:   Wed Apr 27 22:22:20 2016 +0800
+
+    f2fs: be aware of invalid filename length
+    
+    The filename length in dirent of may become zero-sized after random junk
+    data injection, once encounter such dirent, find_target_dentry or
+    f2fs_add_inline_entries will run into an infinite loop. So let f2fs being
+    aware of that to avoid deadloop.
+    
+    Signed-off-by: Chao Yu <yuchao0@huawei.com>
+    Signed-off-by: Jaegeuk Kim <jaegeuk@kernel.org>
+
+diff --git a/fs/f2fs/inline.c b/fs/f2fs/inline.c
+index 772056587eb9..e61084cac5f1 100644
+--- a/fs/f2fs/inline.c
++++ b/fs/f2fs/inline.c
+@@ -303,11 +303,6 @@ struct f2fs_dir_entry *find_in_inline_dir(struct inode *dir,
+ 	else
+ 		f2fs_put_page(ipage, 0);
+ 
+-	/*
+-	 * For the most part, it should be a bug when name_len is zero.
+-	 * We stop here for figuring out where the bugs has occurred.
+-	 */
+-	f2fs_bug_on(sbi, d.max < 0);
+ 	return de;
+ }
+ 
+@@ -437,6 +432,12 @@ static int f2fs_add_inline_entries(struct inode *dir,
+ 		}
+ 
+ 		de = &d.dentry[bit_pos];
++
++		if (unlikely(!de->name_len)) {
++			bit_pos++;
++			continue;
++		}
++
+ 		new_name.name = d.filename[bit_pos];
+ 		new_name.len = de->name_len;
+ 
+@@ -448,9 +449,6 @@ static int f2fs_add_inline_entries(struct inode *dir,
+ 		if (err)
+ 			goto punch_dentry_pages;
+ 
+-		if (unlikely(!de->name_len))
+-			d.max = -1;
+-
+ 		bit_pos += GET_DENTRY_SLOTS(le16_to_cpu(de->name_len));
+ 	}
+ 	return 0;

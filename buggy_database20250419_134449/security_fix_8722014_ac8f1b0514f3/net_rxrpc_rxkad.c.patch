@@ -1,0 +1,44 @@
+commit 8722014311e613244f33952354956a82fa4b0472
+Author: David Howells <dhowells@redhat.com>
+Date:   Tue Jan 9 15:10:48 2024 +0000
+
+    rxrpc: Fix use of Don't Fragment flag
+    
+    rxrpc normally has the Don't Fragment flag set on the UDP packets it
+    transmits, except when it has decided that DATA packets aren't getting
+    through - in which case it turns it off just for the DATA transmissions.
+    This can be a problem, however, for RESPONSE packets that convey
+    authentication and crypto data from the client to the server as ticket may
+    be larger than can fit in the MTU.
+    
+    In such a case, rxrpc gets itself into an infinite loop as the sendmsg
+    returns an error (EMSGSIZE), which causes rxkad_send_response() to return
+    -EAGAIN - and the CHALLENGE packet is put back on the Rx queue to retry,
+    leading to the I/O thread endlessly attempting to perform the transmission.
+    
+    Fix this by disabling DF on RESPONSE packets for now.  The use of DF and
+    best data MTU determination needs reconsidering at some point in the
+    future.
+    
+    Fixes: 17926a79320a ("[AF_RXRPC]: Provide secure RxRPC sockets for use by userspace and kernel both")
+    Reported-by: Marc Dionne <marc.dionne@auristor.com>
+    Signed-off-by: David Howells <dhowells@redhat.com>
+    cc: linux-afs@lists.infradead.org
+    Acked-by: Paolo Abeni <pabeni@redhat.com>
+    Link: https://lore.kernel.org/r/1581852.1704813048@warthog.procyon.org.uk
+    Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+diff --git a/net/rxrpc/rxkad.c b/net/rxrpc/rxkad.c
+index 1bf571a66e02..b52dedcebce0 100644
+--- a/net/rxrpc/rxkad.c
++++ b/net/rxrpc/rxkad.c
+@@ -724,7 +724,9 @@ static int rxkad_send_response(struct rxrpc_connection *conn,
+ 	serial = atomic_inc_return(&conn->serial);
+ 	whdr.serial = htonl(serial);
+ 
++	rxrpc_local_dont_fragment(conn->local, false);
+ 	ret = kernel_sendmsg(conn->local->socket, &msg, iov, 3, len);
++	rxrpc_local_dont_fragment(conn->local, true);
+ 	if (ret < 0) {
+ 		trace_rxrpc_tx_fail(conn->debug_id, serial, ret,
+ 				    rxrpc_tx_point_rxkad_response);

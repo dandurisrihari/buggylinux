@@ -1,0 +1,55 @@
+commit 7b11eab041dacfeaaa6d27d9183b247a995bc16d
+Author: Keith Busch <kbusch@kernel.org>
+Date:   Fri May 29 07:51:59 2020 -0700
+
+    blk-mq: blk-mq: provide forced completion method
+    
+    Drivers may need to bypass error injection for error recovery. Rename
+    __blk_mq_complete_request() to blk_mq_force_complete_rq() and export
+    that function so drivers may skip potential fake timeouts after they've
+    reclaimed lost requests.
+    
+    Signed-off-by: Keith Busch <kbusch@kernel.org>
+    Reviewed-by: Daniel Wagner <dwagner@suse.de>
+    Signed-off-by: Jens Axboe <axboe@kernel.dk>
+
+diff --git a/block/blk-mq.c b/block/blk-mq.c
+index c606c74463cc..c6dcd390be2d 100644
+--- a/block/blk-mq.c
++++ b/block/blk-mq.c
+@@ -556,7 +556,17 @@ static void __blk_mq_complete_request_remote(void *data)
+ 	q->mq_ops->complete(rq);
+ }
+ 
+-static void __blk_mq_complete_request(struct request *rq)
++/**
++ * blk_mq_force_complete_rq() - Force complete the request, bypassing any error
++ * 				injection that could drop the completion.
++ * @rq: Request to be force completed
++ *
++ * Drivers should use blk_mq_complete_request() to complete requests in their
++ * normal IO path. For timeout error recovery, drivers may call this forced
++ * completion routine after they've reclaimed timed out requests to bypass
++ * potentially subsequent fake timeouts.
++ */
++void blk_mq_force_complete_rq(struct request *rq)
+ {
+ 	struct blk_mq_ctx *ctx = rq->mq_ctx;
+ 	struct request_queue *q = rq->q;
+@@ -602,6 +612,7 @@ static void __blk_mq_complete_request(struct request *rq)
+ 	}
+ 	put_cpu();
+ }
++EXPORT_SYMBOL_GPL(blk_mq_force_complete_rq);
+ 
+ static void hctx_unlock(struct blk_mq_hw_ctx *hctx, int srcu_idx)
+ 	__releases(hctx->srcu)
+@@ -635,7 +646,7 @@ bool blk_mq_complete_request(struct request *rq)
+ {
+ 	if (unlikely(blk_should_fake_timeout(rq->q)))
+ 		return false;
+-	__blk_mq_complete_request(rq);
++	blk_mq_force_complete_rq(rq);
+ 	return true;
+ }
+ EXPORT_SYMBOL(blk_mq_complete_request);

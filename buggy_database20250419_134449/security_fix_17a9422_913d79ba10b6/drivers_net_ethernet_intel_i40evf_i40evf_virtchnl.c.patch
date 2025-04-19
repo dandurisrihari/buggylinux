@@ -1,0 +1,54 @@
+commit 17a9422de78c3a59b490b400f555635c477f1476
+Author: Alan Brady <alan.brady@intel.com>
+Date:   Wed Oct 11 14:49:43 2017 -0700
+
+    i40e/i40evf: don't trust VF to reset itself
+    
+    When using 'ethtool -L' on a VF to change number of requested queues
+    from PF, we shouldn't trust the VF to reset itself after making the
+    request.  Doing it that way opens the door for a potentially malicious
+    VF to do nasty things to the PF which should never be the case.
+    
+    This makes it such that after VF makes a successful request, PF will
+    then reset the VF to institute required changes.  Only if the request
+    fails will PF send a message back to VF letting it know the request was
+    unsuccessful.
+    
+    Testing-hints:
+    There should be no real functional changes.  This is simply hardening
+    against a potentially malicious VF.
+    
+    Signed-off-by: Alan Brady <alan.brady@intel.com>
+    Tested-by: Andrew Bowers <andrewx.bowers@intel.com>
+    Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+
+diff --git a/drivers/net/ethernet/intel/i40evf/i40evf_virtchnl.c b/drivers/net/ethernet/intel/i40evf/i40evf_virtchnl.c
+index 2bb81c39d85f..46c8b8a3907c 100644
+--- a/drivers/net/ethernet/intel/i40evf/i40evf_virtchnl.c
++++ b/drivers/net/ethernet/intel/i40evf/i40evf_virtchnl.c
+@@ -407,6 +407,7 @@ int i40evf_request_queues(struct i40evf_adapter *adapter, int num)
+ 	vfres.num_queue_pairs = num;
+ 
+ 	adapter->current_op = VIRTCHNL_OP_REQUEST_QUEUES;
++	adapter->flags |= I40EVF_FLAG_REINIT_ITR_NEEDED;
+ 	return i40evf_send_pf_msg(adapter, VIRTCHNL_OP_REQUEST_QUEUES,
+ 				  (u8 *)&vfres, sizeof(vfres));
+ }
+@@ -1098,15 +1099,13 @@ void i40evf_virtchnl_completion(struct i40evf_adapter *adapter,
+ 	case VIRTCHNL_OP_REQUEST_QUEUES: {
+ 		struct virtchnl_vf_res_request *vfres =
+ 			(struct virtchnl_vf_res_request *)msg;
+-		if (vfres->num_queue_pairs == adapter->num_req_queues) {
+-			adapter->flags |= I40EVF_FLAG_REINIT_ITR_NEEDED;
+-			i40evf_schedule_reset(adapter);
+-		} else {
++		if (vfres->num_queue_pairs != adapter->num_req_queues) {
+ 			dev_info(&adapter->pdev->dev,
+ 				 "Requested %d queues, PF can support %d\n",
+ 				 adapter->num_req_queues,
+ 				 vfres->num_queue_pairs);
+ 			adapter->num_req_queues = 0;
++			adapter->flags &= ~I40EVF_FLAG_REINIT_ITR_NEEDED;
+ 		}
+ 		}
+ 		break;

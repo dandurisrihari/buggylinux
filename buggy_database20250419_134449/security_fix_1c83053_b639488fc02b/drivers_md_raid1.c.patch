@@ -1,0 +1,48 @@
+commit 1c830532f6b44d10a1743ccd00e990c6b83396f5
+Author: NeilBrown <neilb@suse.de>
+Date:   Tue Mar 4 14:29:35 2008 -0800
+
+    md: fix possible raid1/raid10 deadlock on read error during resync
+    
+    Thanks to K.Tanaka and the scsi fault injection framework, here is a fix for
+    another possible deadlock in raid1/raid10 error handing.
+    
+    If a read request returns an error while a resync is happening and a resync
+    request is pending, the attempt to fix the error will block until the resync
+    progresses, and the resync will block until the read request completes.  Thus
+    a deadlock.
+    
+    This patch fixes the problem.
+    
+    Cc: "K.Tanaka" <k-tanaka@ce.jp.nec.com>
+    Signed-off-by: Neil Brown <neilb@suse.de>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/drivers/md/raid1.c b/drivers/md/raid1.c
+index 38f076a3400d..ff61b309129a 100644
+--- a/drivers/md/raid1.c
++++ b/drivers/md/raid1.c
+@@ -704,13 +704,20 @@ static void freeze_array(conf_t *conf)
+ 	/* stop syncio and normal IO and wait for everything to
+ 	 * go quite.
+ 	 * We increment barrier and nr_waiting, and then
+-	 * wait until barrier+nr_pending match nr_queued+2
++	 * wait until nr_pending match nr_queued+1
++	 * This is called in the context of one normal IO request
++	 * that has failed. Thus any sync request that might be pending
++	 * will be blocked by nr_pending, and we need to wait for
++	 * pending IO requests to complete or be queued for re-try.
++	 * Thus the number queued (nr_queued) plus this request (1)
++	 * must match the number of pending IOs (nr_pending) before
++	 * we continue.
+ 	 */
+ 	spin_lock_irq(&conf->resync_lock);
+ 	conf->barrier++;
+ 	conf->nr_waiting++;
+ 	wait_event_lock_irq(conf->wait_barrier,
+-			    conf->barrier+conf->nr_pending == conf->nr_queued+2,
++			    conf->nr_pending == conf->nr_queued+1,
+ 			    conf->resync_lock,
+ 			    ({ flush_pending_writes(conf);
+ 			       raid1_unplug(conf->mddev->queue); }));

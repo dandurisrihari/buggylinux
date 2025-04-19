@@ -1,0 +1,42 @@
+commit 71ba994c94a81c37185ef2fb5190844286ba9aca
+Author: Paolo Bonzini <pbonzini@redhat.com>
+Date:   Wed Jul 29 12:31:15 2015 +0200
+
+    KVM: x86: clean/fix memory barriers in irqchip_in_kernel
+    
+    The memory barriers are trying to protect against concurrent RCU-based
+    interrupt injection, but the IRQ routing table is not valid at the time
+    kvm->arch.vpic is written.  Fix this by writing kvm->arch.vpic last.
+    kvm_destroy_pic then need not set kvm->arch.vpic to NULL; modify it
+    to take a struct kvm_pic* and reuse it if the IOAPIC creation fails.
+    
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/irq.h b/arch/x86/kvm/irq.h
+index ad68c73008c5..3d782a2c336a 100644
+--- a/arch/x86/kvm/irq.h
++++ b/arch/x86/kvm/irq.h
+@@ -74,7 +74,7 @@ struct kvm_pic {
+ };
+ 
+ struct kvm_pic *kvm_create_pic(struct kvm *kvm);
+-void kvm_destroy_pic(struct kvm *kvm);
++void kvm_destroy_pic(struct kvm_pic *vpic);
+ int kvm_pic_read_irq(struct kvm *kvm);
+ void kvm_pic_update_irq(struct kvm_pic *s);
+ 
+@@ -85,11 +85,11 @@ static inline struct kvm_pic *pic_irqchip(struct kvm *kvm)
+ 
+ static inline int irqchip_in_kernel(struct kvm *kvm)
+ {
+-	int ret;
++	struct kvm_pic *vpic = pic_irqchip(kvm);
+ 
+-	ret = (pic_irqchip(kvm) != NULL);
++	/* Read vpic before kvm->irq_routing.  */
+ 	smp_rmb();
+-	return ret;
++	return vpic != NULL;
+ }
+ 
+ void kvm_pic_reset(struct kvm_kpic_state *s);

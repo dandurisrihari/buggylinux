@@ -1,0 +1,62 @@
+commit ec15e68ba6a505631016f230899bafbb7b8cd0d6
+Author: Jouni Malinen <jouni.malinen@atheros.com>
+Date:   Wed Mar 23 15:29:52 2011 +0200
+
+    cfg80211: Add nl80211 event for deletion of a station entry
+    
+    Indicate an NL80211_CMD_DEL_STATION event when a station entry in
+    mac80211 is deleted to match with the NL80211_CMD_NEW_STATION event
+    that is used when the entry was added. This is needed, e.g., to allow
+    user space to remove a peer from RSN IBSS Authenticator state machine
+    to avoid re-authentication and re-keying delays when the peer is not
+    reachable anymore.
+    
+    Signed-off-by: Jouni Malinen <jouni.malinen@atheros.com>
+    Reviewed-by: Johannes Berg <johannes@sipsolutions.net>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/wireless/nl80211.c b/net/wireless/nl80211.c
+index 4ebce4284e9d..40c90fb461c4 100644
+--- a/net/wireless/nl80211.c
++++ b/net/wireless/nl80211.c
+@@ -5966,6 +5966,40 @@ void nl80211_send_sta_event(struct cfg80211_registered_device *rdev,
+ 				nl80211_mlme_mcgrp.id, gfp);
+ }
+ 
++void nl80211_send_sta_del_event(struct cfg80211_registered_device *rdev,
++				struct net_device *dev, const u8 *mac_addr,
++				gfp_t gfp)
++{
++	struct sk_buff *msg;
++	void *hdr;
++
++	msg = nlmsg_new(NLMSG_GOODSIZE, gfp);
++	if (!msg)
++		return;
++
++	hdr = nl80211hdr_put(msg, 0, 0, 0, NL80211_CMD_DEL_STATION);
++	if (!hdr) {
++		nlmsg_free(msg);
++		return;
++	}
++
++	NLA_PUT_U32(msg, NL80211_ATTR_IFINDEX, dev->ifindex);
++	NLA_PUT(msg, NL80211_ATTR_MAC, ETH_ALEN, mac_addr);
++
++	if (genlmsg_end(msg, hdr) < 0) {
++		nlmsg_free(msg);
++		return;
++	}
++
++	genlmsg_multicast_netns(wiphy_net(&rdev->wiphy), msg, 0,
++				nl80211_mlme_mcgrp.id, gfp);
++	return;
++
++ nla_put_failure:
++	genlmsg_cancel(msg, hdr);
++	nlmsg_free(msg);
++}
++
+ int nl80211_send_mgmt(struct cfg80211_registered_device *rdev,
+ 		      struct net_device *netdev, u32 nlpid,
+ 		      int freq, const u8 *buf, size_t len, gfp_t gfp)

@@ -1,0 +1,238 @@
+commit 74451e66d516c55e309e8d89a4a1e7596e46aacd
+Author: Daniel Borkmann <daniel@iogearbox.net>
+Date:   Thu Feb 16 22:24:50 2017 +0100
+
+    bpf: make jited programs visible in traces
+    
+    Long standing issue with JITed programs is that stack traces from
+    function tracing check whether a given address is kernel code
+    through {__,}kernel_text_address(), which checks for code in core
+    kernel, modules and dynamically allocated ftrace trampolines. But
+    what is still missing is BPF JITed programs (interpreted programs
+    are not an issue as __bpf_prog_run() will be attributed to them),
+    thus when a stack trace is triggered, the code walking the stack
+    won't see any of the JITed ones. The same for address correlation
+    done from user space via reading /proc/kallsyms. This is read by
+    tools like perf, but the latter is also useful for permanent live
+    tracing with eBPF itself in combination with stack maps when other
+    eBPF types are part of the callchain. See offwaketime example on
+    dumping stack from a map.
+    
+    This work tries to tackle that issue by making the addresses and
+    symbols known to the kernel. The lookup from *kernel_text_address()
+    is implemented through a latched RB tree that can be read under
+    RCU in fast-path that is also shared for symbol/size/offset lookup
+    for a specific given address in kallsyms. The slow-path iteration
+    through all symbols in the seq file done via RCU list, which holds
+    a tiny fraction of all exported ksyms, usually below 0.1 percent.
+    Function symbols are exported as bpf_prog_<tag>, in order to aide
+    debugging and attribution. This facility is currently enabled for
+    root-only when bpf_jit_kallsyms is set to 1, and disabled if hardening
+    is active in any mode. The rationale behind this is that still a lot
+    of systems ship with world read permissions on kallsyms thus addresses
+    should not get suddenly exposed for them. If that situation gets
+    much better in future, we always have the option to change the
+    default on this. Likewise, unprivileged programs are not allowed
+    to add entries there either, but that is less of a concern as most
+    such programs types relevant in this context are for root-only anyway.
+    If enabled, call graphs and stack traces will then show a correct
+    attribution; one example is illustrated below, where the trace is
+    now visible in tooling such as perf script --kallsyms=/proc/kallsyms
+    and friends.
+    
+    Before:
+    
+      7fff8166889d bpf_clone_redirect+0x80007f0020ed (/lib/modules/4.9.0-rc8+/build/vmlinux)
+             f5d80 __sendmsg_nocancel+0xffff006451f1a007 (/usr/lib64/libc-2.18.so)
+    
+    After:
+    
+      7fff816688b7 bpf_clone_redirect+0x80007f002107 (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fffa0575728 bpf_prog_33c45a467c9e061a+0x8000600020fb (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fffa07ef1fc cls_bpf_classify+0x8000600020dc (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff81678b68 tc_classify+0x80007f002078 (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff8164d40b __netif_receive_skb_core+0x80007f0025fb (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff8164d718 __netif_receive_skb+0x80007f002018 (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff8164e565 process_backlog+0x80007f002095 (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff8164dc71 net_rx_action+0x80007f002231 (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff81767461 __softirqentry_text_start+0x80007f0020d1 (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff817658ac do_softirq_own_stack+0x80007f00201c (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff810a2c20 do_softirq+0x80007f002050 (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff810a2cb5 __local_bh_enable_ip+0x80007f002085 (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff8168d452 ip_finish_output2+0x80007f002152 (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff8168ea3d ip_finish_output+0x80007f00217d (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff8168f2af ip_output+0x80007f00203f (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      [...]
+      7fff81005854 do_syscall_64+0x80007f002054 (/lib/modules/4.9.0-rc8+/build/vmlinux)
+      7fff817649eb return_from_SYSCALL_64+0x80007f002000 (/lib/modules/4.9.0-rc8+/build/vmlinux)
+             f5d80 __sendmsg_nocancel+0xffff01c484812007 (/usr/lib64/libc-2.18.so)
+    
+    Signed-off-by: Daniel Borkmann <daniel@iogearbox.net>
+    Acked-by: Alexei Starovoitov <ast@kernel.org>
+    Cc: linux-kernel@vger.kernel.org
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/include/linux/filter.h b/include/linux/filter.h
+index c7a70e0cc3a0..0c1cc9143cb2 100644
+--- a/include/linux/filter.h
++++ b/include/linux/filter.h
+@@ -54,6 +54,12 @@ struct bpf_prog_aux;
+ #define BPF_REG_AX		MAX_BPF_REG
+ #define MAX_BPF_JIT_REG		(MAX_BPF_REG + 1)
+ 
++/* As per nm, we expose JITed images as text (code) section for
++ * kallsyms. That way, tools like perf can find it to match
++ * addresses.
++ */
++#define BPF_SYM_ELF_TYPE	't'
++
+ /* BPF program can access up to 512 bytes of stack space. */
+ #define MAX_BPF_STACK	512
+ 
+@@ -555,6 +561,11 @@ static inline void bpf_prog_unlock_ro(struct bpf_prog *fp)
+ {
+ 	set_memory_rw((unsigned long)fp, fp->pages);
+ }
++
++static inline void bpf_jit_binary_unlock_ro(struct bpf_binary_header *hdr)
++{
++	set_memory_rw((unsigned long)hdr, hdr->pages);
++}
+ #else
+ static inline void bpf_prog_lock_ro(struct bpf_prog *fp)
+ {
+@@ -563,8 +574,21 @@ static inline void bpf_prog_lock_ro(struct bpf_prog *fp)
+ static inline void bpf_prog_unlock_ro(struct bpf_prog *fp)
+ {
+ }
++
++static inline void bpf_jit_binary_unlock_ro(struct bpf_binary_header *hdr)
++{
++}
+ #endif /* CONFIG_DEBUG_SET_MODULE_RONX */
+ 
++static inline struct bpf_binary_header *
++bpf_jit_binary_hdr(const struct bpf_prog *fp)
++{
++	unsigned long real_start = (unsigned long)fp->bpf_func;
++	unsigned long addr = real_start & PAGE_MASK;
++
++	return (void *)addr;
++}
++
+ int sk_filter_trim_cap(struct sock *sk, struct sk_buff *skb, unsigned int cap);
+ static inline int sk_filter(struct sock *sk, struct sk_buff *skb)
+ {
+@@ -617,6 +641,7 @@ void bpf_warn_invalid_xdp_action(u32 act);
+ #ifdef CONFIG_BPF_JIT
+ extern int bpf_jit_enable;
+ extern int bpf_jit_harden;
++extern int bpf_jit_kallsyms;
+ 
+ typedef void (*bpf_jit_fill_hole_t)(void *area, unsigned int size);
+ 
+@@ -651,6 +676,11 @@ static inline bool bpf_jit_is_ebpf(void)
+ # endif
+ }
+ 
++static inline bool bpf_prog_ebpf_jited(const struct bpf_prog *fp)
++{
++	return fp->jited && bpf_jit_is_ebpf();
++}
++
+ static inline bool bpf_jit_blinding_enabled(void)
+ {
+ 	/* These are the prerequisites, should someone ever have the
+@@ -668,11 +698,91 @@ static inline bool bpf_jit_blinding_enabled(void)
+ 
+ 	return true;
+ }
+-#else
++
++static inline bool bpf_jit_kallsyms_enabled(void)
++{
++	/* There are a couple of corner cases where kallsyms should
++	 * not be enabled f.e. on hardening.
++	 */
++	if (bpf_jit_harden)
++		return false;
++	if (!bpf_jit_kallsyms)
++		return false;
++	if (bpf_jit_kallsyms == 1)
++		return true;
++
++	return false;
++}
++
++const char *__bpf_address_lookup(unsigned long addr, unsigned long *size,
++				 unsigned long *off, char *sym);
++bool is_bpf_text_address(unsigned long addr);
++int bpf_get_kallsym(unsigned int symnum, unsigned long *value, char *type,
++		    char *sym);
++
++static inline const char *
++bpf_address_lookup(unsigned long addr, unsigned long *size,
++		   unsigned long *off, char **modname, char *sym)
++{
++	const char *ret = __bpf_address_lookup(addr, size, off, sym);
++
++	if (ret && modname)
++		*modname = NULL;
++	return ret;
++}
++
++void bpf_prog_kallsyms_add(struct bpf_prog *fp);
++void bpf_prog_kallsyms_del(struct bpf_prog *fp);
++
++#else /* CONFIG_BPF_JIT */
++
++static inline bool bpf_prog_ebpf_jited(const struct bpf_prog *fp)
++{
++	return false;
++}
++
+ static inline void bpf_jit_free(struct bpf_prog *fp)
+ {
+ 	bpf_prog_unlock_free(fp);
+ }
++
++static inline bool bpf_jit_kallsyms_enabled(void)
++{
++	return false;
++}
++
++static inline const char *
++__bpf_address_lookup(unsigned long addr, unsigned long *size,
++		     unsigned long *off, char *sym)
++{
++	return NULL;
++}
++
++static inline bool is_bpf_text_address(unsigned long addr)
++{
++	return false;
++}
++
++static inline int bpf_get_kallsym(unsigned int symnum, unsigned long *value,
++				  char *type, char *sym)
++{
++	return -ERANGE;
++}
++
++static inline const char *
++bpf_address_lookup(unsigned long addr, unsigned long *size,
++		   unsigned long *off, char **modname, char *sym)
++{
++	return NULL;
++}
++
++static inline void bpf_prog_kallsyms_add(struct bpf_prog *fp)
++{
++}
++
++static inline void bpf_prog_kallsyms_del(struct bpf_prog *fp)
++{
++}
+ #endif /* CONFIG_BPF_JIT */
+ 
+ #define BPF_ANC		BIT(15)

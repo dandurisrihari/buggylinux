@@ -1,0 +1,58 @@
+commit 505a19eec49ab36b314a05bc062749ebdfb0aa90
+Author: Andre Przywara <andre.przywara@arm.com>
+Date:   Tue Aug 9 10:54:29 2016 +0100
+
+    KVM: arm64: check for ITS device on MSI injection
+    
+    When userspace provides the doorbell address for an MSI to be
+    injected into the guest, we find a KVM device which feels responsible.
+    Lets check that this device is really an emulated ITS before we make
+    real use of the container_of-ed pointer.
+    
+      [ Moved NULL-pointer check to caller of static function
+        - Christoffer ]
+    
+    Signed-off-by: Andre Przywara <andre.przywara@arm.com>
+    Reviewed-by: Christoffer Dall <christoffer.dall@linaro.org>
+    Signed-off-by: Christoffer Dall <christoffer.dall@linaro.org>
+
+diff --git a/virt/kvm/arm/vgic/vgic-its.c b/virt/kvm/arm/vgic/vgic-its.c
+index 1cf9f598c72a..9533080b47d3 100644
+--- a/virt/kvm/arm/vgic/vgic-its.c
++++ b/virt/kvm/arm/vgic/vgic-its.c
+@@ -471,6 +471,21 @@ static int vgic_its_trigger_msi(struct kvm *kvm, struct vgic_its *its,
+ 	return 0;
+ }
+ 
++static struct vgic_io_device *vgic_get_its_iodev(struct kvm_io_device *dev)
++{
++	struct vgic_io_device *iodev;
++
++	if (dev->ops != &kvm_io_gic_ops)
++		return NULL;
++
++	iodev = container_of(dev, struct vgic_io_device, dev);
++
++	if (iodev->iodev_type != IODEV_ITS)
++		return NULL;
++
++	return iodev;
++}
++
+ /*
+  * Queries the KVM IO bus framework to get the ITS pointer from the given
+  * doorbell address.
+@@ -494,9 +509,11 @@ int vgic_its_inject_msi(struct kvm *kvm, struct kvm_msi *msi)
+ 
+ 	kvm_io_dev = kvm_io_bus_get_dev(kvm, KVM_MMIO_BUS, address);
+ 	if (!kvm_io_dev)
+-		return -ENODEV;
++		return -EINVAL;
+ 
+-	iodev = container_of(kvm_io_dev, struct vgic_io_device, dev);
++	iodev = vgic_get_its_iodev(kvm_io_dev);
++	if (!iodev)
++		return -EINVAL;
+ 
+ 	mutex_lock(&iodev->its->its_lock);
+ 	ret = vgic_its_trigger_msi(kvm, iodev->its, msi->devid, msi->data);

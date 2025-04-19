@@ -1,0 +1,209 @@
+diff --git a/drivers/net/dsa/ocelot/felix.c b/drivers/net/dsa/ocelot/felix.c
+index b7d51e4ec792..336d93d03a9a 100644
+--- a/drivers/net/dsa/ocelot/felix.c
++++ b/drivers/net/dsa/ocelot/felix.c
+@@ -16,6 +16,7 @@
+ #include <linux/dsa/8021q.h>
+ #include <linux/dsa/ocelot.h>
+ #include <linux/platform_device.h>
++#include <linux/ptp_classify.h>
+ #include <linux/module.h>
+ #include <linux/of_net.h>
+ #include <linux/pci.h>
+@@ -345,6 +346,15 @@ static int felix_setup_mmio_filtering(struct felix *felix)
+ 		return ret;
+ 	}
+ 
++	/* The ownership of the CPU port module's queues might have just been
++	 * transferred to the tag_8021q tagger from the NPI-based tagger.
++	 * So there might still be all sorts of crap in the queues. On the
++	 * other hand, the MMIO-based matching of PTP frames is very brittle,
++	 * so we need to be careful that there are no extra frames to be
++	 * dequeued over MMIO, since we would never know to discard them.
++	 */
++	ocelot_drain_cpu_queue(ocelot, 0);
++
+ 	return 0;
+ }
+ 
+@@ -1273,6 +1283,55 @@ static int felix_hwtstamp_set(struct dsa_switch *ds, int port,
+ 	return ocelot_hwstamp_set(ocelot, port, ifr);
+ }
+ 
++static bool felix_check_xtr_pkt(struct ocelot *ocelot, unsigned int ptp_type)
++{
++	struct felix *felix = ocelot_to_felix(ocelot);
++	int err, grp = 0;
++
++	if (felix->tag_proto != DSA_TAG_PROTO_OCELOT_8021Q)
++		return false;
++
++	if (!felix->info->quirk_no_xtr_irq)
++		return false;
++
++	if (ptp_type == PTP_CLASS_NONE)
++		return false;
++
++	while (ocelot_read(ocelot, QS_XTR_DATA_PRESENT) & BIT(grp)) {
++		struct sk_buff *skb;
++		unsigned int type;
++
++		err = ocelot_xtr_poll_frame(ocelot, grp, &skb);
++		if (err)
++			goto out;
++
++		/* We trap to the CPU port module all PTP frames, but
++		 * felix_rxtstamp() only gets called for event frames.
++		 * So we need to avoid sending duplicate general
++		 * message frames by running a second BPF classifier
++		 * here and dropping those.
++		 */
++		__skb_push(skb, ETH_HLEN);
++
++		type = ptp_classify_raw(skb);
++
++		__skb_pull(skb, ETH_HLEN);
++
++		if (type == PTP_CLASS_NONE) {
++			kfree_skb(skb);
++			continue;
++		}
++
++		netif_rx(skb);
++	}
++
++out:
++	if (err < 0)
++		ocelot_drain_cpu_queue(ocelot, 0);
++
++	return true;
++}
++
+ static bool felix_rxtstamp(struct dsa_switch *ds, int port,
+ 			   struct sk_buff *skb, unsigned int type)
+ {
+@@ -1283,6 +1342,16 @@ static bool felix_rxtstamp(struct dsa_switch *ds, int port,
+ 	struct timespec64 ts;
+ 	u64 tstamp, val;
+ 
++	/* If the "no XTR IRQ" workaround is in use, tell DSA to defer this skb
++	 * for RX timestamping. Then free it, and poll for its copy through
++	 * MMIO in the CPU port module, and inject that into the stack from
++	 * ocelot_xtr_poll().
++	 */
++	if (felix_check_xtr_pkt(ocelot, type)) {
++		kfree_skb(skb);
++		return true;
++	}
++
+ 	ocelot_ptp_gettime64(&ocelot->ptp_info, &ts);
+ 	tstamp = ktime_set(ts.tv_sec, ts.tv_nsec);
+ 
+diff --git a/drivers/net/ethernet/mscc/ocelot.c b/drivers/net/ethernet/mscc/ocelot.c
+index 981811ffcdae..8d97c731e953 100644
+--- a/drivers/net/ethernet/mscc/ocelot.c
++++ b/drivers/net/ethernet/mscc/ocelot.c
+@@ -837,6 +837,13 @@ void ocelot_port_inject_frame(struct ocelot *ocelot, int port, int grp,
+ }
+ EXPORT_SYMBOL(ocelot_port_inject_frame);
+ 
++void ocelot_drain_cpu_queue(struct ocelot *ocelot, int grp)
++{
++	while (ocelot_read(ocelot, QS_XTR_DATA_PRESENT) & BIT(grp))
++		ocelot_read_rix(ocelot, QS_XTR_RD, grp);
++}
++EXPORT_SYMBOL(ocelot_drain_cpu_queue);
++
+ int ocelot_fdb_add(struct ocelot *ocelot, int port,
+ 		   const unsigned char *addr, u16 vid)
+ {
+diff --git a/drivers/net/ethernet/mscc/ocelot_vsc7514.c b/drivers/net/ethernet/mscc/ocelot_vsc7514.c
+index 47ee06832a51..4bd7e9d9ec61 100644
+--- a/drivers/net/ethernet/mscc/ocelot_vsc7514.c
++++ b/drivers/net/ethernet/mscc/ocelot_vsc7514.c
+@@ -552,8 +552,7 @@ static irqreturn_t ocelot_xtr_irq_handler(int irq, void *arg)
+ 
+ out:
+ 	if (err < 0)
+-		while (ocelot_read(ocelot, QS_XTR_DATA_PRESENT) & BIT(grp))
+-			ocelot_read_rix(ocelot, QS_XTR_RD, grp);
++		ocelot_drain_cpu_queue(ocelot, 0);
+ 
+ 	return IRQ_HANDLED;
+ }
+diff --git a/include/soc/mscc/ocelot.h b/include/soc/mscc/ocelot.h
+index ded9ae1149bc..1f2d90976564 100644
+--- a/include/soc/mscc/ocelot.h
++++ b/include/soc/mscc/ocelot.h
+@@ -742,6 +742,7 @@ bool ocelot_can_inject(struct ocelot *ocelot, int grp);
+ void ocelot_port_inject_frame(struct ocelot *ocelot, int port, int grp,
+ 			      u32 rew_op, struct sk_buff *skb);
+ int ocelot_xtr_poll_frame(struct ocelot *ocelot, int grp, struct sk_buff **skb);
++void ocelot_drain_cpu_queue(struct ocelot *ocelot, int grp);
+ 
+ #else
+ 
+@@ -762,6 +763,10 @@ static inline int ocelot_xtr_poll_frame(struct ocelot *ocelot, int grp,
+ 	return -EIO;
+ }
+ 
++static inline void ocelot_drain_cpu_queue(struct ocelot *ocelot, int grp)
++{
++}
++
+ #endif
+ 
+ /* Hardware initialization */
+diff --git a/net/dsa/tag_ocelot_8021q.c b/net/dsa/tag_ocelot_8021q.c
+index 190255d06bef..5f3e8e124a82 100644
+--- a/net/dsa/tag_ocelot_8021q.c
++++ b/net/dsa/tag_ocelot_8021q.c
+@@ -9,8 +9,36 @@
+  *   that on egress
+  */
+ #include <linux/dsa/8021q.h>
++#include <soc/mscc/ocelot.h>
++#include <soc/mscc/ocelot_ptp.h>
+ #include "dsa_priv.h"
+ 
++static struct sk_buff *ocelot_xmit_ptp(struct dsa_port *dp,
++				       struct sk_buff *skb,
++				       struct sk_buff *clone)
++{
++	struct ocelot *ocelot = dp->ds->priv;
++	struct ocelot_port *ocelot_port;
++	int port = dp->index;
++	u32 rew_op;
++
++	if (!ocelot_can_inject(ocelot, 0))
++		return NULL;
++
++	ocelot_port = ocelot->ports[port];
++	rew_op = ocelot_port->ptp_cmd;
++
++	/* Retrieve timestamp ID populated inside skb->cb[0] of the
++	 * clone by ocelot_port_add_txtstamp_skb
++	 */
++	if (ocelot_port->ptp_cmd == IFH_REW_OP_TWO_STEP_PTP)
++		rew_op |= clone->cb[0] << 3;
++
++	ocelot_port_inject_frame(ocelot, port, 0, rew_op, skb);
++
++	return NULL;
++}
++
+ static struct sk_buff *ocelot_xmit(struct sk_buff *skb,
+ 				   struct net_device *netdev)
+ {
+@@ -18,6 +46,11 @@ static struct sk_buff *ocelot_xmit(struct sk_buff *skb,
+ 	u16 tx_vid = dsa_8021q_tx_vid(dp->ds, dp->index);
+ 	u16 queue_mapping = skb_get_queue_mapping(skb);
+ 	u8 pcp = netdev_txq_to_tc(netdev, queue_mapping);
++	struct sk_buff *clone = DSA_SKB_CB(skb)->clone;
++
++	/* TX timestamping was requested, so inject through MMIO */
++	if (clone)
++		return ocelot_xmit_ptp(dp, skb, clone);
+ 
+ 	return dsa_8021q_xmit(skb, netdev, ETH_P_8021Q,
+ 			      ((pcp << VLAN_PRIO_SHIFT) | tx_vid));

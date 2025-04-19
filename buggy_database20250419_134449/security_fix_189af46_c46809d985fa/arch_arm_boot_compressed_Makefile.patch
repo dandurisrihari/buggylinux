@@ -1,0 +1,42 @@
+commit 189af4657186da08a2e79fb8e906cfd82b2ccddc
+Author: Ard Biesheuvel <ardb@kernel.org>
+Date:   Thu Dec 6 09:32:57 2018 +0100
+
+    ARM: smp: add support for per-task stack canaries
+    
+    On ARM, we currently only change the value of the stack canary when
+    switching tasks if the kernel was built for UP. On SMP kernels, this
+    is impossible since the stack canary value is obtained via a global
+    symbol reference, which means
+    a) all running tasks on all CPUs must use the same value
+    b) we can only modify the value when no kernel stack frames are live
+       on any CPU, which is effectively never.
+    
+    So instead, use a GCC plugin to add a RTL pass that replaces each
+    reference to the address of the __stack_chk_guard symbol with an
+    expression that produces the address of the 'stack_canary' field
+    that is added to struct thread_info. This way, each task will use
+    its own randomized value.
+    
+    Cc: Russell King <linux@armlinux.org.uk>
+    Cc: Kees Cook <keescook@chromium.org>
+    Cc: Emese Revfy <re.emese@gmail.com>
+    Cc: Arnd Bergmann <arnd@arndb.de>
+    Cc: Laura Abbott <labbott@redhat.com>
+    Cc: kernel-hardening@lists.openwall.com
+    Acked-by: Nicolas Pitre <nico@linaro.org>
+    Signed-off-by: Ard Biesheuvel <ard.biesheuvel@linaro.org>
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+
+diff --git a/arch/arm/boot/compressed/Makefile b/arch/arm/boot/compressed/Makefile
+index 1f5a5ffe7fcf..01bf2585a0fa 100644
+--- a/arch/arm/boot/compressed/Makefile
++++ b/arch/arm/boot/compressed/Makefile
+@@ -101,6 +101,7 @@ clean-files += piggy_data lib1funcs.S ashldi3.S bswapsdi2.S \
+ 		$(libfdt) $(libfdt_hdrs) hyp-stub.S
+ 
+ KBUILD_CFLAGS += -DDISABLE_BRANCH_PROFILING
++KBUILD_CFLAGS += $(DISABLE_ARM_SSP_PER_TASK_PLUGIN)
+ 
+ ifeq ($(CONFIG_FUNCTION_TRACER),y)
+ ORIG_CFLAGS := $(KBUILD_CFLAGS)

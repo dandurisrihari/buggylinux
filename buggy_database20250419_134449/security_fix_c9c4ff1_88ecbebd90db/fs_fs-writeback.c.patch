@@ -1,0 +1,54 @@
+commit c9c4ff12df110feb1b91951010f673f4b16e49e8
+Author: David Howells <dhowells@redhat.com>
+Date:   Mon Nov 27 13:58:07 2023 +0000
+
+    netfs: Move pinning-for-writeback from fscache to netfs
+    
+    Move the resource pinning-for-writeback from fscache code to netfslib code.
+    This is used to keep a cache backing object pinned whilst we have dirty
+    pages on the netfs inode in the pagecache such that VM writeback will be
+    able to reach it.
+    
+    Whilst we're at it, switch the parameters of netfs_unpin_writeback() to
+    match ->write_inode() so that it can be used for that directly.
+    
+    Note that this mechanism could be more generically useful than that for
+    network filesystems.  Quite often they have to keep around other resources
+    (e.g. authentication tokens or network connections) until the writeback is
+    complete.
+    
+    Signed-off-by: David Howells <dhowells@redhat.com>
+    Reviewed-by: Jeff Layton <jlayton@kernel.org>
+    cc: linux-cachefs@redhat.com
+    cc: linux-fsdevel@vger.kernel.org
+    cc: linux-mm@kvack.org
+
+diff --git a/fs/fs-writeback.c b/fs/fs-writeback.c
+index 1767493dffda..3d84fcc471c6 100644
+--- a/fs/fs-writeback.c
++++ b/fs/fs-writeback.c
+@@ -1675,11 +1675,11 @@ __writeback_single_inode(struct inode *inode, struct writeback_control *wbc)
+ 
+ 	if (mapping_tagged(mapping, PAGECACHE_TAG_DIRTY))
+ 		inode->i_state |= I_DIRTY_PAGES;
+-	else if (unlikely(inode->i_state & I_PINNING_FSCACHE_WB)) {
++	else if (unlikely(inode->i_state & I_PINNING_NETFS_WB)) {
+ 		if (!(inode->i_state & I_DIRTY_PAGES)) {
+-			inode->i_state &= ~I_PINNING_FSCACHE_WB;
+-			wbc->unpinned_fscache_wb = true;
+-			dirty |= I_PINNING_FSCACHE_WB; /* Cause write_inode */
++			inode->i_state &= ~I_PINNING_NETFS_WB;
++			wbc->unpinned_netfs_wb = true;
++			dirty |= I_PINNING_NETFS_WB; /* Cause write_inode */
+ 		}
+ 	}
+ 
+@@ -1691,7 +1691,7 @@ __writeback_single_inode(struct inode *inode, struct writeback_control *wbc)
+ 		if (ret == 0)
+ 			ret = err;
+ 	}
+-	wbc->unpinned_fscache_wb = false;
++	wbc->unpinned_netfs_wb = false;
+ 	trace_writeback_single_inode(inode, wbc, nr_to_write);
+ 	return ret;
+ }

@@ -1,0 +1,132 @@
+commit 1085b8276bb4239daa7008f0dcd5c973e4bd690f
+Author: James Bottomley <James.Bottomley@HansenPartnership.com>
+Date:   Mon Apr 29 16:28:05 2024 -0400
+
+    tpm: Add the rest of the session HMAC API
+    
+    The final pieces of the HMAC API are for manipulating the session area
+    of the command.  To add an authentication HMAC session
+    tpm_buf_append_hmac_session() is called where tpm2_append_auth() would
+    go. If a non empty password is passed in, this is correctly added to
+    the HMAC to prove knowledge of it without revealing it.  Note that if
+    the session is only used to encrypt or decrypt parameters (no
+    authentication) then tpm_buf_append_hmac_session_opt() must be used
+    instead.  This functions identically to tpm_buf_append_hmac_session()
+    when TPM_BUS_SECURITY is enabled, but differently when it isn't,
+    because effectively nothing is appended to the session area.
+    
+    Next the parameters should be filled in for the command and finally
+    tpm_buf_fill_hmac_session() is called immediately prior to transmitting
+    the command which computes the correct HMAC and places it in the
+    command at the session location in the tpm buffer
+    
+    Finally, after tpm_transmit_cmd() is called,
+    tpm_buf_check_hmac_response() is called to check that the returned
+    HMAC matched and collect the new state for the next use of the
+    session, if any.
+    
+    The features of the session are controlled by the session attributes
+    set in tpm_buf_append_hmac_session().  If TPM2_SA_CONTINUE_SESSION is
+    not specified, the session will be flushed and the tpm2_auth structure
+    freed in tpm_buf_check_hmac_response(); otherwise the session may be
+    used again.  Parameter encryption is specified by or'ing the flag
+    TPM2_SA_DECRYPT and response encryption by or'ing the flag
+    TPM2_SA_ENCRYPT.  the various encryptions will be taken care of by
+    tpm_buf_fill_hmac_session() and tpm_buf_check_hmac_response()
+    respectively.
+    
+    Signed-off-by: James Bottomley <James.Bottomley@HansenPartnership.com>
+    Reviewed-by: Ard Biesheuvel <ard.biesheuvel@linaro.org> # crypto API parts
+    Reviewed-by: Jarkko Sakkinen <jarkko@kernel.org>
+    Tested-by: Jarkko Sakkinen <jarkko@kernel.org>
+    Signed-off-by: Jarkko Sakkinen <jarkko@kernel.org>
+
+diff --git a/include/linux/tpm.h b/include/linux/tpm.h
+index 31c2065fcd35..dd4d6a6158c4 100644
+--- a/include/linux/tpm.h
++++ b/include/linux/tpm.h
+@@ -510,8 +510,25 @@ static inline void tpm_buf_append_empty_auth(struct tpm_buf *buf, u32 handle)
+ int tpm2_start_auth_session(struct tpm_chip *chip);
+ void tpm_buf_append_name(struct tpm_chip *chip, struct tpm_buf *buf,
+ 			 u32 handle, u8 *name);
++void tpm_buf_append_hmac_session(struct tpm_chip *chip, struct tpm_buf *buf,
++				 u8 attributes, u8 *passphrase,
++				 int passphraselen);
++static inline void tpm_buf_append_hmac_session_opt(struct tpm_chip *chip,
++						   struct tpm_buf *buf,
++						   u8 attributes,
++						   u8 *passphrase,
++						   int passphraselen)
++{
++	tpm_buf_append_hmac_session(chip, buf, attributes, passphrase,
++				    passphraselen);
++}
++void tpm_buf_fill_hmac_session(struct tpm_chip *chip, struct tpm_buf *buf);
++int tpm_buf_check_hmac_response(struct tpm_chip *chip, struct tpm_buf *buf,
++				int rc);
+ void tpm2_end_auth_session(struct tpm_chip *chip);
+ #else
++#include <asm/unaligned.h>
++
+ static inline int tpm2_start_auth_session(struct tpm_chip *chip)
+ {
+ 	return 0;
+@@ -527,6 +544,58 @@ static inline void tpm_buf_append_name(struct tpm_chip *chip,
+ 	/* count the number of handles in the upper bits of flags */
+ 	buf->handles++;
+ }
++static inline void tpm_buf_append_hmac_session(struct tpm_chip *chip,
++					       struct tpm_buf *buf,
++					       u8 attributes, u8 *passphrase,
++					       int passphraselen)
++{
++	/* offset tells us where the sessions area begins */
++	int offset = buf->handles * 4 + TPM_HEADER_SIZE;
++	u32 len = 9 + passphraselen;
++
++	if (tpm_buf_length(buf) != offset) {
++		/* not the first session so update the existing length */
++		len += get_unaligned_be32(&buf->data[offset]);
++		put_unaligned_be32(len, &buf->data[offset]);
++	} else {
++		tpm_buf_append_u32(buf, len);
++	}
++	/* auth handle */
++	tpm_buf_append_u32(buf, TPM2_RS_PW);
++	/* nonce */
++	tpm_buf_append_u16(buf, 0);
++	/* attributes */
++	tpm_buf_append_u8(buf, 0);
++	/* passphrase */
++	tpm_buf_append_u16(buf, passphraselen);
++	tpm_buf_append(buf, passphrase, passphraselen);
++}
++static inline void tpm_buf_append_hmac_session_opt(struct tpm_chip *chip,
++						   struct tpm_buf *buf,
++						   u8 attributes,
++						   u8 *passphrase,
++						   int passphraselen)
++{
++	int offset = buf->handles * 4 + TPM_HEADER_SIZE;
++	struct tpm_header *head = (struct tpm_header *) buf->data;
++
++	/*
++	 * if the only sessions are optional, the command tag
++	 * must change to TPM2_ST_NO_SESSIONS
++	 */
++	if (tpm_buf_length(buf) == offset)
++		head->tag = cpu_to_be16(TPM2_ST_NO_SESSIONS);
++}
++static inline void tpm_buf_fill_hmac_session(struct tpm_chip *chip,
++					     struct tpm_buf *buf)
++{
++}
++static inline int tpm_buf_check_hmac_response(struct tpm_chip *chip,
++					      struct tpm_buf *buf,
++					      int rc)
++{
++	return rc;
++}
+ #endif	/* CONFIG_TCG_TPM2_HMAC */
+ 
+ #endif

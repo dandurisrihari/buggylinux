@@ -1,0 +1,74 @@
+commit e7c29cb16c833441fd2160642bb13025f4e7ac70
+Author: Marcel Holtmann <marcel@holtmann.org>
+Date:   Tue Sep 9 07:19:20 2008 +0200
+
+    [Bluetooth] Reject L2CAP connections on an insecure ACL link
+    
+    The Security Mode 4 of the Bluetooth 2.1 specification has strict
+    authentication and encryption requirements. It is the initiators job
+    to create a secure ACL link. However in case of malicious devices, the
+    acceptor has to make sure that the ACL is encrypted before allowing
+    any kind of L2CAP connection. The only exception here is the PSM 1 for
+    the service discovery protocol, because that is allowed to run on an
+    insecure ACL link.
+    
+    Previously it was enough to reject a L2CAP connection during the
+    connection setup phase, but with Bluetooth 2.1 it is forbidden to
+    do any L2CAP protocol exchange on an insecure link (except SDP).
+    
+    The new hci_conn_check_link_mode() function can be used to check the
+    integrity of an ACL link. This functions also takes care of the cases
+    where Security Mode 4 is disabled or one of the devices is based on
+    an older specification.
+    
+    Signed-off-by: Marcel Holtmann <marcel@holtmann.org>
+
+diff --git a/net/bluetooth/l2cap.c b/net/bluetooth/l2cap.c
+index a96d6de80d12..9610a9c85b98 100644
+--- a/net/bluetooth/l2cap.c
++++ b/net/bluetooth/l2cap.c
+@@ -1568,10 +1568,10 @@ static inline int l2cap_connect_req(struct l2cap_conn *conn, struct l2cap_cmd_hd
+ 	struct l2cap_conn_req *req = (struct l2cap_conn_req *) data;
+ 	struct l2cap_conn_rsp rsp;
+ 	struct sock *sk, *parent;
+-	int result, status = 0;
++	int result, status = L2CAP_CS_NO_INFO;
+ 
+ 	u16 dcid = 0, scid = __le16_to_cpu(req->scid);
+-	__le16 psm  = req->psm;
++	__le16 psm = req->psm;
+ 
+ 	BT_DBG("psm 0x%2.2x scid 0x%4.4x", psm, scid);
+ 
+@@ -1582,6 +1582,13 @@ static inline int l2cap_connect_req(struct l2cap_conn *conn, struct l2cap_cmd_hd
+ 		goto sendresp;
+ 	}
+ 
++	/* Check if the ACL is secure enough (if not SDP) */
++	if (psm != cpu_to_le16(0x0001) &&
++				!hci_conn_check_link_mode(conn->hcon)) {
++		result = L2CAP_CR_SEC_BLOCK;
++		goto response;
++	}
++
+ 	result = L2CAP_CR_NO_MEM;
+ 
+ 	/* Check for backlog size */
+@@ -2239,7 +2246,7 @@ static int l2cap_auth_cfm(struct hci_conn *hcon, u8 status)
+ 			rsp.scid   = cpu_to_le16(l2cap_pi(sk)->dcid);
+ 			rsp.dcid   = cpu_to_le16(l2cap_pi(sk)->scid);
+ 			rsp.result = cpu_to_le16(result);
+-			rsp.status = cpu_to_le16(0);
++			rsp.status = cpu_to_le16(L2CAP_CS_NO_INFO);
+ 			l2cap_send_cmd(conn, l2cap_pi(sk)->ident,
+ 					L2CAP_CONN_RSP, sizeof(rsp), &rsp);
+ 		}
+@@ -2311,7 +2318,7 @@ static int l2cap_encrypt_cfm(struct hci_conn *hcon, u8 status, u8 encrypt)
+ 			rsp.scid   = cpu_to_le16(l2cap_pi(sk)->dcid);
+ 			rsp.dcid   = cpu_to_le16(l2cap_pi(sk)->scid);
+ 			rsp.result = cpu_to_le16(result);
+-			rsp.status = cpu_to_le16(0);
++			rsp.status = cpu_to_le16(L2CAP_CS_NO_INFO);
+ 			l2cap_send_cmd(conn, l2cap_pi(sk)->ident,
+ 					L2CAP_CONN_RSP, sizeof(rsp), &rsp);
+ 		}

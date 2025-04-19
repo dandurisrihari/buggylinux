@@ -1,0 +1,39 @@
+commit 71ba994c94a81c37185ef2fb5190844286ba9aca
+Author: Paolo Bonzini <pbonzini@redhat.com>
+Date:   Wed Jul 29 12:31:15 2015 +0200
+
+    KVM: x86: clean/fix memory barriers in irqchip_in_kernel
+    
+    The memory barriers are trying to protect against concurrent RCU-based
+    interrupt injection, but the IRQ routing table is not valid at the time
+    kvm->arch.vpic is written.  Fix this by writing kvm->arch.vpic last.
+    kvm_destroy_pic then need not set kvm->arch.vpic to NULL; modify it
+    to take a struct kvm_pic* and reuse it if the IOAPIC creation fails.
+    
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/i8259.c b/arch/x86/kvm/i8259.c
+index fef922ff2635..7cc2360f1848 100644
+--- a/arch/x86/kvm/i8259.c
++++ b/arch/x86/kvm/i8259.c
+@@ -651,15 +651,10 @@ struct kvm_pic *kvm_create_pic(struct kvm *kvm)
+ 	return NULL;
+ }
+ 
+-void kvm_destroy_pic(struct kvm *kvm)
++void kvm_destroy_pic(struct kvm_pic *vpic)
+ {
+-	struct kvm_pic *vpic = kvm->arch.vpic;
+-
+-	if (vpic) {
+-		kvm_io_bus_unregister_dev(kvm, KVM_PIO_BUS, &vpic->dev_master);
+-		kvm_io_bus_unregister_dev(kvm, KVM_PIO_BUS, &vpic->dev_slave);
+-		kvm_io_bus_unregister_dev(kvm, KVM_PIO_BUS, &vpic->dev_eclr);
+-		kvm->arch.vpic = NULL;
+-		kfree(vpic);
+-	}
++	kvm_io_bus_unregister_dev(vpic->kvm, KVM_PIO_BUS, &vpic->dev_master);
++	kvm_io_bus_unregister_dev(vpic->kvm, KVM_PIO_BUS, &vpic->dev_slave);
++	kvm_io_bus_unregister_dev(vpic->kvm, KVM_PIO_BUS, &vpic->dev_eclr);
++	kfree(vpic);
+ }

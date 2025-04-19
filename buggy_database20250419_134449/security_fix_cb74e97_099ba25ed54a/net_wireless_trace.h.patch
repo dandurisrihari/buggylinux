@@ -1,0 +1,89 @@
+commit cb74e9775871f8c82a1297cf76209f10ab5bbe3d
+Author: Sunil Dutt <usdutt@codeaurora.org>
+Date:   Wed Feb 20 16:18:07 2019 +0530
+
+    cfg80211/nl80211: Offload OWE processing to user space in AP mode
+    
+    This interface allows the host driver to offload OWE processing
+    to user space. This intends to support OWE (Opportunistic Wireless
+    Encryption) AKM by the drivers that implement SME but rely on the
+    user space for the cryptographic/OWE processing in AP mode. Such
+    drivers are not capable of processing/deriving the DH IE.
+    
+    A new NL80211 command - NL80211_CMD_UPDATE_OWE_INFO is introduced
+    to send the request/event between the host driver and user space.
+    
+    Driver shall provide the OWE info (MAC address and DH IE) of
+    the peer to user space for cryptographic processing of the DH IE
+    through the event. Accordingly, the user space shall update the
+    OWE info/DH IE to the driver.
+    
+    Following is the sequence in AP mode for OWE authentication.
+    
+    Driver passes the OWE info obtained from the peer in the
+    Association Request to the user space through the event
+    cfg80211_update_owe_info_event. User space shall process the
+    OWE info received and generate new OWE info. This OWE info is
+    passed to the driver through NL80211_CMD_UPDATE_OWE_INFO
+    request. Driver eventually uses this OWE info to send the
+    Association Response to the peer.
+    
+    This OWE info in the command interface carries the IEs that include
+    PMKID of the peer if the PMKSA is still valid or an updated DH IE
+    for generating a new PMKSA with the peer.
+    
+    Signed-off-by: Liangwei Dong <liangwei@codeaurora.org>
+    Signed-off-by: Sunil Dutt <usdutt@codeaurora.org>
+    Signed-off-by: Srinivas Dasari <dasaris@codeaurora.org>
+    [remove policy initialization - no longer exists]
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+diff --git a/net/wireless/trace.h b/net/wireless/trace.h
+index 44b2ce1bb13a..2dda5291fc01 100644
+--- a/net/wireless/trace.h
++++ b/net/wireless/trace.h
+@@ -3362,6 +3362,44 @@ TRACE_EVENT(cfg80211_pmsr_complete,
+ 		  WIPHY_PR_ARG, WDEV_PR_ARG,
+ 		  (unsigned long long)__entry->cookie)
+ );
++
++TRACE_EVENT(rdev_update_owe_info,
++	    TP_PROTO(struct wiphy *wiphy, struct net_device *netdev,
++		     struct cfg80211_update_owe_info *owe_info),
++	    TP_ARGS(wiphy, netdev, owe_info),
++	    TP_STRUCT__entry(WIPHY_ENTRY
++			     NETDEV_ENTRY
++			     MAC_ENTRY(peer)
++			     __field(u16, status)
++			     __dynamic_array(u8, ie, owe_info->ie_len)),
++	    TP_fast_assign(WIPHY_ASSIGN;
++			   NETDEV_ASSIGN;
++			   MAC_ASSIGN(peer, owe_info->peer);
++			   __entry->status = owe_info->status;
++			   memcpy(__get_dynamic_array(ie),
++				  owe_info->ie, owe_info->ie_len);),
++	    TP_printk(WIPHY_PR_FMT ", " NETDEV_PR_FMT ", peer: " MAC_PR_FMT
++		  " status %d", WIPHY_PR_ARG, NETDEV_PR_ARG, MAC_PR_ARG(peer),
++		  __entry->status)
++);
++
++TRACE_EVENT(cfg80211_update_owe_info_event,
++	    TP_PROTO(struct wiphy *wiphy, struct net_device *netdev,
++		     struct cfg80211_update_owe_info *owe_info),
++	    TP_ARGS(wiphy, netdev, owe_info),
++	    TP_STRUCT__entry(WIPHY_ENTRY
++			     NETDEV_ENTRY
++			     MAC_ENTRY(peer)
++			     __dynamic_array(u8, ie, owe_info->ie_len)),
++	    TP_fast_assign(WIPHY_ASSIGN;
++			   NETDEV_ASSIGN;
++			   MAC_ASSIGN(peer, owe_info->peer);
++			   memcpy(__get_dynamic_array(ie), owe_info->ie,
++				  owe_info->ie_len);),
++	    TP_printk(WIPHY_PR_FMT ", " NETDEV_PR_FMT ", peer: " MAC_PR_FMT,
++		      WIPHY_PR_ARG, NETDEV_PR_ARG, MAC_PR_ARG(peer))
++);
++
+ #endif /* !__RDEV_OPS_TRACE || TRACE_HEADER_MULTI_READ */
+ 
+ #undef TRACE_INCLUDE_PATH

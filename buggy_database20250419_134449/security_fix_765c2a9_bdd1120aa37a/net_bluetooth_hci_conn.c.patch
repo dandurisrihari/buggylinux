@@ -1,0 +1,42 @@
+commit 765c2a964b49bd06b61a52991519281c85d82b67
+Author: Johan Hedberg <johan.hedberg@nokia.com>
+Date:   Wed Jan 19 12:06:52 2011 +0530
+
+    Bluetooth: Fix race condition with conn->sec_level
+    
+    The conn->sec_level value is supposed to represent the current level of
+    security that the connection has. However, by assigning to it before
+    requesting authentication it will have the wrong value during the
+    authentication procedure. To fix this a pending_sec_level variable is
+    added which is used to track the desired security level while making
+    sure that sec_level always represents the current level of security.
+    
+    Signed-off-by: Johan Hedberg <johan.hedberg@nokia.com>
+    Signed-off-by: Gustavo F. Padovan <padovan@profusion.mobi>
+
+diff --git a/net/bluetooth/hci_conn.c b/net/bluetooth/hci_conn.c
+index fe712a89a856..99cd8d9d891b 100644
+--- a/net/bluetooth/hci_conn.c
++++ b/net/bluetooth/hci_conn.c
+@@ -379,7 +379,8 @@ struct hci_conn *hci_connect(struct hci_dev *hdev, int type, bdaddr_t *dst, __u8
+ 	hci_conn_hold(acl);
+ 
+ 	if (acl->state == BT_OPEN || acl->state == BT_CLOSED) {
+-		acl->sec_level = sec_level;
++		acl->sec_level = BT_SECURITY_LOW;
++		acl->pending_sec_level = sec_level;
+ 		acl->auth_type = auth_type;
+ 		hci_acl_connect(acl);
+ 	}
+@@ -437,8 +438,11 @@ static int hci_conn_auth(struct hci_conn *conn, __u8 sec_level, __u8 auth_type)
+ {
+ 	BT_DBG("conn %p", conn);
+ 
++	if (conn->pending_sec_level > sec_level)
++		sec_level = conn->pending_sec_level;
++
+ 	if (sec_level > conn->sec_level)
+-		conn->sec_level = sec_level;
++		conn->pending_sec_level = sec_level;
+ 	else if (conn->link_mode & HCI_LM_AUTH)
+ 		return 1;

@@ -1,0 +1,56 @@
+commit 1fc44d9b1afb0afe46acd99bdfdf793805a850e1
+Author: Chris Wilson <chris@chris-wilson.co.uk>
+Date:   Thu May 17 22:26:32 2018 +0100
+
+    drm/i915: Store a pointer to intel_context in i915_request
+    
+    To ease the frequent and ugly pointer dance of
+    &request->gem_context->engine[request->engine->id] during request
+    submission, store that pointer as request->hw_context. One major
+    advantage that we will exploit later is that this decouples the logical
+    context state from the engine itself.
+    
+    v2: Set mock_context->ops so we don't crash and burn in selftests.
+        Cleanups from Tvrtko.
+    
+    Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+    Acked-by: Zhenyu Wang <zhenyuw@linux.intel.com>
+    Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+    Link: https://patchwork.freedesktop.org/patch/msgid/20180517212633.24934-3-chris@chris-wilson.co.uk
+
+diff --git a/drivers/gpu/drm/i915/intel_guc_submission.c b/drivers/gpu/drm/i915/intel_guc_submission.c
+index a432a193f3c4..133367a17863 100644
+--- a/drivers/gpu/drm/i915/intel_guc_submission.c
++++ b/drivers/gpu/drm/i915/intel_guc_submission.c
+@@ -513,9 +513,7 @@ static void guc_add_request(struct intel_guc *guc, struct i915_request *rq)
+ {
+ 	struct intel_guc_client *client = guc->execbuf_client;
+ 	struct intel_engine_cs *engine = rq->engine;
+-	u32 ctx_desc =
+-		lower_32_bits(intel_lr_context_descriptor(rq->gem_context,
+-							  engine));
++	u32 ctx_desc = lower_32_bits(rq->hw_context->lrc_desc);
+ 	u32 ring_tail = intel_ring_set_tail(rq->ring, rq->tail) / sizeof(u64);
+ 
+ 	spin_lock(&client->wq_lock);
+@@ -553,8 +551,8 @@ static void inject_preempt_context(struct work_struct *work)
+ 					     preempt_work[engine->id]);
+ 	struct intel_guc_client *client = guc->preempt_client;
+ 	struct guc_stage_desc *stage_desc = __get_stage_desc(client);
+-	u32 ctx_desc = lower_32_bits(intel_lr_context_descriptor(client->owner,
+-								 engine));
++	u32 ctx_desc = lower_32_bits(to_intel_context(client->owner,
++						      engine)->lrc_desc);
+ 	u32 data[7];
+ 
+ 	/*
+@@ -726,7 +724,7 @@ static bool __guc_dequeue(struct intel_engine_cs *engine)
+ 		struct i915_request *rq, *rn;
+ 
+ 		list_for_each_entry_safe(rq, rn, &p->requests, sched.link) {
+-			if (last && rq->gem_context != last->gem_context) {
++			if (last && rq->hw_context != last->hw_context) {
+ 				if (port == last_port) {
+ 					__list_del_many(&p->requests,
+ 							&rq->sched.link);

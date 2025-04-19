@@ -1,0 +1,105 @@
+commit 14c43be60166981f0b1f034ad9c59252c6f99e0d
+Author: Ard Biesheuvel <ardb@kernel.org>
+Date:   Mon Apr 25 21:06:34 2016 +0100
+
+    efi/arm*: Drop writable mapping of the UEFI System table
+    
+    Commit:
+    
+      2eec5dedf770 ("efi/arm-init: Use read-only early mappings")
+    
+    updated the early ARM UEFI init code to create the temporary, early
+    mapping of the UEFI System table using read-only attributes, as a
+    hardening measure against inadvertent modification.
+    
+    However, this still leaves the permanent, writable mapping of the UEFI
+    System table, which is only ever referenced during invocations of UEFI
+    Runtime Services, at which time the UEFI virtual mapping is available,
+    which also covers the system table. (This is guaranteed by the fact that
+    SetVirtualAddressMap(), which is a runtime service itself, converts
+    various entries in the table to their virtual equivalents, which implies
+    that the table must be covered by a RuntimeServicesData region that has
+    the EFI_MEMORY_RUNTIME attribute.)
+    
+    So instead of creating this permanent mapping, record the virtual address
+    of the system table inside the UEFI virtual mapping, and dereference that
+    when accessing the table. This protects the contents of the system table
+    from inadvertent (or deliberate) modification when no UEFI Runtime
+    Services calls are in progress.
+    
+    Signed-off-by: Ard Biesheuvel <ard.biesheuvel@linaro.org>
+    Signed-off-by: Matt Fleming <matt@codeblueprint.co.uk>
+    Cc: Borislav Petkov <bp@alien8.de>
+    Cc: Leif Lindholm <leif.lindholm@linaro.org>
+    Cc: Mark Rutland <mark.rutland@arm.com>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Cc: linux-efi@vger.kernel.org
+    Link: http://lkml.kernel.org/r/1461614832-17633-3-git-send-email-matt@codeblueprint.co.uk
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+diff --git a/drivers/firmware/efi/arm-runtime.c b/drivers/firmware/efi/arm-runtime.c
+index 16c7d2a71156..771750df6b7d 100644
+--- a/drivers/firmware/efi/arm-runtime.c
++++ b/drivers/firmware/efi/arm-runtime.c
+@@ -42,10 +42,12 @@ static struct mm_struct efi_mm = {
+ static bool __init efi_virtmap_init(void)
+ {
+ 	efi_memory_desc_t *md;
++	bool systab_found;
+ 
+ 	efi_mm.pgd = pgd_alloc(&efi_mm);
+ 	init_new_context(NULL, &efi_mm);
+ 
++	systab_found = false;
+ 	for_each_efi_memory_desc(&memmap, md) {
+ 		phys_addr_t phys = md->phys_addr;
+ 		int ret;
+@@ -64,8 +66,20 @@ static bool __init efi_virtmap_init(void)
+ 				&phys, ret);
+ 			return false;
+ 		}
++		/*
++		 * If this entry covers the address of the UEFI system table,
++		 * calculate and record its virtual address.
++		 */
++		if (efi_system_table >= phys &&
++		    efi_system_table < phys + (md->num_pages * EFI_PAGE_SIZE)) {
++			efi.systab = (void *)(unsigned long)(efi_system_table -
++							     phys + md->virt_addr);
++			systab_found = true;
++		}
+ 	}
+-	return true;
++	if (!systab_found)
++		pr_err("No virtual mapping found for the UEFI System Table\n");
++	return systab_found;
+ }
+ 
+ /*
+@@ -99,15 +113,8 @@ static int __init arm_enable_runtime_services(void)
+ 	memmap.map_end = memmap.map + mapsize;
+ 	efi.memmap = &memmap;
+ 
+-	efi.systab = (__force void *)ioremap_cache(efi_system_table,
+-						   sizeof(efi_system_table_t));
+-	if (!efi.systab) {
+-		pr_err("Failed to remap EFI System Table\n");
+-		return -ENOMEM;
+-	}
+-
+ 	if (!efi_virtmap_init()) {
+-		pr_err("No UEFI virtual mapping was installed -- runtime services will not be available\n");
++		pr_err("UEFI virtual mapping missing or invalid -- runtime services will not be available\n");
+ 		return -ENOMEM;
+ 	}
+ 
+@@ -115,8 +122,6 @@ static int __init arm_enable_runtime_services(void)
+ 	efi_native_runtime_setup();
+ 	set_bit(EFI_RUNTIME_SERVICES, &efi.flags);
+ 
+-	efi.runtime_version = efi.systab->hdr.revision;
+-
+ 	return 0;
+ }
+ early_initcall(arm_enable_runtime_services);

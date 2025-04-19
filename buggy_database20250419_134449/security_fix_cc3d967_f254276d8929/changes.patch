@@ -1,0 +1,113 @@
+diff --git a/arch/x86/include/asm/kvm_host.h b/arch/x86/include/asm/kvm_host.h
+index 8700b845f780..7233445a20bd 100644
+--- a/arch/x86/include/asm/kvm_host.h
++++ b/arch/x86/include/asm/kvm_host.h
+@@ -1065,6 +1065,7 @@ struct kvm_x86_ops {
+ 	int (*smi_allowed)(struct kvm_vcpu *vcpu);
+ 	int (*pre_enter_smm)(struct kvm_vcpu *vcpu, char *smstate);
+ 	int (*pre_leave_smm)(struct kvm_vcpu *vcpu, u64 smbase);
++	int (*enable_smi_window)(struct kvm_vcpu *vcpu);
+ };
+ 
+ struct kvm_arch_async_pf {
+diff --git a/arch/x86/kvm/svm.c b/arch/x86/kvm/svm.c
+index ff94552f85d0..b71daed3cca2 100644
+--- a/arch/x86/kvm/svm.c
++++ b/arch/x86/kvm/svm.c
+@@ -3187,7 +3187,7 @@ static int stgi_interception(struct vcpu_svm *svm)
+ 
+ 	/*
+ 	 * If VGIF is enabled, the STGI intercept is only added to
+-	 * detect the opening of the NMI window; remove it now.
++	 * detect the opening of the SMI/NMI window; remove it now.
+ 	 */
+ 	if (vgif_enabled(svm))
+ 		clr_intercept(svm, INTERCEPT_STGI);
+@@ -5476,6 +5476,19 @@ static int svm_pre_leave_smm(struct kvm_vcpu *vcpu, u64 smbase)
+ 	return ret;
+ }
+ 
++static int enable_smi_window(struct kvm_vcpu *vcpu)
++{
++	struct vcpu_svm *svm = to_svm(vcpu);
++
++	if (!gif_set(svm)) {
++		if (vgif_enabled(svm))
++			set_intercept(svm, INTERCEPT_STGI);
++		/* STGI will cause a vm exit */
++		return 1;
++	}
++	return 0;
++}
++
+ static struct kvm_x86_ops svm_x86_ops __ro_after_init = {
+ 	.cpu_has_kvm_support = has_svm,
+ 	.disabled_by_bios = is_disabled,
+@@ -5590,6 +5603,7 @@ static struct kvm_x86_ops svm_x86_ops __ro_after_init = {
+ 	.smi_allowed = svm_smi_allowed,
+ 	.pre_enter_smm = svm_pre_enter_smm,
+ 	.pre_leave_smm = svm_pre_leave_smm,
++	.enable_smi_window = enable_smi_window,
+ };
+ 
+ static int __init svm_init(void)
+diff --git a/arch/x86/kvm/vmx.c b/arch/x86/kvm/vmx.c
+index c460b0b439d3..69d45734091f 100644
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -11973,6 +11973,11 @@ static int vmx_pre_leave_smm(struct kvm_vcpu *vcpu, u64 smbase)
+ 	return 0;
+ }
+ 
++static int enable_smi_window(struct kvm_vcpu *vcpu)
++{
++	return 0;
++}
++
+ static struct kvm_x86_ops vmx_x86_ops __ro_after_init = {
+ 	.cpu_has_kvm_support = cpu_has_kvm_support,
+ 	.disabled_by_bios = vmx_disabled_by_bios,
+@@ -12102,6 +12107,7 @@ static struct kvm_x86_ops vmx_x86_ops __ro_after_init = {
+ 	.smi_allowed = vmx_smi_allowed,
+ 	.pre_enter_smm = vmx_pre_enter_smm,
+ 	.pre_leave_smm = vmx_pre_leave_smm,
++	.enable_smi_window = enable_smi_window,
+ };
+ 
+ static int __init vmx_init(void)
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 5669af09b732..3b51c8659741 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -6892,17 +6892,23 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 		if (inject_pending_event(vcpu, req_int_win) != 0)
+ 			req_immediate_exit = true;
+ 		else {
+-			/* Enable NMI/IRQ window open exits if needed.
++			/* Enable SMI/NMI/IRQ window open exits if needed.
+ 			 *
+-			 * SMIs have two cases: 1) they can be nested, and
+-			 * then there is nothing to do here because RSM will
+-			 * cause a vmexit anyway; 2) or the SMI can be pending
+-			 * because inject_pending_event has completed the
+-			 * injection of an IRQ or NMI from the previous vmexit,
+-			 * and then we request an immediate exit to inject the SMI.
++			 * SMIs have three cases:
++			 * 1) They can be nested, and then there is nothing to
++			 *    do here because RSM will cause a vmexit anyway.
++			 * 2) There is an ISA-specific reason why SMI cannot be
++			 *    injected, and the moment when this changes can be
++			 *    intercepted.
++			 * 3) Or the SMI can be pending because
++			 *    inject_pending_event has completed the injection
++			 *    of an IRQ or NMI from the previous vmexit, and
++			 *    then we request an immediate exit to inject the
++			 *    SMI.
+ 			 */
+ 			if (vcpu->arch.smi_pending && !is_smm(vcpu))
+-				req_immediate_exit = true;
++				if (!kvm_x86_ops->enable_smi_window(vcpu))
++					req_immediate_exit = true;
+ 			if (vcpu->arch.nmi_pending)
+ 				kvm_x86_ops->enable_nmi_window(vcpu);
+ 			if (kvm_cpu_has_injectable_intr(vcpu) || req_int_win)

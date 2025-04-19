@@ -1,0 +1,63 @@
+commit 84d582d236dc1f9085e741affc72e9ba061a67c2
+Author: Boris Ostrovsky <boris.ostrovsky@oracle.com>
+Date:   Mon Apr 24 15:04:53 2017 -0400
+
+    xen: Revert commits da72ff5bfcb0 and 72a9b186292d
+    
+    Recent discussion (http://marc.info/?l=xen-devel&m=149192184523741)
+    established that commit 72a9b186292d ("xen: Remove event channel
+    notification through Xen PCI platform device") (and thus commit
+    da72ff5bfcb0 ("partially revert "xen: Remove event channel
+    notification through Xen PCI platform device"")) are unnecessary and,
+    in fact, prevent HVM guests from booting on Xen releases prior to 4.0
+    
+    Therefore we revert both of those commits.
+    
+    The summary of that discussion is below:
+    
+      Here is the brief summary of the current situation:
+    
+      Before the offending commit (72a9b186292):
+    
+      1) INTx does not work because of the reset_watches path.
+      2) The reset_watches path is only taken if you have Xen > 4.0
+      3) The Linux Kernel by default will use vector inject if the hypervisor
+         support. So even INTx does not work no body running the kernel with
+         Xen > 4.0 would notice. Unless he explicitly disabled this feature
+         either in the kernel or in Xen (and this can only be disabled by
+         modifying the code, not user-supported way to do it).
+    
+      After the offending commit (+ partial revert):
+    
+      1) INTx is no longer support for HVM (only for PV guests).
+      2) Any HVM guest The kernel will not boot on Xen < 4.0 which does
+         not have vector injection support. Since the only other mode
+         supported is INTx which.
+    
+      So based on this summary, I think before commit (72a9b186292) we were
+      in much better position from a user point of view.
+    
+    Signed-off-by: Boris Ostrovsky <boris.ostrovsky@oracle.com>
+    Reviewed-by: Juergen Gross <jgross@suse.com>
+    Signed-off-by: Juergen Gross <jgross@suse.com>
+
+diff --git a/arch/x86/include/asm/xen/events.h b/arch/x86/include/asm/xen/events.h
+index 608a79d5a466..e6911caf5bbf 100644
+--- a/arch/x86/include/asm/xen/events.h
++++ b/arch/x86/include/asm/xen/events.h
+@@ -20,4 +20,15 @@ static inline int xen_irqs_disabled(struct pt_regs *regs)
+ /* No need for a barrier -- XCHG is a barrier on x86. */
+ #define xchg_xen_ulong(ptr, val) xchg((ptr), (val))
+ 
++extern int xen_have_vector_callback;
++
++/*
++ * Events delivered via platform PCI interrupts are always
++ * routed to vcpu 0 and hence cannot be rebound.
++ */
++static inline bool xen_support_evtchn_rebind(void)
++{
++	return (!xen_hvm_domain() || xen_have_vector_callback);
++}
++
+ #endif /* _ASM_X86_XEN_EVENTS_H */

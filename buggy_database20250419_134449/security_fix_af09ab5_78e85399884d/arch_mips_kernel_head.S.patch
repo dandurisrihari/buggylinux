@@ -1,0 +1,52 @@
+commit af09ab5e3fa7b6e137b135325a2ca00d57b4aea2
+Author: Matt Redfearn <matt.redfearn@mips.com>
+Date:   Thu Mar 31 10:05:37 2016 +0100
+
+    MIPS: Call relocate_kernel if CONFIG_RELOCATABLE=y
+    
+    If CONFIG_RELOCATABLE is enabled, call relocate_kernel.
+    
+    This function will return the entry point of the relocated kernel if
+    copy/relocate is sucessful or the original entry point if not. The stack
+    pointer must then be pointed into the new image.
+    
+    Signed-off-by: Matt Redfearn <matt.redfearn@imgtec.com>
+    Cc: Jonas Gorski <jogo@openwrt.org>
+    Cc: linux-mips@linux-mips.org
+    Cc: kernel-hardening@lists.openwall.com
+    Cc: linux-kernel@vger.kernel.org
+    Patchwork: https://patchwork.linux-mips.org/patch/12984/
+    Signed-off-by: Ralf Baechle <ralf@linux-mips.org>
+
+diff --git a/arch/mips/kernel/head.S b/arch/mips/kernel/head.S
+index 4e4cc5b9a771..7dc043349d66 100644
+--- a/arch/mips/kernel/head.S
++++ b/arch/mips/kernel/head.S
+@@ -132,7 +132,27 @@ not_found:
+ 	set_saved_sp	sp, t0, t1
+ 	PTR_SUBU	sp, 4 * SZREG		# init stack pointer
+ 
++#ifdef CONFIG_RELOCATABLE
++	/* Copy kernel and apply the relocations */
++	jal		relocate_kernel
++
++	/* Repoint the sp into the new kernel image */
++	PTR_LI		sp, _THREAD_SIZE - 32 - PT_SIZE
++	PTR_ADDU	sp, $28
++	set_saved_sp	sp, t0, t1
++	PTR_SUBU	sp, 4 * SZREG		# init stack pointer
++
++	/*
++	 * relocate_kernel returns the entry point either
++	 * in the relocated kernel or the original if for
++	 * some reason relocation failed - jump there now
++	 * with instruction hazard barrier because of the
++	 * newly sync'd icache.
++	 */
++	jr.hb		v0
++#else
+ 	j		start_kernel
++#endif
+ 	END(kernel_entry)
+ 
+ #ifdef CONFIG_SMP

@@ -1,0 +1,164 @@
+commit b28ddcc32d8fa3e20745b3a47dff863fe0376d79
+Author: Christian Brauner <brauner@kernel.org>
+Date:   Mon Feb 19 16:30:57 2024 +0100
+
+    pidfs: convert to path_from_stashed() helper
+    
+    Moving pidfds from the anonymous inode infrastructure to a separate tiny
+    in-kernel filesystem similar to sockfs, pipefs, and anon_inodefs causes
+    selinux denials and thus various userspace components that make heavy
+    use of pidfds to fail as pidfds used anon_inode_getfile() which aren't
+    subject to any LSM hooks. But dentry_open() is and that would cause
+    regressions.
+    
+    The failures that are seen are selinux denials. But the core failure is
+    dbus-broker. That cascades into other services failing that depend on
+    dbus-broker. For example, when dbus-broker fails to start polkit and all
+    the others won't be able to work because they depend on dbus-broker.
+    
+    The reason for dbus-broker failing is because it doesn't handle failures
+    for SO_PEERPIDFD correctly. Last kernel release we introduced
+    SO_PEERPIDFD (and SCM_PIDFD). SO_PEERPIDFD allows dbus-broker and polkit
+    and others to receive a pidfd for the peer of an AF_UNIX socket. This is
+    the first time in the history of Linux that we can safely authenticate
+    clients in a race-free manner.
+    
+    dbus-broker immediately made use of this but messed up the error
+    checking. It only allowed EINVAL as a valid failure for SO_PEERPIDFD.
+    That's obviously problematic not just because of LSM denials but because
+    of seccomp denials that would prevent SO_PEERPIDFD from working; or any
+    other new error code from there.
+    
+    So this is catching a flawed implementation in dbus-broker as well. It
+    has to fallback to the old pid-based authentication when SO_PEERPIDFD
+    doesn't work no matter the reasons otherwise it'll always risk such
+    failures. So overall that LSM denial should not have caused dbus-broker
+    to fail. It can never assume that a feature released one kernel ago like
+    SO_PEERPIDFD can be assumed to be available.
+    
+    So, the next fix separate from the selinux policy update is to try and
+    fix dbus-broker at [3]. That should make it into Fedora as well. In
+    addition the selinux reference policy should also be updated. See [4]
+    for that. If Selinux is in enforcing mode in userspace and it encounters
+    anything that it doesn't know about it will deny it by default. And the
+    policy is entirely in userspace including declaring new types for stuff
+    like nsfs or pidfs to allow it.
+    
+    For now we continue to raise S_PRIVATE on the inode if it's a pidfs
+    inode which means things behave exactly like before.
+    
+    Link: https://bugzilla.redhat.com/show_bug.cgi?id=2265630
+    Link: https://github.com/fedora-selinux/selinux-policy/pull/2050
+    Link: https://github.com/bus1/dbus-broker/pull/343 [3]
+    Link: https://github.com/SELinuxProject/refpolicy/pull/762 [4]
+    Reported-by: Nathan Chancellor <nathan@kernel.org>
+    Link: https://lore.kernel.org/r/20240222190334.GA412503@dev-arch.thelio-3990X
+    Link: https://lore.kernel.org/r/20240218-neufahrzeuge-brauhaus-fb0eb6459771@brauner
+    Signed-off-by: Christian Brauner <brauner@kernel.org>
+
+diff --git a/fs/pidfs.c b/fs/pidfs.c
+index 6c3f010074af..cf606f15def5 100644
+--- a/fs/pidfs.c
++++ b/fs/pidfs.c
+@@ -14,6 +14,8 @@
+ #include <linux/seq_file.h>
+ #include <uapi/linux/pidfd.h>
+ 
++#include "internal.h"
++
+ static int pidfd_release(struct inode *inode, struct file *file)
+ {
+ #ifndef CONFIG_FS_PID
+@@ -186,9 +188,21 @@ static char *pidfs_dname(struct dentry *dentry, char *buffer, int buflen)
+ 			     d_inode(dentry)->i_ino);
+ }
+ 
++static void pidfs_prune_dentry(struct dentry *dentry)
++{
++	struct inode *inode;
++
++	inode = d_inode(dentry);
++	if (inode) {
++		struct pid *pid = inode->i_private;
++		WRITE_ONCE(pid->stashed, NULL);
++	}
++}
++
+ static const struct dentry_operations pidfs_dentry_operations = {
+ 	.d_delete	= always_delete_dentry,
+ 	.d_dname	= pidfs_dname,
++	.d_prune	= pidfs_prune_dentry,
+ };
+ 
+ static int pidfs_init_fs_context(struct fs_context *fc)
+@@ -213,34 +227,28 @@ static struct file_system_type pidfs_type = {
+ struct file *pidfs_alloc_file(struct pid *pid, unsigned int flags)
+ {
+ 
+-	struct inode *inode;
+ 	struct file *pidfd_file;
++	struct path path;
++	int ret;
+ 
+-	inode = iget_locked(pidfs_sb, pid->ino);
+-	if (!inode)
+-		return ERR_PTR(-ENOMEM);
+-
+-	if (inode->i_state & I_NEW) {
++	do {
+ 		/*
+ 		 * Inode numbering for pidfs start at RESERVED_PIDS + 1.
+ 		 * This avoids collisions with the root inode which is 1
+ 		 * for pseudo filesystems.
+ 		 */
+-		inode->i_ino = pid->ino;
+-		inode->i_mode = S_IFREG | S_IRUGO;
+-		inode->i_op = &pidfs_inode_operations;
+-		inode->i_fop = &pidfs_file_operations;
+-		inode->i_flags |= S_IMMUTABLE;
+-		inode->i_private = get_pid(pid);
+-		simple_inode_init_ts(inode);
+-		unlock_new_inode(inode);
+-	}
+-
+-	pidfd_file = alloc_file_pseudo(inode, pidfs_mnt, "", flags,
+-				       &pidfs_file_operations);
+-	if (IS_ERR(pidfd_file))
+-		iput(inode);
+-
++		ret = path_from_stashed(&pid->stashed, pid->ino, pidfs_mnt,
++					&pidfs_file_operations,
++					&pidfs_inode_operations, get_pid(pid),
++					&path);
++		if (ret <= 0 && ret != -EAGAIN)
++			put_pid(pid);
++	} while (ret == -EAGAIN);
++	if (ret < 0)
++		return ERR_PTR(ret);
++
++	pidfd_file = dentry_open(&path, flags, current_cred());
++	path_put(&path);
+ 	return pidfd_file;
+ }
+ 
+@@ -253,6 +261,11 @@ void __init pidfs_init(void)
+ 	pidfs_sb = pidfs_mnt->mnt_sb;
+ }
+ 
++bool is_pidfs_sb(const struct super_block *sb)
++{
++	return sb == pidfs_mnt->mnt_sb;
++}
++
+ #else /* !CONFIG_FS_PID */
+ 
+ struct file *pidfs_alloc_file(struct pid *pid, unsigned int flags)
+@@ -269,4 +282,8 @@ struct file *pidfs_alloc_file(struct pid *pid, unsigned int flags)
+ }
+ 
+ void __init pidfs_init(void) { }
++bool is_pidfs_sb(const struct super_block *sb)
++{
++	return false;
++}
+ #endif

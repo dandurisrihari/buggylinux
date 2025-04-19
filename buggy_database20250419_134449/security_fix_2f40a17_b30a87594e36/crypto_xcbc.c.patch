@@ -1,0 +1,44 @@
+commit 2f40a178e70030c4712fe63807c883f34c3645eb
+Author: Joy Latten <latten@austin.ibm.com>
+Date:   Thu Mar 6 19:28:44 2008 +0800
+
+    [CRYPTO] xcbc: Fix crash with IPsec
+    
+    When using aes-xcbc-mac for authentication in IPsec,
+    the kernel crashes. It seems this algorithm doesn't
+    account for the space IPsec may make in scatterlist for authtag.
+    Thus when crypto_xcbc_digest_update2() gets called,
+    nbytes may be less than sg[i].length.
+    Since nbytes is an unsigned number, it wraps
+    at the end of the loop allowing us to go back
+    into loop and causing crash in memcpy.
+    
+    I used update function in digest.c to model this fix.
+    Please let me know if it looks ok.
+    
+    Signed-off-by: Joy Latten <latten@austin.ibm.com>
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+diff --git a/crypto/xcbc.c b/crypto/xcbc.c
+index 86727403e5ab..2feb0f239c38 100644
+--- a/crypto/xcbc.c
++++ b/crypto/xcbc.c
+@@ -124,6 +124,11 @@ static int crypto_xcbc_digest_update2(struct hash_desc *pdesc,
+ 		unsigned int offset = sg[i].offset;
+ 		unsigned int slen = sg[i].length;
+ 
++		if (unlikely(slen > nbytes))
++			slen = nbytes;
++
++		nbytes -= slen;
++
+ 		while (slen > 0) {
+ 			unsigned int len = min(slen, ((unsigned int)(PAGE_SIZE)) - offset);
+ 			char *p = crypto_kmap(pg, 0) + offset;
+@@ -177,7 +182,6 @@ static int crypto_xcbc_digest_update2(struct hash_desc *pdesc,
+ 			offset = 0;
+ 			pg++;
+ 		}
+-		nbytes-=sg[i].length;
+ 		i++;
+ 	} while (nbytes>0);

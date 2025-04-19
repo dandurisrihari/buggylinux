@@ -1,0 +1,78 @@
+commit cc744042d90809ccb7cac7f9fb773f5c9cb9f835
+Merge: b5396271eab4 192df2aa0113
+Author: Paolo Bonzini <pbonzini@redhat.com>
+Date:   Sat Jul 1 07:04:29 2023 -0400
+
+    Merge tag 'kvmarm-6.5' of git://git.kernel.org/pub/scm/linux/kernel/git/kvmarm/kvmarm into HEAD
+    
+    KVM/arm64 updates for 6.5
+    
+     - Eager page splitting optimization for dirty logging, optionally
+       allowing for a VM to avoid the cost of block splitting in the stage-2
+       fault path.
+    
+     - Arm FF-A proxy for pKVM, allowing a pKVM host to safely interact with
+       services that live in the Secure world. pKVM intervenes on FF-A calls
+       to guarantee the host doesn't misuse memory donated to the hyp or a
+       pKVM guest.
+    
+     - Support for running the split hypervisor with VHE enabled, known as
+       'hVHE' mode. This is extremely useful for testing the split
+       hypervisor on VHE-only systems, and paves the way for new use cases
+       that depend on having two TTBRs available at EL2.
+    
+     - Generalized framework for configurable ID registers from userspace.
+       KVM/arm64 currently prevents arbitrary CPU feature set configuration
+       from userspace, but the intent is to relax this limitation and allow
+       userspace to select a feature set consistent with the CPU.
+    
+     - Enable the use of Branch Target Identification (FEAT_BTI) in the
+       hypervisor.
+    
+     - Use a separate set of pointer authentication keys for the hypervisor
+       when running in protected mode, as the host is untrusted at runtime.
+    
+     - Ensure timer IRQs are consistently released in the init failure
+       paths.
+    
+     - Avoid trapping CTR_EL0 on systems with Enhanced Virtualization Traps
+       (FEAT_EVT), as it is a register commonly read from userspace.
+    
+     - Erratum workaround for the upcoming AmpereOne part, which has broken
+       hardware A/D state management.
+    
+    As a consequence of the hVHE series reworking the arm64 software
+    features framework, the for-next/module-alloc branch from the arm64 tree
+    comes along for the ride.
+
+diff --cc arch/arm64/kvm/hyp/include/hyp/switch.h
+index 4fe217efa218,dc584b0f4f12..f35d5abedf9c
+--- a/arch/arm64/kvm/hyp/include/hyp/switch.h
++++ b/arch/arm64/kvm/hyp/include/hyp/switch.h
+@@@ -112,22 -148,11 +154,16 @@@ static inline void __deactivate_traps_c
+  	write_sysreg(vcpu->arch.mdcr_el2_host, mdcr_el2);
+  
+  	write_sysreg(0, hstr_el2);
+ -	if (kvm_arm_support_pmu_v3())
+ -		write_sysreg(0, pmuserenr_el0);
+ +	if (kvm_arm_support_pmu_v3()) {
+ +		struct kvm_cpu_context *hctxt;
+ +
+ +		hctxt = &this_cpu_ptr(&kvm_host_data)->host_ctxt;
+ +		write_sysreg(ctxt_sys_reg(hctxt, PMUSERENR_EL0), pmuserenr_el0);
+ +		vcpu_clear_flag(vcpu, PMUSERENR_ON_CPU);
+ +	}
+  
+- 	if (cpus_have_final_cap(ARM64_SME)) {
+- 		sysreg_clear_set_s(SYS_HFGRTR_EL2, 0,
+- 				   HFGxTR_EL2_nSMPRI_EL1_MASK |
+- 				   HFGxTR_EL2_nTPIDR2_EL0_MASK);
+- 		sysreg_clear_set_s(SYS_HFGWTR_EL2, 0,
+- 				   HFGxTR_EL2_nSMPRI_EL1_MASK |
+- 				   HFGxTR_EL2_nTPIDR2_EL0_MASK);
+- 	}
++ 	if (__hfgxtr_traps_required())
++ 		__deactivate_traps_hfgxtr();
+  }
+  
+  static inline void ___activate_traps(struct kvm_vcpu *vcpu)

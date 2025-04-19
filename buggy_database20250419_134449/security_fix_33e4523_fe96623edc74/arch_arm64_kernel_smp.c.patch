@@ -1,0 +1,50 @@
+commit 33e45234987ea3ed4b05fc512f4441696478f12d
+Author: Kristina Martsenko <kristina.martsenko@arm.com>
+Date:   Fri Mar 13 14:34:56 2020 +0530
+
+    arm64: initialize and switch ptrauth kernel keys
+    
+    Set up keys to use pointer authentication within the kernel. The kernel
+    will be compiled with APIAKey instructions, the other keys are currently
+    unused. Each task is given its own APIAKey, which is initialized during
+    fork. The key is changed during context switch and on kernel entry from
+    EL0.
+    
+    The keys for idle threads need to be set before calling any C functions,
+    because it is not possible to enter and exit a function with different
+    keys.
+    
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Reviewed-by: Catalin Marinas <catalin.marinas@arm.com>
+    Reviewed-by: Vincenzo Frascino <Vincenzo.Frascino@arm.com>
+    Signed-off-by: Kristina Martsenko <kristina.martsenko@arm.com>
+    [Amit: Modified secondary cores key structure, comments]
+    Signed-off-by: Amit Daniel Kachhap <amit.kachhap@arm.com>
+    Signed-off-by: Catalin Marinas <catalin.marinas@arm.com>
+
+diff --git a/arch/arm64/kernel/smp.c b/arch/arm64/kernel/smp.c
+index d4ed9a19d8fe..08903413f106 100644
+--- a/arch/arm64/kernel/smp.c
++++ b/arch/arm64/kernel/smp.c
+@@ -112,6 +112,10 @@ int __cpu_up(unsigned int cpu, struct task_struct *idle)
+ 	 */
+ 	secondary_data.task = idle;
+ 	secondary_data.stack = task_stack_page(idle) + THREAD_SIZE;
++#if defined(CONFIG_ARM64_PTR_AUTH)
++	secondary_data.ptrauth_key.apia.lo = idle->thread.keys_kernel.apia.lo;
++	secondary_data.ptrauth_key.apia.hi = idle->thread.keys_kernel.apia.hi;
++#endif
+ 	update_cpu_boot_status(CPU_MMU_OFF);
+ 	__flush_dcache_area(&secondary_data, sizeof(secondary_data));
+ 
+@@ -138,6 +142,10 @@ int __cpu_up(unsigned int cpu, struct task_struct *idle)
+ 
+ 	secondary_data.task = NULL;
+ 	secondary_data.stack = NULL;
++#if defined(CONFIG_ARM64_PTR_AUTH)
++	secondary_data.ptrauth_key.apia.lo = 0;
++	secondary_data.ptrauth_key.apia.hi = 0;
++#endif
+ 	__flush_dcache_area(&secondary_data, sizeof(secondary_data));
+ 	status = READ_ONCE(secondary_data.status);
+ 	if (ret && status) {

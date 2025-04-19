@@ -1,0 +1,75 @@
+commit 4d02e2de0e80a786452e70d7f3a20a50641e6620
+Author: Simona Vetter <simona.vetter@ffwll.ch>
+Date:   Tue Nov 11 10:12:00 2014 +0100
+
+    drm: Per-plane locking
+    
+    Turned out to be much simpler on top of my latest atomic stuff than
+    what I've feared. Some details:
+    
+    - Drop the modeset_lock_all snakeoil in drm_plane_init. Same
+      justification as for the equivalent change in drm_crtc_init done in
+    
+            commit d0fa1af40e784aaf7ebb7ba8a17b229bb3fa4c21
+            Author: Daniel Vetter <daniel.vetter@ffwll.ch>
+            Date:   Mon Sep 8 09:02:49 2014 +0200
+    
+                drm: Drop modeset locking from crtc init function
+    
+      Without these the drm_modeset_lock_init would fall over the exact
+      same way.
+    
+    - Since the atomic core code wraps the locking switching it to
+      per-plane locks was a one-line change.
+    
+    - For the legacy ioctls add a plane argument to the locking helper so
+      that we can grab the right plane lock (cursor or primary). Since the
+      universal cursor plane might not be there, or someone really crazy
+      might forgoe the primary plane even accept NULL.
+    
+    - Add some locking WARN_ON to the atomic helpers for good paranoid
+      measure and to check that it all works out.
+    
+    Tested on my exynos atomic hackfest with full lockdep checks and ww
+    backoff injection.
+    
+    v2: I've forgotten about the load-detect code in i915.
+    
+    v3: Thierry reported that in latest 3.18-rc vmwgfx doesn't compile any
+    more due to
+    
+    commit 21e88620aa21b48d4f62d29275e3e2944a5ea2b5
+    Author: Rob Clark <robdclark@gmail.com>
+    Date:   Thu Oct 30 13:39:04 2014 -0400
+    
+        drm/vmwgfx: fix lock breakage
+    
+    Rebased and fix this up.
+    
+    Cc: Thierry Reding <thierry.reding@gmail.com>
+    Signed-off-by: Daniel Vetter <daniel.vetter@intel.com>
+    Reviewed-by: Sean Paul <seanpaul@chromium.org>
+    Signed-off-by: Dave Airlie <airlied@redhat.com>
+
+diff --git a/drivers/gpu/drm/drm_atomic_helper.c b/drivers/gpu/drm/drm_atomic_helper.c
+index fad2b932cf72..c0a07cba3aaa 100644
+--- a/drivers/gpu/drm/drm_atomic_helper.c
++++ b/drivers/gpu/drm/drm_atomic_helper.c
+@@ -1006,6 +1006,8 @@ void drm_atomic_helper_commit_planes(struct drm_device *dev,
+ 		if (!crtc)
+ 			continue;
+ 
++		WARN_ON(!drm_modeset_is_locked(&crtc->mutex));
++
+ 		funcs = crtc->helper_private;
+ 
+ 		if (!funcs || !funcs->atomic_begin)
+@@ -1021,6 +1023,8 @@ void drm_atomic_helper_commit_planes(struct drm_device *dev,
+ 		if (!plane)
+ 			continue;
+ 
++		WARN_ON(!drm_modeset_is_locked(&plane->mutex));
++
+ 		funcs = plane->helper_private;
+ 
+ 		if (!funcs || !funcs->atomic_update)

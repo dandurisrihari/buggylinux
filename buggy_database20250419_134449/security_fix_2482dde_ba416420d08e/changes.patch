@@ -1,0 +1,121 @@
+diff --git a/include/linux/slub_def.h b/include/linux/slub_def.h
+index cc0faf3a90be..0783b622311e 100644
+--- a/include/linux/slub_def.h
++++ b/include/linux/slub_def.h
+@@ -115,6 +115,10 @@ struct kmem_cache {
+ #endif
+ #endif
+ 
++#ifdef CONFIG_SLAB_FREELIST_HARDENED
++	unsigned long random;
++#endif
++
+ #ifdef CONFIG_NUMA
+ 	/*
+ 	 * Defragmentation by allocating from a remote node.
+diff --git a/init/Kconfig b/init/Kconfig
+index 5f0ef850e808..78cb2461012e 100644
+--- a/init/Kconfig
++++ b/init/Kconfig
+@@ -1576,6 +1576,15 @@ config SLAB_FREELIST_RANDOM
+ 	  security feature reduces the predictability of the kernel slab
+ 	  allocator against heap overflows.
+ 
++config SLAB_FREELIST_HARDENED
++	bool "Harden slab freelist metadata"
++	depends on SLUB
++	help
++	  Many kernel heap attacks try to target slab cache metadata and
++	  other infrastructure. This options makes minor performance
++	  sacrifies to harden the kernel slab allocator against common
++	  freelist exploit methods.
++
+ config SLUB_CPU_PARTIAL
+ 	default y
+ 	depends on SLUB && SMP
+diff --git a/mm/slub.c b/mm/slub.c
+index 3e90d791dd41..6c87c2c6af24 100644
+--- a/mm/slub.c
++++ b/mm/slub.c
+@@ -34,6 +34,7 @@
+ #include <linux/stacktrace.h>
+ #include <linux/prefetch.h>
+ #include <linux/memcontrol.h>
++#include <linux/random.h>
+ 
+ #include <trace/events/kmem.h>
+ 
+@@ -238,30 +239,58 @@ static inline void stat(const struct kmem_cache *s, enum stat_item si)
+  * 			Core slab cache functions
+  *******************************************************************/
+ 
++/*
++ * Returns freelist pointer (ptr). With hardening, this is obfuscated
++ * with an XOR of the address where the pointer is held and a per-cache
++ * random number.
++ */
++static inline void *freelist_ptr(const struct kmem_cache *s, void *ptr,
++				 unsigned long ptr_addr)
++{
++#ifdef CONFIG_SLAB_FREELIST_HARDENED
++	return (void *)((unsigned long)ptr ^ s->random ^ ptr_addr);
++#else
++	return ptr;
++#endif
++}
++
++/* Returns the freelist pointer recorded at location ptr_addr. */
++static inline void *freelist_dereference(const struct kmem_cache *s,
++					 void *ptr_addr)
++{
++	return freelist_ptr(s, (void *)*(unsigned long *)(ptr_addr),
++			    (unsigned long)ptr_addr);
++}
++
+ static inline void *get_freepointer(struct kmem_cache *s, void *object)
+ {
+-	return *(void **)(object + s->offset);
++	return freelist_dereference(s, object + s->offset);
+ }
+ 
+ static void prefetch_freepointer(const struct kmem_cache *s, void *object)
+ {
+-	prefetch(object + s->offset);
++	if (object)
++		prefetch(freelist_dereference(s, object + s->offset));
+ }
+ 
+ static inline void *get_freepointer_safe(struct kmem_cache *s, void *object)
+ {
++	unsigned long freepointer_addr;
+ 	void *p;
+ 
+ 	if (!debug_pagealloc_enabled())
+ 		return get_freepointer(s, object);
+ 
+-	probe_kernel_read(&p, (void **)(object + s->offset), sizeof(p));
+-	return p;
++	freepointer_addr = (unsigned long)object + s->offset;
++	probe_kernel_read(&p, (void **)freepointer_addr, sizeof(p));
++	return freelist_ptr(s, p, freepointer_addr);
+ }
+ 
+ static inline void set_freepointer(struct kmem_cache *s, void *object, void *fp)
+ {
+-	*(void **)(object + s->offset) = fp;
++	unsigned long freeptr_addr = (unsigned long)object + s->offset;
++
++	*(void **)freeptr_addr = freelist_ptr(s, fp, freeptr_addr);
+ }
+ 
+ /* Loop over all objects in a slab */
+@@ -3563,6 +3592,9 @@ static int kmem_cache_open(struct kmem_cache *s, unsigned long flags)
+ {
+ 	s->flags = kmem_cache_flags(s->size, flags, s->name, s->ctor);
+ 	s->reserved = 0;
++#ifdef CONFIG_SLAB_FREELIST_HARDENED
++	s->random = get_random_long();
++#endif
+ 
+ 	if (need_reserve_slab_rcu && (s->flags & SLAB_TYPESAFE_BY_RCU))
+ 		s->reserved = sizeof(struct rcu_head);

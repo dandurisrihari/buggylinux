@@ -1,0 +1,160 @@
+commit f19b9f74b7ea3b21ddcee55d852a6488239608a4
+Author: Akinobu Mita <akinobu.mita@gmail.com>
+Date:   Mon Jul 30 14:42:33 2012 -0700
+
+    fork: fix error handling in dup_task()
+    
+    The function dup_task() may fail at the following function calls in the
+    following order.
+    
+    0) alloc_task_struct_node()
+    1) alloc_thread_info_node()
+    2) arch_dup_task_struct()
+    
+    Error by 0) is not a matter, it can just return.  But error by 1) requires
+    releasing task_struct allocated by 0) before it returns.  Likewise, error
+    by 2) requires releasing task_struct and thread_info allocated by 0) and
+    1).
+    
+    The existing error handling calls free_task_struct() and
+    free_thread_info() which do not only release task_struct and thread_info,
+    but also call architecture specific arch_release_task_struct() and
+    arch_release_thread_info().
+    
+    The problem is that task_struct and thread_info are not fully initialized
+    yet at this point, but arch_release_task_struct() and
+    arch_release_thread_info() are called with them.
+    
+    For example, x86 defines its own arch_release_task_struct() that releases
+    a task_xstate.  If alloc_thread_info_node() fails in dup_task(),
+    arch_release_task_struct() is called with task_struct which is just
+    allocated and filled with garbage in this error handling.
+    
+    This actually happened with tools/testing/fault-injection/failcmd.sh
+    
+            # env FAILCMD_TYPE=fail_page_alloc \
+                    ./tools/testing/fault-injection/failcmd.sh --times=100 \
+                    --min-order=0 --ignore-gfp-wait=0 \
+                    -- make -C tools/testing/selftests/ run_tests
+    
+    In order to fix this issue, make free_{task_struct,thread_info}() not to
+    call arch_release_{task_struct,thread_info}() and call
+    arch_release_{task_struct,thread_info}() implicitly where needed.
+    
+    Default arch_release_task_struct() and arch_release_thread_info() are
+    defined as empty by default.  So this change only affects the
+    architectures which implement their own arch_release_task_struct() or
+    arch_release_thread_info() as listed below.
+    
+    arch_release_task_struct(): x86, sh
+    arch_release_thread_info(): mn10300, tile
+    
+    Signed-off-by: Akinobu Mita <akinobu.mita@gmail.com>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Ingo Molnar <mingo@redhat.com>
+    Cc: "H. Peter Anvin" <hpa@zytor.com>
+    Cc: David Howells <dhowells@redhat.com>
+    Cc: Koichi Yasutake <yasutake.koichi@jp.panasonic.com>
+    Cc: Paul Mundt <lethal@linux-sh.org>
+    Cc: Chris Metcalf <cmetcalf@tilera.com>
+    Cc: Salman Qazi <sqazi@google.com>
+    Cc: Peter Zijlstra <a.p.zijlstra@chello.nl>
+    Cc: Ingo Molnar <mingo@elte.hu>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/kernel/fork.c b/kernel/fork.c
+index 088025bd1925..8efac1fe56bc 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -114,6 +114,10 @@ int nr_processes(void)
+ 	return total;
+ }
+ 
++void __weak arch_release_task_struct(struct task_struct *tsk)
++{
++}
++
+ #ifndef CONFIG_ARCH_TASK_STRUCT_ALLOCATOR
+ static struct kmem_cache *task_struct_cachep;
+ 
+@@ -122,17 +126,17 @@ static inline struct task_struct *alloc_task_struct_node(int node)
+ 	return kmem_cache_alloc_node(task_struct_cachep, GFP_KERNEL, node);
+ }
+ 
+-void __weak arch_release_task_struct(struct task_struct *tsk) { }
+-
+ static inline void free_task_struct(struct task_struct *tsk)
+ {
+-	arch_release_task_struct(tsk);
+ 	kmem_cache_free(task_struct_cachep, tsk);
+ }
+ #endif
+ 
++void __weak arch_release_thread_info(struct thread_info *ti)
++{
++}
++
+ #ifndef CONFIG_ARCH_THREAD_INFO_ALLOCATOR
+-void __weak arch_release_thread_info(struct thread_info *ti) { }
+ 
+ /*
+  * Allocate pages if THREAD_SIZE is >= PAGE_SIZE, otherwise use a
+@@ -150,7 +154,6 @@ static struct thread_info *alloc_thread_info_node(struct task_struct *tsk,
+ 
+ static inline void free_thread_info(struct thread_info *ti)
+ {
+-	arch_release_thread_info(ti);
+ 	free_pages((unsigned long)ti, THREAD_SIZE_ORDER);
+ }
+ # else
+@@ -164,7 +167,6 @@ static struct thread_info *alloc_thread_info_node(struct task_struct *tsk,
+ 
+ static void free_thread_info(struct thread_info *ti)
+ {
+-	arch_release_thread_info(ti);
+ 	kmem_cache_free(thread_info_cache, ti);
+ }
+ 
+@@ -205,10 +207,12 @@ static void account_kernel_stack(struct thread_info *ti, int account)
+ void free_task(struct task_struct *tsk)
+ {
+ 	account_kernel_stack(tsk->stack, -1);
++	arch_release_thread_info(tsk->stack);
+ 	free_thread_info(tsk->stack);
+ 	rt_mutex_debug_task_free(tsk);
+ 	ftrace_graph_exit_task(tsk);
+ 	put_seccomp_filter(tsk);
++	arch_release_task_struct(tsk);
+ 	free_task_struct(tsk);
+ }
+ EXPORT_SYMBOL(free_task);
+@@ -298,14 +302,12 @@ static struct task_struct *dup_task_struct(struct task_struct *orig)
+ 		return NULL;
+ 
+ 	ti = alloc_thread_info_node(tsk, node);
+-	if (!ti) {
+-		free_task_struct(tsk);
+-		return NULL;
+-	}
++	if (!ti)
++		goto free_tsk;
+ 
+ 	err = arch_dup_task_struct(tsk, orig);
+ 	if (err)
+-		goto out;
++		goto free_ti;
+ 
+ 	tsk->stack = ti;
+ 
+@@ -333,8 +335,9 @@ static struct task_struct *dup_task_struct(struct task_struct *orig)
+ 
+ 	return tsk;
+ 
+-out:
++free_ti:
+ 	free_thread_info(ti);
++free_tsk:
+ 	free_task_struct(tsk);
+ 	return NULL;
+ }

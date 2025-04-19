@@ -1,0 +1,66 @@
+diff --git a/include/net/bluetooth/hci_core.h b/include/net/bluetooth/hci_core.h
+index 2da2eb9f53ac..2995e2e63512 100644
+--- a/include/net/bluetooth/hci_core.h
++++ b/include/net/bluetooth/hci_core.h
+@@ -777,7 +777,7 @@ int mgmt_connected(u16 index, bdaddr_t *bdaddr);
+ int mgmt_disconnected(u16 index, bdaddr_t *bdaddr);
+ int mgmt_disconnect_failed(u16 index);
+ int mgmt_connect_failed(u16 index, bdaddr_t *bdaddr, u8 status);
+-int mgmt_pin_code_request(u16 index, bdaddr_t *bdaddr);
++int mgmt_pin_code_request(u16 index, bdaddr_t *bdaddr, u8 secure);
+ int mgmt_pin_code_reply_complete(u16 index, bdaddr_t *bdaddr, u8 status);
+ int mgmt_pin_code_neg_reply_complete(u16 index, bdaddr_t *bdaddr, u8 status);
+ int mgmt_user_confirm_request(u16 index, bdaddr_t *bdaddr, __le32 value);
+diff --git a/include/net/bluetooth/mgmt.h b/include/net/bluetooth/mgmt.h
+index 743440615349..0e7de636035d 100644
+--- a/include/net/bluetooth/mgmt.h
++++ b/include/net/bluetooth/mgmt.h
+@@ -253,6 +253,7 @@ struct mgmt_ev_connect_failed {
+ #define MGMT_EV_PIN_CODE_REQUEST	0x000E
+ struct mgmt_ev_pin_code_request {
+ 	bdaddr_t bdaddr;
++	__u8 secure;
+ } __packed;
+ 
+ #define MGMT_EV_USER_CONFIRM_REQUEST	0x000F
+diff --git a/net/bluetooth/hci_event.c b/net/bluetooth/hci_event.c
+index 9d50e90993ca..577d638600df 100644
+--- a/net/bluetooth/hci_event.c
++++ b/net/bluetooth/hci_event.c
+@@ -2022,8 +2022,16 @@ static inline void hci_pin_code_request_evt(struct hci_dev *hdev, struct sk_buff
+ 		hci_send_cmd(hdev, HCI_OP_PIN_CODE_NEG_REPLY,
+ 					sizeof(ev->bdaddr), &ev->bdaddr);
+ 
+-	if (test_bit(HCI_MGMT, &hdev->flags))
+-		mgmt_pin_code_request(hdev->id, &ev->bdaddr);
++	if (test_bit(HCI_MGMT, &hdev->flags)) {
++		u8 secure;
++
++		if (conn->pending_sec_level == BT_SECURITY_HIGH)
++			secure = 1;
++		else
++			secure = 0;
++
++		mgmt_pin_code_request(hdev->id, &ev->bdaddr, secure);
++	}
+ 
+ 	hci_dev_unlock(hdev);
+ }
+diff --git a/net/bluetooth/mgmt.c b/net/bluetooth/mgmt.c
+index 4542396fc856..a7b4937d761c 100644
+--- a/net/bluetooth/mgmt.c
++++ b/net/bluetooth/mgmt.c
+@@ -1942,11 +1942,12 @@ int mgmt_connect_failed(u16 index, bdaddr_t *bdaddr, u8 status)
+ 	return mgmt_event(MGMT_EV_CONNECT_FAILED, index, &ev, sizeof(ev), NULL);
+ }
+ 
+-int mgmt_pin_code_request(u16 index, bdaddr_t *bdaddr)
++int mgmt_pin_code_request(u16 index, bdaddr_t *bdaddr, u8 secure)
+ {
+ 	struct mgmt_ev_pin_code_request ev;
+ 
+ 	bacpy(&ev.bdaddr, bdaddr);
++	ev.secure = secure;
+ 
+ 	return mgmt_event(MGMT_EV_PIN_CODE_REQUEST, index, &ev, sizeof(ev),
+ 									NULL);

@@ -1,0 +1,60 @@
+commit 996ff5429e9898947016206ee9da387a93d63d9d
+Author: Paolo Bonzini <pbonzini@redhat.com>
+Date:   Mon Dec 14 07:49:54 2020 -0500
+
+    KVM: x86: move kvm_inject_gp up from kvm_set_dr to callers
+    
+    Push the injection of #GP up to the callers, so that they can just use
+    kvm_complete_insn_gp. __kvm_set_dr is pretty much what the callers can use
+    together with kvm_complete_insn_gp, so rename it to kvm_set_dr and drop
+    the old kvm_set_dr wrapper.
+    
+    This also allows nested VMX code, which really wanted to use __kvm_set_dr,
+    to use the right function.
+    
+    While at it, remove the kvm_require_dr() check from the SVM interception.
+    The APM states:
+    
+      All normal exception checks take precedence over the SVM intercepts.
+    
+    which includes the CR4.DE=1 #UD.
+    
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/svm/svm.c b/arch/x86/kvm/svm/svm.c
+index ef2f2b0f20d3..42d4710074a6 100644
+--- a/arch/x86/kvm/svm/svm.c
++++ b/arch/x86/kvm/svm/svm.c
+@@ -2617,6 +2617,7 @@ static int dr_interception(struct vcpu_svm *svm)
+ {
+ 	int reg, dr;
+ 	unsigned long val;
++	int err = 0;
+ 
+ 	if (svm->vcpu.guest_debug == 0) {
+ 		/*
+@@ -2634,20 +2635,16 @@ static int dr_interception(struct vcpu_svm *svm)
+ 
+ 	reg = svm->vmcb->control.exit_info_1 & SVM_EXITINFO_REG_MASK;
+ 	dr = svm->vmcb->control.exit_code - SVM_EXIT_READ_DR0;
+-
+-	if (dr >= 16) { /* mov to DRn */
+-		if (!kvm_require_dr(&svm->vcpu, dr - 16))
+-			return 1;
++	if (dr >= 16) { /* mov to DRn  */
++		dr -= 16;
+ 		val = kvm_register_read(&svm->vcpu, reg);
+-		kvm_set_dr(&svm->vcpu, dr - 16, val);
++		err = kvm_set_dr(&svm->vcpu, dr, val);
+ 	} else {
+-		if (!kvm_require_dr(&svm->vcpu, dr))
+-			return 1;
+ 		kvm_get_dr(&svm->vcpu, dr, &val);
+ 		kvm_register_write(&svm->vcpu, reg, val);
+ 	}
+ 
+-	return kvm_skip_emulated_instruction(&svm->vcpu);
++	return kvm_complete_insn_gp(&svm->vcpu, err);
+ }
+ 
+ static int cr8_write_interception(struct vcpu_svm *svm)

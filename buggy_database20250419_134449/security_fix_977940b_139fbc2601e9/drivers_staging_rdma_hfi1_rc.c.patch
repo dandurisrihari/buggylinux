@@ -1,0 +1,55 @@
+commit 977940b85e3c3b6b5b8ffbc1235b23e35284382f
+Author: Arthur Kepner <arthur.kepner@intel.com>
+Date:   Wed Nov 4 21:10:10 2015 -0500
+
+    staging/rdma/hfi1: optionally prescan rx queue for {B, F}ECNs - UC, RC
+    
+    To more rapidly respond to Explicit Congestion Notifications, prescan the
+    receive queue, and process FECNs, and BECNs first.  When a UC, or RC packet
+    containing a FECN, or BECN is found, immediately react to the ECN (either by
+    returning a CNP, or adjusting the injection rate). Afterward, the packet will
+    be processed normally.
+    
+    Reviewed-by: Mike Marciniszyn <mike.marciniszyn@intel.com>
+    Reviewed-by: Dennis Dalessandro <dennis.dalessandro@intel.com>
+    Signed-off-by: Arthur Kepner <arthur.kepner@intel.com>
+    Signed-off-by: Ira Weiny <ira.weiny@intel.com>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/staging/rdma/hfi1/rc.c b/drivers/staging/rdma/hfi1/rc.c
+index 5fc93bb312f1..fd23907f18fe 100644
+--- a/drivers/staging/rdma/hfi1/rc.c
++++ b/drivers/staging/rdma/hfi1/rc.c
+@@ -1978,7 +1978,7 @@ void hfi1_rc_rcv(struct hfi1_packet *packet)
+ 	}
+ 
+ 	psn = be32_to_cpu(ohdr->bth[2]);
+-	opcode = bth0 >> 24;
++	opcode = (bth0 >> 24) & 0xff;
+ 
+ 	/*
+ 	 * Process responses (ACKs) before anything else.  Note that the
+@@ -2391,19 +2391,19 @@ void hfi1_rc_hdrerr(
+ 	struct hfi1_ibport *ibp = to_iport(qp->ibqp.device, qp->port_num);
+ 	int diff;
+ 	u32 opcode;
+-	u32 psn;
++	u32 psn, bth0;
+ 
+ 	/* Check for GRH */
+ 	ohdr = &hdr->u.oth;
+ 	if (has_grh)
+ 		ohdr = &hdr->u.l.oth;
+ 
+-	opcode = be32_to_cpu(ohdr->bth[0]);
+-	if (hfi1_ruc_check_hdr(ibp, hdr, has_grh, qp, opcode))
++	bth0 = be32_to_cpu(ohdr->bth[0]);
++	if (hfi1_ruc_check_hdr(ibp, hdr, has_grh, qp, bth0))
+ 		return;
+ 
+ 	psn = be32_to_cpu(ohdr->bth[2]);
+-	opcode >>= 24;
++	opcode = (bth0 >> 24) & 0xff;
+ 
+ 	/* Only deal with RDMA Writes for now */
+ 	if (opcode < IB_OPCODE_RC_RDMA_READ_RESPONSE_FIRST) {

@@ -1,0 +1,40 @@
+commit fa40a8214bb9bcae8d49c234c19d8b4a6c1f37ff
+Author: Marcelo Tosatti <mtosatti@redhat.com>
+Date:   Thu Jun 4 15:08:24 2009 -0300
+
+    KVM: switch irq injection/acking data structures to irq_lock
+    
+    Protect irq injection/acking data structures with a separate irq_lock
+    mutex. This fixes the following deadlock:
+    
+    CPU A                               CPU B
+    kvm_vm_ioctl_deassign_dev_irq()
+      mutex_lock(&kvm->lock);            worker_thread()
+      -> kvm_deassign_irq()                -> kvm_assigned_dev_interrupt_work_handler()
+        -> deassign_host_irq()               mutex_lock(&kvm->lock);
+          -> cancel_work_sync() [blocked]
+    
+    [gleb: fix ia64 path]
+    
+    Reported-by: Alex Williamson <alex.williamson@hp.com>
+    Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
+    Signed-off-by: Gleb Natapov <gleb@redhat.com>
+    Signed-off-by: Avi Kivity <avi@redhat.com>
+
+diff --git a/virt/kvm/eventfd.c b/virt/kvm/eventfd.c
+index 314012323afe..4092b8dcd510 100644
+--- a/virt/kvm/eventfd.c
++++ b/virt/kvm/eventfd.c
+@@ -57,10 +57,10 @@ irqfd_inject(struct work_struct *work)
+ 	struct _irqfd *irqfd = container_of(work, struct _irqfd, inject);
+ 	struct kvm *kvm = irqfd->kvm;
+ 
+-	mutex_lock(&kvm->lock);
++	mutex_lock(&kvm->irq_lock);
+ 	kvm_set_irq(kvm, KVM_USERSPACE_IRQ_SOURCE_ID, irqfd->gsi, 1);
+ 	kvm_set_irq(kvm, KVM_USERSPACE_IRQ_SOURCE_ID, irqfd->gsi, 0);
+-	mutex_unlock(&kvm->lock);
++	mutex_unlock(&kvm->irq_lock);
+ }
+ 
+ /*

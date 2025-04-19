@@ -1,0 +1,126 @@
+diff --git a/arch/arm64/include/asm/mmu.h b/arch/arm64/include/asm/mmu.h
+index b2e91c187e2a..75beffe2ee8a 100644
+--- a/arch/arm64/include/asm/mmu.h
++++ b/arch/arm64/include/asm/mmu.h
+@@ -12,9 +12,6 @@
+ #define USER_ASID_FLAG	(UL(1) << USER_ASID_BIT)
+ #define TTBR_ASID_MASK	(UL(0xffff) << 48)
+ 
+-#define BP_HARDEN_EL2_SLOTS 4
+-#define __BP_HARDEN_HYP_VECS_SZ (BP_HARDEN_EL2_SLOTS * SZ_2K)
+-
+ #ifndef __ASSEMBLY__
+ 
+ #include <linux/refcount.h>
+@@ -41,32 +38,6 @@ static inline bool arm64_kernel_unmapped_at_el0(void)
+ 	return cpus_have_const_cap(ARM64_UNMAP_KERNEL_AT_EL0);
+ }
+ 
+-typedef void (*bp_hardening_cb_t)(void);
+-
+-struct bp_hardening_data {
+-	int			hyp_vectors_slot;
+-	bp_hardening_cb_t	fn;
+-};
+-
+-DECLARE_PER_CPU_READ_MOSTLY(struct bp_hardening_data, bp_hardening_data);
+-
+-static inline struct bp_hardening_data *arm64_get_bp_hardening_data(void)
+-{
+-	return this_cpu_ptr(&bp_hardening_data);
+-}
+-
+-static inline void arm64_apply_bp_hardening(void)
+-{
+-	struct bp_hardening_data *d;
+-
+-	if (!cpus_have_const_cap(ARM64_SPECTRE_V2))
+-		return;
+-
+-	d = arm64_get_bp_hardening_data();
+-	if (d->fn)
+-		d->fn();
+-}
+-
+ extern void arm64_memblock_init(void);
+ extern void paging_init(void);
+ extern void bootmem_init(void);
+diff --git a/arch/arm64/include/asm/spectre.h b/arch/arm64/include/asm/spectre.h
+index fcdfbce302bd..d22f8b7d9c50 100644
+--- a/arch/arm64/include/asm/spectre.h
++++ b/arch/arm64/include/asm/spectre.h
+@@ -9,7 +9,15 @@
+ #ifndef __ASM_SPECTRE_H
+ #define __ASM_SPECTRE_H
+ 
++#define BP_HARDEN_EL2_SLOTS 4
++#define __BP_HARDEN_HYP_VECS_SZ (BP_HARDEN_EL2_SLOTS * SZ_2K)
++
++#ifndef __ASSEMBLY__
++
++#include <linux/percpu.h>
++
+ #include <asm/cpufeature.h>
++#include <asm/virt.h>
+ 
+ /* Watch out, ordering is important here. */
+ enum mitigation_state {
+@@ -20,6 +28,27 @@ enum mitigation_state {
+ 
+ struct task_struct;
+ 
++typedef void (*bp_hardening_cb_t)(void);
++
++struct bp_hardening_data {
++	int			hyp_vectors_slot;
++	bp_hardening_cb_t	fn;
++};
++
++DECLARE_PER_CPU_READ_MOSTLY(struct bp_hardening_data, bp_hardening_data);
++
++static inline void arm64_apply_bp_hardening(void)
++{
++	struct bp_hardening_data *d;
++
++	if (!cpus_have_const_cap(ARM64_SPECTRE_V2))
++		return;
++
++	d = this_cpu_ptr(&bp_hardening_data);
++	if (d->fn)
++		d->fn();
++}
++
+ enum mitigation_state arm64_get_spectre_v2_state(void);
+ bool has_spectre_v2(const struct arm64_cpu_capabilities *cap, int scope);
+ void spectre_v2_enable_mitigation(const struct arm64_cpu_capabilities *__unused);
+@@ -29,4 +58,5 @@ bool has_spectre_v4(const struct arm64_cpu_capabilities *cap, int scope);
+ void spectre_v4_enable_mitigation(const struct arm64_cpu_capabilities *__unused);
+ void spectre_v4_enable_task_mitigation(struct task_struct *tsk);
+ 
++#endif	/* __ASSEMBLY__ */
+ #endif	/* __ASM_SPECTRE_H */
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index 3262c16f0449..044c5fc81f90 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -1405,7 +1405,7 @@ static void cpu_hyp_reset(void)
+  */
+ static void cpu_set_hyp_vector(void)
+ {
+-	struct bp_hardening_data *data = arm64_get_bp_hardening_data();
++	struct bp_hardening_data *data = this_cpu_ptr(&bp_hardening_data);
+ 	void *vect = kern_hyp_va(kvm_ksym_ref(__kvm_hyp_vector));
+ 	int slot = -1;
+ 
+diff --git a/arch/arm64/kvm/hyp/hyp-entry.S b/arch/arm64/kvm/hyp/hyp-entry.S
+index 0a5b36eb54b3..874eacdabc64 100644
+--- a/arch/arm64/kvm/hyp/hyp-entry.S
++++ b/arch/arm64/kvm/hyp/hyp-entry.S
+@@ -13,6 +13,7 @@
+ #include <asm/kvm_arm.h>
+ #include <asm/kvm_asm.h>
+ #include <asm/mmu.h>
++#include <asm/spectre.h>
+ 
+ .macro save_caller_saved_regs_vect
+ 	/* x0 and x1 were saved in the vector entry */

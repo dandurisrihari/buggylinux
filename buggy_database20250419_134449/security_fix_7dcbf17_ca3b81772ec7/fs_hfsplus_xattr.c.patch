@@ -1,0 +1,89 @@
+commit 7dcbf17e3f917f691d2ae9ed4a34283bd0e74a95
+Author: Justin Stitt <justinstitt@google.com>
+Date:   Mon Apr 1 18:10:48 2024 +0000
+
+    hfsplus: refactor copy_name to not use strncpy
+    
+    strncpy() is deprecated with NUL-terminated destination strings [1].
+    
+    The copy_name() method does a lot of manual buffer manipulation to
+    eventually arrive with its desired string. If we don't know the
+    namespace this attr has or belongs to we want to prepend "osx." to our
+    final string. Following this, we're copying xattr_name and doing a
+    bizarre manual NUL-byte assignment with a memset where n=1.
+    
+    Really, we can use some more obvious string APIs to acomplish this,
+    improving readability and security. Following the same control flow as
+    before: if we don't know the namespace let's use scnprintf() to form our
+    prefix + xattr_name pairing (while NUL-terminating too!). Otherwise, use
+    strscpy() to return the number of bytes copied into our buffer.
+    Additionally, for non-empty strings, include the NUL-byte in the length
+    -- matching the behavior of the previous implementation.
+    
+    Note that strscpy() _can_ return -E2BIG but this is already handled by
+    all callsites:
+    
+    In both hfsplus_listxattr_finder_info() and hfsplus_listxattr(), ret is
+    already type ssize_t so we can change the return type of copy_name() to
+    match (understanding that scnprintf()'s return type is different yet
+    fully representable by ssize_t). Furthermore, listxattr() in fs/xattr.c
+    is well-equipped to handle a potential -E2BIG return result from
+    vfs_listxattr():
+    |       ssize_t error;
+    ...
+    |       error = vfs_listxattr(d, klist, size);
+    |       if (error > 0) {
+    |               if (size && copy_to_user(list, klist, error))
+    |                       error = -EFAULT;
+    |       } else if (error == -ERANGE && size >= XATTR_LIST_MAX) {
+    |               /* The file system tried to returned a list bigger
+    |                       than XATTR_LIST_MAX bytes. Not possible. */
+    |               error = -E2BIG;
+    |       }
+    ... the error can potentially already be -E2BIG, skipping this else-if
+    and ending up at the same state as other errors.
+    
+    Link: https://www.kernel.org/doc/html/latest/process/deprecated.html#strncpy-on-nul-terminated-strings [1]
+    Link: https://manpages.debian.org/testing/linux-manual-4.8/strscpy.9.en.html
+    Link: https://github.com/KSPP/linux/issues/90
+    Cc:  <linux-hardening@vger.kernel.org>
+    Signed-off-by: Justin Stitt <justinstitt@google.com>
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Link: https://lore.kernel.org/r/20240401-strncpy-fs-hfsplus-xattr-c-v2-1-6e089999355e@google.com
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+
+diff --git a/fs/hfsplus/xattr.c b/fs/hfsplus/xattr.c
+index 9c9ff6b8c6f7..5a400259ae74 100644
+--- a/fs/hfsplus/xattr.c
++++ b/fs/hfsplus/xattr.c
+@@ -400,21 +400,19 @@ static int name_len(const char *xattr_name, int xattr_name_len)
+ 	return len;
+ }
+ 
+-static int copy_name(char *buffer, const char *xattr_name, int name_len)
++static ssize_t copy_name(char *buffer, const char *xattr_name, int name_len)
+ {
+-	int len = name_len;
+-	int offset = 0;
++	ssize_t len;
+ 
+-	if (!is_known_namespace(xattr_name)) {
+-		memcpy(buffer, XATTR_MAC_OSX_PREFIX, XATTR_MAC_OSX_PREFIX_LEN);
+-		offset += XATTR_MAC_OSX_PREFIX_LEN;
+-		len += XATTR_MAC_OSX_PREFIX_LEN;
+-	}
+-
+-	strncpy(buffer + offset, xattr_name, name_len);
+-	memset(buffer + offset + name_len, 0, 1);
+-	len += 1;
++	if (!is_known_namespace(xattr_name))
++		len = scnprintf(buffer, name_len + XATTR_MAC_OSX_PREFIX_LEN,
++				 "%s%s", XATTR_MAC_OSX_PREFIX, xattr_name);
++	else
++		len = strscpy(buffer, xattr_name, name_len + 1);
+ 
++	/* include NUL-byte in length for non-empty name */
++	if (len >= 0)
++		len++;
+ 	return len;
+ }

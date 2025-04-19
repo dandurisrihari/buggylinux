@@ -1,0 +1,112 @@
+commit cb74e9775871f8c82a1297cf76209f10ab5bbe3d
+Author: Sunil Dutt <usdutt@codeaurora.org>
+Date:   Wed Feb 20 16:18:07 2019 +0530
+
+    cfg80211/nl80211: Offload OWE processing to user space in AP mode
+    
+    This interface allows the host driver to offload OWE processing
+    to user space. This intends to support OWE (Opportunistic Wireless
+    Encryption) AKM by the drivers that implement SME but rely on the
+    user space for the cryptographic/OWE processing in AP mode. Such
+    drivers are not capable of processing/deriving the DH IE.
+    
+    A new NL80211 command - NL80211_CMD_UPDATE_OWE_INFO is introduced
+    to send the request/event between the host driver and user space.
+    
+    Driver shall provide the OWE info (MAC address and DH IE) of
+    the peer to user space for cryptographic processing of the DH IE
+    through the event. Accordingly, the user space shall update the
+    OWE info/DH IE to the driver.
+    
+    Following is the sequence in AP mode for OWE authentication.
+    
+    Driver passes the OWE info obtained from the peer in the
+    Association Request to the user space through the event
+    cfg80211_update_owe_info_event. User space shall process the
+    OWE info received and generate new OWE info. This OWE info is
+    passed to the driver through NL80211_CMD_UPDATE_OWE_INFO
+    request. Driver eventually uses this OWE info to send the
+    Association Response to the peer.
+    
+    This OWE info in the command interface carries the IEs that include
+    PMKID of the peer if the PMKSA is still valid or an updated DH IE
+    for generating a new PMKSA with the peer.
+    
+    Signed-off-by: Liangwei Dong <liangwei@codeaurora.org>
+    Signed-off-by: Sunil Dutt <usdutt@codeaurora.org>
+    Signed-off-by: Srinivas Dasari <dasaris@codeaurora.org>
+    [remove policy initialization - no longer exists]
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+diff --git a/include/net/cfg80211.h b/include/net/cfg80211.h
+index 5859a5e02454..70432fd638af 100644
+--- a/include/net/cfg80211.h
++++ b/include/net/cfg80211.h
+@@ -3110,6 +3110,32 @@ struct cfg80211_pmsr_request {
+ 	struct cfg80211_pmsr_request_peer peers[];
+ };
+ 
++/**
++ * struct cfg80211_update_owe_info - OWE Information
++ *
++ * This structure provides information needed for the drivers to offload OWE
++ * (Opportunistic Wireless Encryption) processing to the user space.
++ *
++ * Commonly used across update_owe_info request and event interfaces.
++ *
++ * @peer: MAC address of the peer device for which the OWE processing
++ *	has to be done.
++ * @status: status code, %WLAN_STATUS_SUCCESS for successful OWE info
++ *	processing, use %WLAN_STATUS_UNSPECIFIED_FAILURE if user space
++ *	cannot give you the real status code for failures. Used only for
++ *	OWE update request command interface (user space to driver).
++ * @ie: IEs obtained from the peer or constructed by the user space. These are
++ *	the IEs of the remote peer in the event from the host driver and
++ *	the constructed IEs by the user space in the request interface.
++ * @ie_len: Length of IEs in octets.
++ */
++struct cfg80211_update_owe_info {
++	u8 peer[ETH_ALEN] __aligned(2);
++	u16 status;
++	const u8 *ie;
++	size_t ie_len;
++};
++
+ /**
+  * struct cfg80211_ops - backend description for wireless configuration
+  *
+@@ -3447,6 +3473,10 @@ struct cfg80211_pmsr_request {
+  *	Statistics should be cumulative, currently no way to reset is provided.
+  * @start_pmsr: start peer measurement (e.g. FTM)
+  * @abort_pmsr: abort peer measurement
++ *
++ * @update_owe_info: Provide updated OWE info to driver. Driver implementing SME
++ *	but offloading OWE processing to the user space will get the updated
++ *	DH IE through this interface.
+  */
+ struct cfg80211_ops {
+ 	int	(*suspend)(struct wiphy *wiphy, struct cfg80211_wowlan *wow);
+@@ -3761,6 +3791,8 @@ struct cfg80211_ops {
+ 			      struct cfg80211_pmsr_request *request);
+ 	void	(*abort_pmsr)(struct wiphy *wiphy, struct wireless_dev *wdev,
+ 			      struct cfg80211_pmsr_request *request);
++	int	(*update_owe_info)(struct wiphy *wiphy, struct net_device *dev,
++				   struct cfg80211_update_owe_info *owe_info);
+ };
+ 
+ /*
+@@ -7219,4 +7251,14 @@ void cfg80211_pmsr_complete(struct wireless_dev *wdev,
+ #define wiphy_WARN(wiphy, format, args...)			\
+ 	WARN(1, "wiphy: %s\n" format, wiphy_name(wiphy), ##args);
+ 
++/**
++ * cfg80211_update_owe_info_event - Notify the peer's OWE info to user space
++ * @netdev: network device
++ * @owe_info: peer's owe info
++ * @gfp: allocation flags
++ */
++void cfg80211_update_owe_info_event(struct net_device *netdev,
++				    struct cfg80211_update_owe_info *owe_info,
++				    gfp_t gfp);
++
+ #endif /* __NET_CFG80211_H */

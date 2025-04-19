@@ -1,0 +1,657 @@
+diff --git a/include/net/bluetooth/bluetooth.h b/include/net/bluetooth/bluetooth.h
+index 847e9e6df08b..3ad5390a4dd5 100644
+--- a/include/net/bluetooth/bluetooth.h
++++ b/include/net/bluetooth/bluetooth.h
+@@ -53,6 +53,15 @@
+ #define SOL_SCO		17
+ #define SOL_RFCOMM	18
+ 
++#define BT_SECURITY	4
++struct bt_security {
++	__u8 level;
++};
++#define BT_SECURITY_SDP		0
++#define BT_SECURITY_LOW		1
++#define BT_SECURITY_MEDIUM	2
++#define BT_SECURITY_HIGH	3
++
+ #define BT_DEFER_SETUP	7
+ 
+ #define BT_INFO(fmt, arg...) printk(KERN_INFO "Bluetooth: " fmt "\n" , ## arg)
+diff --git a/include/net/bluetooth/hci_core.h b/include/net/bluetooth/hci_core.h
+index 46a43b721dd6..4b14972c1694 100644
+--- a/include/net/bluetooth/hci_core.h
++++ b/include/net/bluetooth/hci_core.h
+@@ -169,6 +169,7 @@ struct hci_conn {
+ 	__u16            link_policy;
+ 	__u32		 link_mode;
+ 	__u8             auth_type;
++	__u8             sec_level;
+ 	__u8             power_save;
+ 	unsigned long	 pend;
+ 
+@@ -325,12 +326,11 @@ int hci_conn_del(struct hci_conn *conn);
+ void hci_conn_hash_flush(struct hci_dev *hdev);
+ void hci_conn_check_pending(struct hci_dev *hdev);
+ 
+-struct hci_conn *hci_connect(struct hci_dev *hdev, int type, bdaddr_t *dst, __u8 auth_type);
++struct hci_conn *hci_connect(struct hci_dev *hdev, int type, bdaddr_t *dst, __u8 sec_level, __u8 auth_type);
+ int hci_conn_check_link_mode(struct hci_conn *conn);
+-int hci_conn_auth(struct hci_conn *conn);
+-int hci_conn_encrypt(struct hci_conn *conn);
++int hci_conn_security(struct hci_conn *conn, __u8 sec_level);
+ int hci_conn_change_link_key(struct hci_conn *conn);
+-int hci_conn_switch_role(struct hci_conn *conn, uint8_t role);
++int hci_conn_switch_role(struct hci_conn *conn, __u8 role);
+ 
+ void hci_conn_enter_active_mode(struct hci_conn *conn);
+ void hci_conn_enter_sniff_mode(struct hci_conn *conn);
+@@ -470,26 +470,25 @@ void hci_conn_del_sysfs(struct hci_conn *conn);
+ 
+ /* ----- HCI protocols ----- */
+ struct hci_proto {
+-	char 		*name;
++	char		*name;
+ 	unsigned int	id;
+ 	unsigned long	flags;
+ 
+ 	void		*priv;
+ 
+-	int (*connect_ind) 	(struct hci_dev *hdev, bdaddr_t *bdaddr, __u8 type);
++	int (*connect_ind)	(struct hci_dev *hdev, bdaddr_t *bdaddr, __u8 type);
+ 	int (*connect_cfm)	(struct hci_conn *conn, __u8 status);
+ 	int (*disconn_ind)	(struct hci_conn *conn, __u8 reason);
+ 	int (*recv_acldata)	(struct hci_conn *conn, struct sk_buff *skb, __u16 flags);
+ 	int (*recv_scodata)	(struct hci_conn *conn, struct sk_buff *skb);
+-	int (*auth_cfm)		(struct hci_conn *conn, __u8 status);
+-	int (*encrypt_cfm)	(struct hci_conn *conn, __u8 status, __u8 encrypt);
++	int (*security_cfm)	(struct hci_conn *conn, __u8 status, __u8 encrypt);
+ };
+ 
+ static inline int hci_proto_connect_ind(struct hci_dev *hdev, bdaddr_t *bdaddr, __u8 type)
+ {
+ 	register struct hci_proto *hp;
+ 	int mask = 0;
+-	
++
+ 	hp = hci_proto[HCI_PROTO_L2CAP];
+ 	if (hp && hp->connect_ind)
+ 		mask |= hp->connect_ind(hdev, bdaddr, type);
+@@ -530,14 +529,20 @@ static inline void hci_proto_disconn_ind(struct hci_conn *conn, __u8 reason)
+ static inline void hci_proto_auth_cfm(struct hci_conn *conn, __u8 status)
+ {
+ 	register struct hci_proto *hp;
++	__u8 encrypt;
++
++	if (test_bit(HCI_CONN_ENCRYPT_PEND, &conn->pend))
++		return;
++
++	encrypt = (conn->link_mode & HCI_LM_ENCRYPT) ? 0x01 : 0x00;
+ 
+ 	hp = hci_proto[HCI_PROTO_L2CAP];
+-	if (hp && hp->auth_cfm)
+-		hp->auth_cfm(conn, status);
++	if (hp && hp->security_cfm)
++		hp->security_cfm(conn, status, encrypt);
+ 
+ 	hp = hci_proto[HCI_PROTO_SCO];
+-	if (hp && hp->auth_cfm)
+-		hp->auth_cfm(conn, status);
++	if (hp && hp->security_cfm)
++		hp->security_cfm(conn, status, encrypt);
+ }
+ 
+ static inline void hci_proto_encrypt_cfm(struct hci_conn *conn, __u8 status, __u8 encrypt)
+@@ -545,12 +550,12 @@ static inline void hci_proto_encrypt_cfm(struct hci_conn *conn, __u8 status, __u
+ 	register struct hci_proto *hp;
+ 
+ 	hp = hci_proto[HCI_PROTO_L2CAP];
+-	if (hp && hp->encrypt_cfm)
+-		hp->encrypt_cfm(conn, status, encrypt);
++	if (hp && hp->security_cfm)
++		hp->security_cfm(conn, status, encrypt);
+ 
+ 	hp = hci_proto[HCI_PROTO_SCO];
+-	if (hp && hp->encrypt_cfm)
+-		hp->encrypt_cfm(conn, status, encrypt);
++	if (hp && hp->security_cfm)
++		hp->security_cfm(conn, status, encrypt);
+ }
+ 
+ int hci_register_proto(struct hci_proto *hproto);
+@@ -562,8 +567,7 @@ struct hci_cb {
+ 
+ 	char *name;
+ 
+-	void (*auth_cfm)	(struct hci_conn *conn, __u8 status);
+-	void (*encrypt_cfm)	(struct hci_conn *conn, __u8 status, __u8 encrypt);
++	void (*security_cfm)	(struct hci_conn *conn, __u8 status, __u8 encrypt);
+ 	void (*key_change_cfm)	(struct hci_conn *conn, __u8 status);
+ 	void (*role_switch_cfm)	(struct hci_conn *conn, __u8 status, __u8 role);
+ };
+@@ -571,14 +575,20 @@ struct hci_cb {
+ static inline void hci_auth_cfm(struct hci_conn *conn, __u8 status)
+ {
+ 	struct list_head *p;
++	__u8 encrypt;
+ 
+ 	hci_proto_auth_cfm(conn, status);
+ 
++	if (test_bit(HCI_CONN_ENCRYPT_PEND, &conn->pend))
++		return;
++
++	encrypt = (conn->link_mode & HCI_LM_ENCRYPT) ? 0x01 : 0x00;
++
+ 	read_lock_bh(&hci_cb_list_lock);
+ 	list_for_each(p, &hci_cb_list) {
+ 		struct hci_cb *cb = list_entry(p, struct hci_cb, list);
+-		if (cb->auth_cfm)
+-			cb->auth_cfm(conn, status);
++		if (cb->security_cfm)
++			cb->security_cfm(conn, status, encrypt);
+ 	}
+ 	read_unlock_bh(&hci_cb_list_lock);
+ }
+@@ -592,8 +602,8 @@ static inline void hci_encrypt_cfm(struct hci_conn *conn, __u8 status, __u8 encr
+ 	read_lock_bh(&hci_cb_list_lock);
+ 	list_for_each(p, &hci_cb_list) {
+ 		struct hci_cb *cb = list_entry(p, struct hci_cb, list);
+-		if (cb->encrypt_cfm)
+-			cb->encrypt_cfm(conn, status, encrypt);
++		if (cb->security_cfm)
++			cb->security_cfm(conn, status, encrypt);
+ 	}
+ 	read_unlock_bh(&hci_cb_list_lock);
+ }
+diff --git a/net/bluetooth/hci_conn.c b/net/bluetooth/hci_conn.c
+index a4a789f24c8d..98f97a1e9bbb 100644
+--- a/net/bluetooth/hci_conn.c
++++ b/net/bluetooth/hci_conn.c
+@@ -325,7 +325,7 @@ EXPORT_SYMBOL(hci_get_route);
+ 
+ /* Create SCO or ACL connection.
+  * Device _must_ be locked */
+-struct hci_conn *hci_connect(struct hci_dev *hdev, int type, bdaddr_t *dst, __u8 auth_type)
++struct hci_conn *hci_connect(struct hci_dev *hdev, int type, bdaddr_t *dst, __u8 sec_level, __u8 auth_type)
+ {
+ 	struct hci_conn *acl;
+ 	struct hci_conn *sco;
+@@ -340,6 +340,7 @@ struct hci_conn *hci_connect(struct hci_dev *hdev, int type, bdaddr_t *dst, __u8
+ 	hci_conn_hold(acl);
+ 
+ 	if (acl->state == BT_OPEN || acl->state == BT_CLOSED) {
++		acl->sec_level = sec_level;
+ 		acl->auth_type = auth_type;
+ 		hci_acl_connect(acl);
+ 	}
+@@ -385,16 +386,17 @@ int hci_conn_check_link_mode(struct hci_conn *conn)
+ EXPORT_SYMBOL(hci_conn_check_link_mode);
+ 
+ /* Authenticate remote device */
+-int hci_conn_auth(struct hci_conn *conn)
++static int hci_conn_auth(struct hci_conn *conn, __u8 sec_level)
+ {
+ 	BT_DBG("conn %p", conn);
+ 
+-	if (conn->ssp_mode > 0 && conn->hdev->ssp_mode > 0) {
+-		if (!(conn->auth_type & 0x01)) {
+-			conn->auth_type |= 0x01;
+-			conn->link_mode &= ~HCI_LM_AUTH;
+-		}
+-	}
++	if (sec_level > conn->sec_level)
++		conn->link_mode &= ~HCI_LM_AUTH;
++
++	conn->sec_level = sec_level;
++
++	if (sec_level == BT_SECURITY_HIGH)
++		conn->auth_type |= 0x01;
+ 
+ 	if (conn->link_mode & HCI_LM_AUTH)
+ 		return 1;
+@@ -405,31 +407,42 @@ int hci_conn_auth(struct hci_conn *conn)
+ 		hci_send_cmd(conn->hdev, HCI_OP_AUTH_REQUESTED,
+ 							sizeof(cp), &cp);
+ 	}
++
+ 	return 0;
+ }
+-EXPORT_SYMBOL(hci_conn_auth);
+ 
+-/* Enable encryption */
+-int hci_conn_encrypt(struct hci_conn *conn)
++/* Enable security */
++int hci_conn_security(struct hci_conn *conn, __u8 sec_level)
+ {
+ 	BT_DBG("conn %p", conn);
+ 
++	if (sec_level == BT_SECURITY_SDP)
++		return 1;
++
++	if (sec_level == BT_SECURITY_LOW) {
++		if (conn->ssp_mode > 0 && conn->hdev->ssp_mode > 0)
++			return hci_conn_auth(conn, sec_level);
++		else
++			return 1;
++	}
++
+ 	if (conn->link_mode & HCI_LM_ENCRYPT)
+-		return hci_conn_auth(conn);
++		return hci_conn_auth(conn, sec_level);
+ 
+ 	if (test_and_set_bit(HCI_CONN_ENCRYPT_PEND, &conn->pend))
+ 		return 0;
+ 
+-	if (hci_conn_auth(conn)) {
++	if (hci_conn_auth(conn, sec_level)) {
+ 		struct hci_cp_set_conn_encrypt cp;
+ 		cp.handle  = cpu_to_le16(conn->handle);
+ 		cp.encrypt = 1;
+ 		hci_send_cmd(conn->hdev, HCI_OP_SET_CONN_ENCRYPT,
+ 							sizeof(cp), &cp);
+ 	}
++
+ 	return 0;
+ }
+-EXPORT_SYMBOL(hci_conn_encrypt);
++EXPORT_SYMBOL(hci_conn_security);
+ 
+ /* Change link key */
+ int hci_conn_change_link_key(struct hci_conn *conn)
+@@ -442,12 +455,13 @@ int hci_conn_change_link_key(struct hci_conn *conn)
+ 		hci_send_cmd(conn->hdev, HCI_OP_CHANGE_CONN_LINK_KEY,
+ 							sizeof(cp), &cp);
+ 	}
++
+ 	return 0;
+ }
+ EXPORT_SYMBOL(hci_conn_change_link_key);
+ 
+ /* Switch role */
+-int hci_conn_switch_role(struct hci_conn *conn, uint8_t role)
++int hci_conn_switch_role(struct hci_conn *conn, __u8 role)
+ {
+ 	BT_DBG("conn %p", conn);
+ 
+@@ -460,6 +474,7 @@ int hci_conn_switch_role(struct hci_conn *conn, uint8_t role)
+ 		cp.role = role;
+ 		hci_send_cmd(conn->hdev, HCI_OP_SWITCH_ROLE, sizeof(cp), &cp);
+ 	}
++
+ 	return 0;
+ }
+ EXPORT_SYMBOL(hci_conn_switch_role);
+diff --git a/net/bluetooth/hci_event.c b/net/bluetooth/hci_event.c
+index beea9dbb6562..014fc8b320ba 100644
+--- a/net/bluetooth/hci_event.c
++++ b/net/bluetooth/hci_event.c
+@@ -1601,7 +1601,8 @@ static inline void hci_remote_ext_features_evt(struct hci_dev *hdev, struct sk_b
+ 
+ 		if (conn->state == BT_CONFIG) {
+ 			if (!ev->status && hdev->ssp_mode > 0 &&
+-					conn->ssp_mode > 0 && conn->out) {
++					conn->ssp_mode > 0 && conn->out &&
++					conn->sec_level != BT_SECURITY_SDP) {
+ 				struct hci_cp_auth_requested cp;
+ 				cp.handle = ev->handle;
+ 				hci_send_cmd(hdev, HCI_OP_AUTH_REQUESTED,
+diff --git a/net/bluetooth/l2cap.c b/net/bluetooth/l2cap.c
+index 123efb46d3f5..eadf09231866 100644
+--- a/net/bluetooth/l2cap.c
++++ b/net/bluetooth/l2cap.c
+@@ -263,12 +263,17 @@ static inline int l2cap_check_link_mode(struct sock *sk)
+ {
+ 	struct l2cap_conn *conn = l2cap_pi(sk)->conn;
+ 
+-	if ((l2cap_pi(sk)->link_mode & L2CAP_LM_ENCRYPT) ||
+-				(l2cap_pi(sk)->link_mode & L2CAP_LM_SECURE))
+-		return hci_conn_encrypt(conn->hcon);
++	if (l2cap_pi(sk)->link_mode & L2CAP_LM_SECURE)
++		return hci_conn_security(conn->hcon, BT_SECURITY_HIGH);
++
++	if (l2cap_pi(sk)->link_mode & L2CAP_LM_ENCRYPT)
++		return hci_conn_security(conn->hcon, BT_SECURITY_MEDIUM);
+ 
+ 	if (l2cap_pi(sk)->link_mode & L2CAP_LM_AUTH)
+-		return hci_conn_auth(conn->hcon);
++		return hci_conn_security(conn->hcon, BT_SECURITY_LOW);
++
++	if (l2cap_pi(sk)->psm == cpu_to_le16(0x0001))
++		return hci_conn_security(conn->hcon, BT_SECURITY_SDP);
+ 
+ 	return 1;
+ }
+@@ -803,6 +808,7 @@ static int l2cap_do_connect(struct sock *sk)
+ 	struct l2cap_conn *conn;
+ 	struct hci_conn *hcon;
+ 	struct hci_dev *hdev;
++	__u8 sec_level;
+ 	__u8 auth_type;
+ 	int err = 0;
+ 
+@@ -815,21 +821,37 @@ static int l2cap_do_connect(struct sock *sk)
+ 
+ 	err = -ENOMEM;
+ 
+-	if (l2cap_pi(sk)->link_mode & L2CAP_LM_AUTH ||
+-			l2cap_pi(sk)->link_mode & L2CAP_LM_ENCRYPT ||
+-				l2cap_pi(sk)->link_mode & L2CAP_LM_SECURE) {
+-		if (l2cap_pi(sk)->psm == cpu_to_le16(0x0001))
+-			auth_type = HCI_AT_NO_BONDING_MITM;
++	if (l2cap_pi(sk)->link_mode & L2CAP_LM_SECURE)
++		sec_level = BT_SECURITY_HIGH;
++	else if (l2cap_pi(sk)->psm == cpu_to_le16(0x0001))
++		sec_level = BT_SECURITY_SDP;
++	else if (l2cap_pi(sk)->link_mode & L2CAP_LM_ENCRYPT)
++		sec_level = BT_SECURITY_MEDIUM;
++	else
++		sec_level = BT_SECURITY_LOW;
++
++	if (sk->sk_type == SOCK_RAW) {
++		if (l2cap_pi(sk)->link_mode & L2CAP_LM_SECURE)
++			auth_type = HCI_AT_DEDICATED_BONDING_MITM;
++		else if (l2cap_pi(sk)->link_mode & L2CAP_LM_ENCRYPT)
++			auth_type = HCI_AT_DEDICATED_BONDING;
+ 		else
+-			auth_type = HCI_AT_GENERAL_BONDING_MITM;
+-	} else {
+-		if (l2cap_pi(sk)->psm == cpu_to_le16(0x0001))
+ 			auth_type = HCI_AT_NO_BONDING;
++	} else if (l2cap_pi(sk)->psm == cpu_to_le16(0x0001)) {
++		if (l2cap_pi(sk)->link_mode & L2CAP_LM_SECURE)
++			auth_type = HCI_AT_NO_BONDING_MITM;
+ 		else
++			auth_type = HCI_AT_NO_BONDING;
++	} else {
++		if (l2cap_pi(sk)->link_mode & L2CAP_LM_SECURE)
++			auth_type = HCI_AT_GENERAL_BONDING_MITM;
++		else if (l2cap_pi(sk)->link_mode & L2CAP_LM_ENCRYPT)
+ 			auth_type = HCI_AT_GENERAL_BONDING;
++		else
++			auth_type = HCI_AT_NO_BONDING;
+ 	}
+ 
+-	hcon = hci_connect(hdev, ACL_LINK, dst, auth_type);
++	hcon = hci_connect(hdev, ACL_LINK, dst, sec_level, auth_type);
+ 	if (!hcon)
+ 		goto done;
+ 
+@@ -1402,11 +1424,6 @@ static void l2cap_chan_ready(struct sock *sk)
+ 		 */
+ 		parent->sk_data_ready(parent, 0);
+ 	}
+-
+-	if (l2cap_pi(sk)->link_mode & L2CAP_LM_SECURE) {
+-		struct l2cap_conn *conn = l2cap_pi(sk)->conn;
+-		hci_conn_change_link_key(conn->hcon);
+-	}
+ }
+ 
+ /* Copy frame to all raw sockets on that connection */
+@@ -2323,77 +2340,7 @@ static int l2cap_disconn_ind(struct hci_conn *hcon, u8 reason)
+ 	return 0;
+ }
+ 
+-static int l2cap_auth_cfm(struct hci_conn *hcon, u8 status)
+-{
+-	struct l2cap_chan_list *l;
+-	struct l2cap_conn *conn = hcon->l2cap_data;
+-	struct sock *sk;
+-
+-	if (!conn)
+-		return 0;
+-
+-	l = &conn->chan_list;
+-
+-	BT_DBG("conn %p", conn);
+-
+-	read_lock(&l->lock);
+-
+-	for (sk = l->head; sk; sk = l2cap_pi(sk)->next_c) {
+-		struct l2cap_pinfo *pi = l2cap_pi(sk);
+-
+-		bh_lock_sock(sk);
+-
+-		if ((pi->link_mode & (L2CAP_LM_ENCRYPT | L2CAP_LM_SECURE)) &&
+-					!(hcon->link_mode & HCI_LM_ENCRYPT) &&
+-								!status) {
+-			bh_unlock_sock(sk);
+-			continue;
+-		}
+-
+-		if (sk->sk_state == BT_CONNECT) {
+-			if (!status) {
+-				struct l2cap_conn_req req;
+-				req.scid = cpu_to_le16(l2cap_pi(sk)->scid);
+-				req.psm  = l2cap_pi(sk)->psm;
+-
+-				l2cap_pi(sk)->ident = l2cap_get_ident(conn);
+-
+-				l2cap_send_cmd(conn, l2cap_pi(sk)->ident,
+-					L2CAP_CONN_REQ, sizeof(req), &req);
+-			} else {
+-				l2cap_sock_clear_timer(sk);
+-				l2cap_sock_set_timer(sk, HZ / 10);
+-			}
+-		} else if (sk->sk_state == BT_CONNECT2) {
+-			struct l2cap_conn_rsp rsp;
+-			__u16 result;
+-
+-			if (!status) {
+-				sk->sk_state = BT_CONFIG;
+-				result = L2CAP_CR_SUCCESS;
+-			} else {
+-				sk->sk_state = BT_DISCONN;
+-				l2cap_sock_set_timer(sk, HZ / 10);
+-				result = L2CAP_CR_SEC_BLOCK;
+-			}
+-
+-			rsp.scid   = cpu_to_le16(l2cap_pi(sk)->dcid);
+-			rsp.dcid   = cpu_to_le16(l2cap_pi(sk)->scid);
+-			rsp.result = cpu_to_le16(result);
+-			rsp.status = cpu_to_le16(L2CAP_CS_NO_INFO);
+-			l2cap_send_cmd(conn, l2cap_pi(sk)->ident,
+-					L2CAP_CONN_RSP, sizeof(rsp), &rsp);
+-		}
+-
+-		bh_unlock_sock(sk);
+-	}
+-
+-	read_unlock(&l->lock);
+-
+-	return 0;
+-}
+-
+-static int l2cap_encrypt_cfm(struct hci_conn *hcon, u8 status, u8 encrypt)
++static int l2cap_security_cfm(struct hci_conn *hcon, u8 status, u8 encrypt)
+ {
+ 	struct l2cap_chan_list *l;
+ 	struct l2cap_conn *conn = hcon->l2cap_data;
+@@ -2413,10 +2360,10 @@ static int l2cap_encrypt_cfm(struct hci_conn *hcon, u8 status, u8 encrypt)
+ 
+ 		bh_lock_sock(sk);
+ 
+-		if ((pi->link_mode & (L2CAP_LM_ENCRYPT | L2CAP_LM_SECURE)) &&
++		if (!status && encrypt == 0x00 &&
++				(pi->link_mode & L2CAP_LM_SECURE) &&
+ 					(sk->sk_state == BT_CONNECTED ||
+-						sk->sk_state == BT_CONFIG) &&
+-						!status && encrypt == 0x00) {
++						sk->sk_state == BT_CONFIG)) {
+ 			__l2cap_sock_close(sk, ECONNREFUSED);
+ 			bh_unlock_sock(sk);
+ 			continue;
+@@ -2608,8 +2555,7 @@ static struct hci_proto l2cap_hci_proto = {
+ 	.connect_ind	= l2cap_connect_ind,
+ 	.connect_cfm	= l2cap_connect_cfm,
+ 	.disconn_ind	= l2cap_disconn_ind,
+-	.auth_cfm	= l2cap_auth_cfm,
+-	.encrypt_cfm	= l2cap_encrypt_cfm,
++	.security_cfm	= l2cap_security_cfm,
+ 	.recv_acldata	= l2cap_recv_acldata
+ };
+ 
+diff --git a/net/bluetooth/rfcomm/core.c b/net/bluetooth/rfcomm/core.c
+index edee49e00fbf..68f70c5270c6 100644
+--- a/net/bluetooth/rfcomm/core.c
++++ b/net/bluetooth/rfcomm/core.c
+@@ -226,16 +226,18 @@ static int rfcomm_l2sock_create(struct socket **sock)
+ static inline int rfcomm_check_link_mode(struct rfcomm_dlc *d)
+ {
+ 	struct sock *sk = d->session->sock->sk;
++	struct l2cap_conn *conn = l2cap_pi(sk)->conn;
+ 
+-	if (d->link_mode & (RFCOMM_LM_ENCRYPT | RFCOMM_LM_SECURE)) {
+-		if (!hci_conn_encrypt(l2cap_pi(sk)->conn->hcon))
+-			return 1;
+-	} else if (d->link_mode & RFCOMM_LM_AUTH) {
+-		if (!hci_conn_auth(l2cap_pi(sk)->conn->hcon))
+-			return 1;
+-	}
++	if (d->link_mode & RFCOMM_LM_SECURE)
++		return hci_conn_security(conn->hcon, BT_SECURITY_HIGH);
+ 
+-	return 0;
++	if (d->link_mode & RFCOMM_LM_ENCRYPT)
++		return hci_conn_security(conn->hcon, BT_SECURITY_MEDIUM);
++
++	if (d->link_mode & RFCOMM_LM_AUTH)
++		return hci_conn_security(conn->hcon, BT_SECURITY_LOW);
++
++	return 1;
+ }
+ 
+ /* ---- RFCOMM DLCs ---- */
+@@ -389,9 +391,9 @@ static int __rfcomm_dlc_open(struct rfcomm_dlc *d, bdaddr_t *src, bdaddr_t *dst,
+ 
+ 	if (s->state == BT_CONNECTED) {
+ 		if (rfcomm_check_link_mode(d))
+-			set_bit(RFCOMM_AUTH_PENDING, &d->flags);
+-		else
+ 			rfcomm_send_pn(s, 1, d);
++		else
++			set_bit(RFCOMM_AUTH_PENDING, &d->flags);
+ 	}
+ 
+ 	rfcomm_dlc_set_timer(d, RFCOMM_CONN_TIMEOUT);
+@@ -1199,14 +1201,14 @@ void rfcomm_dlc_accept(struct rfcomm_dlc *d)
+ static void rfcomm_check_accept(struct rfcomm_dlc *d)
+ {
+ 	if (rfcomm_check_link_mode(d)) {
+-		set_bit(RFCOMM_AUTH_PENDING, &d->flags);
+-		rfcomm_dlc_set_timer(d, RFCOMM_AUTH_TIMEOUT);
+-	} else {
+ 		if (d->defer_setup) {
+ 			set_bit(RFCOMM_DEFER_SETUP, &d->flags);
+ 			rfcomm_dlc_set_timer(d, RFCOMM_AUTH_TIMEOUT);
+ 		} else
+ 			rfcomm_dlc_accept(d);
++	} else {
++		set_bit(RFCOMM_AUTH_PENDING, &d->flags);
++		rfcomm_dlc_set_timer(d, RFCOMM_AUTH_TIMEOUT);
+ 	}
+ }
+ 
+@@ -1659,10 +1661,11 @@ static void rfcomm_process_connect(struct rfcomm_session *s)
+ 		if (d->state == BT_CONFIG) {
+ 			d->mtu = s->mtu;
+ 			if (rfcomm_check_link_mode(d)) {
++				rfcomm_send_pn(s, 1, d);
++			} else {
+ 				set_bit(RFCOMM_AUTH_PENDING, &d->flags);
+ 				rfcomm_dlc_set_timer(d, RFCOMM_AUTH_TIMEOUT);
+-			} else
+-				rfcomm_send_pn(s, 1, d);
++			}
+ 		}
+ 	}
+ }
+@@ -1973,42 +1976,7 @@ static int rfcomm_run(void *unused)
+ 	return 0;
+ }
+ 
+-static void rfcomm_auth_cfm(struct hci_conn *conn, u8 status)
+-{
+-	struct rfcomm_session *s;
+-	struct rfcomm_dlc *d;
+-	struct list_head *p, *n;
+-
+-	BT_DBG("conn %p status 0x%02x", conn, status);
+-
+-	s = rfcomm_session_get(&conn->hdev->bdaddr, &conn->dst);
+-	if (!s)
+-		return;
+-
+-	rfcomm_session_hold(s);
+-
+-	list_for_each_safe(p, n, &s->dlcs) {
+-		d = list_entry(p, struct rfcomm_dlc, list);
+-
+-		if ((d->link_mode & (RFCOMM_LM_ENCRYPT | RFCOMM_LM_SECURE)) &&
+-				!(conn->link_mode & HCI_LM_ENCRYPT) && !status)
+-			continue;
+-
+-		if (!test_and_clear_bit(RFCOMM_AUTH_PENDING, &d->flags))
+-			continue;
+-
+-		if (!status)
+-			set_bit(RFCOMM_AUTH_ACCEPT, &d->flags);
+-		else
+-			set_bit(RFCOMM_AUTH_REJECT, &d->flags);
+-	}
+-
+-	rfcomm_session_put(s);
+-
+-	rfcomm_schedule(RFCOMM_SCHED_AUTH);
+-}
+-
+-static void rfcomm_encrypt_cfm(struct hci_conn *conn, u8 status, u8 encrypt)
++static void rfcomm_security_cfm(struct hci_conn *conn, u8 status, u8 encrypt)
+ {
+ 	struct rfcomm_session *s;
+ 	struct rfcomm_dlc *d;
+@@ -2025,10 +1993,10 @@ static void rfcomm_encrypt_cfm(struct hci_conn *conn, u8 status, u8 encrypt)
+ 	list_for_each_safe(p, n, &s->dlcs) {
+ 		d = list_entry(p, struct rfcomm_dlc, list);
+ 
+-		if ((d->link_mode & (RFCOMM_LM_ENCRYPT | RFCOMM_LM_SECURE)) &&
++		if (!status && encrypt == 0x00 &&
++				(d->link_mode & RFCOMM_LM_ENCRYPT) &&
+ 					(d->state == BT_CONNECTED ||
+-						d->state == BT_CONFIG) &&
+-						!status && encrypt == 0x00) {
++						d->state == BT_CONFIG)) {
+ 			__rfcomm_dlc_close(d, ECONNREFUSED);
+ 			continue;
+ 		}
+@@ -2036,7 +2004,7 @@ static void rfcomm_encrypt_cfm(struct hci_conn *conn, u8 status, u8 encrypt)
+ 		if (!test_and_clear_bit(RFCOMM_AUTH_PENDING, &d->flags))
+ 			continue;
+ 
+-		if (!status && encrypt)
++		if (!status)
+ 			set_bit(RFCOMM_AUTH_ACCEPT, &d->flags);
+ 		else
+ 			set_bit(RFCOMM_AUTH_REJECT, &d->flags);
+@@ -2049,8 +2017,7 @@ static void rfcomm_encrypt_cfm(struct hci_conn *conn, u8 status, u8 encrypt)
+ 
+ static struct hci_cb rfcomm_cb = {
+ 	.name		= "RFCOMM",
+-	.auth_cfm	= rfcomm_auth_cfm,
+-	.encrypt_cfm	= rfcomm_encrypt_cfm
++	.security_cfm	= rfcomm_security_cfm
+ };
+ 
+ static ssize_t rfcomm_dlc_sysfs_show(struct class *dev, char *buf)
+diff --git a/net/bluetooth/sco.c b/net/bluetooth/sco.c
+index 71df982c09c9..7f10f97cd697 100644
+--- a/net/bluetooth/sco.c
++++ b/net/bluetooth/sco.c
+@@ -195,7 +195,7 @@ static int sco_connect(struct sock *sk)
+ 	else
+ 		type = SCO_LINK;
+ 
+-	hcon = hci_connect(hdev, type, dst, HCI_AT_NO_BONDING);
++	hcon = hci_connect(hdev, type, dst, BT_SECURITY_LOW, HCI_AT_NO_BONDING);
+ 	if (!hcon)
+ 		goto done;

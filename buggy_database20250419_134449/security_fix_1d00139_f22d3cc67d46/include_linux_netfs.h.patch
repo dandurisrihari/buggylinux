@@ -1,0 +1,128 @@
+commit 1d0013962d220b166d9f7c9fe2746f1542e459a3
+Author: David Howells <dhowells@redhat.com>
+Date:   Wed Feb 12 22:23:59 2025 +0000
+
+    netfs: Fix a number of read-retry hangs
+    
+    Fix a number of hangs in the netfslib read-retry code, including:
+    
+     (1) netfs_reissue_read() doubles up the getting of references on
+         subrequests, thereby leaking the subrequest and causing inode eviction
+         to wait indefinitely.  This can lead to the kernel reporting a hang in
+         the filesystem's evict_inode().
+    
+         Fix this by removing the get from netfs_reissue_read() and adding one
+         to netfs_retry_read_subrequests() to deal with the one place that
+         didn't double up.
+    
+     (2) The loop in netfs_retry_read_subrequests() that retries a sequence of
+         failed subrequests doesn't record whether or not it retried the one
+         that the "subreq" pointer points to when it leaves the loop.  It may
+         not if renegotiation/repreparation of the subrequests means that fewer
+         subrequests are needed to span the cumulative range of the sequence.
+    
+         Because it doesn't record this, the piece of code that discards
+         now-superfluous subrequests doesn't know whether it should discard the
+         one "subreq" points to - and so it doesn't.
+    
+         Fix this by noting whether the last subreq it examines is superfluous
+         and if it is, then getting rid of it and all subsequent subrequests.
+    
+         If that one one wasn't superfluous, then we would have tried to go
+         round the previous loop again and so there can be no further unretried
+         subrequests in the sequence.
+    
+     (3) netfs_retry_read_subrequests() gets yet an extra ref on any additional
+         subrequests it has to get because it ran out of ones it could reuse to
+         to renegotiation/repreparation shrinking the subrequests.
+    
+         Fix this by removing that extra ref.
+    
+     (4) In netfs_retry_reads(), it was using wait_on_bit() to wait for
+         NETFS_SREQ_IN_PROGRESS to be cleared on all subrequests in the
+         sequence - but netfs_read_subreq_terminated() is now using a wait
+         queue on the request instead and so this wait will never finish.
+    
+         Fix this by waiting on the wait queue instead.  To make this work, a
+         new flag, NETFS_RREQ_RETRYING, is now set around the wait loop to tell
+         the wake-up code to wake up the wait queue rather than requeuing the
+         request's work item.
+    
+         Note that this flag replaces the NETFS_RREQ_NEED_RETRY flag which is
+         no longer used.
+    
+     (5) Whilst not strictly anything to do with the hang,
+         netfs_retry_read_subrequests() was also doubly incrementing the
+         subreq_counter and re-setting the debug index, leaving a gap in the
+         trace.  This is also fixed.
+    
+    One of these hangs was observed with 9p and with cifs.  Others were forced
+    by manual code injection into fs/afs/file.c.  Firstly, afs_prepare_read()
+    was created to provide an changing pattern of maximum subrequest sizes:
+    
+            static int afs_prepare_read(struct netfs_io_subrequest *subreq)
+            {
+                    struct netfs_io_request *rreq = subreq->rreq;
+                    if (!S_ISREG(subreq->rreq->inode->i_mode))
+                            return 0;
+                    if (subreq->retry_count < 20)
+                            rreq->io_streams[0].sreq_max_len =
+                                    umax(200, 2222 - subreq->retry_count * 40);
+                    else
+                            rreq->io_streams[0].sreq_max_len = 3333;
+                    return 0;
+            }
+    
+    and pointed to by afs_req_ops.  Then the following:
+    
+            struct netfs_io_subrequest *subreq = op->fetch.subreq;
+            if (subreq->error == 0 &&
+                S_ISREG(subreq->rreq->inode->i_mode) &&
+                subreq->retry_count < 20) {
+                    subreq->transferred = subreq->already_done;
+                    __clear_bit(NETFS_SREQ_HIT_EOF, &subreq->flags);
+                    __set_bit(NETFS_SREQ_NEED_RETRY, &subreq->flags);
+                    afs_fetch_data_notify(op);
+                    return;
+            }
+    
+    was inserted into afs_fetch_data_success() at the beginning and struct
+    netfs_io_subrequest given an extra field, "already_done" that was set to
+    the value in "subreq->transferred" by netfs_reissue_read().
+    
+    When reading a 4K file, the subrequests would get gradually smaller, a new
+    subrequest would be allocated around the 3rd retry and then eventually be
+    rendered superfluous when the 20th retry was hit and the limit on the first
+    subrequest was eased.
+    
+    Fixes: e2d46f2ec332 ("netfs: Change the read result collector to only use one work item")
+    Signed-off-by: David Howells <dhowells@redhat.com>
+    Link: https://lore.kernel.org/r/20250212222402.3618494-2-dhowells@redhat.com
+    Tested-by: Marc Dionne <marc.dionne@auristor.com>
+    Tested-by: Steve French <stfrench@microsoft.com>
+    cc: Ihor Solodrai <ihor.solodrai@pm.me>
+    cc: Eric Van Hensbergen <ericvh@kernel.org>
+    cc: Latchesar Ionkov <lucho@ionkov.net>
+    cc: Dominique Martinet <asmadeus@codewreck.org>
+    cc: Christian Schoenebeck <linux_oss@crudebyte.com>
+    cc: Paulo Alcantara <pc@manguebit.com>
+    cc: Jeff Layton <jlayton@kernel.org>
+    cc: v9fs@lists.linux.dev
+    cc: linux-cifs@vger.kernel.org
+    cc: netfs@lists.linux.dev
+    cc: linux-fsdevel@vger.kernel.org
+    Signed-off-by: Christian Brauner <brauner@kernel.org>
+
+diff --git a/include/linux/netfs.h b/include/linux/netfs.h
+index 071d05d81d38..c86a11cfc4a3 100644
+--- a/include/linux/netfs.h
++++ b/include/linux/netfs.h
+@@ -278,7 +278,7 @@ struct netfs_io_request {
+ #define NETFS_RREQ_PAUSE		11	/* Pause subrequest generation */
+ #define NETFS_RREQ_USE_IO_ITER		12	/* Use ->io_iter rather than ->i_pages */
+ #define NETFS_RREQ_ALL_QUEUED		13	/* All subreqs are now queued */
+-#define NETFS_RREQ_NEED_RETRY		14	/* Need to try retrying */
++#define NETFS_RREQ_RETRYING		14	/* Set if we're in the retry path */
+ #define NETFS_RREQ_USE_PGPRIV2		31	/* [DEPRECATED] Use PG_private_2 to mark
+ 						 * write to cache on read */
+ 	const struct netfs_request_ops *netfs_ops;

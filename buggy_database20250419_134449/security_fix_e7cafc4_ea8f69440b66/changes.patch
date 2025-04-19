@@ -1,0 +1,149 @@
+diff --git a/include/net/bluetooth/hci_core.h b/include/net/bluetooth/hci_core.h
+index 73e16ecfd6b9..eb2b9c9e3480 100644
+--- a/include/net/bluetooth/hci_core.h
++++ b/include/net/bluetooth/hci_core.h
+@@ -720,7 +720,8 @@ struct hci_conn *hci_connect_sco(struct hci_dev *hdev, int type, bdaddr_t *dst,
+ 				 __u16 setting);
+ int hci_conn_check_link_mode(struct hci_conn *conn);
+ int hci_conn_check_secure(struct hci_conn *conn, __u8 sec_level);
+-int hci_conn_security(struct hci_conn *conn, __u8 sec_level, __u8 auth_type);
++int hci_conn_security(struct hci_conn *conn, __u8 sec_level, __u8 auth_type,
++		      bool initiator);
+ int hci_conn_change_link_key(struct hci_conn *conn);
+ int hci_conn_switch_role(struct hci_conn *conn, __u8 role);
+ 
+diff --git a/include/net/bluetooth/l2cap.h b/include/net/bluetooth/l2cap.h
+index 1fffd92808b0..8df15ad0d43f 100644
+--- a/include/net/bluetooth/l2cap.h
++++ b/include/net/bluetooth/l2cap.h
+@@ -905,7 +905,7 @@ int l2cap_chan_connect(struct l2cap_chan *chan, __le16 psm, u16 cid,
+ 		       bdaddr_t *dst, u8 dst_type);
+ int l2cap_chan_send(struct l2cap_chan *chan, struct msghdr *msg, size_t len);
+ void l2cap_chan_busy(struct l2cap_chan *chan, int busy);
+-int l2cap_chan_check_security(struct l2cap_chan *chan);
++int l2cap_chan_check_security(struct l2cap_chan *chan, bool initiator);
+ void l2cap_chan_set_defaults(struct l2cap_chan *chan);
+ int l2cap_ertm_init(struct l2cap_chan *chan);
+ void l2cap_chan_add(struct l2cap_conn *conn, struct l2cap_chan *chan);
+diff --git a/net/bluetooth/hci_conn.c b/net/bluetooth/hci_conn.c
+index ad5f0b819e90..76c5a38e5997 100644
+--- a/net/bluetooth/hci_conn.c
++++ b/net/bluetooth/hci_conn.c
+@@ -973,7 +973,8 @@ static void hci_conn_encrypt(struct hci_conn *conn)
+ }
+ 
+ /* Enable security */
+-int hci_conn_security(struct hci_conn *conn, __u8 sec_level, __u8 auth_type)
++int hci_conn_security(struct hci_conn *conn, __u8 sec_level, __u8 auth_type,
++		      bool initiator)
+ {
+ 	BT_DBG("hcon %p", conn);
+ 
+diff --git a/net/bluetooth/l2cap_core.c b/net/bluetooth/l2cap_core.c
+index d0f36336b6ce..c8c259f21d80 100644
+--- a/net/bluetooth/l2cap_core.c
++++ b/net/bluetooth/l2cap_core.c
+@@ -775,7 +775,7 @@ static inline u8 l2cap_get_auth_type(struct l2cap_chan *chan)
+ }
+ 
+ /* Service level security */
+-int l2cap_chan_check_security(struct l2cap_chan *chan)
++int l2cap_chan_check_security(struct l2cap_chan *chan, bool initiator)
+ {
+ 	struct l2cap_conn *conn = chan->conn;
+ 	__u8 auth_type;
+@@ -785,7 +785,8 @@ int l2cap_chan_check_security(struct l2cap_chan *chan)
+ 
+ 	auth_type = l2cap_get_auth_type(chan);
+ 
+-	return hci_conn_security(conn->hcon, chan->sec_level, auth_type);
++	return hci_conn_security(conn->hcon, chan->sec_level, auth_type,
++				 initiator);
+ }
+ 
+ static u8 l2cap_get_ident(struct l2cap_conn *conn)
+@@ -1278,7 +1279,7 @@ static void l2cap_do_start(struct l2cap_chan *chan)
+ 		if (!(conn->info_state & L2CAP_INFO_FEAT_MASK_REQ_DONE))
+ 			return;
+ 
+-		if (l2cap_chan_check_security(chan) &&
++		if (l2cap_chan_check_security(chan, true) &&
+ 		    __l2cap_no_conn_pending(chan)) {
+ 			l2cap_start_connection(chan);
+ 		}
+@@ -1357,7 +1358,7 @@ static void l2cap_conn_start(struct l2cap_conn *conn)
+ 		}
+ 
+ 		if (chan->state == BT_CONNECT) {
+-			if (!l2cap_chan_check_security(chan) ||
++			if (!l2cap_chan_check_security(chan, true) ||
+ 			    !__l2cap_no_conn_pending(chan)) {
+ 				l2cap_chan_unlock(chan);
+ 				continue;
+@@ -1379,7 +1380,7 @@ static void l2cap_conn_start(struct l2cap_conn *conn)
+ 			rsp.scid = cpu_to_le16(chan->dcid);
+ 			rsp.dcid = cpu_to_le16(chan->scid);
+ 
+-			if (l2cap_chan_check_security(chan)) {
++			if (l2cap_chan_check_security(chan, false)) {
+ 				if (test_bit(FLAG_DEFER_SETUP, &chan->flags)) {
+ 					rsp.result = cpu_to_le16(L2CAP_CR_PEND);
+ 					rsp.status = cpu_to_le16(L2CAP_CS_AUTHOR_PEND);
+@@ -3849,7 +3850,7 @@ static struct l2cap_chan *l2cap_connect(struct l2cap_conn *conn,
+ 	chan->ident = cmd->ident;
+ 
+ 	if (conn->info_state & L2CAP_INFO_FEAT_MASK_REQ_DONE) {
+-		if (l2cap_chan_check_security(chan)) {
++		if (l2cap_chan_check_security(chan, false)) {
+ 			if (test_bit(FLAG_DEFER_SETUP, &chan->flags)) {
+ 				l2cap_state_change(chan, BT_CONNECT2);
+ 				result = L2CAP_CR_PEND;
+@@ -7191,7 +7192,7 @@ int l2cap_chan_connect(struct l2cap_chan *chan, __le16 psm, u16 cid,
+ 	if (hcon->state == BT_CONNECTED) {
+ 		if (chan->chan_type != L2CAP_CHAN_CONN_ORIENTED) {
+ 			__clear_chan_timer(chan);
+-			if (l2cap_chan_check_security(chan))
++			if (l2cap_chan_check_security(chan, true))
+ 				l2cap_state_change(chan, BT_CONNECTED);
+ 		} else
+ 			l2cap_do_start(chan);
+diff --git a/net/bluetooth/l2cap_sock.c b/net/bluetooth/l2cap_sock.c
+index 0bc67dc5dcce..3bb1cdf34f07 100644
+--- a/net/bluetooth/l2cap_sock.c
++++ b/net/bluetooth/l2cap_sock.c
+@@ -797,7 +797,7 @@ static int l2cap_sock_setsockopt(struct socket *sock, int level, int optname,
+ 		} else if ((sk->sk_state == BT_CONNECT2 &&
+ 			    test_bit(BT_SK_DEFER_SETUP, &bt_sk(sk)->flags)) ||
+ 			   sk->sk_state == BT_CONNECTED) {
+-			if (!l2cap_chan_check_security(chan))
++			if (!l2cap_chan_check_security(chan, true))
+ 				set_bit(BT_SK_SUSPEND, &bt_sk(sk)->flags);
+ 			else
+ 				sk->sk_state_change(sk);
+diff --git a/net/bluetooth/mgmt.c b/net/bluetooth/mgmt.c
+index b981bfb87f86..190668367e42 100644
+--- a/net/bluetooth/mgmt.c
++++ b/net/bluetooth/mgmt.c
+@@ -3202,7 +3202,7 @@ static int pair_device(struct sock *sk, struct hci_dev *hdev, void *data,
+ 	cmd->user_data = conn;
+ 
+ 	if (conn->state == BT_CONNECTED &&
+-	    hci_conn_security(conn, sec_level, auth_type))
++	    hci_conn_security(conn, sec_level, auth_type, true))
+ 		pairing_complete(cmd, 0);
+ 
+ 	err = 0;
+diff --git a/net/bluetooth/rfcomm/core.c b/net/bluetooth/rfcomm/core.c
+index 754b6fe4f742..a0690a84f3e9 100644
+--- a/net/bluetooth/rfcomm/core.c
++++ b/net/bluetooth/rfcomm/core.c
+@@ -227,7 +227,8 @@ static int rfcomm_check_security(struct rfcomm_dlc *d)
+ 		break;
+ 	}
+ 
+-	return hci_conn_security(conn->hcon, d->sec_level, auth_type);
++	return hci_conn_security(conn->hcon, d->sec_level, auth_type,
++				 d->out);
+ }
+ 
+ static void rfcomm_session_timeout(unsigned long arg)

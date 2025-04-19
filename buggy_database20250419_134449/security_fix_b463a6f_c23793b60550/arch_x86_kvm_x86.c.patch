@@ -1,0 +1,84 @@
+commit b463a6f744a263fccd7da14db1afdc880371a280
+Author: Avi Kivity <avi@redhat.com>
+Date:   Tue Jul 20 15:06:17 2010 +0300
+
+    KVM: Non-atomic interrupt injection
+    
+    Change the interrupt injection code to work from preemptible, interrupts
+    enabled context.  This works by adding a ->cancel_injection() operation
+    that undoes an injection in case we were not able to actually enter the guest
+    (this condition could never happen with atomic injection).
+    
+    Signed-off-by: Avi Kivity <avi@redhat.com>
+
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index e7198036db61..a465bd29f381 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -5005,7 +5005,6 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 	int r;
+ 	bool req_int_win = !irqchip_in_kernel(vcpu->kvm) &&
+ 		vcpu->run->request_interrupt_window;
+-	bool req_event;
+ 
+ 	if (vcpu->requests) {
+ 		if (kvm_check_request(KVM_REQ_MMU_RELOAD, vcpu))
+@@ -5041,6 +5040,21 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 	if (unlikely(r))
+ 		goto out;
+ 
++	if (kvm_check_request(KVM_REQ_EVENT, vcpu) || req_int_win) {
++		inject_pending_event(vcpu);
++
++		/* enable NMI/IRQ window open exits if needed */
++		if (vcpu->arch.nmi_pending)
++			kvm_x86_ops->enable_nmi_window(vcpu);
++		else if (kvm_cpu_has_interrupt(vcpu) || req_int_win)
++			kvm_x86_ops->enable_irq_window(vcpu);
++
++		if (kvm_lapic_enabled(vcpu)) {
++			update_cr8_intercept(vcpu);
++			kvm_lapic_sync_to_vapic(vcpu);
++		}
++	}
++
+ 	preempt_disable();
+ 
+ 	kvm_x86_ops->prepare_guest_switch(vcpu);
+@@ -5053,35 +5067,17 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 
+ 	local_irq_disable();
+ 
+-	req_event = kvm_check_request(KVM_REQ_EVENT, vcpu);
+-
+ 	if (!atomic_read(&vcpu->guest_mode) || vcpu->requests
+ 	    || need_resched() || signal_pending(current)) {
+-		if (req_event)
+-			kvm_make_request(KVM_REQ_EVENT, vcpu);
+ 		atomic_set(&vcpu->guest_mode, 0);
+ 		smp_wmb();
+ 		local_irq_enable();
+ 		preempt_enable();
++		kvm_x86_ops->cancel_injection(vcpu);
+ 		r = 1;
+ 		goto out;
+ 	}
+ 
+-	if (req_event || req_int_win) {
+-		inject_pending_event(vcpu);
+-
+-		/* enable NMI/IRQ window open exits if needed */
+-		if (vcpu->arch.nmi_pending)
+-			kvm_x86_ops->enable_nmi_window(vcpu);
+-		else if (kvm_cpu_has_interrupt(vcpu) || req_int_win)
+-			kvm_x86_ops->enable_irq_window(vcpu);
+-
+-		if (kvm_lapic_enabled(vcpu)) {
+-			update_cr8_intercept(vcpu);
+-			kvm_lapic_sync_to_vapic(vcpu);
+-		}
+-	}
+-
+ 	srcu_read_unlock(&vcpu->kvm->srcu, vcpu->srcu_idx);
+ 
+ 	kvm_guest_enter();

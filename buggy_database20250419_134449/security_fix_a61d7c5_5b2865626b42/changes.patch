@@ -1,0 +1,78 @@
+diff --git a/arch/x86/kvm/trace.h b/arch/x86/kvm/trace.h
+index de4762517569..d07428e660e3 100644
+--- a/arch/x86/kvm/trace.h
++++ b/arch/x86/kvm/trace.h
+@@ -358,25 +358,29 @@ TRACE_EVENT(kvm_inj_virq,
+  * Tracepoint for kvm interrupt injection:
+  */
+ TRACE_EVENT(kvm_inj_exception,
+-	TP_PROTO(unsigned exception, bool has_error, unsigned error_code),
+-	TP_ARGS(exception, has_error, error_code),
++	TP_PROTO(unsigned exception, bool has_error, unsigned error_code,
++		 bool reinjected),
++	TP_ARGS(exception, has_error, error_code, reinjected),
+ 
+ 	TP_STRUCT__entry(
+ 		__field(	u8,	exception	)
+ 		__field(	u8,	has_error	)
+ 		__field(	u32,	error_code	)
++		__field(	bool,	reinjected	)
+ 	),
+ 
+ 	TP_fast_assign(
+ 		__entry->exception	= exception;
+ 		__entry->has_error	= has_error;
+ 		__entry->error_code	= error_code;
++		__entry->reinjected	= reinjected;
+ 	),
+ 
+-	TP_printk("%s (0x%x)",
++	TP_printk("%s (0x%x)%s",
+ 		  __print_symbolic(__entry->exception, kvm_trace_sym_exc),
+ 		  /* FIXME: don't print error_code if not present */
+-		  __entry->has_error ? __entry->error_code : 0)
++		  __entry->has_error ? __entry->error_code : 0,
++		  __entry->reinjected ? " [reinjected]" : "")
+ );
+ 
+ /*
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 921b1139c303..c9f3ad89bf4c 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -9408,6 +9408,11 @@ int kvm_check_nested_events(struct kvm_vcpu *vcpu)
+ 
+ static void kvm_inject_exception(struct kvm_vcpu *vcpu)
+ {
++	trace_kvm_inj_exception(vcpu->arch.exception.nr,
++				vcpu->arch.exception.has_error_code,
++				vcpu->arch.exception.error_code,
++				vcpu->arch.exception.injected);
++
+ 	if (vcpu->arch.exception.error_code && !is_protmode(vcpu))
+ 		vcpu->arch.exception.error_code = false;
+ 	static_call(kvm_x86_queue_exception)(vcpu);
+@@ -9465,13 +9470,6 @@ static int inject_pending_event(struct kvm_vcpu *vcpu, bool *req_immediate_exit)
+ 
+ 	/* try to inject new event if pending */
+ 	if (vcpu->arch.exception.pending) {
+-		trace_kvm_inj_exception(vcpu->arch.exception.nr,
+-					vcpu->arch.exception.has_error_code,
+-					vcpu->arch.exception.error_code);
+-
+-		vcpu->arch.exception.pending = false;
+-		vcpu->arch.exception.injected = true;
+-
+ 		if (exception_type(vcpu->arch.exception.nr) == EXCPT_FAULT)
+ 			__kvm_set_rflags(vcpu, kvm_get_rflags(vcpu) |
+ 					     X86_EFLAGS_RF);
+@@ -9485,6 +9483,10 @@ static int inject_pending_event(struct kvm_vcpu *vcpu, bool *req_immediate_exit)
+ 		}
+ 
+ 		kvm_inject_exception(vcpu);
++
++		vcpu->arch.exception.pending = false;
++		vcpu->arch.exception.injected = true;
++
+ 		can_inject = false;
+ 	}

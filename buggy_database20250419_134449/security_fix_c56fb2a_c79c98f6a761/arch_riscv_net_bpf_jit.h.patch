@@ -1,0 +1,66 @@
+commit c56fb2aab23505bb7160d06097c8de100b82b851
+Author: Björn Töpel <bjorn@rivosinc.com>
+Date:   Mon Jul 10 09:41:31 2023 +0200
+
+    riscv, bpf: Fix inconsistent JIT image generation
+    
+    In order to generate the prologue and epilogue, the BPF JIT needs to
+    know which registers that are clobbered. Therefore, the during
+    pre-final passes, the prologue is generated after the body of the
+    program body-prologue-epilogue. Then, in the final pass, a proper
+    prologue-body-epilogue JITted image is generated.
+    
+    This scheme has worked most of the time. However, for some large
+    programs with many jumps, e.g. the test_kmod.sh BPF selftest with
+    hardening enabled (blinding constants), this has shown to be
+    incorrect. For the final pass, when the proper prologue-body-epilogue
+    is generated, the image has not converged. This will lead to that the
+    final image will have incorrect jump offsets. The following is an
+    excerpt from an incorrect image:
+    
+      | ...
+      |     3b8:       00c50663                beq     a0,a2,3c4 <.text+0x3c4>
+      |     3bc:       0020e317                auipc   t1,0x20e
+      |     3c0:       49630067                jalr    zero,1174(t1) # 20e852 <.text+0x20e852>
+      | ...
+      |  20e84c:       8796                    c.mv    a5,t0
+      |  20e84e:       6422                    c.ldsp  s0,8(sp)    # Epilogue start
+      |  20e850:       6141                    c.addi16sp      sp,16
+      |  20e852:       853e                    c.mv    a0,a5       # Incorrect jump target
+      |  20e854:       8082                    c.jr    ra
+    
+    The image has shrunk, and the epilogue offset is incorrect in the
+    final pass.
+    
+    Correct the problem by always generating proper prologue-body-epilogue
+    outputs, which means that the first pass will only generate the body
+    to track what registers that are touched.
+    
+    Fixes: 2353ecc6f91f ("bpf, riscv: add BPF JIT for RV64G")
+    Signed-off-by: Björn Töpel <bjorn@rivosinc.com>
+    Signed-off-by: Daniel Borkmann <daniel@iogearbox.net>
+    Link: https://lore.kernel.org/bpf/20230710074131.19596-1-bjorn@kernel.org
+
+diff --git a/arch/riscv/net/bpf_jit.h b/arch/riscv/net/bpf_jit.h
+index bf9802a63061..2717f5490428 100644
+--- a/arch/riscv/net/bpf_jit.h
++++ b/arch/riscv/net/bpf_jit.h
+@@ -69,7 +69,7 @@ struct rv_jit_context {
+ 	struct bpf_prog *prog;
+ 	u16 *insns;		/* RV insns */
+ 	int ninsns;
+-	int body_len;
++	int prologue_len;
+ 	int epilogue_offset;
+ 	int *offset;		/* BPF to RV */
+ 	int nexentries;
+@@ -216,8 +216,8 @@ static inline int rv_offset(int insn, int off, struct rv_jit_context *ctx)
+ 	int from, to;
+ 
+ 	off++; /* BPF branch is from PC+1, RV is from PC */
+-	from = (insn > 0) ? ctx->offset[insn - 1] : 0;
+-	to = (insn + off > 0) ? ctx->offset[insn + off - 1] : 0;
++	from = (insn > 0) ? ctx->offset[insn - 1] : ctx->prologue_len;
++	to = (insn + off > 0) ? ctx->offset[insn + off - 1] : ctx->prologue_len;
+ 	return ninsns_rvoff(to - from);
+ }

@@ -1,0 +1,133 @@
+diff --git a/crypto/aead.c b/crypto/aead.c
+index 5fa992ac219c..c1f73a9672a6 100644
+--- a/crypto/aead.c
++++ b/crypto/aead.c
+@@ -69,7 +69,7 @@ int crypto_aead_setauthsize(struct crypto_aead *tfm, unsigned int authsize)
+ {
+ 	int err;
+ 
+-	if (authsize > tfm->maxauthsize)
++	if (authsize > crypto_aead_maxauthsize(tfm))
+ 		return -EINVAL;
+ 
+ 	if (tfm->setauthsize) {
+@@ -162,8 +162,6 @@ static int crypto_old_aead_init_tfm(struct crypto_tfm *tfm)
+ 		crt->givdecrypt = aead_null_givdecrypt;
+ 	}
+ 	crt->child = __crypto_aead_cast(tfm);
+-	crt->ivsize = alg->ivsize;
+-	crt->maxauthsize = alg->maxauthsize;
+ 	crt->authsize = alg->maxauthsize;
+ 
+ 	return 0;
+@@ -182,8 +180,6 @@ static int crypto_aead_init_tfm(struct crypto_tfm *tfm)
+ 	aead->encrypt = alg->encrypt;
+ 	aead->decrypt = alg->decrypt;
+ 	aead->child = __crypto_aead_cast(tfm);
+-	aead->ivsize = alg->ivsize;
+-	aead->maxauthsize = alg->maxauthsize;
+ 	aead->authsize = alg->maxauthsize;
+ 
+ 	return 0;
+@@ -418,13 +414,8 @@ struct aead_instance *aead_geniv_alloc(struct crypto_template *tmpl,
+ 
+ 	alg = crypto_spawn_aead_alg(spawn);
+ 
+-	if (alg->base.cra_aead.encrypt) {
+-		ivsize = alg->base.cra_aead.ivsize;
+-		maxauthsize = alg->base.cra_aead.maxauthsize;
+-	} else {
+-		ivsize = alg->ivsize;
+-		maxauthsize = alg->maxauthsize;
+-	}
++	ivsize = crypto_aead_alg_ivsize(alg);
++	maxauthsize = crypto_aead_alg_maxauthsize(alg);
+ 
+ 	err = -EINVAL;
+ 	if (!ivsize)
+diff --git a/include/crypto/aead.h b/include/crypto/aead.h
+index 177e6f46e2bb..ba28c61e765f 100644
+--- a/include/crypto/aead.h
++++ b/include/crypto/aead.h
+@@ -139,9 +139,7 @@ struct crypto_aead {
+ 
+ 	struct crypto_aead *child;
+ 
+-	unsigned int ivsize;
+ 	unsigned int authsize;
+-	unsigned int maxauthsize;
+ 	unsigned int reqsize;
+ 
+ 	struct crypto_tfm base;
+@@ -187,6 +185,23 @@ static inline struct crypto_aead *crypto_aead_crt(struct crypto_aead *tfm)
+ 	return tfm;
+ }
+ 
++static inline struct old_aead_alg *crypto_old_aead_alg(struct crypto_aead *tfm)
++{
++	return &crypto_aead_tfm(tfm)->__crt_alg->cra_aead;
++}
++
++static inline struct aead_alg *crypto_aead_alg(struct crypto_aead *tfm)
++{
++	return container_of(crypto_aead_tfm(tfm)->__crt_alg,
++			    struct aead_alg, base);
++}
++
++static inline unsigned int crypto_aead_alg_ivsize(struct aead_alg *alg)
++{
++	return alg->base.cra_aead.encrypt ? alg->base.cra_aead.ivsize :
++					    alg->ivsize;
++}
++
+ /**
+  * crypto_aead_ivsize() - obtain IV size
+  * @tfm: cipher handle
+@@ -198,7 +213,7 @@ static inline struct crypto_aead *crypto_aead_crt(struct crypto_aead *tfm)
+  */
+ static inline unsigned int crypto_aead_ivsize(struct crypto_aead *tfm)
+ {
+-	return tfm->ivsize;
++	return crypto_aead_alg_ivsize(crypto_aead_alg(tfm));
+ }
+ 
+ /**
+diff --git a/include/crypto/internal/aead.h b/include/crypto/internal/aead.h
+index 08f2ca6c020e..4137330f01ab 100644
+--- a/include/crypto/internal/aead.h
++++ b/include/crypto/internal/aead.h
+@@ -30,17 +30,6 @@ struct crypto_aead_spawn {
+ extern const struct crypto_type crypto_aead_type;
+ extern const struct crypto_type crypto_nivaead_type;
+ 
+-static inline struct old_aead_alg *crypto_old_aead_alg(struct crypto_aead *tfm)
+-{
+-	return &crypto_aead_tfm(tfm)->__crt_alg->cra_aead;
+-}
+-
+-static inline struct aead_alg *crypto_aead_alg(struct crypto_aead *tfm)
+-{
+-	return container_of(crypto_aead_tfm(tfm)->__crt_alg,
+-			    struct aead_alg, base);
+-}
+-
+ static inline void *crypto_aead_ctx(struct crypto_aead *tfm)
+ {
+ 	return crypto_tfm_ctx(&tfm->base);
+@@ -145,9 +134,15 @@ static inline void crypto_aead_set_reqsize(struct crypto_aead *aead,
+ 	crypto_aead_crt(aead)->reqsize = reqsize;
+ }
+ 
++static inline unsigned int crypto_aead_alg_maxauthsize(struct aead_alg *alg)
++{
++	return alg->base.cra_aead.encrypt ? alg->base.cra_aead.maxauthsize :
++					    alg->maxauthsize;
++}
++
+ static inline unsigned int crypto_aead_maxauthsize(struct crypto_aead *aead)
+ {
+-	return aead->maxauthsize;
++	return crypto_aead_alg_maxauthsize(crypto_aead_alg(aead));
+ }
+ 
+ int crypto_register_aead(struct aead_alg *alg);

@@ -1,0 +1,58 @@
+commit 7561d27e90fa0df0aac2a1d6b49c2a28eaae7026
+Author: Brian Foster <bfoster@redhat.com>
+Date:   Tue Oct 17 14:16:29 2017 -0700
+
+    xfs: buffer lru reference count error injection tag
+    
+    XFS uses a fixed reference count for certain types of buffers in the
+    internal LRU cache. These reference counts dictate how aggressively
+    certain buffers are reclaimed vs. others. While the reference counts
+    implements priority across different buffer types, all buffers
+    (other than uncached buffers) are typically cached for at least one
+    reclaim cycle.
+    
+    We've had at least one bug recently that has been hidden by a
+    released buffer sitting around in the LRU. Users hitting the problem
+    were able to reproduce under enough memory pressure to cause
+    aggressive reclaim in a particular window of time.
+    
+    To support future xfstests cases, add an error injection tag to
+    hardcode the buffer reference count to zero. When enabled, this
+    bypasses caching of associated buffers and facilitates test cases
+    that depend on this behavior.
+    
+    Signed-off-by: Brian Foster <bfoster@redhat.com>
+    Reviewed-by: Darrick J. Wong <darrick.wong@oracle.com>
+    Signed-off-by: Darrick J. Wong <darrick.wong@oracle.com>
+
+diff --git a/fs/xfs/xfs_buf.c b/fs/xfs/xfs_buf.c
+index 2f97c12ca75e..d481dd2b29a6 100644
+--- a/fs/xfs/xfs_buf.c
++++ b/fs/xfs/xfs_buf.c
+@@ -42,6 +42,7 @@
+ #include "xfs_mount.h"
+ #include "xfs_trace.h"
+ #include "xfs_log.h"
++#include "xfs_error.h"
+ 
+ static kmem_zone_t *xfs_buf_zone;
+ 
+@@ -2129,3 +2130,18 @@ xfs_buf_terminate(void)
+ {
+ 	kmem_zone_destroy(xfs_buf_zone);
+ }
++
++void xfs_buf_set_ref(struct xfs_buf *bp, int lru_ref)
++{
++	struct xfs_mount	*mp = bp->b_target->bt_mount;
++
++	/*
++	 * Set the lru reference count to 0 based on the error injection tag.
++	 * This allows userspace to disrupt buffer caching for debug/testing
++	 * purposes.
++	 */
++	if (XFS_TEST_ERROR(false, mp, XFS_ERRTAG_BUF_LRU_REF))
++		lru_ref = 0;
++
++	atomic_set(&bp->b_lru_ref, lru_ref);
++}

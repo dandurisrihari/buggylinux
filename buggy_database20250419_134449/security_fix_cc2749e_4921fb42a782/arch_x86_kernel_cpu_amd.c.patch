@@ -1,0 +1,105 @@
+commit cc2749e4095cbbcb35518fb2db5e926b85c3f25f
+Author: Aravind Gopalakrishnan <Aravind.Gopalakrishnan@amd.com>
+Date:   Mon Jun 15 10:28:15 2015 +0200
+
+    x86/cpu/amd: Give access to the number of nodes in a physical package
+    
+    Stash the number of nodes in a physical processor package
+    locally and add an accessor to be called by interested parties.
+    The first user is the MCE injection module which uses it to find
+    the node base core in a package for injecting a certain type of
+    errors.
+    
+    Signed-off-by: Aravind Gopalakrishnan <Aravind.Gopalakrishnan@amd.com>
+    [ Rewrote the commit message, merged it with the accessor patch and unified naming. ]
+    Signed-off-by: Borislav Petkov <bp@suse.de>
+    Cc: Andrew Morton <akpm@linux-foundation.org>
+    Cc: Andy Lutomirski <luto@amacapital.net>
+    Cc: Andy Lutomirski <luto@kernel.org>
+    Cc: Borislav Petkov <bp@alien8.de>
+    Cc: Brian Gerst <brgerst@gmail.com>
+    Cc: Dave Hansen <dave.hansen@linux.intel.com>
+    Cc: Denys Vlasenko <dvlasenk@redhat.com>
+    Cc: H. Peter Anvin <hpa@zytor.com>
+    Cc: Jacob Shin <jacob.w.shin@gmail.com>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Cc: Oleg Nesterov <oleg@redhat.com>
+    Cc: Paolo Bonzini <pbonzini@redhat.com>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Cc: linux-edac <linux-edac@vger.kernel.org>
+    Cc: mchehab@osg.samsung.com
+    Link: http://lkml.kernel.org/r/1433868317-18417-2-git-send-email-Aravind.Gopalakrishnan@amd.com
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+diff --git a/arch/x86/kernel/cpu/amd.c b/arch/x86/kernel/cpu/amd.c
+index 94e7051fba1a..56cae1964a81 100644
+--- a/arch/x86/kernel/cpu/amd.c
++++ b/arch/x86/kernel/cpu/amd.c
+@@ -19,6 +19,13 @@
+ 
+ #include "cpu.h"
+ 
++/*
++ * nodes_per_socket: Stores the number of nodes per socket.
++ * Refer to Fam15h Models 00-0fh BKDG - CPUID Fn8000_001E_ECX
++ * Node Identifiers[10:8]
++ */
++static u32 nodes_per_socket = 1;
++
+ static inline int rdmsrl_amd_safe(unsigned msr, unsigned long long *p)
+ {
+ 	u32 gprs[8] = { 0 };
+@@ -291,7 +298,7 @@ static int nearby_node(int apicid)
+ #ifdef CONFIG_X86_HT
+ static void amd_get_topology(struct cpuinfo_x86 *c)
+ {
+-	u32 nodes, cores_per_cu = 1;
++	u32 cores_per_cu = 1;
+ 	u8 node_id;
+ 	int cpu = smp_processor_id();
+ 
+@@ -300,7 +307,7 @@ static void amd_get_topology(struct cpuinfo_x86 *c)
+ 		u32 eax, ebx, ecx, edx;
+ 
+ 		cpuid(0x8000001e, &eax, &ebx, &ecx, &edx);
+-		nodes = ((ecx >> 8) & 7) + 1;
++		nodes_per_socket = ((ecx >> 8) & 7) + 1;
+ 		node_id = ecx & 7;
+ 
+ 		/* get compute unit information */
+@@ -311,18 +318,18 @@ static void amd_get_topology(struct cpuinfo_x86 *c)
+ 		u64 value;
+ 
+ 		rdmsrl(MSR_FAM10H_NODE_ID, value);
+-		nodes = ((value >> 3) & 7) + 1;
++		nodes_per_socket = ((value >> 3) & 7) + 1;
+ 		node_id = value & 7;
+ 	} else
+ 		return;
+ 
+ 	/* fixup multi-node processor information */
+-	if (nodes > 1) {
++	if (nodes_per_socket > 1) {
+ 		u32 cores_per_node;
+ 		u32 cus_per_node;
+ 
+ 		set_cpu_cap(c, X86_FEATURE_AMD_DCM);
+-		cores_per_node = c->x86_max_cores / nodes;
++		cores_per_node = c->x86_max_cores / nodes_per_socket;
+ 		cus_per_node = cores_per_node / cores_per_cu;
+ 
+ 		/* store NodeID, use llc_shared_map to store sibling info */
+@@ -366,6 +373,12 @@ u16 amd_get_nb_id(int cpu)
+ }
+ EXPORT_SYMBOL_GPL(amd_get_nb_id);
+ 
++u32 amd_get_nodes_per_socket(void)
++{
++	return nodes_per_socket;
++}
++EXPORT_SYMBOL_GPL(amd_get_nodes_per_socket);
++
+ static void srat_detect_node(struct cpuinfo_x86 *c)
+ {
+ #ifdef CONFIG_NUMA

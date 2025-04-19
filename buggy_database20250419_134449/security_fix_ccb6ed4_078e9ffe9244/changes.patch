@@ -1,0 +1,254 @@
+diff --git a/drivers/net/ethernet/mscc/ocelot.c b/drivers/net/ethernet/mscc/ocelot.c
+index a26d613088ef..d38a9b498490 100644
+--- a/drivers/net/ethernet/mscc/ocelot.c
++++ b/drivers/net/ethernet/mscc/ocelot.c
+@@ -3023,6 +3023,82 @@ int ocelot_port_del_dscp_prio(struct ocelot *ocelot, int port, u8 dscp, u8 prio)
+ }
+ EXPORT_SYMBOL_GPL(ocelot_port_del_dscp_prio);
+ 
++static struct ocelot_mirror *ocelot_mirror_get(struct ocelot *ocelot, int to,
++					       struct netlink_ext_ack *extack)
++{
++	struct ocelot_mirror *m = ocelot->mirror;
++
++	if (m) {
++		if (m->to != to) {
++			NL_SET_ERR_MSG_MOD(extack,
++					   "Mirroring already configured towards different egress port");
++			return ERR_PTR(-EBUSY);
++		}
++
++		refcount_inc(&m->refcount);
++		return m;
++	}
++
++	m = kzalloc(sizeof(*m), GFP_KERNEL);
++	if (!m)
++		return ERR_PTR(-ENOMEM);
++
++	m->to = to;
++	refcount_set(&m->refcount, 1);
++	ocelot->mirror = m;
++
++	/* Program the mirror port to hardware */
++	ocelot_write(ocelot, BIT(to), ANA_MIRRORPORTS);
++
++	return m;
++}
++
++static void ocelot_mirror_put(struct ocelot *ocelot)
++{
++	struct ocelot_mirror *m = ocelot->mirror;
++
++	if (!refcount_dec_and_test(&m->refcount))
++		return;
++
++	ocelot_write(ocelot, 0, ANA_MIRRORPORTS);
++	ocelot->mirror = NULL;
++	kfree(m);
++}
++
++int ocelot_port_mirror_add(struct ocelot *ocelot, int from, int to,
++			   bool ingress, struct netlink_ext_ack *extack)
++{
++	struct ocelot_mirror *m = ocelot_mirror_get(ocelot, to, extack);
++
++	if (IS_ERR(m))
++		return PTR_ERR(m);
++
++	if (ingress) {
++		ocelot_rmw_gix(ocelot, ANA_PORT_PORT_CFG_SRC_MIRROR_ENA,
++			       ANA_PORT_PORT_CFG_SRC_MIRROR_ENA,
++			       ANA_PORT_PORT_CFG, from);
++	} else {
++		ocelot_rmw(ocelot, BIT(from), BIT(from),
++			   ANA_EMIRRORPORTS);
++	}
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(ocelot_port_mirror_add);
++
++void ocelot_port_mirror_del(struct ocelot *ocelot, int from, bool ingress)
++{
++	if (ingress) {
++		ocelot_rmw_gix(ocelot, 0, ANA_PORT_PORT_CFG_SRC_MIRROR_ENA,
++			       ANA_PORT_PORT_CFG, from);
++	} else {
++		ocelot_rmw(ocelot, 0, BIT(from), ANA_EMIRRORPORTS);
++	}
++
++	ocelot_mirror_put(ocelot);
++}
++EXPORT_SYMBOL_GPL(ocelot_port_mirror_del);
++
+ void ocelot_init_port(struct ocelot *ocelot, int port)
+ {
+ 	struct ocelot_port *ocelot_port = ocelot->ports[port];
+diff --git a/drivers/net/ethernet/mscc/ocelot.h b/drivers/net/ethernet/mscc/ocelot.h
+index f8dc0d75eb5d..d5bd525e7ec2 100644
+--- a/drivers/net/ethernet/mscc/ocelot.h
++++ b/drivers/net/ethernet/mscc/ocelot.h
+@@ -38,7 +38,8 @@
+ struct ocelot_port_tc {
+ 	bool block_shared;
+ 	unsigned long offload_cnt;
+-
++	unsigned long ingress_mirred_id;
++	unsigned long egress_mirred_id;
+ 	unsigned long police_id;
+ };
+ 
+diff --git a/drivers/net/ethernet/mscc/ocelot_net.c b/drivers/net/ethernet/mscc/ocelot_net.c
+index a95e2fbbb975..247bc105bdd2 100644
+--- a/drivers/net/ethernet/mscc/ocelot_net.c
++++ b/drivers/net/ethernet/mscc/ocelot_net.c
+@@ -20,6 +20,8 @@
+ 
+ #define OCELOT_MAC_QUIRKS	OCELOT_QUIRK_QSGMII_PORTS_MUST_BE_UP
+ 
++static bool ocelot_netdevice_dev_check(const struct net_device *dev);
++
+ static struct ocelot *devlink_port_to_ocelot(struct devlink_port *dlp)
+ {
+ 	return devlink_priv(dlp->devlink);
+@@ -257,6 +259,49 @@ static int ocelot_setup_tc_cls_matchall_police(struct ocelot_port_private *priv,
+ 	return 0;
+ }
+ 
++static int ocelot_setup_tc_cls_matchall_mirred(struct ocelot_port_private *priv,
++					       struct tc_cls_matchall_offload *f,
++					       bool ingress,
++					       struct netlink_ext_ack *extack)
++{
++	struct flow_action *action = &f->rule->action;
++	struct ocelot *ocelot = priv->port.ocelot;
++	struct ocelot_port_private *other_priv;
++	const struct flow_action_entry *a;
++	int err;
++
++	if (f->common.protocol != htons(ETH_P_ALL))
++		return -EOPNOTSUPP;
++
++	if (!flow_action_basic_hw_stats_check(action, extack))
++		return -EOPNOTSUPP;
++
++	a = &action->entries[0];
++	if (!a->dev)
++		return -EINVAL;
++
++	if (!ocelot_netdevice_dev_check(a->dev)) {
++		NL_SET_ERR_MSG_MOD(extack,
++				   "Destination not an ocelot port");
++		return -EOPNOTSUPP;
++	}
++
++	other_priv = netdev_priv(a->dev);
++
++	err = ocelot_port_mirror_add(ocelot, priv->chip_port,
++				     other_priv->chip_port, ingress, extack);
++	if (err)
++		return err;
++
++	if (ingress)
++		priv->tc.ingress_mirred_id = f->cookie;
++	else
++		priv->tc.egress_mirred_id = f->cookie;
++	priv->tc.offload_cnt++;
++
++	return 0;
++}
++
+ static int ocelot_del_tc_cls_matchall_police(struct ocelot_port_private *priv,
+ 					     struct netlink_ext_ack *extack)
+ {
+@@ -277,6 +322,24 @@ static int ocelot_del_tc_cls_matchall_police(struct ocelot_port_private *priv,
+ 	return 0;
+ }
+ 
++static int ocelot_del_tc_cls_matchall_mirred(struct ocelot_port_private *priv,
++					     bool ingress,
++					     struct netlink_ext_ack *extack)
++{
++	struct ocelot *ocelot = priv->port.ocelot;
++	int port = priv->chip_port;
++
++	ocelot_port_mirror_del(ocelot, port, ingress);
++
++	if (ingress)
++		priv->tc.ingress_mirred_id = 0;
++	else
++		priv->tc.egress_mirred_id = 0;
++	priv->tc.offload_cnt--;
++
++	return 0;
++}
++
+ static int ocelot_setup_tc_cls_matchall(struct ocelot_port_private *priv,
+ 					struct tc_cls_matchall_offload *f,
+ 					bool ingress)
+@@ -294,7 +357,7 @@ static int ocelot_setup_tc_cls_matchall(struct ocelot_port_private *priv,
+ 
+ 		if (priv->tc.block_shared) {
+ 			NL_SET_ERR_MSG_MOD(extack,
+-					   "Rate limit is not supported on shared blocks");
++					   "Matchall offloads not supported on shared blocks");
+ 			return -EOPNOTSUPP;
+ 		}
+ 
+@@ -306,6 +369,10 @@ static int ocelot_setup_tc_cls_matchall(struct ocelot_port_private *priv,
+ 								   ingress,
+ 								   extack);
+ 			break;
++		case FLOW_ACTION_MIRRED:
++			return ocelot_setup_tc_cls_matchall_mirred(priv, f,
++								   ingress,
++								   extack);
+ 		default:
+ 			NL_SET_ERR_MSG_MOD(extack, "Unsupported action");
+ 			return -EOPNOTSUPP;
+@@ -317,6 +384,10 @@ static int ocelot_setup_tc_cls_matchall(struct ocelot_port_private *priv,
+ 
+ 		if (f->cookie == priv->tc.police_id)
+ 			return ocelot_del_tc_cls_matchall_police(priv, extack);
++		else if (f->cookie == priv->tc.ingress_mirred_id ||
++			 f->cookie == priv->tc.egress_mirred_id)
++			return ocelot_del_tc_cls_matchall_mirred(priv, ingress,
++								 extack);
+ 		else
+ 			return -ENOENT;
+ 
+diff --git a/include/soc/mscc/ocelot.h b/include/soc/mscc/ocelot.h
+index 4d51e2a7120f..9b4e6c78d0f4 100644
+--- a/include/soc/mscc/ocelot.h
++++ b/include/soc/mscc/ocelot.h
+@@ -642,6 +642,11 @@ struct ocelot_lag_fdb {
+ 	struct list_head list;
+ };
+ 
++struct ocelot_mirror {
++	refcount_t refcount;
++	int to;
++};
++
+ struct ocelot_port {
+ 	struct ocelot			*ocelot;
+ 
+@@ -723,6 +728,7 @@ struct ocelot {
+ 	struct ocelot_vcap_block	block[3];
+ 	struct ocelot_vcap_policer	vcap_pol;
+ 	struct vcap_props		*vcap;
++	struct ocelot_mirror		*mirror;
+ 
+ 	struct ocelot_psfp_list		psfp;
+ 
+@@ -908,6 +914,9 @@ int ocelot_get_max_mtu(struct ocelot *ocelot, int port);
+ int ocelot_port_policer_add(struct ocelot *ocelot, int port,
+ 			    struct ocelot_policer *pol);
+ int ocelot_port_policer_del(struct ocelot *ocelot, int port);
++int ocelot_port_mirror_add(struct ocelot *ocelot, int from, int to,
++			   bool ingress, struct netlink_ext_ack *extack);
++void ocelot_port_mirror_del(struct ocelot *ocelot, int from, bool ingress);
+ int ocelot_cls_flower_replace(struct ocelot *ocelot, int port,
+ 			      struct flow_cls_offload *f, bool ingress);
+ int ocelot_cls_flower_destroy(struct ocelot *ocelot, int port,

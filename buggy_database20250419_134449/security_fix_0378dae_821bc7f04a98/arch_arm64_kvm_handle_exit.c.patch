@@ -1,0 +1,89 @@
+commit 0378daef0c6cf1c2ba525bde0b529f0d4ef5233b
+Merge: 05487215e6b9 16314874b12b
+Author: Paolo Bonzini <pbonzini@redhat.com>
+Date:   Sun Aug 9 12:58:23 2020 -0400
+
+    Merge tag 'kvmarm-5.9' of git://git.kernel.org/pub/scm/linux/kernel/git/kvmarm/kvmarm into kvm-next-5.6
+    
+    KVM/arm64 updates for Linux 5.9:
+    
+    - Split the VHE and nVHE hypervisor code bases, build the EL2 code
+      separately, allowing for the VHE code to now be built with instrumentation
+    
+    - Level-based TLB invalidation support
+    
+    - Restructure of the vcpu register storage to accomodate the NV code
+    
+    - Pointer Authentication available for guests on nVHE hosts
+    
+    - Simplification of the system register table parsing
+    
+    - MMU cleanups and fixes
+    
+    - A number of post-32bit cleanups and other fixes
+
+diff --cc arch/arm64/kvm/handle_exit.c
+index 1df3beafd73f,98ab33139982..fe6c7d79309d
+--- a/arch/arm64/kvm/handle_exit.c
++++ b/arch/arm64/kvm/handle_exit.c
+@@@ -87,9 -87,9 +87,9 @@@ static int handle_no_fpsimd(struct kvm_
+   * world-switches and schedule other host processes until there is an
+   * incoming IRQ or FIQ to the VM.
+   */
+ -static int kvm_handle_wfx(struct kvm_vcpu *vcpu, struct kvm_run *run)
+ +static int kvm_handle_wfx(struct kvm_vcpu *vcpu)
+  {
+- 	if (kvm_vcpu_get_hsr(vcpu) & ESR_ELx_WFx_ISS_WFE) {
++ 	if (kvm_vcpu_get_esr(vcpu) & ESR_ELx_WFx_ISS_WFE) {
+  		trace_kvm_wfx_arm64(*vcpu_pc(vcpu), true);
+  		vcpu->stat.wfe_exit_stat++;
+  		kvm_vcpu_on_spin(vcpu, vcpu_mode_priv(vcpu));
+@@@ -114,12 -115,11 +114,12 @@@
+   * guest and host are using the same debug facilities it will be up to
+   * userspace to re-inject the correct exception for guest delivery.
+   *
+ - * @return: 0 (while setting run->exit_reason), -1 for error
+ + * @return: 0 (while setting vcpu->run->exit_reason), -1 for error
+   */
+ -static int kvm_handle_guest_debug(struct kvm_vcpu *vcpu, struct kvm_run *run)
+ +static int kvm_handle_guest_debug(struct kvm_vcpu *vcpu)
+  {
+ +	struct kvm_run *run = vcpu->run;
+- 	u32 hsr = kvm_vcpu_get_hsr(vcpu);
++ 	u32 esr = kvm_vcpu_get_esr(vcpu);
+  	int ret = 0;
+  
+  	run->exit_reason = KVM_EXIT_DEBUG;
+@@@ -144,12 -144,12 +144,12 @@@
+  	return ret;
+  }
+  
+ -static int kvm_handle_unknown_ec(struct kvm_vcpu *vcpu, struct kvm_run *run)
+ +static int kvm_handle_unknown_ec(struct kvm_vcpu *vcpu)
+  {
+- 	u32 hsr = kvm_vcpu_get_hsr(vcpu);
++ 	u32 esr = kvm_vcpu_get_esr(vcpu);
+  
+- 	kvm_pr_unimpl("Unknown exception class: hsr: %#08x -- %s\n",
+- 		      hsr, esr_get_class_string(hsr));
++ 	kvm_pr_unimpl("Unknown exception class: esr: %#08x -- %s\n",
++ 		      esr, esr_get_class_string(esr));
+  
+  	kvm_inject_undefined(vcpu);
+  	return 1;
+@@@ -237,12 -237,11 +237,12 @@@ static int handle_trap_exceptions(struc
+   * Return > 0 to return to guest, < 0 on error, 0 (and set exit_reason) on
+   * proper exit to userspace.
+   */
+ -int handle_exit(struct kvm_vcpu *vcpu, struct kvm_run *run,
+ -		       int exception_index)
+ +int handle_exit(struct kvm_vcpu *vcpu, int exception_index)
+  {
+ +	struct kvm_run *run = vcpu->run;
+ +
+  	if (ARM_SERROR_PENDING(exception_index)) {
+- 		u8 hsr_ec = ESR_ELx_EC(kvm_vcpu_get_hsr(vcpu));
++ 		u8 esr_ec = ESR_ELx_EC(kvm_vcpu_get_esr(vcpu));
+  
+  		/*
+  		 * HVC/SMC already have an adjusted PC, which we need

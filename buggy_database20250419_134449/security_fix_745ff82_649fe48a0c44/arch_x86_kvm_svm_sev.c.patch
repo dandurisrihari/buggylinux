@@ -1,0 +1,78 @@
+commit 745ff82199b1d68585040a36f2f8c3a7987274cd
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Wed Feb 26 17:25:36 2025 -0800
+
+    KVM: SVM: Require AP's "requested" SEV_FEATURES to match KVM's view
+    
+    When handling an "AP Create" event, return an error if the "requested" SEV
+    features for the vCPU don't exactly match KVM's view of the VM-scoped
+    features.  There is no known use case for heterogeneous SEV features across
+    vCPUs, and while KVM can't actually enforce an exact match since the value
+    in RAX isn't guaranteed to match what the guest shoved into the VMSA, KVM
+    can at least avoid knowingly letting the guest run in an unsupported state.
+    
+    E.g. if a VM is created with DebugSwap disabled, KVM will intercept #DBs
+    and DRs for all vCPUs, even if an AP is "created" with DebugSwap enabled in
+    its VMSA.
+    
+    Note, the GHCB spec only "requires" that "AP use the same interrupt
+    injection mechanism as the BSP", but given the disaster that is DebugSwap
+    and SEV_FEATURES in general, it's safe to say that AMD didn't consider all
+    possible complications with mismatching features between the BSP and APs.
+    
+    Opportunistically fold the check into the relevant request flavors; the
+    "request < AP_DESTROY" check is just a bizarre way of implementing the
+    AP_CREATE_ON_INIT => AP_CREATE fallthrough.
+    
+    Fixes: e366f92ea99e ("KVM: SEV: Support SEV-SNP AP Creation NAE event")
+    Reviewed-by: Tom Lendacky <thomas.lendacky@amd.com>
+    Reviewed-by: Pankaj Gupta <pankaj.gupta@amd.com>
+    Link: https://lore.kernel.org/r/20250227012541.3234589-6-seanjc@google.com
+    Signed-off-by: Sean Christopherson <seanjc@google.com>
+
+diff --git a/arch/x86/kvm/svm/sev.c b/arch/x86/kvm/svm/sev.c
+index 2b76957209e6..8bc81a5a8159 100644
+--- a/arch/x86/kvm/svm/sev.c
++++ b/arch/x86/kvm/svm/sev.c
+@@ -3938,6 +3938,7 @@ void sev_snp_init_protected_guest_state(struct kvm_vcpu *vcpu)
+ 
+ static int sev_snp_ap_creation(struct vcpu_svm *svm)
+ {
++	struct kvm_sev_info *sev = to_kvm_sev_info(svm->vcpu.kvm);
+ 	struct kvm_vcpu *vcpu = &svm->vcpu;
+ 	struct kvm_vcpu *target_vcpu;
+ 	struct vcpu_svm *target_svm;
+@@ -3969,26 +3970,18 @@ static int sev_snp_ap_creation(struct vcpu_svm *svm)
+ 
+ 	mutex_lock(&target_svm->sev_es.snp_vmsa_mutex);
+ 
+-	/* Interrupt injection mode shouldn't change for AP creation */
+-	if (request < SVM_VMGEXIT_AP_DESTROY) {
+-		u64 sev_features;
+-
+-		sev_features = vcpu->arch.regs[VCPU_REGS_RAX];
+-		sev_features ^= to_kvm_sev_info(svm->vcpu.kvm)->vmsa_features;
+-
+-		if (sev_features & SVM_SEV_FEAT_INT_INJ_MODES) {
+-			vcpu_unimpl(vcpu, "vmgexit: invalid AP injection mode [%#lx] from guest\n",
+-				    vcpu->arch.regs[VCPU_REGS_RAX]);
+-			ret = -EINVAL;
+-			goto out;
+-		}
+-	}
+-
+ 	switch (request) {
+ 	case SVM_VMGEXIT_AP_CREATE_ON_INIT:
+ 		kick = false;
+ 		fallthrough;
+ 	case SVM_VMGEXIT_AP_CREATE:
++		if (vcpu->arch.regs[VCPU_REGS_RAX] != sev->vmsa_features) {
++			vcpu_unimpl(vcpu, "vmgexit: mismatched AP sev_features [%#lx] != [%#llx] from guest\n",
++				    vcpu->arch.regs[VCPU_REGS_RAX], sev->vmsa_features);
++			ret = -EINVAL;
++			goto out;
++		}
++
+ 		if (!page_address_valid(vcpu, svm->vmcb->control.exit_info_2)) {
+ 			vcpu_unimpl(vcpu, "vmgexit: invalid AP VMSA address [%#llx] from guest\n",
+ 				    svm->vmcb->control.exit_info_2);

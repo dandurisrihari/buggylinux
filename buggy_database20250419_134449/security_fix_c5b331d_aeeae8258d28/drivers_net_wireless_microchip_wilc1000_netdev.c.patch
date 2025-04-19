@@ -1,0 +1,45 @@
+commit c5b331d4f550fb78bf1a553b2517616a5ea913d6
+Author: Ajay Singh <ajay.kathat@microchip.com>
+Date:   Tue May 24 12:06:20 2022 +0000
+
+    wifi: wilc1000: add WPA3 SAE support
+    
+    Enable SAE authentication for AP and STA mode. In STA mode, allow the
+    driver to pass the auth frames which are received from firmware to
+    userspace application(hostapd) so that SAE authentication is offloaded to
+    userspace.
+    
+    Signed-off-by: Ajay Singh <ajay.kathat@microchip.com>
+    Signed-off-by: Kalle Valo <kvalo@kernel.org>
+    Link: https://lore.kernel.org/r/20220524120606.9675-3-ajay.kathat@microchip.com
+
+diff --git a/drivers/net/wireless/microchip/wilc1000/netdev.c b/drivers/net/wireless/microchip/wilc1000/netdev.c
+index 3c292e3464c2..fcc4e61592ee 100644
+--- a/drivers/net/wireless/microchip/wilc1000/netdev.c
++++ b/drivers/net/wireless/microchip/wilc1000/netdev.c
+@@ -835,15 +835,24 @@ void wilc_frmw_to_host(struct wilc *wilc, u8 *buff, u32 size,
+ 	}
+ }
+ 
+-void wilc_wfi_mgmt_rx(struct wilc *wilc, u8 *buff, u32 size)
++void wilc_wfi_mgmt_rx(struct wilc *wilc, u8 *buff, u32 size, bool is_auth)
+ {
+ 	int srcu_idx;
+ 	struct wilc_vif *vif;
+ 
+ 	srcu_idx = srcu_read_lock(&wilc->srcu);
+ 	list_for_each_entry_rcu(vif, &wilc->vif_list, list) {
++		struct ieee80211_mgmt *mgmt = (struct ieee80211_mgmt *)buff;
+ 		u16 type = le16_to_cpup((__le16 *)buff);
+ 		u32 type_bit = BIT(type >> 4);
++		u32 auth_bit = BIT(IEEE80211_STYPE_AUTH >> 4);
++
++		if ((vif->mgmt_reg_stypes & auth_bit &&
++		     ieee80211_is_auth(mgmt->frame_control)) &&
++		    vif->iftype == WILC_STATION_MODE && is_auth) {
++			wilc_wfi_mgmt_frame_rx(vif, buff, size);
++			break;
++		}
+ 
+ 		if (vif->priv.p2p_listen_state &&
+ 		    vif->mgmt_reg_stypes & type_bit)

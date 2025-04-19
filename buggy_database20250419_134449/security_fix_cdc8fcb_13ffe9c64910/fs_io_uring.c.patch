@@ -1,0 +1,249 @@
+commit cdc8fcb49905c0b67e355e027cb462ee168ffaa3
+Merge: 382625d0d432 fa15bafb71fd
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Mon Aug 3 13:01:22 2020 -0700
+
+    Merge tag 'for-5.9/io_uring-20200802' of git://git.kernel.dk/linux-block
+    
+    Pull io_uring updates from Jens Axboe:
+     "Lots of cleanups in here, hardening the code and/or making it easier
+      to read and fixing bugs, but a core feature/change too adding support
+      for real async buffered reads. With the latter in place, we just need
+      buffered write async support and we're done relying on kthreads for
+      the fast path. In detail:
+    
+       - Cleanup how memory accounting is done on ring setup/free (Bijan)
+    
+       - sq array offset calculation fixup (Dmitry)
+    
+       - Consistently handle blocking off O_DIRECT submission path (me)
+    
+       - Support proper async buffered reads, instead of relying on kthread
+         offload for that. This uses the page waitqueue to drive retries
+         from task_work, like we handle poll based retry. (me)
+    
+       - IO completion optimizations (me)
+    
+       - Fix race with accounting and ring fd install (me)
+    
+       - Support EPOLLEXCLUSIVE (Jiufei)
+    
+       - Get rid of the io_kiocb unionizing, made possible by shrinking
+         other bits (Pavel)
+    
+       - Completion side cleanups (Pavel)
+    
+       - Cleanup REQ_F_ flags handling, and kill off many of them (Pavel)
+    
+       - Request environment grabbing cleanups (Pavel)
+    
+       - File and socket read/write cleanups (Pavel)
+    
+       - Improve kiocb_set_rw_flags() (Pavel)
+    
+       - Tons of fixes and cleanups (Pavel)
+    
+       - IORING_SQ_NEED_WAKEUP clear fix (Xiaoguang)"
+    
+    * tag 'for-5.9/io_uring-20200802' of git://git.kernel.dk/linux-block: (127 commits)
+      io_uring: flip if handling after io_setup_async_rw
+      fs: optimise kiocb_set_rw_flags()
+      io_uring: don't touch 'ctx' after installing file descriptor
+      io_uring: get rid of atomic FAA for cq_timeouts
+      io_uring: consolidate *_check_overflow accounting
+      io_uring: fix stalled deferred requests
+      io_uring: fix racy overflow count reporting
+      io_uring: deduplicate __io_complete_rw()
+      io_uring: de-unionise io_kiocb
+      io-wq: update hash bits
+      io_uring: fix missing io_queue_linked_timeout()
+      io_uring: mark ->work uninitialised after cleanup
+      io_uring: deduplicate io_grab_files() calls
+      io_uring: don't do opcode prep twice
+      io_uring: clear IORING_SQ_NEED_WAKEUP after executing task works
+      io_uring: batch put_task_struct()
+      tasks: add put_task_struct_many()
+      io_uring: return locked and pinned page accounting
+      io_uring: don't miscount pinned memory
+      io_uring: don't open-code recv kbuf managment
+      ...
+
+diff --cc fs/io_uring.c
+index 493e5047e67c,6fd0b0f5df68..2a3af95be4ca
+--- a/fs/io_uring.c
++++ b/fs/io_uring.c
+@@@ -2593,40 -2913,122 +2913,147 @@@ static int io_setup_async_rw(struct io_
+  
+  		io_req_map_rw(req, io_size, iovec, fast_iov, iter);
+  	}
+- 	return 0;
++ 	return 0;
++ }
++ 
++ static inline int io_rw_prep_async(struct io_kiocb *req, int rw,
++ 				   bool force_nonblock)
++ {
++ 	struct io_async_ctx *io = req->io;
++ 	struct iov_iter iter;
++ 	ssize_t ret;
++ 
++ 	io->rw.iov = io->rw.fast_iov;
++ 	req->io = NULL;
++ 	ret = io_import_iovec(rw, req, &io->rw.iov, &iter, !force_nonblock);
++ 	req->io = io;
++ 	if (unlikely(ret < 0))
++ 		return ret;
++ 
++ 	io_req_map_rw(req, ret, io->rw.iov, io->rw.fast_iov, &iter);
++ 	return 0;
++ }
++ 
++ static int io_read_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe,
++ 			bool force_nonblock)
++ {
++ 	ssize_t ret;
++ 
++ 	ret = io_prep_rw(req, sqe, force_nonblock);
++ 	if (ret)
++ 		return ret;
++ 
++ 	if (unlikely(!(req->file->f_mode & FMODE_READ)))
++ 		return -EBADF;
++ 
++ 	/* either don't need iovec imported or already have it */
++ 	if (!req->io || req->flags & REQ_F_NEED_CLEANUP)
++ 		return 0;
++ 	return io_rw_prep_async(req, READ, force_nonblock);
++ }
++ 
++ static int io_async_buf_func(struct wait_queue_entry *wait, unsigned mode,
++ 			     int sync, void *arg)
++ {
++ 	struct wait_page_queue *wpq;
++ 	struct io_kiocb *req = wait->private;
++ 	struct wait_page_key *key = arg;
++ 	int ret;
++ 
++ 	wpq = container_of(wait, struct wait_page_queue, wait);
++ 
+ -	ret = wake_page_match(wpq, key);
+ -	if (ret != 1)
+ -		return ret;
+++	if (!wake_page_match(wpq, key))
+++		return 0;
+++
+++	/* Stop waking things up if the page is locked again */
+++	if (test_bit(key->bit_nr, &key->page->flags))
+++		return -1;
++ 
++ 	list_del_init(&wait->entry);
++ 
++ 	init_task_work(&req->task_work, io_req_task_submit);
++ 	/* submit ref gets dropped, acquire a new one */
++ 	refcount_inc(&req->refs);
++ 	ret = io_req_task_work_add(req, &req->task_work);
++ 	if (unlikely(ret)) {
++ 		struct task_struct *tsk;
++ 
++ 		/* queue just for cancelation */
++ 		init_task_work(&req->task_work, io_req_task_cancel);
++ 		tsk = io_wq_get_task(req->ctx->io_wq);
++ 		task_work_add(tsk, &req->task_work, 0);
++ 		wake_up_process(tsk);
++ 	}
++ 	return 1;
++ }
++ 
+++static inline int kiocb_wait_page_queue_init(struct kiocb *kiocb,
+++					     struct wait_page_queue *wait,
+++					     wait_queue_func_t func,
+++					     void *data)
+++{
+++	/* Can't support async wakeup with polled IO */
+++	if (kiocb->ki_flags & IOCB_HIPRI)
+++		return -EINVAL;
+++	if (kiocb->ki_filp->f_mode & FMODE_BUF_RASYNC) {
+++		wait->wait.func = func;
+++		wait->wait.private = data;
+++		wait->wait.flags = 0;
+++		INIT_LIST_HEAD(&wait->wait.entry);
+++		kiocb->ki_flags |= IOCB_WAITQ;
+++		kiocb->ki_waitq = wait;
+++		return 0;
+++	}
+++
+++	return -EOPNOTSUPP;
+ +}
+ +
+- static int io_read_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe,
+- 			bool force_nonblock)
+++
++ static bool io_rw_should_retry(struct io_kiocb *req)
+  {
+- 	struct io_async_ctx *io;
+- 	struct iov_iter iter;
+- 	ssize_t ret;
++ 	struct kiocb *kiocb = &req->rw.kiocb;
++ 	int ret;
+  
+- 	ret = io_prep_rw(req, sqe, force_nonblock);
+- 	if (ret)
+- 		return ret;
++ 	/* never retry for NOWAIT, we just complete with -EAGAIN */
++ 	if (req->flags & REQ_F_NOWAIT)
++ 		return false;
+  
+- 	if (unlikely(!(req->file->f_mode & FMODE_READ)))
+- 		return -EBADF;
++ 	/* already tried, or we're doing O_DIRECT */
++ 	if (kiocb->ki_flags & (IOCB_DIRECT | IOCB_WAITQ))
++ 		return false;
++ 	/*
++ 	 * just use poll if we can, and don't attempt if the fs doesn't
++ 	 * support callback based unlocks
++ 	 */
++ 	if (file_can_poll(req->file) || !(req->file->f_mode & FMODE_BUF_RASYNC))
++ 		return false;
+  
+- 	/* either don't need iovec imported or already have it */
+- 	if (!req->io || req->flags & REQ_F_NEED_CLEANUP)
+- 		return 0;
++ 	/*
++ 	 * If request type doesn't require req->io to defer in general,
++ 	 * we need to allocate it here
++ 	 */
++ 	if (!req->io && __io_alloc_async_ctx(req))
++ 		return false;
+  
+- 	io = req->io;
+- 	io->rw.iov = io->rw.fast_iov;
+- 	req->io = NULL;
+- 	ret = io_import_iovec(READ, req, &io->rw.iov, &iter, !force_nonblock);
+- 	req->io = io;
+- 	if (ret < 0)
+- 		return ret;
++ 	ret = kiocb_wait_page_queue_init(kiocb, &req->io->rw.wpq,
++ 						io_async_buf_func, req);
++ 	if (!ret) {
++ 		io_get_req_task(req);
++ 		return true;
++ 	}
+  
+- 	io_req_map_rw(req, ret, io->rw.iov, io->rw.fast_iov, &iter);
+- 	return 0;
++ 	return false;
++ }
++ 
++ static int io_iter_do_read(struct io_kiocb *req, struct iov_iter *iter)
++ {
++ 	if (req->file->f_op->read_iter)
++ 		return call_read_iter(req->file, &req->rw.kiocb, iter);
++ 	return loop_rw_iter(READ, req->file, &req->rw.kiocb, iter);
+  }
+  
+- static int io_read(struct io_kiocb *req, bool force_nonblock)
++ static int io_read(struct io_kiocb *req, bool force_nonblock,
++ 		   struct io_comp_state *cs)
+  {
+  	struct iovec inline_vecs[UIO_FASTIOV], *iovec = inline_vecs;
+  	struct kiocb *kiocb = &req->rw.kiocb;

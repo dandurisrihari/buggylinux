@@ -1,0 +1,37 @@
+commit 8680b94b0e6046af2644c17313287ec0cb5843dc
+Author: Michael S. Tsirkin <mst@redhat.com>
+Date:   Sun Jun 24 19:24:26 2012 +0300
+
+    KVM: optimize ISR lookups
+    
+    We perform ISR lookups twice: during interrupt
+    injection and on EOI. Typical workloads only have
+    a single bit set there. So we can avoid ISR scans by
+    1. counting bits as we set/clear them in ISR
+    2. on set, caching the injected vector number
+    3. on clear, invalidating the cache
+    
+    The real purpose of this is enabling PV EOI
+    which needs to quickly validate the vector.
+    But non PV guests also benefit: with this patch,
+    and without interrupt nesting, apic_find_highest_isr
+    will always return immediately without scanning ISR.
+    
+    Signed-off-by: Michael S. Tsirkin <mst@redhat.com>
+    Signed-off-by: Avi Kivity <avi@redhat.com>
+
+diff --git a/arch/x86/kvm/lapic.h b/arch/x86/kvm/lapic.h
+index d29da25ea525..5ac9e5e2fedd 100644
+--- a/arch/x86/kvm/lapic.h
++++ b/arch/x86/kvm/lapic.h
+@@ -13,6 +13,10 @@ struct kvm_lapic {
+ 	u32 divide_count;
+ 	struct kvm_vcpu *vcpu;
+ 	bool irr_pending;
++	/* Number of bits set in ISR. */
++	s16 isr_count;
++	/* The highest vector set in ISR; if -1 - invalid, must scan ISR. */
++	int highest_isr_cache;
+ 	/**
+ 	 * APIC register page.  The layout matches the register layout seen by
+ 	 * the guest 1:1, because it is accessed by the vmx microcode.

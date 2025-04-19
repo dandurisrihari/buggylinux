@@ -1,0 +1,58 @@
+commit 7f4d01f36a3ac16f539f0fd3839de5d58fa4940f
+Author: Brian Foster <bfoster@redhat.com>
+Date:   Tue Aug 8 18:21:52 2017 -0700
+
+    xfs: add log item pinning error injection tag
+    
+    Add an error injection tag to force log items in the AIL to the
+    pinned state. This option can be used by test infrastructure to
+    induce head behind tail conditions. Specifically, this is intended
+    to be used by xfstests to reproduce log recovery problems after
+    failed/corrupted log writes overwrite the last good tail LSN in the
+    log.
+    
+    When enabled, AIL push attempts see log items in the AIL in the
+    pinned state. This stalls metadata writeback and thus prevents the
+    current tail of the log from moving forward. When disabled,
+    subsequent AIL pushes observe the log items in their appropriate
+    state and filesystem operation continues as normal.
+    
+    Signed-off-by: Brian Foster <bfoster@redhat.com>
+    Reviewed-by: Darrick J. Wong <darrick.wong@oracle.com>
+    Signed-off-by: Darrick J. Wong <darrick.wong@oracle.com>
+
+diff --git a/fs/xfs/xfs_trans_ail.c b/fs/xfs/xfs_trans_ail.c
+index 70f5ab017323..354368a906e5 100644
+--- a/fs/xfs/xfs_trans_ail.c
++++ b/fs/xfs/xfs_trans_ail.c
+@@ -325,6 +325,21 @@ xfs_ail_delete(
+ 	xfs_trans_ail_cursor_clear(ailp, lip);
+ }
+ 
++static inline uint
++xfsaild_push_item(
++	struct xfs_ail		*ailp,
++	struct xfs_log_item	*lip)
++{
++	/*
++	 * If log item pinning is enabled, skip the push and track the item as
++	 * pinned. This can help induce head-behind-tail conditions.
++	 */
++	if (XFS_TEST_ERROR(false, ailp->xa_mount, XFS_ERRTAG_LOG_ITEM_PIN))
++		return XFS_ITEM_PINNED;
++
++	return lip->li_ops->iop_push(lip, &ailp->xa_buf_list);
++}
++
+ static long
+ xfsaild_push(
+ 	struct xfs_ail		*ailp)
+@@ -382,7 +397,7 @@ xfsaild_push(
+ 		 * rely on the AIL cursor implementation to be able to deal with
+ 		 * the dropped lock.
+ 		 */
+-		lock_result = lip->li_ops->iop_push(lip, &ailp->xa_buf_list);
++		lock_result = xfsaild_push_item(ailp, lip);
+ 		switch (lock_result) {
+ 		case XFS_ITEM_SUCCESS:
+ 			XFS_STATS_INC(mp, xs_push_ail_success);

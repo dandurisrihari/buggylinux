@@ -1,0 +1,53 @@
+commit 99a2775d02a7accf4cc661a65c76fd7b379d1c7a
+Author: Arik Nemtsov <arik@wizery.com>
+Date:   Wed Feb 23 00:22:25 2011 +0200
+
+    wl12xx: AP-mode - fix race condition on sta connection
+    
+    If a sta starts transmitting immediately after authentication, sometimes
+    the FW deauthenticates it. Fix this by marking the sta "in-connection"
+    in FW before sending the autentication response.
+    
+    The "in-connection" entry is automatically removed when connection
+    succeeds or after a timeout.
+    
+    Signed-off-by: Arik Nemtsov <arik@wizery.com>
+    Signed-off-by: Luciano Coelho <coelho@ti.com>
+
+diff --git a/drivers/net/wireless/wl12xx/tx.c b/drivers/net/wireless/wl12xx/tx.c
+index 94ff3faf7dde..0bb57daac889 100644
+--- a/drivers/net/wireless/wl12xx/tx.c
++++ b/drivers/net/wireless/wl12xx/tx.c
+@@ -70,6 +70,22 @@ static void wl1271_free_tx_id(struct wl1271 *wl, int id)
+ 	}
+ }
+ 
++static void wl1271_tx_ap_update_inconnection_sta(struct wl1271 *wl,
++						 struct sk_buff *skb)
++{
++	struct ieee80211_hdr *hdr;
++
++	/*
++	 * add the station to the known list before transmitting the
++	 * authentication response. this way it won't get de-authed by FW
++	 * when transmitting too soon.
++	 */
++	hdr = (struct ieee80211_hdr *)(skb->data +
++				       sizeof(struct wl1271_tx_hw_descr));
++	if (ieee80211_is_auth(hdr->frame_control))
++		wl1271_acx_set_inconnection_sta(wl, hdr->addr1);
++}
++
+ static int wl1271_tx_allocate(struct wl1271 *wl, struct sk_buff *skb, u32 extra,
+ 				u32 buf_offset)
+ {
+@@ -238,6 +254,9 @@ static int wl1271_prepare_tx_frame(struct wl1271 *wl, struct sk_buff *skb,
+ 	if (ret < 0)
+ 		return ret;
+ 
++	if (wl->bss_type == BSS_TYPE_AP_BSS)
++		wl1271_tx_ap_update_inconnection_sta(wl, skb);
++
+ 	wl1271_tx_fill_hdr(wl, skb, extra, info);
+ 
+ 	/*

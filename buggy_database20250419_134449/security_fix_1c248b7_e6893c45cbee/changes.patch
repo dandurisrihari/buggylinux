@@ -1,0 +1,4326 @@
+diff --git a/drivers/gpu/drm/Kconfig b/drivers/gpu/drm/Kconfig
+index b493663c7ba7..e405e61c27e2 100644
+--- a/drivers/gpu/drm/Kconfig
++++ b/drivers/gpu/drm/Kconfig
+@@ -158,3 +158,5 @@ config DRM_SAVAGE
+ 	help
+ 	  Choose this option if you have a Savage3D/4/SuperSavage/Pro/Twister
+ 	  chipset. If M is selected the module will be called savage.
++
++source "drivers/gpu/drm/exynos/Kconfig"
+\ No newline at end of file
+diff --git a/drivers/gpu/drm/Makefile b/drivers/gpu/drm/Makefile
+index 89cf05a72d1c..c0496f660707 100644
+--- a/drivers/gpu/drm/Makefile
++++ b/drivers/gpu/drm/Makefile
+@@ -35,4 +35,5 @@ obj-$(CONFIG_DRM_SAVAGE)+= savage/
+ obj-$(CONFIG_DRM_VMWGFX)+= vmwgfx/
+ obj-$(CONFIG_DRM_VIA)	+=via/
+ obj-$(CONFIG_DRM_NOUVEAU) +=nouveau/
++obj-$(CONFIG_DRM_EXYNOS) +=exynos/
+ obj-y			+= i2c/
+diff --git a/drivers/gpu/drm/exynos/Kconfig b/drivers/gpu/drm/exynos/Kconfig
+new file mode 100644
+index 000000000000..847466aab435
+--- /dev/null
++++ b/drivers/gpu/drm/exynos/Kconfig
+@@ -0,0 +1,20 @@
++config DRM_EXYNOS
++	tristate "DRM Support for Samsung SoC EXYNOS Series"
++	depends on DRM && PLAT_SAMSUNG
++	default	n
++	select DRM_KMS_HELPER
++	select FB_CFB_FILLRECT
++	select FB_CFB_COPYAREA
++	select FB_CFB_IMAGEBLIT
++	select VT_HW_CONSOLE_BINDING if FRAMEBUFFER_CONSOLE
++	help
++	  Choose this option if you have a Samsung SoC EXYNOS chipset.
++	  If M is selected the module will be called exynosdrm.
++
++config DRM_EXYNOS_FIMD
++	tristate "Exynos DRM FIMD"
++	depends on DRM_EXYNOS
++	default n
++	help
++	  Choose this option if you want to use Exynos FIMD for DRM.
++	  If M is selected, the module will be called exynos_drm_fimd
+diff --git a/drivers/gpu/drm/exynos/Makefile b/drivers/gpu/drm/exynos/Makefile
+new file mode 100644
+index 000000000000..0496d3ff2683
+--- /dev/null
++++ b/drivers/gpu/drm/exynos/Makefile
+@@ -0,0 +1,11 @@
++#
++# Makefile for the drm device driver.  This driver provides support for the
++# Direct Rendering Infrastructure (DRI) in XFree86 4.1.0 and higher.
++
++ccflags-y := -Iinclude/drm -Idrivers/gpu/drm/exynos
++exynosdrm-y := exynos_drm_drv.o exynos_drm_encoder.o exynos_drm_connector.o \
++		exynos_drm_crtc.o exynos_drm_fbdev.o exynos_drm_fb.o \
++		exynos_drm_buf.o exynos_drm_gem.o exynos_drm_core.o
++
++obj-$(CONFIG_DRM_EXYNOS) += exynosdrm.o
++obj-$(CONFIG_DRM_EXYNOS_FIMD) += exynos_drm_fimd.o
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_buf.c b/drivers/gpu/drm/exynos/exynos_drm_buf.c
+new file mode 100644
+index 000000000000..6f8afea94fc9
+--- /dev/null
++++ b/drivers/gpu/drm/exynos/exynos_drm_buf.c
+@@ -0,0 +1,110 @@
++/* exynos_drm_buf.c
++ *
++ * Copyright (c) 2011 Samsung Electronics Co., Ltd.
++ * Author: Inki Dae <inki.dae@samsung.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * VA LINUX SYSTEMS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
++ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
++ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ * OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#include "drmP.h"
++#include "drm.h"
++
++#include "exynos_drm_drv.h"
++#include "exynos_drm_buf.h"
++
++static DEFINE_MUTEX(exynos_drm_buf_lock);
++
++static int lowlevel_buffer_allocate(struct drm_device *dev,
++		struct exynos_drm_buf_entry *entry)
++{
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	entry->vaddr = dma_alloc_writecombine(dev->dev, entry->size,
++			(dma_addr_t *)&entry->paddr, GFP_KERNEL);
++	if (!entry->paddr) {
++		DRM_ERROR("failed to allocate buffer.\n");
++		return -ENOMEM;
++	}
++
++	DRM_DEBUG_KMS("allocated : vaddr(0x%x), paddr(0x%x), size(0x%x)\n",
++			(unsigned int)entry->vaddr, entry->paddr, entry->size);
++
++	return 0;
++}
++
++static void lowlevel_buffer_deallocate(struct drm_device *dev,
++		struct exynos_drm_buf_entry *entry)
++{
++	DRM_DEBUG_KMS("%s.\n", __FILE__);
++
++	if (entry->paddr && entry->vaddr && entry->size)
++		dma_free_writecombine(dev->dev, entry->size, entry->vaddr,
++				entry->paddr);
++	else
++		DRM_DEBUG_KMS("entry data is null.\n");
++}
++
++struct exynos_drm_buf_entry *exynos_drm_buf_create(struct drm_device *dev,
++		unsigned int size)
++{
++	struct exynos_drm_buf_entry *entry;
++
++	DRM_DEBUG_KMS("%s.\n", __FILE__);
++
++	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
++	if (!entry) {
++		DRM_ERROR("failed to allocate exynos_drm_buf_entry.\n");
++		return ERR_PTR(-ENOMEM);
++	}
++
++	entry->size = size;
++
++	/*
++	 * allocate memory region with size and set the memory information
++	 * to vaddr and paddr of a entry object.
++	 */
++	if (lowlevel_buffer_allocate(dev, entry) < 0) {
++		kfree(entry);
++		entry = NULL;
++		return ERR_PTR(-ENOMEM);
++	}
++
++	return entry;
++}
++
++void exynos_drm_buf_destroy(struct drm_device *dev,
++		struct exynos_drm_buf_entry *entry)
++{
++	DRM_DEBUG_KMS("%s.\n", __FILE__);
++
++	if (!entry) {
++		DRM_DEBUG_KMS("entry is null.\n");
++		return;
++	}
++
++	lowlevel_buffer_deallocate(dev, entry);
++
++	kfree(entry);
++	entry = NULL;
++}
++
++MODULE_AUTHOR("Inki Dae <inki.dae@samsung.com>");
++MODULE_DESCRIPTION("Samsung SoC DRM Buffer Management Module");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_buf.h b/drivers/gpu/drm/exynos/exynos_drm_buf.h
+new file mode 100644
+index 000000000000..9b1f0fb8d3a5
+--- /dev/null
++++ b/drivers/gpu/drm/exynos/exynos_drm_buf.h
+@@ -0,0 +1,50 @@
++/* exynos_drm_buf.h
++ *
++ * Copyright (c) 2011 Samsung Electronics Co., Ltd.
++ * Author: Inki Dae <inki.dae@samsung.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * VA LINUX SYSTEMS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
++ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
++ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ * OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#ifndef _EXYNOS_DRM_BUF_H_
++#define _EXYNOS_DRM_BUF_H_
++
++/*
++ * exynos drm buffer entry structure.
++ *
++ * @paddr: physical address of allocated memory.
++ * @vaddr: kernel virtual address of allocated memory.
++ * @size: size of allocated memory.
++ */
++struct exynos_drm_buf_entry {
++	dma_addr_t paddr;
++	void __iomem *vaddr;
++	unsigned int size;
++};
++
++/* allocate physical memory. */
++struct exynos_drm_buf_entry *exynos_drm_buf_create(struct drm_device *dev,
++		unsigned int size);
++
++/* remove allocated physical memory. */
++void exynos_drm_buf_destroy(struct drm_device *dev,
++		struct exynos_drm_buf_entry *entry);
++
++#endif
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_connector.c b/drivers/gpu/drm/exynos/exynos_drm_connector.c
+new file mode 100644
+index 000000000000..985d9e768728
+--- /dev/null
++++ b/drivers/gpu/drm/exynos/exynos_drm_connector.c
+@@ -0,0 +1,293 @@
++/*
++ * Copyright (c) 2011 Samsung Electronics Co., Ltd.
++ * Authors:
++ *	Inki Dae <inki.dae@samsung.com>
++ *	Joonyoung Shim <jy0922.shim@samsung.com>
++ *	Seung-Woo Kim <sw0312.kim@samsung.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * VA LINUX SYSTEMS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
++ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
++ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ * OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#include "drmP.h"
++#include "drm_crtc_helper.h"
++
++#include "exynos_drm_drv.h"
++#include "exynos_drm_encoder.h"
++
++#define MAX_EDID 256
++#define to_exynos_connector(x)	container_of(x, struct exynos_drm_connector,\
++				drm_connector)
++
++struct exynos_drm_connector {
++	struct drm_connector	drm_connector;
++};
++
++/* convert exynos_video_timings to drm_display_mode */
++static inline void
++convert_to_display_mode(struct drm_display_mode *mode,
++			struct fb_videomode *timing)
++{
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	mode->clock = timing->pixclock / 1000;
++
++	mode->hdisplay = timing->xres;
++	mode->hsync_start = mode->hdisplay + timing->left_margin;
++	mode->hsync_end = mode->hsync_start + timing->hsync_len;
++	mode->htotal = mode->hsync_end + timing->right_margin;
++
++	mode->vdisplay = timing->yres;
++	mode->vsync_start = mode->vdisplay + timing->upper_margin;
++	mode->vsync_end = mode->vsync_start + timing->vsync_len;
++	mode->vtotal = mode->vsync_end + timing->lower_margin;
++}
++
++/* convert drm_display_mode to exynos_video_timings */
++static inline void
++convert_to_video_timing(struct fb_videomode *timing,
++			struct drm_display_mode *mode)
++{
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	memset(timing, 0, sizeof(*timing));
++
++	timing->pixclock = mode->clock * 1000;
++	timing->refresh = mode->vrefresh;
++
++	timing->xres = mode->hdisplay;
++	timing->left_margin = mode->hsync_start - mode->hdisplay;
++	timing->hsync_len = mode->hsync_end - mode->hsync_start;
++	timing->right_margin = mode->htotal - mode->hsync_end;
++
++	timing->yres = mode->vdisplay;
++	timing->upper_margin = mode->vsync_start - mode->vdisplay;
++	timing->vsync_len = mode->vsync_end - mode->vsync_start;
++	timing->lower_margin = mode->vtotal - mode->vsync_end;
++
++	if (mode->flags & DRM_MODE_FLAG_INTERLACE)
++		timing->vmode = FB_VMODE_INTERLACED;
++	else
++		timing->vmode = FB_VMODE_NONINTERLACED;
++
++	if (mode->flags & DRM_MODE_FLAG_DBLSCAN)
++		timing->vmode |= FB_VMODE_DOUBLE;
++}
++
++static int exynos_drm_connector_get_modes(struct drm_connector *connector)
++{
++	struct exynos_drm_manager *manager =
++				exynos_drm_get_manager(connector->encoder);
++	struct exynos_drm_display *display = manager->display;
++	unsigned int count;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	if (!display) {
++		DRM_DEBUG_KMS("display is null.\n");
++		return 0;
++	}
++
++	/*
++	 * if get_edid() exists then get_edid() callback of hdmi side
++	 * is called to get edid data through i2c interface else
++	 * get timing from the FIMD driver(display controller).
++	 *
++	 * P.S. in case of lcd panel, count is always 1 if success
++	 * because lcd panel has only one mode.
++	 */
++	if (display->get_edid) {
++		int ret;
++		void *edid;
++
++		edid = kzalloc(MAX_EDID, GFP_KERNEL);
++		if (!edid) {
++			DRM_ERROR("failed to allocate edid\n");
++			return 0;
++		}
++
++		ret = display->get_edid(manager->dev, connector,
++						edid, MAX_EDID);
++		if (ret < 0) {
++			DRM_ERROR("failed to get edid data.\n");
++			kfree(edid);
++			edid = NULL;
++			return 0;
++		}
++
++		drm_mode_connector_update_edid_property(connector, edid);
++		count = drm_add_edid_modes(connector, edid);
++
++		kfree(connector->display_info.raw_edid);
++		connector->display_info.raw_edid = edid;
++	} else {
++		struct drm_display_mode *mode = drm_mode_create(connector->dev);
++		struct fb_videomode *timing;
++
++		if (display->get_timing)
++			timing = display->get_timing(manager->dev);
++		else {
++			drm_mode_destroy(connector->dev, mode);
++			return 0;
++		}
++
++		convert_to_display_mode(mode, timing);
++
++		mode->type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
++		drm_mode_set_name(mode);
++		drm_mode_probed_add(connector, mode);
++
++		count = 1;
++	}
++
++	return count;
++}
++
++static int exynos_drm_connector_mode_valid(struct drm_connector *connector,
++					    struct drm_display_mode *mode)
++{
++	struct exynos_drm_manager *manager =
++				exynos_drm_get_manager(connector->encoder);
++	struct exynos_drm_display *display = manager->display;
++	struct fb_videomode timing;
++	int ret = MODE_BAD;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	convert_to_video_timing(&timing, mode);
++
++	if (display && display->check_timing)
++		if (!display->check_timing(manager->dev, (void *)&timing))
++			ret = MODE_OK;
++
++	return ret;
++}
++
++struct drm_encoder *exynos_drm_best_encoder(struct drm_connector *connector)
++{
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	return connector->encoder;
++}
++
++static struct drm_connector_helper_funcs exynos_connector_helper_funcs = {
++	.get_modes	= exynos_drm_connector_get_modes,
++	.mode_valid	= exynos_drm_connector_mode_valid,
++	.best_encoder	= exynos_drm_best_encoder,
++};
++
++/* get detection status of display device. */
++static enum drm_connector_status
++exynos_drm_connector_detect(struct drm_connector *connector, bool force)
++{
++	struct exynos_drm_manager *manager =
++				exynos_drm_get_manager(connector->encoder);
++	struct exynos_drm_display *display = manager->display;
++	enum drm_connector_status status = connector_status_disconnected;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	if (display && display->is_connected) {
++		if (display->is_connected(manager->dev))
++			status = connector_status_connected;
++		else
++			status = connector_status_disconnected;
++	}
++
++	return status;
++}
++
++static void exynos_drm_connector_destroy(struct drm_connector *connector)
++{
++	struct exynos_drm_connector *exynos_connector =
++		to_exynos_connector(connector);
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	drm_sysfs_connector_remove(connector);
++	drm_connector_cleanup(connector);
++	kfree(exynos_connector);
++}
++
++static struct drm_connector_funcs exynos_connector_funcs = {
++	.dpms		= drm_helper_connector_dpms,
++	.fill_modes	= drm_helper_probe_single_connector_modes,
++	.detect		= exynos_drm_connector_detect,
++	.destroy	= exynos_drm_connector_destroy,
++};
++
++struct drm_connector *exynos_drm_connector_create(struct drm_device *dev,
++						   struct drm_encoder *encoder)
++{
++	struct exynos_drm_connector *exynos_connector;
++	struct exynos_drm_manager *manager = exynos_drm_get_manager(encoder);
++	struct drm_connector *connector;
++	int type;
++	int err;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	exynos_connector = kzalloc(sizeof(*exynos_connector), GFP_KERNEL);
++	if (!exynos_connector) {
++		DRM_ERROR("failed to allocate connector\n");
++		return NULL;
++	}
++
++	connector = &exynos_connector->drm_connector;
++
++	switch (manager->display->type) {
++	case EXYNOS_DISPLAY_TYPE_HDMI:
++		type = DRM_MODE_CONNECTOR_HDMIA;
++		break;
++	default:
++		type = DRM_MODE_CONNECTOR_Unknown;
++		break;
++	}
++
++	drm_connector_init(dev, connector, &exynos_connector_funcs, type);
++	drm_connector_helper_add(connector, &exynos_connector_helper_funcs);
++
++	err = drm_sysfs_connector_add(connector);
++	if (err)
++		goto err_connector;
++
++	connector->encoder = encoder;
++	err = drm_mode_connector_attach_encoder(connector, encoder);
++	if (err) {
++		DRM_ERROR("failed to attach a connector to a encoder\n");
++		goto err_sysfs;
++	}
++
++	DRM_DEBUG_KMS("connector has been created\n");
++
++	return connector;
++
++err_sysfs:
++	drm_sysfs_connector_remove(connector);
++err_connector:
++	drm_connector_cleanup(connector);
++	kfree(exynos_connector);
++	return NULL;
++}
++
++MODULE_AUTHOR("Inki Dae <inki.dae@samsung.com>");
++MODULE_AUTHOR("Joonyoung Shim <jy0922.shim@samsung.com>");
++MODULE_AUTHOR("Seung-Woo Kim <sw0312.kim@samsung.com>");
++MODULE_DESCRIPTION("Samsung SoC DRM Connector Driver");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_connector.h b/drivers/gpu/drm/exynos/exynos_drm_connector.h
+new file mode 100644
+index 000000000000..1c7b2b5b579c
+--- /dev/null
++++ b/drivers/gpu/drm/exynos/exynos_drm_connector.h
+@@ -0,0 +1,34 @@
++/*
++ * Copyright (c) 2011 Samsung Electronics Co., Ltd.
++ * Authors:
++ *	Inki Dae <inki.dae@samsung.com>
++ *	Joonyoung Shim <jy0922.shim@samsung.com>
++ *	Seung-Woo Kim <sw0312.kim@samsung.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * VA LINUX SYSTEMS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
++ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
++ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ * OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#ifndef _EXYNOS_DRM_CONNECTOR_H_
++#define _EXYNOS_DRM_CONNECTOR_H_
++
++struct drm_connector *exynos_drm_connector_create(struct drm_device *dev,
++						   struct drm_encoder *encoder);
++
++#endif
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_core.c b/drivers/gpu/drm/exynos/exynos_drm_core.c
+new file mode 100644
+index 000000000000..edb0ee13cffc
+--- /dev/null
++++ b/drivers/gpu/drm/exynos/exynos_drm_core.c
+@@ -0,0 +1,272 @@
++/* exynos_drm_core.c
++ *
++ * Copyright (c) 2011 Samsung Electronics Co., Ltd.
++ * Author:
++ *	Inki Dae <inki.dae@samsung.com>
++ *	Joonyoung Shim <jy0922.shim@samsung.com>
++ *	Seung-Woo Kim <sw0312.kim@samsung.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * VA LINUX SYSTEMS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
++ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
++ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ * OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#include "drmP.h"
++#include "exynos_drm_drv.h"
++#include "exynos_drm_encoder.h"
++#include "exynos_drm_connector.h"
++#include "exynos_drm_fbdev.h"
++
++static DEFINE_MUTEX(exynos_drm_mutex);
++static LIST_HEAD(exynos_drm_subdrv_list);
++static struct drm_device *drm_dev;
++
++static int exynos_drm_subdrv_probe(struct drm_device *dev,
++					struct exynos_drm_subdrv *subdrv)
++{
++	struct drm_encoder *encoder;
++	struct drm_connector *connector;
++
++	DRM_DEBUG_DRIVER("%s\n", __FILE__);
++
++	if (subdrv->probe) {
++		int ret;
++
++		/*
++		 * this probe callback would be called by sub driver
++		 * after setting of all resources to this sub driver,
++		 * such as clock, irq and register map are done or by load()
++		 * of exynos drm driver.
++		 *
++		 * P.S. note that this driver is considered for modularization.
++		 */
++		ret = subdrv->probe(dev);
++		if (ret)
++			return ret;
++	}
++
++	/* create and initialize a encoder for this sub driver. */
++	encoder = exynos_drm_encoder_create(dev, &subdrv->manager,
++			(1 << MAX_CRTC) - 1);
++	if (!encoder) {
++		DRM_ERROR("failed to create encoder\n");
++		return -EFAULT;
++	}
++
++	/*
++	 * create and initialize a connector for this sub driver and
++	 * attach the encoder created above to the connector.
++	 */
++	connector = exynos_drm_connector_create(dev, encoder);
++	if (!connector) {
++		DRM_ERROR("failed to create connector\n");
++		encoder->funcs->destroy(encoder);
++		return -EFAULT;
++	}
++
++	subdrv->encoder = encoder;
++	subdrv->connector = connector;
++
++	return 0;
++}
++
++static void exynos_drm_subdrv_remove(struct drm_device *dev,
++				      struct exynos_drm_subdrv *subdrv)
++{
++	DRM_DEBUG_DRIVER("%s\n", __FILE__);
++
++	if (subdrv->remove)
++		subdrv->remove(dev);
++
++	if (subdrv->encoder) {
++		struct drm_encoder *encoder = subdrv->encoder;
++		encoder->funcs->destroy(encoder);
++		subdrv->encoder = NULL;
++	}
++
++	if (subdrv->connector) {
++		struct drm_connector *connector = subdrv->connector;
++		connector->funcs->destroy(connector);
++		subdrv->connector = NULL;
++	}
++}
++
++int exynos_drm_device_register(struct drm_device *dev)
++{
++	struct exynos_drm_subdrv *subdrv, *n;
++	int err;
++
++	DRM_DEBUG_DRIVER("%s\n", __FILE__);
++
++	if (!dev)
++		return -EINVAL;
++
++	if (drm_dev) {
++		DRM_ERROR("Already drm device were registered\n");
++		return -EBUSY;
++	}
++
++	mutex_lock(&exynos_drm_mutex);
++	list_for_each_entry_safe(subdrv, n, &exynos_drm_subdrv_list, list) {
++		err = exynos_drm_subdrv_probe(dev, subdrv);
++		if (err) {
++			DRM_DEBUG("exynos drm subdrv probe failed.\n");
++			list_del(&subdrv->list);
++		}
++	}
++
++	drm_dev = dev;
++	mutex_unlock(&exynos_drm_mutex);
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(exynos_drm_device_register);
++
++int exynos_drm_device_unregister(struct drm_device *dev)
++{
++	struct exynos_drm_subdrv *subdrv;
++
++	DRM_DEBUG_DRIVER("%s\n", __FILE__);
++
++	if (!dev || dev != drm_dev) {
++		WARN(1, "Unexpected drm device unregister!\n");
++		return -EINVAL;
++	}
++
++	mutex_lock(&exynos_drm_mutex);
++	list_for_each_entry(subdrv, &exynos_drm_subdrv_list, list)
++		exynos_drm_subdrv_remove(dev, subdrv);
++
++	drm_dev = NULL;
++	mutex_unlock(&exynos_drm_mutex);
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(exynos_drm_device_unregister);
++
++static int exynos_drm_mode_group_reinit(struct drm_device *dev)
++{
++	struct drm_mode_group *group = &dev->primary->mode_group;
++	uint32_t *id_list = group->id_list;
++	int ret;
++
++	DRM_DEBUG_DRIVER("%s\n", __FILE__);
++
++	ret = drm_mode_group_init_legacy_group(dev, group);
++	if (ret < 0)
++		return ret;
++
++	kfree(id_list);
++	return 0;
++}
++
++int exynos_drm_subdrv_register(struct exynos_drm_subdrv *subdrv)
++{
++	int err;
++
++	DRM_DEBUG_DRIVER("%s\n", __FILE__);
++
++	if (!subdrv)
++		return -EINVAL;
++
++	mutex_lock(&exynos_drm_mutex);
++	if (drm_dev) {
++		err = exynos_drm_subdrv_probe(drm_dev, subdrv);
++		if (err) {
++			DRM_ERROR("failed to probe exynos drm subdrv\n");
++			mutex_unlock(&exynos_drm_mutex);
++			return err;
++		}
++
++		/*
++		 * if any specific driver such as fimd or hdmi driver called
++		 * exynos_drm_subdrv_register() later than drm_load(),
++		 * the fb helper should be re-initialized and re-configured.
++		 */
++		err = exynos_drm_fbdev_reinit(drm_dev);
++		if (err) {
++			DRM_ERROR("failed to reinitialize exynos drm fbdev\n");
++			exynos_drm_subdrv_remove(drm_dev, subdrv);
++			mutex_unlock(&exynos_drm_mutex);
++			return err;
++		}
++
++		err = exynos_drm_mode_group_reinit(drm_dev);
++		if (err) {
++			DRM_ERROR("failed to reinitialize mode group\n");
++			exynos_drm_fbdev_fini(drm_dev);
++			exynos_drm_subdrv_remove(drm_dev, subdrv);
++			mutex_unlock(&exynos_drm_mutex);
++			return err;
++		}
++	}
++
++	subdrv->drm_dev = drm_dev;
++
++	list_add_tail(&subdrv->list, &exynos_drm_subdrv_list);
++	mutex_unlock(&exynos_drm_mutex);
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(exynos_drm_subdrv_register);
++
++int exynos_drm_subdrv_unregister(struct exynos_drm_subdrv *subdrv)
++{
++	int ret = -EFAULT;
++
++	DRM_DEBUG_DRIVER("%s\n", __FILE__);
++
++	if (!subdrv) {
++		DRM_DEBUG("Unexpected exynos drm subdrv unregister!\n");
++		return ret;
++	}
++
++	mutex_lock(&exynos_drm_mutex);
++	if (drm_dev) {
++		exynos_drm_subdrv_remove(drm_dev, subdrv);
++		list_del(&subdrv->list);
++
++		/*
++		 * fb helper should be updated once a sub driver is released
++		 * to re-configure crtc and connector and also to re-setup
++		 * drm framebuffer.
++		 */
++		ret = exynos_drm_fbdev_reinit(drm_dev);
++		if (ret < 0) {
++			DRM_ERROR("failed fb helper reinit.\n");
++			goto fail;
++		}
++
++		ret = exynos_drm_mode_group_reinit(drm_dev);
++		if (ret < 0) {
++			DRM_ERROR("failed drm mode group reinit.\n");
++			goto fail;
++		}
++	}
++
++fail:
++	mutex_unlock(&exynos_drm_mutex);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(exynos_drm_subdrv_unregister);
++
++MODULE_AUTHOR("Inki Dae <inki.dae@samsung.com>");
++MODULE_AUTHOR("Joonyoung Shim <jy0922.shim@samsung.com>");
++MODULE_AUTHOR("Seung-Woo Kim <sw0312.kim@samsung.com>");
++MODULE_DESCRIPTION("Samsung SoC DRM Core Driver");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_crtc.c b/drivers/gpu/drm/exynos/exynos_drm_crtc.c
+new file mode 100644
+index 000000000000..683ceb0f5277
+--- /dev/null
++++ b/drivers/gpu/drm/exynos/exynos_drm_crtc.c
+@@ -0,0 +1,344 @@
++/* exynos_drm_crtc.c
++ *
++ * Copyright (c) 2011 Samsung Electronics Co., Ltd.
++ * Authors:
++ *	Inki Dae <inki.dae@samsung.com>
++ *	Joonyoung Shim <jy0922.shim@samsung.com>
++ *	Seung-Woo Kim <sw0312.kim@samsung.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * VA LINUX SYSTEMS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
++ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
++ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ * OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#include "drmP.h"
++#include "drm_crtc_helper.h"
++
++#include "exynos_drm_drv.h"
++#include "exynos_drm_fb.h"
++#include "exynos_drm_encoder.h"
++
++#define to_exynos_crtc(x)	container_of(x, struct exynos_drm_crtc,\
++				drm_crtc)
++
++/*
++ * @fb_x: horizontal position from framebuffer base
++ * @fb_y: vertical position from framebuffer base
++ * @base_x: horizontal position from screen base
++ * @base_y: vertical position from screen base
++ * @crtc_w: width of crtc
++ * @crtc_h: height of crtc
++ */
++struct exynos_drm_crtc_pos {
++	unsigned int fb_x;
++	unsigned int fb_y;
++	unsigned int base_x;
++	unsigned int base_y;
++	unsigned int crtc_w;
++	unsigned int crtc_h;
++};
++
++/*
++ * Exynos specific crtc structure.
++ *
++ * @drm_crtc: crtc object.
++ * @overlay: contain information common to display controller and hdmi and
++ *	contents of this overlay object would be copied to sub driver size.
++ * @pipe: a crtc index created at load() with a new crtc object creation
++ *	and the crtc object would be set to private->crtc array
++ *	to get a crtc object corresponding to this pipe from private->crtc
++ *	array when irq interrupt occured. the reason of using this pipe is that
++ *	drm framework doesn't support multiple irq yet.
++ *	we can refer to the crtc to current hardware interrupt occured through
++ *	this pipe value.
++ */
++struct exynos_drm_crtc {
++	struct drm_crtc			drm_crtc;
++	struct exynos_drm_overlay	overlay;
++	unsigned int			pipe;
++};
++
++void exynos_drm_crtc_apply(struct drm_crtc *crtc)
++{
++	struct exynos_drm_crtc *exynos_crtc = to_exynos_crtc(crtc);
++	struct exynos_drm_overlay *overlay = &exynos_crtc->overlay;
++
++	exynos_drm_fn_encoder(crtc, overlay,
++			exynos_drm_encoder_crtc_mode_set);
++	exynos_drm_fn_encoder(crtc, NULL, exynos_drm_encoder_crtc_commit);
++}
++
++static void exynos_drm_overlay_update(struct exynos_drm_overlay *overlay,
++				       struct drm_framebuffer *fb,
++				       struct drm_display_mode *mode,
++				       struct exynos_drm_crtc_pos *pos)
++{
++	struct exynos_drm_buffer_info buffer_info;
++	unsigned int actual_w = pos->crtc_w;
++	unsigned int actual_h = pos->crtc_h;
++	unsigned int hw_w;
++	unsigned int hw_h;
++
++	/* update buffer address of framebuffer. */
++	exynos_drm_fb_update_buf_off(fb, pos->fb_x, pos->fb_y, &buffer_info);
++	overlay->paddr = buffer_info.paddr;
++	overlay->vaddr = buffer_info.vaddr;
++
++	hw_w = mode->hdisplay - pos->base_x;
++	hw_h = mode->vdisplay - pos->base_y;
++
++	if (actual_w > hw_w)
++		actual_w = hw_w;
++	if (actual_h > hw_h)
++		actual_h = hw_h;
++
++	overlay->offset_x = pos->base_x;
++	overlay->offset_y = pos->base_y;
++	overlay->width = actual_w;
++	overlay->height = actual_h;
++	overlay->bpp = fb->bits_per_pixel;
++
++	DRM_DEBUG_KMS("overlay : offset_x/y(%d,%d), width/height(%d,%d)",
++			overlay->offset_x, overlay->offset_y,
++			overlay->width, overlay->height);
++
++	overlay->buf_offsize = fb->width - actual_w;
++	overlay->line_size = actual_w;
++}
++
++static int exynos_drm_crtc_update(struct drm_crtc *crtc)
++{
++	struct exynos_drm_crtc *exynos_crtc;
++	struct exynos_drm_overlay *overlay;
++	struct exynos_drm_crtc_pos pos;
++	struct drm_display_mode *mode = &crtc->mode;
++	struct drm_framebuffer *fb = crtc->fb;
++
++	if (!mode || !fb)
++		return -EINVAL;
++
++	exynos_crtc = to_exynos_crtc(crtc);
++	overlay = &exynos_crtc->overlay;
++
++	memset(&pos, 0, sizeof(struct exynos_drm_crtc_pos));
++	pos.fb_x = crtc->x;
++	pos.fb_y = crtc->y;
++	pos.crtc_w = fb->width - crtc->x;
++	pos.crtc_h = fb->height - crtc->y;
++
++	exynos_drm_overlay_update(overlay, crtc->fb, mode, &pos);
++
++	return 0;
++}
++
++static void exynos_drm_crtc_dpms(struct drm_crtc *crtc, int mode)
++{
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	/* TODO */
++}
++
++static void exynos_drm_crtc_prepare(struct drm_crtc *crtc)
++{
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	/* drm framework doesn't check NULL. */
++}
++
++static void exynos_drm_crtc_commit(struct drm_crtc *crtc)
++{
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	/* drm framework doesn't check NULL. */
++}
++
++static bool
++exynos_drm_crtc_mode_fixup(struct drm_crtc *crtc,
++			    struct drm_display_mode *mode,
++			    struct drm_display_mode *adjusted_mode)
++{
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	/* drm framework doesn't check NULL */
++	return true;
++}
++
++static int
++exynos_drm_crtc_mode_set(struct drm_crtc *crtc, struct drm_display_mode *mode,
++			  struct drm_display_mode *adjusted_mode, int x, int y,
++			  struct drm_framebuffer *old_fb)
++{
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	mode = adjusted_mode;
++
++	return exynos_drm_crtc_update(crtc);
++}
++
++static int exynos_drm_crtc_mode_set_base(struct drm_crtc *crtc, int x, int y,
++					  struct drm_framebuffer *old_fb)
++{
++	int ret;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	ret = exynos_drm_crtc_update(crtc);
++	if (ret)
++		return ret;
++
++	exynos_drm_crtc_apply(crtc);
++
++	return ret;
++}
++
++static void exynos_drm_crtc_load_lut(struct drm_crtc *crtc)
++{
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++	/* drm framework doesn't check NULL */
++}
++
++static struct drm_crtc_helper_funcs exynos_crtc_helper_funcs = {
++	.dpms		= exynos_drm_crtc_dpms,
++	.prepare	= exynos_drm_crtc_prepare,
++	.commit		= exynos_drm_crtc_commit,
++	.mode_fixup	= exynos_drm_crtc_mode_fixup,
++	.mode_set	= exynos_drm_crtc_mode_set,
++	.mode_set_base	= exynos_drm_crtc_mode_set_base,
++	.load_lut	= exynos_drm_crtc_load_lut,
++};
++
++static int exynos_drm_crtc_page_flip(struct drm_crtc *crtc,
++				      struct drm_framebuffer *fb,
++				      struct drm_pending_vblank_event *event)
++{
++	struct drm_device *dev = crtc->dev;
++	struct exynos_drm_private *dev_priv = dev->dev_private;
++	struct exynos_drm_crtc *exynos_crtc = to_exynos_crtc(crtc);
++	struct drm_framebuffer *old_fb = crtc->fb;
++	int ret = -EINVAL;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	mutex_lock(&dev->struct_mutex);
++
++	if (event && !dev_priv->pageflip_event) {
++		list_add_tail(&event->base.link,
++				&dev_priv->pageflip_event_list);
++
++		ret = drm_vblank_get(dev, exynos_crtc->pipe);
++		if (ret) {
++			DRM_DEBUG("failed to acquire vblank counter\n");
++			goto out;
++		}
++
++		crtc->fb = fb;
++		ret = exynos_drm_crtc_update(crtc);
++		if (ret) {
++			crtc->fb = old_fb;
++			drm_vblank_put(dev, exynos_crtc->pipe);
++			dev_priv->pageflip_event = false;
++
++			goto out;
++		}
++
++		dev_priv->pageflip_event = true;
++	}
++out:
++	mutex_unlock(&dev->struct_mutex);
++	return ret;
++}
++
++static void exynos_drm_crtc_destroy(struct drm_crtc *crtc)
++{
++	struct exynos_drm_crtc *exynos_crtc = to_exynos_crtc(crtc);
++	struct exynos_drm_private *private = crtc->dev->dev_private;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	private->crtc[exynos_crtc->pipe] = NULL;
++
++	drm_crtc_cleanup(crtc);
++	kfree(exynos_crtc);
++}
++
++static struct drm_crtc_funcs exynos_crtc_funcs = {
++	.set_config	= drm_crtc_helper_set_config,
++	.page_flip	= exynos_drm_crtc_page_flip,
++	.destroy	= exynos_drm_crtc_destroy,
++};
++
++struct exynos_drm_overlay *get_exynos_drm_overlay(struct drm_device *dev,
++		struct drm_crtc *crtc)
++{
++	struct exynos_drm_crtc *exynos_crtc = to_exynos_crtc(crtc);
++
++	return &exynos_crtc->overlay;
++}
++
++int exynos_drm_crtc_create(struct drm_device *dev, unsigned int nr)
++{
++	struct exynos_drm_crtc *exynos_crtc;
++	struct exynos_drm_private *private = dev->dev_private;
++	struct drm_crtc *crtc;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	exynos_crtc = kzalloc(sizeof(*exynos_crtc), GFP_KERNEL);
++	if (!exynos_crtc) {
++		DRM_ERROR("failed to allocate exynos crtc\n");
++		return -ENOMEM;
++	}
++
++	exynos_crtc->pipe = nr;
++	crtc = &exynos_crtc->drm_crtc;
++
++	private->crtc[nr] = crtc;
++
++	drm_crtc_init(dev, crtc, &exynos_crtc_funcs);
++	drm_crtc_helper_add(crtc, &exynos_crtc_helper_funcs);
++
++	return 0;
++}
++
++int exynos_drm_crtc_enable_vblank(struct drm_device *dev, int crtc)
++{
++	struct exynos_drm_private *private = dev->dev_private;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	exynos_drm_fn_encoder(private->crtc[crtc], &crtc,
++			exynos_drm_enable_vblank);
++
++	return 0;
++}
++
++void exynos_drm_crtc_disable_vblank(struct drm_device *dev, int crtc)
++{
++	struct exynos_drm_private *private = dev->dev_private;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	exynos_drm_fn_encoder(private->crtc[crtc], &crtc,
++			exynos_drm_disable_vblank);
++}
++
++MODULE_AUTHOR("Inki Dae <inki.dae@samsung.com>");
++MODULE_AUTHOR("Joonyoung Shim <jy0922.shim@samsung.com>");
++MODULE_AUTHOR("Seung-Woo Kim <sw0312.kim@samsung.com>");
++MODULE_DESCRIPTION("Samsung SoC DRM CRTC Driver");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_crtc.h b/drivers/gpu/drm/exynos/exynos_drm_crtc.h
+new file mode 100644
+index 000000000000..452b62b23853
+--- /dev/null
++++ b/drivers/gpu/drm/exynos/exynos_drm_crtc.h
+@@ -0,0 +1,39 @@
++/* exynos_drm_crtc.h
++ *
++ * Copyright (c) 2011 Samsung Electronics Co., Ltd.
++ * Authors:
++ *	Inki Dae <inki.dae@samsung.com>
++ *	Joonyoung Shim <jy0922.shim@samsung.com>
++ *	Seung-Woo Kim <sw0312.kim@samsung.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * VA LINUX SYSTEMS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
++ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
++ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ * OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#ifndef _EXYNOS_DRM_CRTC_H_
++#define _EXYNOS_DRM_CRTC_H_
++
++struct exynos_drm_overlay *get_exynos_drm_overlay(struct drm_device *dev,
++		struct drm_crtc *crtc);
++void exynos_drm_crtc_apply(struct drm_crtc *crtc);
++int exynos_drm_crtc_create(struct drm_device *dev, unsigned int nr);
++int exynos_drm_crtc_enable_vblank(struct drm_device *dev, int crtc);
++void exynos_drm_crtc_disable_vblank(struct drm_device *dev, int crtc);
++
++#endif
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_drv.c b/drivers/gpu/drm/exynos/exynos_drm_drv.c
+new file mode 100644
+index 000000000000..a190348ed9bd
+--- /dev/null
++++ b/drivers/gpu/drm/exynos/exynos_drm_drv.c
+@@ -0,0 +1,230 @@
++/*
++ * Copyright (c) 2011 Samsung Electronics Co., Ltd.
++ * Authors:
++ *	Inki Dae <inki.dae@samsung.com>
++ *	Joonyoung Shim <jy0922.shim@samsung.com>
++ *	Seung-Woo Kim <sw0312.kim@samsung.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * VA LINUX SYSTEMS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
++ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
++ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ * OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#include "drmP.h"
++#include "drm.h"
++
++#include <drm/exynos_drm.h>
++
++#include "exynos_drm_drv.h"
++#include "exynos_drm_crtc.h"
++#include "exynos_drm_fbdev.h"
++#include "exynos_drm_fb.h"
++#include "exynos_drm_gem.h"
++
++#define DRIVER_NAME	"exynos-drm"
++#define DRIVER_DESC	"Samsung SoC DRM"
++#define DRIVER_DATE	"20110530"
++#define DRIVER_MAJOR	1
++#define DRIVER_MINOR	0
++
++static int exynos_drm_load(struct drm_device *dev, unsigned long flags)
++{
++	struct exynos_drm_private *private;
++	int ret;
++	int nr;
++
++	DRM_DEBUG_DRIVER("%s\n", __FILE__);
++
++	private = kzalloc(sizeof(struct exynos_drm_private), GFP_KERNEL);
++	if (!private) {
++		DRM_ERROR("failed to allocate private\n");
++		return -ENOMEM;
++	}
++
++	INIT_LIST_HEAD(&private->pageflip_event_list);
++	dev->dev_private = (void *)private;
++
++	drm_mode_config_init(dev);
++
++	exynos_drm_mode_config_init(dev);
++
++	/*
++	 * EXYNOS4 is enough to have two CRTCs and each crtc would be used
++	 * without dependency of hardware.
++	 */
++	for (nr = 0; nr < MAX_CRTC; nr++) {
++		ret = exynos_drm_crtc_create(dev, nr);
++		if (ret)
++			goto err_crtc;
++	}
++
++	ret = drm_vblank_init(dev, MAX_CRTC);
++	if (ret)
++		goto err_crtc;
++
++	/*
++	 * probe sub drivers such as display controller and hdmi driver,
++	 * that were registered at probe() of platform driver
++	 * to the sub driver and create encoder and connector for them.
++	 */
++	ret = exynos_drm_device_register(dev);
++	if (ret)
++		goto err_vblank;
++
++	/*
++	 * create and configure fb helper and also exynos specific
++	 * fbdev object.
++	 */
++	ret = exynos_drm_fbdev_init(dev);
++	if (ret) {
++		DRM_ERROR("failed to initialize drm fbdev\n");
++		goto err_drm_device;
++	}
++
++	return 0;
++
++err_drm_device:
++	exynos_drm_device_unregister(dev);
++err_vblank:
++	drm_vblank_cleanup(dev);
++err_crtc:
++	drm_mode_config_cleanup(dev);
++	kfree(private);
++
++	return ret;
++}
++
++static int exynos_drm_unload(struct drm_device *dev)
++{
++	DRM_DEBUG_DRIVER("%s\n", __FILE__);
++
++	exynos_drm_fbdev_fini(dev);
++	exynos_drm_device_unregister(dev);
++	drm_vblank_cleanup(dev);
++	drm_mode_config_cleanup(dev);
++	kfree(dev->dev_private);
++
++	dev->dev_private = NULL;
++
++	return 0;
++}
++
++static void exynos_drm_lastclose(struct drm_device *dev)
++{
++	DRM_DEBUG_DRIVER("%s\n", __FILE__);
++
++	exynos_drm_fbdev_restore_mode(dev);
++}
++
++static struct vm_operations_struct exynos_drm_gem_vm_ops = {
++	.fault = exynos_drm_gem_fault,
++	.open = drm_gem_vm_open,
++	.close = drm_gem_vm_close,
++};
++
++static struct drm_ioctl_desc exynos_ioctls[] = {
++	DRM_IOCTL_DEF_DRV(EXYNOS_GEM_CREATE, exynos_drm_gem_create_ioctl,
++			DRM_UNLOCKED | DRM_AUTH),
++	DRM_IOCTL_DEF_DRV(EXYNOS_GEM_MAP_OFFSET,
++			exynos_drm_gem_map_offset_ioctl, DRM_UNLOCKED |
++			DRM_AUTH),
++	DRM_IOCTL_DEF_DRV(EXYNOS_GEM_MMAP,
++			exynos_drm_gem_mmap_ioctl, DRM_UNLOCKED | DRM_AUTH),
++};
++
++static struct drm_driver exynos_drm_driver = {
++	.driver_features	= DRIVER_HAVE_IRQ | DRIVER_BUS_PLATFORM |
++				  DRIVER_MODESET | DRIVER_GEM,
++	.load			= exynos_drm_load,
++	.unload			= exynos_drm_unload,
++	.lastclose		= exynos_drm_lastclose,
++	.get_vblank_counter	= drm_vblank_count,
++	.enable_vblank		= exynos_drm_crtc_enable_vblank,
++	.disable_vblank		= exynos_drm_crtc_disable_vblank,
++	.gem_init_object	= exynos_drm_gem_init_object,
++	.gem_free_object	= exynos_drm_gem_free_object,
++	.gem_vm_ops		= &exynos_drm_gem_vm_ops,
++	.dumb_create		= exynos_drm_gem_dumb_create,
++	.dumb_map_offset	= exynos_drm_gem_dumb_map_offset,
++	.dumb_destroy		= exynos_drm_gem_dumb_destroy,
++	.ioctls			= exynos_ioctls,
++	.fops = {
++		.owner		= THIS_MODULE,
++		.open		= drm_open,
++		.mmap		= exynos_drm_gem_mmap,
++		.poll		= drm_poll,
++		.read		= drm_read,
++		.unlocked_ioctl	= drm_ioctl,
++		.release	= drm_release,
++	},
++	.name	= DRIVER_NAME,
++	.desc	= DRIVER_DESC,
++	.date	= DRIVER_DATE,
++	.major	= DRIVER_MAJOR,
++	.minor	= DRIVER_MINOR,
++};
++
++static int exynos_drm_platform_probe(struct platform_device *pdev)
++{
++	DRM_DEBUG_DRIVER("%s\n", __FILE__);
++
++	exynos_drm_driver.num_ioctls = DRM_ARRAY_SIZE(exynos_ioctls);
++
++	return drm_platform_init(&exynos_drm_driver, pdev);
++}
++
++static int exynos_drm_platform_remove(struct platform_device *pdev)
++{
++	DRM_DEBUG_DRIVER("%s\n", __FILE__);
++
++	drm_platform_exit(&exynos_drm_driver, pdev);
++
++	return 0;
++}
++
++static struct platform_driver exynos_drm_platform_driver = {
++	.probe		= exynos_drm_platform_probe,
++	.remove		= __devexit_p(exynos_drm_platform_remove),
++	.driver		= {
++		.owner	= THIS_MODULE,
++		.name	= DRIVER_NAME,
++	},
++};
++
++static int __init exynos_drm_init(void)
++{
++	DRM_DEBUG_DRIVER("%s\n", __FILE__);
++
++	return platform_driver_register(&exynos_drm_platform_driver);
++}
++
++static void __exit exynos_drm_exit(void)
++{
++	DRM_DEBUG_DRIVER("%s\n", __FILE__);
++
++	platform_driver_unregister(&exynos_drm_platform_driver);
++}
++
++module_init(exynos_drm_init);
++module_exit(exynos_drm_exit);
++
++MODULE_AUTHOR("Inki Dae <inki.dae@samsung.com>");
++MODULE_AUTHOR("Joonyoung Shim <jy0922.shim@samsung.com>");
++MODULE_AUTHOR("Seung-Woo Kim <sw0312.kim@samsung.com>");
++MODULE_DESCRIPTION("Samsung SoC DRM Driver");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_drv.h b/drivers/gpu/drm/exynos/exynos_drm_drv.h
+new file mode 100644
+index 000000000000..832b6508adbd
+--- /dev/null
++++ b/drivers/gpu/drm/exynos/exynos_drm_drv.h
+@@ -0,0 +1,242 @@
++/* exynos_drm_drv.h
++ *
++ * Copyright (c) 2011 Samsung Electronics Co., Ltd.
++ * Authors:
++ *	Inki Dae <inki.dae@samsung.com>
++ *	Joonyoung Shim <jy0922.shim@samsung.com>
++ *	Seung-Woo Kim <sw0312.kim@samsung.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * VA LINUX SYSTEMS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
++ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
++ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ * OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#ifndef _EXYNOS_DRM_DRV_H_
++#define _EXYNOS_DRM_DRV_H_
++
++#include "drm.h"
++
++#define MAX_CRTC	2
++
++struct drm_device;
++struct exynos_drm_overlay;
++struct drm_connector;
++
++/* this enumerates display type. */
++enum exynos_drm_output_type {
++	EXYNOS_DISPLAY_TYPE_NONE,
++	/* RGB or CPU Interface. */
++	EXYNOS_DISPLAY_TYPE_LCD,
++	/* HDMI Interface. */
++	EXYNOS_DISPLAY_TYPE_HDMI,
++};
++
++/*
++ * Exynos drm overlay ops structure.
++ *
++ * @mode_set: copy drm overlay info to hw specific overlay info.
++ * @commit: apply hardware specific overlay data to registers.
++ * @disable: disable hardware specific overlay.
++ */
++struct exynos_drm_overlay_ops {
++	void (*mode_set)(struct device *subdrv_dev,
++			 struct exynos_drm_overlay *overlay);
++	void (*commit)(struct device *subdrv_dev);
++	void (*disable)(struct device *subdrv_dev);
++};
++
++/*
++ * Exynos drm common overlay structure.
++ *
++ * @offset_x: offset to x position.
++ * @offset_y: offset to y position.
++ * @width: window width.
++ * @height: window height.
++ * @bpp: pixel size.(in bit)
++ * @paddr: bus(accessed by dma) physical memory address to this overlay
++ *		and this is physically continuous.
++ * @vaddr: virtual memory addresss to this overlay.
++ * @buf_off: start offset of framebuffer to be displayed.
++ * @buf_offsize: this value has result from
++ *			(framebuffer width - display width) * bpp.
++ * @line_size: line size to this overlay memory in bytes.
++ * @default_win: a window to be enabled.
++ * @color_key: color key on or off.
++ * @index_color: if using color key feature then this value would be used
++ *			as index color.
++ * @local_path: in case of lcd type, local path mode on or off.
++ * @transparency: transparency on or off.
++ * @activated: activated or not.
++ *
++ * this structure is common to exynos SoC and its contents would be copied
++ * to hardware specific overlay info.
++ */
++struct exynos_drm_overlay {
++	unsigned int offset_x;
++	unsigned int offset_y;
++	unsigned int width;
++	unsigned int height;
++	unsigned int bpp;
++	dma_addr_t paddr;
++	void __iomem *vaddr;
++	unsigned int buf_off;
++	unsigned int buf_offsize;
++	unsigned int line_size;
++
++	bool default_win;
++	bool color_key;
++	unsigned int index_color;
++	bool local_path;
++	bool transparency;
++	bool activated;
++};
++
++/*
++ * Exynos DRM Display Structure.
++ *	- this structure is common to analog tv, digital tv and lcd panel.
++ *
++ * @type: one of exynos_DISPLAY_TYPE_LCD and HDMI.
++ * @is_connected: check for that display is connected or not.
++ * @get_edid: get edid modes from display driver.
++ * @get_timing: get timing object from display driver.
++ * @check_timing: check if timing is valid or not.
++ * @power_on: display device on or off.
++ */
++struct exynos_drm_display {
++	enum exynos_drm_output_type type;
++	bool (*is_connected)(struct device *dev);
++	int (*get_edid)(struct device *dev, struct drm_connector *connector,
++				u8 *edid, int len);
++	void *(*get_timing)(struct device *dev);
++	int (*check_timing)(struct device *dev, void *timing);
++	int (*power_on)(struct device *dev, int mode);
++};
++
++/*
++ * Exynos drm manager ops
++ *
++ * @mode_set: convert drm_display_mode to hw specific display mode and
++ *	      would be called by encoder->mode_set().
++ * @commit: set current hw specific display mode to hw.
++ * @enable_vblank: specific driver callback for enabling vblank interrupt.
++ * @disable_vblank: specific driver callback for disabling vblank interrupt.
++ */
++struct exynos_drm_manager_ops {
++	void (*mode_set)(struct device *subdrv_dev, void *mode);
++	void (*commit)(struct device *subdrv_dev);
++	int (*enable_vblank)(struct device *subdrv_dev);
++	void (*disable_vblank)(struct device *subdrv_dev);
++};
++
++/*
++ * Exynos drm common manager structure.
++ *
++ * @dev: pointer to device object for subdrv device driver.
++ *	sub drivers such as display controller or hdmi driver,
++ *	have their own device object.
++ * @ops: pointer to callbacks for exynos drm specific framebuffer.
++ *	these callbacks should be set by specific drivers such fimd
++ *	or hdmi driver and are used to control hardware global registers.
++ * @overlay_ops: pointer to callbacks for exynos drm specific framebuffer.
++ *	these callbacks should be set by specific drivers such fimd
++ *	or hdmi driver and are used to control hardware overlay reigsters.
++ * @display: pointer to callbacks for exynos drm specific framebuffer.
++ *	these callbacks should be set by specific drivers such fimd
++ *	or hdmi driver and are used to control display devices such as
++ *	analog tv, digital tv and lcd panel and also get timing data for them.
++ */
++struct exynos_drm_manager {
++	struct device *dev;
++	int pipe;
++	struct exynos_drm_manager_ops *ops;
++	struct exynos_drm_overlay_ops *overlay_ops;
++	struct exynos_drm_display *display;
++};
++
++/*
++ * Exynos drm private structure.
++ */
++struct exynos_drm_private {
++	struct drm_fb_helper *fb_helper;
++
++	/* for pageflip */
++	struct list_head pageflip_event_list;
++	bool pageflip_event;
++
++	/*
++	 * created crtc object would be contained at this array and
++	 * this array is used to be aware of which crtc did it request vblank.
++	 */
++	struct drm_crtc *crtc[MAX_CRTC];
++};
++
++/*
++ * Exynos drm sub driver structure.
++ *
++ * @list: sub driver has its own list object to register to exynos drm driver.
++ * @drm_dev: pointer to drm_device and this pointer would be set
++ *	when sub driver calls exynos_drm_subdrv_register().
++ * @probe: this callback would be called by exynos drm driver after
++ *	subdrv is registered to it.
++ * @remove: this callback is used to release resources created
++ *	by probe callback.
++ * @manager: subdrv has its own manager to control a hardware appropriately
++ *	and we can access a hardware drawing on this manager.
++ * @encoder: encoder object owned by this sub driver.
++ * @connector: connector object owned by this sub driver.
++ */
++struct exynos_drm_subdrv {
++	struct list_head list;
++	struct drm_device *drm_dev;
++
++	int (*probe)(struct drm_device *dev);
++	void (*remove)(struct drm_device *dev);
++
++	struct exynos_drm_manager manager;
++	struct drm_encoder *encoder;
++	struct drm_connector *connector;
++};
++
++/*
++ * this function calls a probe callback registered to sub driver list and
++ * create its own encoder and connector and then set drm_device object
++ * to global one.
++ */
++int exynos_drm_device_register(struct drm_device *dev);
++/*
++ * this function calls a remove callback registered to sub driver list and
++ * destroy its own encoder and connetor.
++ */
++int exynos_drm_device_unregister(struct drm_device *dev);
++
++/*
++ * this function would be called by sub drivers such as display controller
++ * or hdmi driver to register this sub driver object to exynos drm driver
++ * and when a sub driver is registered to exynos drm driver a probe callback
++ * of the sub driver is called and creates its own encoder and connector
++ * and then fb helper and drm mode group would be re-initialized.
++ */
++int exynos_drm_subdrv_register(struct exynos_drm_subdrv *drm_subdrv);
++
++/*
++ * this function removes subdrv list from exynos drm driver and fb helper
++ * and drm mode group would be re-initialized.
++ */
++int exynos_drm_subdrv_unregister(struct exynos_drm_subdrv *drm_subdrv);
++
++#endif
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_encoder.c b/drivers/gpu/drm/exynos/exynos_drm_encoder.c
+new file mode 100644
+index 000000000000..7cf6fa86a67e
+--- /dev/null
++++ b/drivers/gpu/drm/exynos/exynos_drm_encoder.c
+@@ -0,0 +1,271 @@
++/* exynos_drm_encoder.c
++ *
++ * Copyright (c) 2011 Samsung Electronics Co., Ltd.
++ * Authors:
++ *	Inki Dae <inki.dae@samsung.com>
++ *	Joonyoung Shim <jy0922.shim@samsung.com>
++ *	Seung-Woo Kim <sw0312.kim@samsung.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * VA LINUX SYSTEMS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
++ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
++ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ * OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#include "drmP.h"
++#include "drm_crtc_helper.h"
++
++#include "exynos_drm_drv.h"
++#include "exynos_drm_crtc.h"
++#include "exynos_drm_encoder.h"
++
++#define to_exynos_encoder(x)	container_of(x, struct exynos_drm_encoder,\
++				drm_encoder)
++
++/*
++ * exynos specific encoder structure.
++ *
++ * @drm_encoder: encoder object.
++ * @manager: specific encoder has its own manager to control a hardware
++ *	appropriately and we can access a hardware drawing on this manager.
++ */
++struct exynos_drm_encoder {
++	struct drm_encoder		drm_encoder;
++	struct exynos_drm_manager	*manager;
++};
++
++static void exynos_drm_encoder_dpms(struct drm_encoder *encoder, int mode)
++{
++	struct drm_device *dev = encoder->dev;
++	struct drm_connector *connector;
++	struct exynos_drm_manager *manager = exynos_drm_get_manager(encoder);
++
++	DRM_DEBUG_KMS("%s, encoder dpms: %d\n", __FILE__, mode);
++
++	list_for_each_entry(connector, &dev->mode_config.connector_list, head) {
++		if (connector->encoder == encoder) {
++			struct exynos_drm_display *display = manager->display;
++
++			if (display && display->power_on)
++				display->power_on(manager->dev, mode);
++		}
++	}
++}
++
++static bool
++exynos_drm_encoder_mode_fixup(struct drm_encoder *encoder,
++			       struct drm_display_mode *mode,
++			       struct drm_display_mode *adjusted_mode)
++{
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	/* drm framework doesn't check NULL. */
++
++	return true;
++}
++
++static void exynos_drm_encoder_mode_set(struct drm_encoder *encoder,
++					 struct drm_display_mode *mode,
++					 struct drm_display_mode *adjusted_mode)
++{
++	struct drm_device *dev = encoder->dev;
++	struct drm_connector *connector;
++	struct exynos_drm_manager *manager = exynos_drm_get_manager(encoder);
++	struct exynos_drm_manager_ops *manager_ops = manager->ops;
++	struct exynos_drm_overlay_ops *overlay_ops = manager->overlay_ops;
++	struct exynos_drm_overlay *overlay = get_exynos_drm_overlay(dev,
++						encoder->crtc);
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	mode = adjusted_mode;
++
++	list_for_each_entry(connector, &dev->mode_config.connector_list, head) {
++		if (connector->encoder == encoder) {
++			if (manager_ops && manager_ops->mode_set)
++				manager_ops->mode_set(manager->dev, mode);
++
++			if (overlay_ops && overlay_ops->mode_set)
++				overlay_ops->mode_set(manager->dev, overlay);
++		}
++	}
++}
++
++static void exynos_drm_encoder_prepare(struct drm_encoder *encoder)
++{
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	/* drm framework doesn't check NULL. */
++}
++
++static void exynos_drm_encoder_commit(struct drm_encoder *encoder)
++{
++	struct exynos_drm_manager *manager = exynos_drm_get_manager(encoder);
++	struct exynos_drm_manager_ops *manager_ops = manager->ops;
++	struct exynos_drm_overlay_ops *overlay_ops = manager->overlay_ops;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	if (manager_ops && manager_ops->commit)
++		manager_ops->commit(manager->dev);
++
++	if (overlay_ops && overlay_ops->commit)
++		overlay_ops->commit(manager->dev);
++}
++
++static struct drm_crtc *
++exynos_drm_encoder_get_crtc(struct drm_encoder *encoder)
++{
++	return encoder->crtc;
++}
++
++static struct drm_encoder_helper_funcs exynos_encoder_helper_funcs = {
++	.dpms		= exynos_drm_encoder_dpms,
++	.mode_fixup	= exynos_drm_encoder_mode_fixup,
++	.mode_set	= exynos_drm_encoder_mode_set,
++	.prepare	= exynos_drm_encoder_prepare,
++	.commit		= exynos_drm_encoder_commit,
++	.get_crtc	= exynos_drm_encoder_get_crtc,
++};
++
++static void exynos_drm_encoder_destroy(struct drm_encoder *encoder)
++{
++	struct exynos_drm_encoder *exynos_encoder =
++		to_exynos_encoder(encoder);
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	exynos_encoder->manager->pipe = -1;
++
++	drm_encoder_cleanup(encoder);
++	encoder->dev->mode_config.num_encoder--;
++	kfree(exynos_encoder);
++}
++
++static struct drm_encoder_funcs exynos_encoder_funcs = {
++	.destroy = exynos_drm_encoder_destroy,
++};
++
++struct drm_encoder *
++exynos_drm_encoder_create(struct drm_device *dev,
++			   struct exynos_drm_manager *manager,
++			   unsigned int possible_crtcs)
++{
++	struct drm_encoder *encoder;
++	struct exynos_drm_encoder *exynos_encoder;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	if (!manager || !possible_crtcs)
++		return NULL;
++
++	if (!manager->dev)
++		return NULL;
++
++	exynos_encoder = kzalloc(sizeof(*exynos_encoder), GFP_KERNEL);
++	if (!exynos_encoder) {
++		DRM_ERROR("failed to allocate encoder\n");
++		return NULL;
++	}
++
++	exynos_encoder->manager = manager;
++	encoder = &exynos_encoder->drm_encoder;
++	encoder->possible_crtcs = possible_crtcs;
++
++	DRM_DEBUG_KMS("possible_crtcs = 0x%x\n", encoder->possible_crtcs);
++
++	drm_encoder_init(dev, encoder, &exynos_encoder_funcs,
++			DRM_MODE_ENCODER_TMDS);
++
++	drm_encoder_helper_add(encoder, &exynos_encoder_helper_funcs);
++
++	DRM_DEBUG_KMS("encoder has been created\n");
++
++	return encoder;
++}
++
++struct exynos_drm_manager *exynos_drm_get_manager(struct drm_encoder *encoder)
++{
++	return to_exynos_encoder(encoder)->manager;
++}
++
++void exynos_drm_fn_encoder(struct drm_crtc *crtc, void *data,
++			    void (*fn)(struct drm_encoder *, void *))
++{
++	struct drm_device *dev = crtc->dev;
++	struct drm_encoder *encoder;
++
++	list_for_each_entry(encoder, &dev->mode_config.encoder_list, head) {
++		if (encoder->crtc != crtc)
++			continue;
++
++		fn(encoder, data);
++	}
++}
++
++void exynos_drm_enable_vblank(struct drm_encoder *encoder, void *data)
++{
++	struct exynos_drm_manager *manager =
++		to_exynos_encoder(encoder)->manager;
++	struct exynos_drm_manager_ops *manager_ops = manager->ops;
++	int crtc = *(int *)data;
++
++	if (manager->pipe == -1)
++		manager->pipe = crtc;
++
++	if (manager_ops->enable_vblank)
++		manager_ops->enable_vblank(manager->dev);
++}
++
++void exynos_drm_disable_vblank(struct drm_encoder *encoder, void *data)
++{
++	struct exynos_drm_manager *manager =
++		to_exynos_encoder(encoder)->manager;
++	struct exynos_drm_manager_ops *manager_ops = manager->ops;
++	int crtc = *(int *)data;
++
++	if (manager->pipe == -1)
++		manager->pipe = crtc;
++
++	if (manager_ops->disable_vblank)
++		manager_ops->disable_vblank(manager->dev);
++}
++
++void exynos_drm_encoder_crtc_commit(struct drm_encoder *encoder, void *data)
++{
++	struct exynos_drm_manager *manager =
++		to_exynos_encoder(encoder)->manager;
++	struct exynos_drm_overlay_ops *overlay_ops = manager->overlay_ops;
++
++	overlay_ops->commit(manager->dev);
++}
++
++void exynos_drm_encoder_crtc_mode_set(struct drm_encoder *encoder, void *data)
++{
++	struct exynos_drm_manager *manager =
++		to_exynos_encoder(encoder)->manager;
++	struct exynos_drm_overlay_ops *overlay_ops = manager->overlay_ops;
++	struct exynos_drm_overlay *overlay = data;
++
++	overlay_ops->mode_set(manager->dev, overlay);
++}
++
++MODULE_AUTHOR("Inki Dae <inki.dae@samsung.com>");
++MODULE_AUTHOR("Joonyoung Shim <jy0922.shim@samsung.com>");
++MODULE_AUTHOR("Seung-Woo Kim <sw0312.kim@samsung.com>");
++MODULE_DESCRIPTION("Samsung SoC DRM Encoder Driver");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_encoder.h b/drivers/gpu/drm/exynos/exynos_drm_encoder.h
+new file mode 100644
+index 000000000000..5ecd645d06a9
+--- /dev/null
++++ b/drivers/gpu/drm/exynos/exynos_drm_encoder.h
+@@ -0,0 +1,45 @@
++/*
++ * Copyright (c) 2011 Samsung Electronics Co., Ltd.
++ * Authors:
++ *	Inki Dae <inki.dae@samsung.com>
++ *	Joonyoung Shim <jy0922.shim@samsung.com>
++ *	Seung-Woo Kim <sw0312.kim@samsung.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * VA LINUX SYSTEMS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
++ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
++ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ * OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#ifndef _EXYNOS_DRM_ENCODER_H_
++#define _EXYNOS_DRM_ENCODER_H_
++
++struct exynos_drm_manager;
++
++struct drm_encoder *exynos_drm_encoder_create(struct drm_device *dev,
++					       struct exynos_drm_manager *mgr,
++					       unsigned int possible_crtcs);
++struct exynos_drm_manager *
++exynos_drm_get_manager(struct drm_encoder *encoder);
++void exynos_drm_fn_encoder(struct drm_crtc *crtc, void *data,
++			    void (*fn)(struct drm_encoder *, void *));
++void exynos_drm_enable_vblank(struct drm_encoder *encoder, void *data);
++void exynos_drm_disable_vblank(struct drm_encoder *encoder, void *data);
++void exynos_drm_encoder_crtc_commit(struct drm_encoder *encoder, void *data);
++void exynos_drm_encoder_crtc_mode_set(struct drm_encoder *encoder, void *data);
++
++#endif
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_fb.c b/drivers/gpu/drm/exynos/exynos_drm_fb.c
+new file mode 100644
+index 000000000000..4505d90d657a
+--- /dev/null
++++ b/drivers/gpu/drm/exynos/exynos_drm_fb.c
+@@ -0,0 +1,271 @@
++/* exynos_drm_fb.c
++ *
++ * Copyright (c) 2011 Samsung Electronics Co., Ltd.
++ * Authors:
++ *	Inki Dae <inki.dae@samsung.com>
++ *	Joonyoung Shim <jy0922.shim@samsung.com>
++ *	Seung-Woo Kim <sw0312.kim@samsung.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * VA LINUX SYSTEMS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
++ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
++ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ * OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#include "drmP.h"
++#include "drm_crtc.h"
++#include "drm_crtc_helper.h"
++
++#include "exynos_drm_fb.h"
++#include "exynos_drm_buf.h"
++#include "exynos_drm_gem.h"
++
++#define to_exynos_fb(x)	container_of(x, struct exynos_drm_fb, fb)
++
++/*
++ * exynos specific framebuffer structure.
++ *
++ * @fb: drm framebuffer obejct.
++ * @exynos_gem_obj: exynos specific gem object containing a gem object.
++ * @entry: pointer to exynos drm buffer entry object.
++ *	- containing only the information to physically continuous memory
++ *	region allocated at default framebuffer creation.
++ */
++struct exynos_drm_fb {
++	struct drm_framebuffer		fb;
++	struct exynos_drm_gem_obj	*exynos_gem_obj;
++	struct exynos_drm_buf_entry	*entry;
++};
++
++static void exynos_drm_fb_destroy(struct drm_framebuffer *fb)
++{
++	struct exynos_drm_fb *exynos_fb = to_exynos_fb(fb);
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	drm_framebuffer_cleanup(fb);
++
++	/*
++	 * default framebuffer has no gem object so
++	 * a buffer of the default framebuffer should be released at here.
++	 */
++	if (!exynos_fb->exynos_gem_obj && exynos_fb->entry)
++		exynos_drm_buf_destroy(fb->dev, exynos_fb->entry);
++
++	kfree(exynos_fb);
++	exynos_fb = NULL;
++}
++
++static int exynos_drm_fb_create_handle(struct drm_framebuffer *fb,
++					struct drm_file *file_priv,
++					unsigned int *handle)
++{
++	struct exynos_drm_fb *exynos_fb = to_exynos_fb(fb);
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	return drm_gem_handle_create(file_priv,
++			&exynos_fb->exynos_gem_obj->base, handle);
++}
++
++static int exynos_drm_fb_dirty(struct drm_framebuffer *fb,
++				struct drm_file *file_priv, unsigned flags,
++				unsigned color, struct drm_clip_rect *clips,
++				unsigned num_clips)
++{
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	/* TODO */
++
++	return 0;
++}
++
++static struct drm_framebuffer_funcs exynos_drm_fb_funcs = {
++	.destroy	= exynos_drm_fb_destroy,
++	.create_handle	= exynos_drm_fb_create_handle,
++	.dirty		= exynos_drm_fb_dirty,
++};
++
++static struct drm_framebuffer *
++exynos_drm_fb_init(struct drm_file *file_priv, struct drm_device *dev,
++		    struct drm_mode_fb_cmd *mode_cmd)
++{
++	struct exynos_drm_fb *exynos_fb;
++	struct drm_framebuffer *fb;
++	struct exynos_drm_gem_obj *exynos_gem_obj = NULL;
++	struct drm_gem_object *obj;
++	unsigned int size;
++	int ret;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	mode_cmd->pitch = max(mode_cmd->pitch,
++			mode_cmd->width * (mode_cmd->bpp >> 3));
++
++	DRM_LOG_KMS("drm fb create(%dx%d)\n",
++			mode_cmd->width, mode_cmd->height);
++
++	exynos_fb = kzalloc(sizeof(*exynos_fb), GFP_KERNEL);
++	if (!exynos_fb) {
++		DRM_ERROR("failed to allocate exynos drm framebuffer.\n");
++		return ERR_PTR(-ENOMEM);
++	}
++
++	fb = &exynos_fb->fb;
++	ret = drm_framebuffer_init(dev, fb, &exynos_drm_fb_funcs);
++	if (ret) {
++		DRM_ERROR("failed to initialize framebuffer.\n");
++		goto err_init;
++	}
++
++	DRM_LOG_KMS("create: fb id: %d\n", fb->base.id);
++
++	size = mode_cmd->pitch * mode_cmd->height;
++
++	/*
++	 * mode_cmd->handle could be NULL at booting time or
++	 * with user request. if NULL, a new buffer or a gem object
++	 * would be allocated.
++	 */
++	if (!mode_cmd->handle) {
++		if (!file_priv) {
++			struct exynos_drm_buf_entry *entry;
++
++			/*
++			 * in case that file_priv is NULL, it allocates
++			 * only buffer and this buffer would be used
++			 * for default framebuffer.
++			 */
++			entry = exynos_drm_buf_create(dev, size);
++			if (IS_ERR(entry)) {
++				ret = PTR_ERR(entry);
++				goto err_buffer;
++			}
++
++			exynos_fb->entry = entry;
++
++			DRM_LOG_KMS("default fb: paddr = 0x%lx, size = 0x%x\n",
++					(unsigned long)entry->paddr, size);
++
++			goto out;
++		} else {
++			exynos_gem_obj = exynos_drm_gem_create(file_priv, dev,
++							size,
++							&mode_cmd->handle);
++			if (IS_ERR(exynos_gem_obj)) {
++				ret = PTR_ERR(exynos_gem_obj);
++				goto err_buffer;
++			}
++		}
++	} else {
++		obj = drm_gem_object_lookup(dev, file_priv, mode_cmd->handle);
++		if (!obj) {
++			DRM_ERROR("failed to lookup gem object.\n");
++			goto err_buffer;
++		}
++
++		exynos_gem_obj = to_exynos_gem_obj(obj);
++
++		drm_gem_object_unreference_unlocked(obj);
++	}
++
++	/*
++	 * if got a exynos_gem_obj from either a handle or
++	 * a new creation then exynos_fb->exynos_gem_obj is NULL
++	 * so that default framebuffer has no its own gem object,
++	 * only its own buffer object.
++	 */
++	exynos_fb->entry = exynos_gem_obj->entry;
++
++	DRM_LOG_KMS("paddr = 0x%lx, size = 0x%x, gem object = 0x%x\n",
++			(unsigned long)exynos_fb->entry->paddr, size,
++			(unsigned int)&exynos_gem_obj->base);
++
++out:
++	exynos_fb->exynos_gem_obj = exynos_gem_obj;
++
++	drm_helper_mode_fill_fb_struct(fb, mode_cmd);
++
++	return fb;
++
++err_buffer:
++	drm_framebuffer_cleanup(fb);
++
++err_init:
++	kfree(exynos_fb);
++
++	return ERR_PTR(ret);
++}
++
++struct drm_framebuffer *exynos_drm_fb_create(struct drm_device *dev,
++					      struct drm_file *file_priv,
++					      struct drm_mode_fb_cmd *mode_cmd)
++{
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	return exynos_drm_fb_init(file_priv, dev, mode_cmd);
++}
++
++void exynos_drm_fb_update_buf_off(struct drm_framebuffer *fb,
++				   unsigned int x, unsigned int y,
++				   struct exynos_drm_buffer_info *info)
++{
++	struct exynos_drm_fb *exynos_fb = to_exynos_fb(fb);
++	struct exynos_drm_buf_entry *entry;
++	unsigned long offset;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	offset = x * (fb->bits_per_pixel >> 3);
++	offset += y * fb->pitch;
++
++	entry = exynos_fb->entry;
++
++	info->base_addr = entry->paddr;
++	info->vaddr = entry->vaddr + offset;
++	info->paddr = entry->paddr + offset;
++
++	DRM_DEBUG_KMS("updated vaddr = 0x%lx, paddr = 0x%lx, offset = 0x%x\n",
++			(unsigned long)info->vaddr, (unsigned long)info->paddr,
++			(unsigned int)offset);
++}
++
++static struct drm_mode_config_funcs exynos_drm_mode_config_funcs = {
++	.fb_create = exynos_drm_fb_create,
++};
++
++void exynos_drm_mode_config_init(struct drm_device *dev)
++{
++	dev->mode_config.min_width = 0;
++	dev->mode_config.min_height = 0;
++
++	/*
++	 * set max width and height as default value(4096x4096).
++	 * this value would be used to check framebuffer size limitation
++	 * at drm_mode_addfb().
++	 */
++	dev->mode_config.max_width = 4096;
++	dev->mode_config.max_height = 4096;
++
++	dev->mode_config.funcs = &exynos_drm_mode_config_funcs;
++}
++
++MODULE_AUTHOR("Inki Dae <inki.dae@samsung.com>");
++MODULE_AUTHOR("Joonyoung Shim <jy0922.shim@samsung.com>");
++MODULE_AUTHOR("Seung-Woo Kim <sw0312.kim@samsung.com>");
++MODULE_DESCRIPTION("Samsung SoC DRM FB Driver");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_fb.h b/drivers/gpu/drm/exynos/exynos_drm_fb.h
+new file mode 100644
+index 000000000000..eaa478abb6d1
+--- /dev/null
++++ b/drivers/gpu/drm/exynos/exynos_drm_fb.h
+@@ -0,0 +1,47 @@
++/*
++ * Copyright (c) 2011 Samsung Electronics Co., Ltd.
++ * Authors:
++ *	Inki Dae <inki.dae@samsung.com>
++ *	Joonyoung Shim <jy0922.shim@samsung.com>
++ *	Seung-Woo Kim <sw0312.kim@samsung.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * VA LINUX SYSTEMS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
++ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
++ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ * OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#ifndef _EXYNOS_DRM_FB_H_
++#define _EXYNOS_DRM_FB_H
++
++struct exynos_drm_buffer_info {
++	unsigned long base_addr;
++	dma_addr_t paddr;
++	void __iomem *vaddr;
++};
++
++void exynos_drm_fb_update_buf_off(struct drm_framebuffer *fb,
++				   unsigned int x, unsigned int y,
++				   struct exynos_drm_buffer_info *info);
++
++struct drm_framebuffer *exynos_drm_fb_create(struct drm_device *dev,
++					      struct drm_file *filp,
++					      struct drm_mode_fb_cmd *mode_cmd);
++
++void exynos_drm_mode_config_init(struct drm_device *dev);
++
++#endif
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_fbdev.c b/drivers/gpu/drm/exynos/exynos_drm_fbdev.c
+new file mode 100644
+index 000000000000..ac43bfc9e1f0
+--- /dev/null
++++ b/drivers/gpu/drm/exynos/exynos_drm_fbdev.c
+@@ -0,0 +1,441 @@
++/* exynos_drm_fbdev.c
++ *
++ * Copyright (c) 2011 Samsung Electronics Co., Ltd.
++ * Authors:
++ *	Inki Dae <inki.dae@samsung.com>
++ *	Joonyoung Shim <jy0922.shim@samsung.com>
++ *	Seung-Woo Kim <sw0312.kim@samsung.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * VA LINUX SYSTEMS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
++ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
++ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ * OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#include "drmP.h"
++#include "drm_crtc.h"
++#include "drm_fb_helper.h"
++#include "drm_crtc_helper.h"
++
++#include "exynos_drm_drv.h"
++#include "exynos_drm_fb.h"
++
++#define MAX_CONNECTOR		4
++#define PREFERRED_BPP		32
++
++#define to_exynos_fbdev(x)	container_of(x, struct exynos_drm_fbdev,\
++				drm_fb_helper)
++
++struct exynos_drm_fbdev {
++	struct drm_fb_helper	drm_fb_helper;
++	struct drm_framebuffer	*fb;
++};
++
++static int exynos_drm_fbdev_set_par(struct fb_info *info)
++{
++	struct fb_var_screeninfo *var = &info->var;
++
++	switch (var->bits_per_pixel) {
++	case 32:
++	case 24:
++	case 18:
++	case 16:
++	case 12:
++		info->fix.visual = FB_VISUAL_TRUECOLOR;
++		break;
++	case 1:
++		info->fix.visual = FB_VISUAL_MONO01;
++		break;
++	default:
++		info->fix.visual = FB_VISUAL_PSEUDOCOLOR;
++		break;
++	}
++
++	info->fix.line_length = (var->xres_virtual * var->bits_per_pixel) / 8;
++
++	return drm_fb_helper_set_par(info);
++}
++
++
++static struct fb_ops exynos_drm_fb_ops = {
++	.owner		= THIS_MODULE,
++	.fb_fillrect	= cfb_fillrect,
++	.fb_copyarea	= cfb_copyarea,
++	.fb_imageblit	= cfb_imageblit,
++	.fb_check_var	= drm_fb_helper_check_var,
++	.fb_set_par	= exynos_drm_fbdev_set_par,
++	.fb_blank	= drm_fb_helper_blank,
++	.fb_pan_display	= drm_fb_helper_pan_display,
++	.fb_setcmap	= drm_fb_helper_setcmap,
++};
++
++static void exynos_drm_fbdev_update(struct drm_fb_helper *helper,
++				     struct drm_framebuffer *fb,
++				     unsigned int fb_width,
++				     unsigned int fb_height)
++{
++	struct fb_info *fbi = helper->fbdev;
++	struct drm_device *dev = helper->dev;
++	struct exynos_drm_fbdev *exynos_fb = to_exynos_fbdev(helper);
++	struct exynos_drm_buffer_info buffer_info;
++	unsigned int size = fb_width * fb_height * (fb->bits_per_pixel >> 3);
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	exynos_fb->fb = fb;
++
++	drm_fb_helper_fill_fix(fbi, fb->pitch, fb->depth);
++	drm_fb_helper_fill_var(fbi, helper, fb_width, fb_height);
++
++	exynos_drm_fb_update_buf_off(fb, fbi->var.xoffset, fbi->var.yoffset,
++			&buffer_info);
++
++	dev->mode_config.fb_base = buffer_info.base_addr;
++
++	fbi->screen_base = buffer_info.vaddr;
++	fbi->screen_size = size;
++	fbi->fix.smem_start = buffer_info.paddr;
++	fbi->fix.smem_len = size;
++}
++
++static int exynos_drm_fbdev_create(struct drm_fb_helper *helper,
++				    struct drm_fb_helper_surface_size *sizes)
++{
++	struct exynos_drm_fbdev *exynos_fbdev = to_exynos_fbdev(helper);
++	struct drm_device *dev = helper->dev;
++	struct fb_info *fbi;
++	struct drm_mode_fb_cmd mode_cmd = { 0 };
++	struct platform_device *pdev = dev->platformdev;
++	int ret;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	DRM_DEBUG_KMS("surface width(%d), height(%d) and bpp(%d\n",
++			sizes->surface_width, sizes->surface_height,
++			sizes->surface_bpp);
++
++	mode_cmd.width = sizes->surface_width;
++	mode_cmd.height = sizes->surface_height;
++	mode_cmd.bpp = sizes->surface_bpp;
++	mode_cmd.depth = sizes->surface_depth;
++
++	mutex_lock(&dev->struct_mutex);
++
++	fbi = framebuffer_alloc(0, &pdev->dev);
++	if (!fbi) {
++		DRM_ERROR("failed to allocate fb info.\n");
++		ret = -ENOMEM;
++		goto out;
++	}
++
++	exynos_fbdev->fb = exynos_drm_fb_create(dev, NULL, &mode_cmd);
++	if (IS_ERR_OR_NULL(exynos_fbdev->fb)) {
++		DRM_ERROR("failed to create drm framebuffer.\n");
++		ret = PTR_ERR(exynos_fbdev->fb);
++		goto out;
++	}
++
++	helper->fb = exynos_fbdev->fb;
++	helper->fbdev = fbi;
++
++	fbi->par = helper;
++	fbi->flags = FBINFO_FLAG_DEFAULT;
++	fbi->fbops = &exynos_drm_fb_ops;
++
++	ret = fb_alloc_cmap(&fbi->cmap, 256, 0);
++	if (ret) {
++		DRM_ERROR("failed to allocate cmap.\n");
++		goto out;
++	}
++
++	exynos_drm_fbdev_update(helper, helper->fb, sizes->fb_width,
++			sizes->fb_height);
++
++/*
++ * if failed, all resources allocated above would be released by
++ * drm_mode_config_cleanup() when drm_load() had been called prior
++ * to any specific driver such as fimd or hdmi driver.
++ */
++out:
++	mutex_unlock(&dev->struct_mutex);
++	return ret;
++}
++
++static bool
++exynos_drm_fbdev_is_samefb(struct drm_framebuffer *fb,
++			    struct drm_fb_helper_surface_size *sizes)
++{
++	if (fb->width != sizes->surface_width)
++		return false;
++	if (fb->height != sizes->surface_height)
++		return false;
++	if (fb->bits_per_pixel != sizes->surface_bpp)
++		return false;
++	if (fb->depth != sizes->surface_depth)
++		return false;
++
++	return true;
++}
++
++static int exynos_drm_fbdev_recreate(struct drm_fb_helper *helper,
++				      struct drm_fb_helper_surface_size *sizes)
++{
++	struct drm_device *dev = helper->dev;
++	struct exynos_drm_fbdev *exynos_fbdev = to_exynos_fbdev(helper);
++	struct drm_framebuffer *fb = exynos_fbdev->fb;
++	struct drm_mode_fb_cmd mode_cmd = { 0 };
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	if (helper->fb != fb) {
++		DRM_ERROR("drm framebuffer is different\n");
++		return -EINVAL;
++	}
++
++	if (exynos_drm_fbdev_is_samefb(fb, sizes))
++		return 0;
++
++	mode_cmd.width = sizes->surface_width;
++	mode_cmd.height = sizes->surface_height;
++	mode_cmd.bpp = sizes->surface_bpp;
++	mode_cmd.depth = sizes->surface_depth;
++
++	if (fb->funcs->destroy)
++		fb->funcs->destroy(fb);
++
++	exynos_fbdev->fb = exynos_drm_fb_create(dev, NULL, &mode_cmd);
++	if (IS_ERR(exynos_fbdev->fb)) {
++		DRM_ERROR("failed to allocate fb.\n");
++		return PTR_ERR(exynos_fbdev->fb);
++	}
++
++	helper->fb = exynos_fbdev->fb;
++	exynos_drm_fbdev_update(helper, helper->fb, sizes->fb_width,
++			sizes->fb_height);
++
++	return 0;
++}
++
++static int exynos_drm_fbdev_probe(struct drm_fb_helper *helper,
++				   struct drm_fb_helper_surface_size *sizes)
++{
++	int ret = 0;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	if (!helper->fb) {
++		ret = exynos_drm_fbdev_create(helper, sizes);
++		if (ret < 0) {
++			DRM_ERROR("failed to create fbdev.\n");
++			return ret;
++		}
++
++		/*
++		 * fb_helper expects a value more than 1 if succeed
++		 * because register_framebuffer() should be called.
++		 */
++		ret = 1;
++	} else {
++		ret = exynos_drm_fbdev_recreate(helper, sizes);
++		if (ret < 0) {
++			DRM_ERROR("failed to reconfigure fbdev\n");
++			return ret;
++		}
++	}
++
++	return ret;
++}
++
++static struct drm_fb_helper_funcs exynos_drm_fb_helper_funcs = {
++	.fb_probe =	exynos_drm_fbdev_probe,
++};
++
++int exynos_drm_fbdev_init(struct drm_device *dev)
++{
++	struct exynos_drm_fbdev *fbdev;
++	struct exynos_drm_private *private = dev->dev_private;
++	struct drm_fb_helper *helper;
++	unsigned int num_crtc;
++	int ret;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	if (!dev->mode_config.num_crtc || !dev->mode_config.num_connector)
++		return 0;
++
++	fbdev = kzalloc(sizeof(*fbdev), GFP_KERNEL);
++	if (!fbdev) {
++		DRM_ERROR("failed to allocate drm fbdev.\n");
++		return -ENOMEM;
++	}
++
++	private->fb_helper = helper = &fbdev->drm_fb_helper;
++	helper->funcs = &exynos_drm_fb_helper_funcs;
++
++	num_crtc = dev->mode_config.num_crtc;
++
++	ret = drm_fb_helper_init(dev, helper, num_crtc, MAX_CONNECTOR);
++	if (ret < 0) {
++		DRM_ERROR("failed to initialize drm fb helper.\n");
++		goto err_init;
++	}
++
++	ret = drm_fb_helper_single_add_all_connectors(helper);
++	if (ret < 0) {
++		DRM_ERROR("failed to register drm_fb_helper_connector.\n");
++		goto err_setup;
++
++	}
++
++	ret = drm_fb_helper_initial_config(helper, PREFERRED_BPP);
++	if (ret < 0) {
++		DRM_ERROR("failed to set up hw configuration.\n");
++		goto err_setup;
++	}
++
++	return 0;
++
++err_setup:
++	drm_fb_helper_fini(helper);
++
++err_init:
++	private->fb_helper = NULL;
++	kfree(fbdev);
++
++	return ret;
++}
++
++static void exynos_drm_fbdev_destroy(struct drm_device *dev,
++				      struct drm_fb_helper *fb_helper)
++{
++	struct drm_framebuffer *fb;
++
++	/* release drm framebuffer and real buffer */
++	if (fb_helper->fb && fb_helper->fb->funcs) {
++		fb = fb_helper->fb;
++		if (fb && fb->funcs->destroy)
++			fb->funcs->destroy(fb);
++	}
++
++	/* release linux framebuffer */
++	if (fb_helper->fbdev) {
++		struct fb_info *info;
++		int ret;
++
++		info = fb_helper->fbdev;
++		ret = unregister_framebuffer(info);
++		if (ret < 0)
++			DRM_DEBUG_KMS("failed unregister_framebuffer()\n");
++
++		if (info->cmap.len)
++			fb_dealloc_cmap(&info->cmap);
++
++		framebuffer_release(info);
++	}
++
++	drm_fb_helper_fini(fb_helper);
++}
++
++void exynos_drm_fbdev_fini(struct drm_device *dev)
++{
++	struct exynos_drm_private *private = dev->dev_private;
++	struct exynos_drm_fbdev *fbdev;
++
++	if (!private || !private->fb_helper)
++		return;
++
++	fbdev = to_exynos_fbdev(private->fb_helper);
++
++	exynos_drm_fbdev_destroy(dev, private->fb_helper);
++	kfree(fbdev);
++	private->fb_helper = NULL;
++}
++
++void exynos_drm_fbdev_restore_mode(struct drm_device *dev)
++{
++	struct exynos_drm_private *private = dev->dev_private;
++
++	if (!private || !private->fb_helper)
++		return;
++
++	drm_fb_helper_restore_fbdev_mode(private->fb_helper);
++}
++
++int exynos_drm_fbdev_reinit(struct drm_device *dev)
++{
++	struct exynos_drm_private *private = dev->dev_private;
++	struct drm_fb_helper *fb_helper;
++	int ret;
++
++	if (!private)
++		return -EINVAL;
++
++	if (!dev->mode_config.num_connector) {
++		exynos_drm_fbdev_fini(dev);
++		return 0;
++	}
++
++	fb_helper = private->fb_helper;
++
++	if (fb_helper) {
++		drm_fb_helper_fini(fb_helper);
++
++		ret = drm_fb_helper_init(dev, fb_helper,
++				dev->mode_config.num_crtc, MAX_CONNECTOR);
++		if (ret < 0) {
++			DRM_ERROR("failed to initialize drm fb helper\n");
++			return ret;
++		}
++
++		ret = drm_fb_helper_single_add_all_connectors(fb_helper);
++		if (ret < 0) {
++			DRM_ERROR("failed to add fb helper to connectors\n");
++			goto err;
++		}
++
++		ret = drm_fb_helper_initial_config(fb_helper, PREFERRED_BPP);
++		if (ret < 0) {
++			DRM_ERROR("failed to set up hw configuration.\n");
++			goto err;
++		}
++	} else {
++		/*
++		 * if drm_load() failed whem drm load() was called prior
++		 * to specific drivers, fb_helper must be NULL and so
++		 * this fuction should be called again to re-initialize and
++		 * re-configure the fb helper. it means that this function
++		 * has been called by the specific drivers.
++		 */
++		return exynos_drm_fbdev_init(dev);
++	}
++
++err:
++	/*
++	 * if drm_load() failed when drm load() was called prior
++	 * to specific drivers, the fb_helper must be NULL and so check it.
++	 */
++	if (fb_helper)
++		drm_fb_helper_fini(fb_helper);
++
++	return ret;
++}
++
++MODULE_AUTHOR("Inki Dae <inki.dae@samsung.com>");
++MODULE_AUTHOR("Joonyoung Shim <jy0922.shim@samsung.com>");
++MODULE_AUTHOR("Seung-Woo Kim <sw0312.kim@samsung.com>");
++MODULE_DESCRIPTION("Samsung SoC DRM FBDEV Driver");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_fbdev.h b/drivers/gpu/drm/exynos/exynos_drm_fbdev.h
+new file mode 100644
+index 000000000000..ccfce8a1a451
+--- /dev/null
++++ b/drivers/gpu/drm/exynos/exynos_drm_fbdev.h
+@@ -0,0 +1,37 @@
++/*
++ * Copyright (c) 2011 Samsung Electronics Co., Ltd.
++ *
++ * Authors:
++ *	Inki Dae <inki.dae@samsung.com>
++ *	Joonyoung Shim <jy0922.shim@samsung.com>
++ *	Seung-Woo Kim <sw0312.kim@samsung.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * VA LINUX SYSTEMS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
++ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
++ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ * OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#ifndef _EXYNOS_DRM_FBDEV_H_
++#define _EXYNOS_DRM_FBDEV_H_
++
++int exynos_drm_fbdev_init(struct drm_device *dev);
++int exynos_drm_fbdev_reinit(struct drm_device *dev);
++void exynos_drm_fbdev_fini(struct drm_device *dev);
++void exynos_drm_fbdev_restore_mode(struct drm_device *dev);
++
++#endif
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_fimd.c b/drivers/gpu/drm/exynos/exynos_drm_fimd.c
+new file mode 100644
+index 000000000000..620ad2d51368
+--- /dev/null
++++ b/drivers/gpu/drm/exynos/exynos_drm_fimd.c
+@@ -0,0 +1,796 @@
++/* exynos_drm_fimd.c
++ *
++ * Copyright (C) 2011 Samsung Electronics Co.Ltd
++ * Authors:
++ *	Joonyoung Shim <jy0922.shim@samsung.com>
++ *	Inki Dae <inki.dae@samsung.com>
++ *
++ * This program is free software; you can redistribute  it and/or modify it
++ * under  the terms of  the GNU General  Public License as published by the
++ * Free Software Foundation;  either version 2 of the  License, or (at your
++ * option) any later version.
++ *
++ */
++#include "drmP.h"
++
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/clk.h>
++
++#include <drm/exynos_drm.h>
++#include <plat/regs-fb-v4.h>
++
++#include "exynos_drm_drv.h"
++#include "exynos_drm_fbdev.h"
++#include "exynos_drm_crtc.h"
++
++/*
++ * FIMD is stand for Fully Interactive Mobile Display and
++ * as a display controller, it transfers contents drawn on memory
++ * to a LCD Panel through Display Interfaces such as RGB or
++ * CPU Interface.
++ */
++
++/* position control register for hardware window 0, 2 ~ 4.*/
++#define VIDOSD_A(win)		(VIDOSD_BASE + 0x00 + (win) * 16)
++#define VIDOSD_B(win)		(VIDOSD_BASE + 0x04 + (win) * 16)
++/* size control register for hardware window 0. */
++#define VIDOSD_C_SIZE_W0	(VIDOSD_BASE + 0x08)
++/* alpha control register for hardware window 1 ~ 4. */
++#define VIDOSD_C(win)		(VIDOSD_BASE + 0x18 + (win) * 16)
++/* size control register for hardware window 1 ~ 4. */
++#define VIDOSD_D(win)		(VIDOSD_BASE + 0x0C + (win) * 16)
++
++#define VIDWx_BUF_START(win, buf)	(VIDW_BUF_START(buf) + (win) * 8)
++#define VIDWx_BUF_END(win, buf)		(VIDW_BUF_END(buf) + (win) * 8)
++#define VIDWx_BUF_SIZE(win, buf)	(VIDW_BUF_SIZE(buf) + (win) * 4)
++
++/* color key control register for hardware window 1 ~ 4. */
++#define WKEYCON0_BASE(x)		((WKEYCON0 + 0x140) + (x * 8))
++/* color key value register for hardware window 1 ~ 4. */
++#define WKEYCON1_BASE(x)		((WKEYCON1 + 0x140) + (x * 8))
++
++/* FIMD has totally five hardware windows. */
++#define WINDOWS_NR	5
++
++#define get_fimd_context(dev)	platform_get_drvdata(to_platform_device(dev))
++
++struct fimd_win_data {
++	unsigned int		offset_x;
++	unsigned int		offset_y;
++	unsigned int		width;
++	unsigned int		height;
++	unsigned int		bpp;
++	dma_addr_t		paddr;
++	void __iomem		*vaddr;
++	unsigned int		buf_offsize;
++	unsigned int		line_size;	/* bytes */
++};
++
++struct fimd_context {
++	struct exynos_drm_subdrv	subdrv;
++	int				irq;
++	struct drm_crtc			*crtc;
++	struct clk			*bus_clk;
++	struct clk			*lcd_clk;
++	struct resource			*regs_res;
++	void __iomem			*regs;
++	struct fimd_win_data		win_data[WINDOWS_NR];
++	unsigned int			clkdiv;
++	unsigned int			default_win;
++	unsigned long			irq_flags;
++	u32				vidcon0;
++	u32				vidcon1;
++
++	struct fb_videomode		*timing;
++};
++
++static bool fimd_display_is_connected(struct device *dev)
++{
++	struct fimd_context *ctx = get_fimd_context(dev);
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	/* TODO. */
++
++	return true;
++}
++
++static void *fimd_get_timing(struct device *dev)
++{
++	struct fimd_context *ctx = get_fimd_context(dev);
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	return ctx->timing;
++}
++
++static int fimd_check_timing(struct device *dev, void *timing)
++{
++	struct fimd_context *ctx = get_fimd_context(dev);
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	/* TODO. */
++
++	return 0;
++}
++
++static int fimd_display_power_on(struct device *dev, int mode)
++{
++	struct fimd_context *ctx = get_fimd_context(dev);
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	/* TODO. */
++
++	return 0;
++}
++
++static struct exynos_drm_display fimd_display = {
++	.type = EXYNOS_DISPLAY_TYPE_LCD,
++	.is_connected = fimd_display_is_connected,
++	.get_timing = fimd_get_timing,
++	.check_timing = fimd_check_timing,
++	.power_on = fimd_display_power_on,
++};
++
++static void fimd_commit(struct device *dev)
++{
++	struct fimd_context *ctx = get_fimd_context(dev);
++	struct fb_videomode *timing = ctx->timing;
++	u32 val;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	/* setup polarity values from machine code. */
++	writel(ctx->vidcon1, ctx->regs + VIDCON1);
++
++	/* setup vertical timing values. */
++	val = VIDTCON0_VBPD(timing->upper_margin - 1) |
++	       VIDTCON0_VFPD(timing->lower_margin - 1) |
++	       VIDTCON0_VSPW(timing->vsync_len - 1);
++	writel(val, ctx->regs + VIDTCON0);
++
++	/* setup horizontal timing values.  */
++	val = VIDTCON1_HBPD(timing->left_margin - 1) |
++	       VIDTCON1_HFPD(timing->right_margin - 1) |
++	       VIDTCON1_HSPW(timing->hsync_len - 1);
++	writel(val, ctx->regs + VIDTCON1);
++
++	/* setup horizontal and vertical display size. */
++	val = VIDTCON2_LINEVAL(timing->yres - 1) |
++	       VIDTCON2_HOZVAL(timing->xres - 1);
++	writel(val, ctx->regs + VIDTCON2);
++
++	/* setup clock source, clock divider, enable dma. */
++	val = ctx->vidcon0;
++	val &= ~(VIDCON0_CLKVAL_F_MASK | VIDCON0_CLKDIR);
++
++	if (ctx->clkdiv > 1)
++		val |= VIDCON0_CLKVAL_F(ctx->clkdiv - 1) | VIDCON0_CLKDIR;
++	else
++		val &= ~VIDCON0_CLKDIR;	/* 1:1 clock */
++
++	/*
++	 * fields of register with prefix '_F' would be updated
++	 * at vsync(same as dma start)
++	 */
++	val |= VIDCON0_ENVID | VIDCON0_ENVID_F;
++	writel(val, ctx->regs + VIDCON0);
++}
++
++static int fimd_enable_vblank(struct device *dev)
++{
++	struct fimd_context *ctx = get_fimd_context(dev);
++	u32 val;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	if (!test_and_set_bit(0, &ctx->irq_flags)) {
++		val = readl(ctx->regs + VIDINTCON0);
++
++		val |= VIDINTCON0_INT_ENABLE;
++		val |= VIDINTCON0_INT_FRAME;
++
++		val &= ~VIDINTCON0_FRAMESEL0_MASK;
++		val |= VIDINTCON0_FRAMESEL0_VSYNC;
++		val &= ~VIDINTCON0_FRAMESEL1_MASK;
++		val |= VIDINTCON0_FRAMESEL1_NONE;
++
++		writel(val, ctx->regs + VIDINTCON0);
++	}
++
++	return 0;
++}
++
++static void fimd_disable_vblank(struct device *dev)
++{
++	struct fimd_context *ctx = get_fimd_context(dev);
++	u32 val;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	if (test_and_clear_bit(0, &ctx->irq_flags)) {
++		val = readl(ctx->regs + VIDINTCON0);
++
++		val &= ~VIDINTCON0_INT_FRAME;
++		val &= ~VIDINTCON0_INT_ENABLE;
++
++		writel(val, ctx->regs + VIDINTCON0);
++	}
++}
++
++static struct exynos_drm_manager_ops fimd_manager_ops = {
++	.commit = fimd_commit,
++	.enable_vblank = fimd_enable_vblank,
++	.disable_vblank = fimd_disable_vblank,
++};
++
++static void fimd_win_mode_set(struct device *dev,
++			      struct exynos_drm_overlay *overlay)
++{
++	struct fimd_context *ctx = get_fimd_context(dev);
++	struct fimd_win_data *win_data;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	if (!overlay) {
++		dev_err(dev, "overlay is NULL\n");
++		return;
++	}
++
++	win_data = &ctx->win_data[ctx->default_win];
++
++	win_data->offset_x = overlay->offset_x;
++	win_data->offset_y = overlay->offset_y;
++	win_data->width = overlay->width;
++	win_data->height = overlay->height;
++	win_data->paddr = overlay->paddr;
++	win_data->vaddr = overlay->vaddr;
++	win_data->bpp = overlay->bpp;
++	win_data->buf_offsize = overlay->buf_offsize * (overlay->bpp >> 3);
++	win_data->line_size = overlay->line_size * (overlay->bpp >> 3);
++}
++
++static void fimd_win_set_pixfmt(struct device *dev, unsigned int win)
++{
++	struct fimd_context *ctx = get_fimd_context(dev);
++	struct fimd_win_data *win_data = &ctx->win_data[win];
++	unsigned long val;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	val = WINCONx_ENWIN;
++
++	switch (win_data->bpp) {
++	case 1:
++		val |= WINCON0_BPPMODE_1BPP;
++		val |= WINCONx_BITSWP;
++		val |= WINCONx_BURSTLEN_4WORD;
++		break;
++	case 2:
++		val |= WINCON0_BPPMODE_2BPP;
++		val |= WINCONx_BITSWP;
++		val |= WINCONx_BURSTLEN_8WORD;
++		break;
++	case 4:
++		val |= WINCON0_BPPMODE_4BPP;
++		val |= WINCONx_BITSWP;
++		val |= WINCONx_BURSTLEN_8WORD;
++		break;
++	case 8:
++		val |= WINCON0_BPPMODE_8BPP_PALETTE;
++		val |= WINCONx_BURSTLEN_8WORD;
++		val |= WINCONx_BYTSWP;
++		break;
++	case 16:
++		val |= WINCON0_BPPMODE_16BPP_565;
++		val |= WINCONx_HAWSWP;
++		val |= WINCONx_BURSTLEN_16WORD;
++		break;
++	case 24:
++		val |= WINCON0_BPPMODE_24BPP_888;
++		val |= WINCONx_WSWP;
++		val |= WINCONx_BURSTLEN_16WORD;
++		break;
++	case 32:
++		val |= WINCON1_BPPMODE_28BPP_A4888
++			| WINCON1_BLD_PIX | WINCON1_ALPHA_SEL;
++		val |= WINCONx_WSWP;
++		val |= WINCONx_BURSTLEN_16WORD;
++		break;
++	default:
++		DRM_DEBUG_KMS("invalid pixel size so using unpacked 24bpp.\n");
++
++		val |= WINCON0_BPPMODE_24BPP_888;
++		val |= WINCONx_WSWP;
++		val |= WINCONx_BURSTLEN_16WORD;
++		break;
++	}
++
++	DRM_DEBUG_KMS("bpp = %d\n", win_data->bpp);
++
++	writel(val, ctx->regs + WINCON(win));
++}
++
++static void fimd_win_set_colkey(struct device *dev, unsigned int win)
++{
++	struct fimd_context *ctx = get_fimd_context(dev);
++	unsigned int keycon0 = 0, keycon1 = 0;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	keycon0 = ~(WxKEYCON0_KEYBL_EN | WxKEYCON0_KEYEN_F |
++			WxKEYCON0_DIRCON) | WxKEYCON0_COMPKEY(0);
++
++	keycon1 = WxKEYCON1_COLVAL(0xffffffff);
++
++	writel(keycon0, ctx->regs + WKEYCON0_BASE(win));
++	writel(keycon1, ctx->regs + WKEYCON1_BASE(win));
++}
++
++static void fimd_win_commit(struct device *dev)
++{
++	struct fimd_context *ctx = get_fimd_context(dev);
++	struct fimd_win_data *win_data;
++	int win = ctx->default_win;
++	unsigned long val, alpha, size;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	if (win < 0 || win > WINDOWS_NR)
++		return;
++
++	win_data = &ctx->win_data[win];
++
++	/*
++	 * SHADOWCON register is used for enabling timing.
++	 *
++	 * for example, once only width value of a register is set,
++	 * if the dma is started then fimd hardware could malfunction so
++	 * with protect window setting, the register fields with prefix '_F'
++	 * wouldn't be updated at vsync also but updated once unprotect window
++	 * is set.
++	 */
++
++	/* protect windows */
++	val = readl(ctx->regs + SHADOWCON);
++	val |= SHADOWCON_WINx_PROTECT(win);
++	writel(val, ctx->regs + SHADOWCON);
++
++	/* buffer start address */
++	val = win_data->paddr;
++	writel(val, ctx->regs + VIDWx_BUF_START(win, 0));
++
++	/* buffer end address */
++	size = win_data->width * win_data->height * (win_data->bpp >> 3);
++	val = win_data->paddr + size;
++	writel(val, ctx->regs + VIDWx_BUF_END(win, 0));
++
++	DRM_DEBUG_KMS("start addr = 0x%lx, end addr = 0x%lx, size = 0x%lx\n",
++			(unsigned long)win_data->paddr, val, size);
++
++	/* buffer size */
++	val = VIDW_BUF_SIZE_OFFSET(win_data->buf_offsize) |
++		VIDW_BUF_SIZE_PAGEWIDTH(win_data->line_size);
++	writel(val, ctx->regs + VIDWx_BUF_SIZE(win, 0));
++
++	/* OSD position */
++	val = VIDOSDxA_TOPLEFT_X(win_data->offset_x) |
++		VIDOSDxA_TOPLEFT_Y(win_data->offset_y);
++	writel(val, ctx->regs + VIDOSD_A(win));
++
++	val = VIDOSDxB_BOTRIGHT_X(win_data->offset_x + win_data->width - 1) |
++		VIDOSDxB_BOTRIGHT_Y(win_data->offset_y + win_data->height - 1);
++	writel(val, ctx->regs + VIDOSD_B(win));
++
++	DRM_DEBUG_KMS("osd pos: tx = %d, ty = %d, bx = %d, by = %x\n",
++			win_data->offset_x, win_data->offset_y,
++			win_data->offset_x + win_data->width - 1,
++			win_data->offset_y + win_data->height - 1);
++
++	/* hardware window 0 doesn't support alpha channel. */
++	if (win != 0) {
++		/* OSD alpha */
++		alpha = VIDISD14C_ALPHA1_R(0xf) |
++			VIDISD14C_ALPHA1_G(0xf) |
++			VIDISD14C_ALPHA1_B(0xf);
++
++		writel(alpha, ctx->regs + VIDOSD_C(win));
++	}
++
++	/* OSD size */
++	if (win != 3 && win != 4) {
++		u32 offset = VIDOSD_D(win);
++		if (win == 0)
++			offset = VIDOSD_C_SIZE_W0;
++		val = win_data->width * win_data->height;
++		writel(val, ctx->regs + offset);
++
++		DRM_DEBUG_KMS("osd size = 0x%x\n", (unsigned int)val);
++	}
++
++	fimd_win_set_pixfmt(dev, win);
++
++	/* hardware window 0 doesn't support color key. */
++	if (win != 0)
++		fimd_win_set_colkey(dev, win);
++
++	/* Enable DMA channel and unprotect windows */
++	val = readl(ctx->regs + SHADOWCON);
++	val |= SHADOWCON_CHx_ENABLE(win);
++	val &= ~SHADOWCON_WINx_PROTECT(win);
++	writel(val, ctx->regs + SHADOWCON);
++}
++
++static void fimd_win_disable(struct device *dev)
++{
++	struct fimd_context *ctx = get_fimd_context(dev);
++	struct fimd_win_data *win_data;
++	int win = ctx->default_win;
++	u32 val;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	if (win < 0 || win > WINDOWS_NR)
++		return;
++
++	win_data = &ctx->win_data[win];
++
++	/* protect windows */
++	val = readl(ctx->regs + SHADOWCON);
++	val |= SHADOWCON_WINx_PROTECT(win);
++	writel(val, ctx->regs + SHADOWCON);
++
++	/* wincon */
++	val = readl(ctx->regs + WINCON(win));
++	val &= ~WINCONx_ENWIN;
++	writel(val, ctx->regs + WINCON(win));
++
++	/* unprotect windows */
++	val = readl(ctx->regs + SHADOWCON);
++	val &= ~SHADOWCON_CHx_ENABLE(win);
++	val &= ~SHADOWCON_WINx_PROTECT(win);
++	writel(val, ctx->regs + SHADOWCON);
++}
++
++static struct exynos_drm_overlay_ops fimd_overlay_ops = {
++	.mode_set = fimd_win_mode_set,
++	.commit = fimd_win_commit,
++	.disable = fimd_win_disable,
++};
++
++/* for pageflip event */
++static void fimd_finish_pageflip(struct drm_device *drm_dev, int crtc)
++{
++	struct exynos_drm_private *dev_priv = drm_dev->dev_private;
++	struct drm_pending_vblank_event *e, *t;
++	struct timeval now;
++	unsigned long flags;
++
++	if (!dev_priv->pageflip_event)
++		return;
++
++	spin_lock_irqsave(&drm_dev->event_lock, flags);
++
++	exynos_drm_crtc_apply(dev_priv->crtc[crtc]);
++
++	list_for_each_entry_safe(e, t, &dev_priv->pageflip_event_list,
++			base.link) {
++		do_gettimeofday(&now);
++		e->event.sequence = 0;
++		e->event.tv_sec = now.tv_sec;
++		e->event.tv_usec = now.tv_usec;
++
++		list_move_tail(&e->base.link, &e->base.file_priv->event_list);
++		wake_up_interruptible(&e->base.file_priv->event_wait);
++	}
++
++	drm_vblank_put(drm_dev, crtc);
++	dev_priv->pageflip_event = false;
++
++	spin_unlock_irqrestore(&drm_dev->event_lock, flags);
++}
++
++static irqreturn_t fimd_irq_handler(int irq, void *dev_id)
++{
++	struct fimd_context *ctx = (struct fimd_context *)dev_id;
++	struct exynos_drm_subdrv *subdrv = &ctx->subdrv;
++	struct drm_device *drm_dev = subdrv->drm_dev;
++	struct device *dev = subdrv->manager.dev;
++	struct exynos_drm_manager *manager = &subdrv->manager;
++	u32 val;
++
++	val = readl(ctx->regs + VIDINTCON1);
++
++	if (val & VIDINTCON1_INT_FRAME)
++		/* VSYNC interrupt */
++		writel(VIDINTCON1_INT_FRAME, ctx->regs + VIDINTCON1);
++
++	drm_handle_vblank(drm_dev, manager->pipe);
++	fimd_finish_pageflip(drm_dev, manager->pipe);
++
++	return IRQ_HANDLED;
++}
++
++static int fimd_subdrv_probe(struct drm_device *drm_dev)
++{
++	struct drm_driver *drm_driver = drm_dev->driver;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	/*
++	 * enable drm irq mode.
++	 * - with irq_enabled = 1, we can use the vblank feature.
++	 *
++	 * P.S. note that we wouldn't use drm irq handler but
++	 *	just specific driver own one instead because
++	 *	drm framework supports only one irq handler.
++	 */
++	drm_dev->irq_enabled = 1;
++
++	/*
++	 * with vblank_disable_allowed = 1, vblank interrupt will be disabled
++	 * by drm timer once a current process gives up ownership of
++	 * vblank event.(drm_vblank_put function was called)
++	 */
++	drm_dev->vblank_disable_allowed = 1;
++
++	return 0;
++}
++
++static void fimd_subdrv_remove(struct drm_device *drm_dev)
++{
++	struct drm_driver *drm_driver = drm_dev->driver;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	/* TODO. */
++}
++
++static int fimd_calc_clkdiv(struct fimd_context *ctx,
++			    struct fb_videomode *timing)
++{
++	unsigned long clk = clk_get_rate(ctx->lcd_clk);
++	u32 retrace;
++	u32 clkdiv;
++	u32 best_framerate = 0;
++	u32 framerate;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	retrace = timing->left_margin + timing->hsync_len +
++				timing->right_margin + timing->xres;
++	retrace *= timing->upper_margin + timing->vsync_len +
++				timing->lower_margin + timing->yres;
++
++	/* default framerate is 60Hz */
++	if (!timing->refresh)
++		timing->refresh = 60;
++
++	clk /= retrace;
++
++	for (clkdiv = 1; clkdiv < 0x100; clkdiv++) {
++		int tmp;
++
++		/* get best framerate */
++		framerate = clk / clkdiv;
++		tmp = timing->refresh - framerate;
++		if (tmp < 0) {
++			best_framerate = framerate;
++			continue;
++		} else {
++			if (!best_framerate)
++				best_framerate = framerate;
++			else if (tmp < (best_framerate - framerate))
++				best_framerate = framerate;
++			break;
++		}
++	}
++
++	return clkdiv;
++}
++
++static void fimd_clear_win(struct fimd_context *ctx, int win)
++{
++	u32 val;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	writel(0, ctx->regs + WINCON(win));
++	writel(0, ctx->regs + VIDOSD_A(win));
++	writel(0, ctx->regs + VIDOSD_B(win));
++	writel(0, ctx->regs + VIDOSD_C(win));
++
++	if (win == 1 || win == 2)
++		writel(0, ctx->regs + VIDOSD_D(win));
++
++	val = readl(ctx->regs + SHADOWCON);
++	val &= ~SHADOWCON_WINx_PROTECT(win);
++	writel(val, ctx->regs + SHADOWCON);
++}
++
++static int __devinit fimd_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct fimd_context *ctx;
++	struct exynos_drm_subdrv *subdrv;
++	struct exynos_drm_fimd_pdata *pdata;
++	struct fb_videomode *timing;
++	struct resource *res;
++	int win;
++	int ret = -EINVAL;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	pdata = pdev->dev.platform_data;
++	if (!pdata) {
++		dev_err(dev, "no platform data specified\n");
++		return -EINVAL;
++	}
++
++	timing = &pdata->timing;
++	if (!timing) {
++		dev_err(dev, "timing is null.\n");
++		return -EINVAL;
++	}
++
++	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
++	if (!ctx)
++		return -ENOMEM;
++
++	ctx->bus_clk = clk_get(dev, "fimd");
++	if (IS_ERR(ctx->bus_clk)) {
++		dev_err(dev, "failed to get bus clock\n");
++		ret = PTR_ERR(ctx->bus_clk);
++		goto err_clk_get;
++	}
++
++	clk_enable(ctx->bus_clk);
++
++	ctx->lcd_clk = clk_get(dev, "sclk_fimd");
++	if (IS_ERR(ctx->lcd_clk)) {
++		dev_err(dev, "failed to get lcd clock\n");
++		ret = PTR_ERR(ctx->lcd_clk);
++		goto err_bus_clk;
++	}
++
++	clk_enable(ctx->lcd_clk);
++
++	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++	if (!res) {
++		dev_err(dev, "failed to find registers\n");
++		ret = -ENOENT;
++		goto err_clk;
++	}
++
++	ctx->regs_res = request_mem_region(res->start, resource_size(res),
++					   dev_name(dev));
++	if (!ctx->regs_res) {
++		dev_err(dev, "failed to claim register region\n");
++		ret = -ENOENT;
++		goto err_clk;
++	}
++
++	ctx->regs = ioremap(res->start, resource_size(res));
++	if (!ctx->regs) {
++		dev_err(dev, "failed to map registers\n");
++		ret = -ENXIO;
++		goto err_req_region_io;
++	}
++
++	res = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
++	if (!res) {
++		dev_err(dev, "irq request failed.\n");
++		goto err_req_region_irq;
++	}
++
++	ctx->irq = res->start;
++
++	for (win = 0; win < WINDOWS_NR; win++)
++		fimd_clear_win(ctx, win);
++
++	ret = request_irq(ctx->irq, fimd_irq_handler, 0, "drm_fimd", ctx);
++	if (ret < 0) {
++		dev_err(dev, "irq request failed.\n");
++		goto err_req_irq;
++	}
++
++	ctx->clkdiv = fimd_calc_clkdiv(ctx, timing);
++	ctx->vidcon0 = pdata->vidcon0;
++	ctx->vidcon1 = pdata->vidcon1;
++	ctx->default_win = pdata->default_win;
++	ctx->timing = timing;
++
++	timing->pixclock = clk_get_rate(ctx->lcd_clk) / ctx->clkdiv;
++
++	DRM_DEBUG_KMS("pixel clock = %d, clkdiv = %d\n",
++			timing->pixclock, ctx->clkdiv);
++
++	subdrv = &ctx->subdrv;
++
++	subdrv->probe = fimd_subdrv_probe;
++	subdrv->remove = fimd_subdrv_remove;
++	subdrv->manager.pipe = -1;
++	subdrv->manager.ops = &fimd_manager_ops;
++	subdrv->manager.overlay_ops = &fimd_overlay_ops;
++	subdrv->manager.display = &fimd_display;
++	subdrv->manager.dev = dev;
++
++	platform_set_drvdata(pdev, ctx);
++	exynos_drm_subdrv_register(subdrv);
++
++	return 0;
++
++err_req_irq:
++err_req_region_irq:
++	iounmap(ctx->regs);
++
++err_req_region_io:
++	release_resource(ctx->regs_res);
++	kfree(ctx->regs_res);
++
++err_clk:
++	clk_disable(ctx->lcd_clk);
++	clk_put(ctx->lcd_clk);
++
++err_bus_clk:
++	clk_disable(ctx->bus_clk);
++	clk_put(ctx->bus_clk);
++
++err_clk_get:
++	kfree(ctx);
++	return ret;
++}
++
++static int __devexit fimd_remove(struct platform_device *pdev)
++{
++	struct fimd_context *ctx = platform_get_drvdata(pdev);
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	exynos_drm_subdrv_unregister(&ctx->subdrv);
++
++	clk_disable(ctx->lcd_clk);
++	clk_disable(ctx->bus_clk);
++	clk_put(ctx->lcd_clk);
++	clk_put(ctx->bus_clk);
++
++	iounmap(ctx->regs);
++	release_resource(ctx->regs_res);
++	kfree(ctx->regs_res);
++	free_irq(ctx->irq, ctx);
++
++	kfree(ctx);
++
++	return 0;
++}
++
++static struct platform_driver fimd_driver = {
++	.probe		= fimd_probe,
++	.remove		= __devexit_p(fimd_remove),
++	.driver		= {
++		.name	= "exynos4-fb",
++		.owner	= THIS_MODULE,
++	},
++};
++
++static int __init fimd_init(void)
++{
++	return platform_driver_register(&fimd_driver);
++}
++
++static void __exit fimd_exit(void)
++{
++	platform_driver_unregister(&fimd_driver);
++}
++
++module_init(fimd_init);
++module_exit(fimd_exit);
++
++MODULE_AUTHOR("Joonyoung Shim <jy0922.shim@samsung.com>");
++MODULE_AUTHOR("Inki Dae <inki.dae@samsung.com>");
++MODULE_DESCRIPTION("Samsung DRM FIMD Driver");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_gem.c b/drivers/gpu/drm/exynos/exynos_drm_gem.c
+new file mode 100644
+index 000000000000..a8e7a88906ed
+--- /dev/null
++++ b/drivers/gpu/drm/exynos/exynos_drm_gem.c
+@@ -0,0 +1,415 @@
++/* exynos_drm_gem.c
++ *
++ * Copyright (c) 2011 Samsung Electronics Co., Ltd.
++ * Author: Inki Dae <inki.dae@samsung.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * VA LINUX SYSTEMS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
++ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
++ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ * OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#include "drmP.h"
++#include "drm.h"
++
++#include <drm/exynos_drm.h>
++
++#include "exynos_drm_drv.h"
++#include "exynos_drm_gem.h"
++#include "exynos_drm_buf.h"
++
++static unsigned int convert_to_vm_err_msg(int msg)
++{
++	unsigned int out_msg;
++
++	switch (msg) {
++	case 0:
++	case -ERESTARTSYS:
++	case -EINTR:
++		out_msg = VM_FAULT_NOPAGE;
++		break;
++
++	case -ENOMEM:
++		out_msg = VM_FAULT_OOM;
++		break;
++
++	default:
++		out_msg = VM_FAULT_SIGBUS;
++		break;
++	}
++
++	return out_msg;
++}
++
++static unsigned int get_gem_mmap_offset(struct drm_gem_object *obj)
++{
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	return (unsigned int)obj->map_list.hash.key << PAGE_SHIFT;
++}
++
++struct exynos_drm_gem_obj *exynos_drm_gem_create(struct drm_file *file_priv,
++		struct drm_device *dev, unsigned int size,
++		unsigned int *handle)
++{
++	struct exynos_drm_gem_obj *exynos_gem_obj;
++	struct exynos_drm_buf_entry *entry;
++	struct drm_gem_object *obj;
++	int ret;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	size = roundup(size, PAGE_SIZE);
++
++	exynos_gem_obj = kzalloc(sizeof(*exynos_gem_obj), GFP_KERNEL);
++	if (!exynos_gem_obj) {
++		DRM_ERROR("failed to allocate exynos gem object.\n");
++		return ERR_PTR(-ENOMEM);
++	}
++
++	/* allocate the new buffer object and memory region. */
++	entry = exynos_drm_buf_create(dev, size);
++	if (!entry) {
++		kfree(exynos_gem_obj);
++		return ERR_PTR(-ENOMEM);
++	}
++
++	exynos_gem_obj->entry = entry;
++
++	obj = &exynos_gem_obj->base;
++
++	ret = drm_gem_object_init(dev, obj, size);
++	if (ret < 0) {
++		DRM_ERROR("failed to initailize gem object.\n");
++		goto err_obj_init;
++	}
++
++	DRM_DEBUG_KMS("created file object = 0x%x\n", (unsigned int)obj->filp);
++
++	ret = drm_gem_create_mmap_offset(obj);
++	if (ret < 0) {
++		DRM_ERROR("failed to allocate mmap offset.\n");
++		goto err_create_mmap_offset;
++	}
++
++	/*
++	 * allocate a id of idr table where the obj is registered
++	 * and handle has the id what user can see.
++	 */
++	ret = drm_gem_handle_create(file_priv, obj, handle);
++	if (ret)
++		goto err_handle_create;
++
++	DRM_DEBUG_KMS("gem handle = 0x%x\n", *handle);
++
++	/* drop reference from allocate - handle holds it now. */
++	drm_gem_object_unreference_unlocked(obj);
++
++	return exynos_gem_obj;
++
++err_handle_create:
++	drm_gem_free_mmap_offset(obj);
++
++err_create_mmap_offset:
++	drm_gem_object_release(obj);
++
++err_obj_init:
++	exynos_drm_buf_destroy(dev, exynos_gem_obj->entry);
++
++	kfree(exynos_gem_obj);
++
++	return ERR_PTR(ret);
++}
++
++int exynos_drm_gem_create_ioctl(struct drm_device *dev, void *data,
++		struct drm_file *file_priv)
++{
++	struct drm_exynos_gem_create *args = data;
++	struct exynos_drm_gem_obj *exynos_gem_obj;
++
++	DRM_DEBUG_KMS("%s : size = 0x%x\n", __FILE__, args->size);
++
++	exynos_gem_obj = exynos_drm_gem_create(file_priv, dev, args->size,
++			&args->handle);
++	if (IS_ERR(exynos_gem_obj))
++		return PTR_ERR(exynos_gem_obj);
++
++	return 0;
++}
++
++int exynos_drm_gem_map_offset_ioctl(struct drm_device *dev, void *data,
++		struct drm_file *file_priv)
++{
++	struct drm_exynos_gem_map_off *args = data;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	DRM_DEBUG_KMS("handle = 0x%x, offset = 0x%lx\n",
++			args->handle, (unsigned long)args->offset);
++
++	if (!(dev->driver->driver_features & DRIVER_GEM)) {
++		DRM_ERROR("does not support GEM.\n");
++		return -ENODEV;
++	}
++
++	return exynos_drm_gem_dumb_map_offset(file_priv, dev, args->handle,
++			&args->offset);
++}
++
++static int exynos_drm_gem_mmap_buffer(struct file *filp,
++		struct vm_area_struct *vma)
++{
++	struct drm_gem_object *obj = filp->private_data;
++	struct exynos_drm_gem_obj *exynos_gem_obj = to_exynos_gem_obj(obj);
++	struct exynos_drm_buf_entry *entry;
++	unsigned long pfn, vm_size;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	vma->vm_flags |= (VM_IO | VM_RESERVED);
++
++	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
++	vma->vm_file = filp;
++
++	vm_size = vma->vm_end - vma->vm_start;
++	/*
++	 * a entry contains information to physically continuous memory
++	 * allocated by user request or at framebuffer creation.
++	 */
++	entry = exynos_gem_obj->entry;
++
++	/* check if user-requested size is valid. */
++	if (vm_size > entry->size)
++		return -EINVAL;
++
++	/*
++	 * get page frame number to physical memory to be mapped
++	 * to user space.
++	 */
++	pfn = exynos_gem_obj->entry->paddr >> PAGE_SHIFT;
++
++	DRM_DEBUG_KMS("pfn = 0x%lx\n", pfn);
++
++	if (remap_pfn_range(vma, vma->vm_start, pfn, vm_size,
++				vma->vm_page_prot)) {
++		DRM_ERROR("failed to remap pfn range.\n");
++		return -EAGAIN;
++	}
++
++	return 0;
++}
++
++static const struct file_operations exynos_drm_gem_fops = {
++	.mmap = exynos_drm_gem_mmap_buffer,
++};
++
++int exynos_drm_gem_mmap_ioctl(struct drm_device *dev, void *data,
++		struct drm_file *file_priv)
++{
++	struct drm_exynos_gem_mmap *args = data;
++	struct drm_gem_object *obj;
++	unsigned int addr;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	if (!(dev->driver->driver_features & DRIVER_GEM)) {
++		DRM_ERROR("does not support GEM.\n");
++		return -ENODEV;
++	}
++
++	obj = drm_gem_object_lookup(dev, file_priv, args->handle);
++	if (!obj) {
++		DRM_ERROR("failed to lookup gem object.\n");
++		return -EINVAL;
++	}
++
++	obj->filp->f_op = &exynos_drm_gem_fops;
++	obj->filp->private_data = obj;
++
++	down_write(&current->mm->mmap_sem);
++	addr = do_mmap(obj->filp, 0, args->size,
++			PROT_READ | PROT_WRITE, MAP_SHARED, 0);
++	up_write(&current->mm->mmap_sem);
++
++	drm_gem_object_unreference_unlocked(obj);
++
++	if (IS_ERR((void *)addr))
++		return PTR_ERR((void *)addr);
++
++	args->mapped = addr;
++
++	DRM_DEBUG_KMS("mapped = 0x%lx\n", (unsigned long)args->mapped);
++
++	return 0;
++}
++
++int exynos_drm_gem_init_object(struct drm_gem_object *obj)
++{
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	return 0;
++}
++
++void exynos_drm_gem_free_object(struct drm_gem_object *gem_obj)
++{
++	struct exynos_drm_gem_obj *exynos_gem_obj;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	DRM_DEBUG_KMS("handle count = %d\n",
++			atomic_read(&gem_obj->handle_count));
++
++	if (gem_obj->map_list.map)
++		drm_gem_free_mmap_offset(gem_obj);
++
++	/* release file pointer to gem object. */
++	drm_gem_object_release(gem_obj);
++
++	exynos_gem_obj = to_exynos_gem_obj(gem_obj);
++
++	exynos_drm_buf_destroy(gem_obj->dev, exynos_gem_obj->entry);
++
++	kfree(exynos_gem_obj);
++}
++
++int exynos_drm_gem_dumb_create(struct drm_file *file_priv,
++		struct drm_device *dev, struct drm_mode_create_dumb *args)
++{
++	struct exynos_drm_gem_obj *exynos_gem_obj;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	/*
++	 * alocate memory to be used for framebuffer.
++	 * - this callback would be called by user application
++	 *	with DRM_IOCTL_MODE_CREATE_DUMB command.
++	 */
++
++	args->pitch = args->width * args->bpp >> 3;
++	args->size = args->pitch * args->height;
++
++	exynos_gem_obj = exynos_drm_gem_create(file_priv, dev, args->size,
++							&args->handle);
++	if (IS_ERR(exynos_gem_obj))
++		return PTR_ERR(exynos_gem_obj);
++
++	return 0;
++}
++
++int exynos_drm_gem_dumb_map_offset(struct drm_file *file_priv,
++		struct drm_device *dev, uint32_t handle, uint64_t *offset)
++{
++	struct exynos_drm_gem_obj *exynos_gem_obj;
++	struct drm_gem_object *obj;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	mutex_lock(&dev->struct_mutex);
++
++	/*
++	 * get offset of memory allocated for drm framebuffer.
++	 * - this callback would be called by user application
++	 *	with DRM_IOCTL_MODE_MAP_DUMB command.
++	 */
++
++	obj = drm_gem_object_lookup(dev, file_priv, handle);
++	if (!obj) {
++		DRM_ERROR("failed to lookup gem object.\n");
++		mutex_unlock(&dev->struct_mutex);
++		return -EINVAL;
++	}
++
++	exynos_gem_obj = to_exynos_gem_obj(obj);
++
++	*offset = get_gem_mmap_offset(&exynos_gem_obj->base);
++
++	drm_gem_object_unreference(obj);
++
++	DRM_DEBUG_KMS("offset = 0x%lx\n", (unsigned long)*offset);
++
++	mutex_unlock(&dev->struct_mutex);
++
++	return 0;
++}
++
++int exynos_drm_gem_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
++{
++	struct drm_gem_object *obj = vma->vm_private_data;
++	struct exynos_drm_gem_obj *exynos_gem_obj = to_exynos_gem_obj(obj);
++	struct drm_device *dev = obj->dev;
++	unsigned long pfn;
++	pgoff_t page_offset;
++	int ret;
++
++	page_offset = ((unsigned long)vmf->virtual_address -
++			vma->vm_start) >> PAGE_SHIFT;
++
++	mutex_lock(&dev->struct_mutex);
++
++	pfn = (exynos_gem_obj->entry->paddr >> PAGE_SHIFT) + page_offset;
++
++	ret = vm_insert_mixed(vma, (unsigned long)vmf->virtual_address, pfn);
++
++	mutex_unlock(&dev->struct_mutex);
++
++	return convert_to_vm_err_msg(ret);
++}
++
++int exynos_drm_gem_mmap(struct file *filp, struct vm_area_struct *vma)
++{
++	int ret;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	/* set vm_area_struct. */
++	ret = drm_gem_mmap(filp, vma);
++	if (ret < 0) {
++		DRM_ERROR("failed to mmap.\n");
++		return ret;
++	}
++
++	vma->vm_flags &= ~VM_PFNMAP;
++	vma->vm_flags |= VM_MIXEDMAP;
++
++	return ret;
++}
++
++
++int exynos_drm_gem_dumb_destroy(struct drm_file *file_priv,
++		struct drm_device *dev, unsigned int handle)
++{
++	int ret;
++
++	DRM_DEBUG_KMS("%s\n", __FILE__);
++
++	/*
++	 * obj->refcount and obj->handle_count are decreased and
++	 * if both them are 0 then exynos_drm_gem_free_object()
++	 * would be called by callback to release resources.
++	 */
++	ret = drm_gem_handle_delete(file_priv, handle);
++	if (ret < 0) {
++		DRM_ERROR("failed to delete drm_gem_handle.\n");
++		return ret;
++	}
++
++	return 0;
++}
++
++MODULE_AUTHOR("Inki Dae <inki.dae@samsung.com>");
++MODULE_DESCRIPTION("Samsung SoC DRM GEM Module");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_gem.h b/drivers/gpu/drm/exynos/exynos_drm_gem.h
+new file mode 100644
+index 000000000000..e5fc0148277b
+--- /dev/null
++++ b/drivers/gpu/drm/exynos/exynos_drm_gem.h
+@@ -0,0 +1,107 @@
++/* exynos_drm_gem.h
++ *
++ * Copyright (c) 2011 Samsung Electronics Co., Ltd.
++ * Authoer: Inki Dae <inki.dae@samsung.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * VA LINUX SYSTEMS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
++ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
++ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ * OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#ifndef _EXYNOS_DRM_GEM_H_
++#define _EXYNOS_DRM_GEM_H_
++
++#define to_exynos_gem_obj(x)	container_of(x,\
++			struct exynos_drm_gem_obj, base)
++
++/*
++ * exynos drm buffer structure.
++ *
++ * @base: a gem object.
++ *	- a new handle to this gem object would be created
++ *	by drm_gem_handle_create().
++ * @entry: pointer to exynos drm buffer entry object.
++ *	- containing the information to physically
++ *	continuous memory region allocated by user request
++ *	or at framebuffer creation.
++ *
++ * P.S. this object would be transfered to user as kms_bo.handle so
++ *	user can access the buffer through kms_bo.handle.
++ */
++struct exynos_drm_gem_obj {
++	struct drm_gem_object base;
++	struct exynos_drm_buf_entry *entry;
++};
++
++/* create a new buffer and get a new gem handle. */
++struct exynos_drm_gem_obj *exynos_drm_gem_create(struct drm_file *file_priv,
++		struct drm_device *dev, unsigned int size,
++		unsigned int *handle);
++
++/*
++ * request gem object creation and buffer allocation as the size
++ * that it is calculated with framebuffer information such as width,
++ * height and bpp.
++ */
++int exynos_drm_gem_create_ioctl(struct drm_device *dev, void *data,
++		struct drm_file *file_priv);
++
++/* get buffer offset to map to user space. */
++int exynos_drm_gem_map_offset_ioctl(struct drm_device *dev, void *data,
++		struct drm_file *file_priv);
++
++/* unmap a buffer from user space. */
++int exynos_drm_gem_munmap_ioctl(struct drm_device *dev, void *data,
++		struct drm_file *file_priv);
++
++/* initialize gem object. */
++int exynos_drm_gem_init_object(struct drm_gem_object *obj);
++
++/* free gem object. */
++void exynos_drm_gem_free_object(struct drm_gem_object *gem_obj);
++
++/* create memory region for drm framebuffer. */
++int exynos_drm_gem_dumb_create(struct drm_file *file_priv,
++		struct drm_device *dev, struct drm_mode_create_dumb *args);
++
++/* map memory region for drm framebuffer to user space. */
++int exynos_drm_gem_dumb_map_offset(struct drm_file *file_priv,
++		struct drm_device *dev, uint32_t handle, uint64_t *offset);
++
++/* page fault handler and mmap fault address(virtual) to physical memory. */
++int exynos_drm_gem_fault(struct vm_area_struct *vma, struct vm_fault *vmf);
++
++/*
++ * mmap the physically continuous memory that a gem object contains
++ * to user space.
++ */
++int exynos_drm_gem_mmap_ioctl(struct drm_device *dev, void *data,
++		struct drm_file *file_priv);
++
++/* set vm_flags and we can change the vm attribute to other one at here. */
++int exynos_drm_gem_mmap(struct file *filp, struct vm_area_struct *vma);
++
++/*
++ * destroy memory region allocated.
++ *	- a gem handle and physical memory region pointed by a gem object
++ *	would be released by drm_gem_handle_delete().
++ */
++int exynos_drm_gem_dumb_destroy(struct drm_file *file_priv,
++		struct drm_device *dev, unsigned int handle);
++
++#endif
+diff --git a/include/drm/exynos_drm.h b/include/drm/exynos_drm.h
+new file mode 100644
+index 000000000000..874c4d271328
+--- /dev/null
++++ b/include/drm/exynos_drm.h
+@@ -0,0 +1,104 @@
++/* exynos_drm.h
++ *
++ * Copyright (c) 2011 Samsung Electronics Co., Ltd.
++ * Authors:
++ *	Inki Dae <inki.dae@samsung.com>
++ *	Joonyoung Shim <jy0922.shim@samsung.com>
++ *	Seung-Woo Kim <sw0312.kim@samsung.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * VA LINUX SYSTEMS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
++ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
++ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ * OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#ifndef _EXYNOS_DRM_H_
++#define _EXYNOS_DRM_H_
++
++/**
++ * User-desired buffer creation information structure.
++ *
++ * @size: requested size for the object.
++ *	- this size value would be page-aligned internally.
++ * @flags: user request for setting memory type or cache attributes.
++ * @handle: returned handle for the object.
++ */
++struct drm_exynos_gem_create {
++	unsigned int size;
++	unsigned int flags;
++	unsigned int handle;
++};
++
++/**
++ * A structure for getting buffer offset.
++ *
++ * @handle: a pointer to gem object created.
++ * @pad: just padding to be 64-bit aligned.
++ * @offset: relatived offset value of the memory region allocated.
++ *	- this value should be set by user.
++ */
++struct drm_exynos_gem_map_off {
++	unsigned int handle;
++	unsigned int pad;
++	uint64_t offset;
++};
++
++/**
++ * A structure for mapping buffer.
++ *
++ * @handle: a handle to gem object created.
++ * @size: memory size to be mapped.
++ * @mapped: having user virtual address mmaped.
++ *	- this variable would be filled by exynos gem module
++ *	of kernel side with user virtual address which is allocated
++ *	by do_mmap().
++ */
++struct drm_exynos_gem_mmap {
++	unsigned int handle;
++	unsigned int size;
++	uint64_t mapped;
++};
++
++#define DRM_EXYNOS_GEM_CREATE		0x00
++#define DRM_EXYNOS_GEM_MAP_OFFSET	0x01
++#define DRM_EXYNOS_GEM_MMAP		0x02
++
++#define DRM_IOCTL_EXYNOS_GEM_CREATE		DRM_IOWR(DRM_COMMAND_BASE + \
++		DRM_EXYNOS_GEM_CREATE, struct drm_exynos_gem_create)
++
++#define DRM_IOCTL_EXYNOS_GEM_MAP_OFFSET	DRM_IOWR(DRM_COMMAND_BASE + \
++		DRM_EXYNOS_GEM_MAP_OFFSET, struct drm_exynos_gem_map_off)
++
++#define DRM_IOCTL_EXYNOS_GEM_MMAP	DRM_IOWR(DRM_COMMAND_BASE + \
++		DRM_EXYNOS_GEM_MMAP, struct drm_exynos_gem_mmap)
++
++/**
++ * Platform Specific Structure for DRM based FIMD.
++ *
++ * @timing: default video mode for initializing
++ * @default_win: default window layer number to be used for UI.
++ * @bpp: default bit per pixel.
++ */
++struct exynos_drm_fimd_pdata {
++	struct fb_videomode		timing;
++	u32				vidcon0;
++	u32				vidcon1;
++	unsigned int			default_win;
++	unsigned int			bpp;
++};
++
++#endif

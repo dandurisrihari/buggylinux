@@ -1,0 +1,66 @@
+commit 4953919feedaeb6d0161ecea920c35d1d1f639d3
+Author: David Hildenbrand <dahi@linux.vnet.ibm.com>
+Date:   Fri Feb 21 08:59:59 2014 +0100
+
+    KVM: s390: interpretive execution of SIGP EXTERNAL CALL
+    
+    If the sigp interpretation facility is installed, most SIGP EXTERNAL CALL
+    operations will be interpreted instead of intercepted. A partial execution
+    interception will occurr at the sending cpu only if the target cpu is in the
+    wait state ("W" bit in the cpuflags set). Instruction interception will only
+    happen in error cases (e.g. cpu addr invalid).
+    
+    As a sending cpu might set the external call interrupt pending flags at the
+    target cpu at every point in time, we can't handle this kind of interrupt using
+    our kvm interrupt injection mechanism. The injection will be done automatically
+    by the SIE when preparing the start of the target cpu.
+    
+    Signed-off-by: David Hildenbrand <dahi@linux.vnet.ibm.com>
+    Reviewed-by: Cornelia Huck <cornelia.huck@de.ibm.com>
+    CC: Thomas Huth <thuth@linux.vnet.ibm.com>
+    [Adopt external call injection to check for sigp interpretion]
+    Signed-off-by: Christian Borntraeger <borntraeger@de.ibm.com>
+
+diff --git a/arch/s390/kvm/sigp.c b/arch/s390/kvm/sigp.c
+index c0b99e0f6b63..d0341d2e54b1 100644
+--- a/arch/s390/kvm/sigp.c
++++ b/arch/s390/kvm/sigp.c
+@@ -458,3 +458,38 @@ int kvm_s390_handle_sigp(struct kvm_vcpu *vcpu)
+ 	kvm_s390_set_psw_cc(vcpu, rc);
+ 	return 0;
+ }
++
++/*
++ * Handle SIGP partial execution interception.
++ *
++ * This interception will occur at the source cpu when a source cpu sends an
++ * external call to a target cpu and the target cpu has the WAIT bit set in
++ * its cpuflags. Interception will occurr after the interrupt indicator bits at
++ * the target cpu have been set. All error cases will lead to instruction
++ * interception, therefore nothing is to be checked or prepared.
++ */
++int kvm_s390_handle_sigp_pei(struct kvm_vcpu *vcpu)
++{
++	int r3 = vcpu->arch.sie_block->ipa & 0x000f;
++	u16 cpu_addr = vcpu->run->s.regs.gprs[r3];
++	struct kvm_vcpu *dest_vcpu;
++	u8 order_code = kvm_s390_get_base_disp_rs(vcpu);
++
++	trace_kvm_s390_handle_sigp_pei(vcpu, order_code, cpu_addr);
++
++	if (order_code == SIGP_EXTERNAL_CALL) {
++		dest_vcpu = kvm_get_vcpu(vcpu->kvm, cpu_addr);
++		BUG_ON(dest_vcpu == NULL);
++
++		spin_lock_bh(&dest_vcpu->arch.local_int.lock);
++		if (waitqueue_active(&dest_vcpu->wq))
++			wake_up_interruptible(&dest_vcpu->wq);
++		dest_vcpu->preempted = true;
++		spin_unlock_bh(&dest_vcpu->arch.local_int.lock);
++
++		kvm_s390_set_psw_cc(vcpu, SIGP_CC_ORDER_CODE_ACCEPTED);
++		return 0;
++	}
++
++	return -EOPNOTSUPP;
++}

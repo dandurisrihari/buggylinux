@@ -1,0 +1,142 @@
+diff --git a/fs/xfs/xfs_mount.c b/fs/xfs/xfs_mount.c
+index c5f153c3693f..53e130f803b1 100644
+--- a/fs/xfs/xfs_mount.c
++++ b/fs/xfs/xfs_mount.c
+@@ -468,6 +468,8 @@ STATIC int
+ xfs_check_summary_counts(
+ 	struct xfs_mount	*mp)
+ {
++	int			error = 0;
++
+ 	/*
+ 	 * The AG0 superblock verifier rejects in-progress filesystems,
+ 	 * so we should never see the flag set this far into mounting.
+@@ -506,11 +508,32 @@ xfs_check_summary_counts(
+ 	 * superblock to be correct and we don't need to do anything here.
+ 	 * Otherwise, recalculate the summary counters.
+ 	 */
+-	if ((!xfs_has_lazysbcount(mp) || xfs_is_clean(mp)) &&
+-	    !xfs_fs_has_sickness(mp, XFS_SICK_FS_COUNTERS))
+-		return 0;
++	if ((xfs_has_lazysbcount(mp) && !xfs_is_clean(mp)) ||
++	    xfs_fs_has_sickness(mp, XFS_SICK_FS_COUNTERS)) {
++		error = xfs_initialize_perag_data(mp, mp->m_sb.sb_agcount);
++		if (error)
++			return error;
++	}
++
++	/*
++	 * Older kernels misused sb_frextents to reflect both incore
++	 * reservations made by running transactions and the actual count of
++	 * free rt extents in the ondisk metadata.  Transactions committed
++	 * during runtime can therefore contain a superblock update that
++	 * undercounts the number of free rt extents tracked in the rt bitmap.
++	 * A clean unmount record will have the correct frextents value since
++	 * there can be no other transactions running at that point.
++	 *
++	 * If we're mounting the rt volume after recovering the log, recompute
++	 * frextents from the rtbitmap file to fix the inconsistency.
++	 */
++	if (xfs_has_realtime(mp) && !xfs_is_clean(mp)) {
++		error = xfs_rtalloc_reinit_frextents(mp);
++		if (error)
++			return error;
++	}
+ 
+-	return xfs_initialize_perag_data(mp, mp->m_sb.sb_agcount);
++	return 0;
+ }
+ 
+ /*
+@@ -784,11 +807,6 @@ xfs_mountfs(
+ 		goto out_inodegc_shrinker;
+ 	}
+ 
+-	/* Make sure the summary counts are ok. */
+-	error = xfs_check_summary_counts(mp);
+-	if (error)
+-		goto out_log_dealloc;
+-
+ 	/* Enable background inode inactivation workers. */
+ 	xfs_inodegc_start(mp);
+ 	xfs_blockgc_start(mp);
+@@ -844,6 +862,11 @@ xfs_mountfs(
+ 		goto out_rele_rip;
+ 	}
+ 
++	/* Make sure the summary counts are ok. */
++	error = xfs_check_summary_counts(mp);
++	if (error)
++		goto out_rtunmount;
++
+ 	/*
+ 	 * If this is a read-only mount defer the superblock updates until
+ 	 * the next remount into writeable mode.  Otherwise we would never
+diff --git a/fs/xfs/xfs_rtalloc.c b/fs/xfs/xfs_rtalloc.c
+index b8c79ee791af..76f50e75f99c 100644
+--- a/fs/xfs/xfs_rtalloc.c
++++ b/fs/xfs/xfs_rtalloc.c
+@@ -1284,6 +1284,43 @@ xfs_rtmount_init(
+ 	return 0;
+ }
+ 
++static int
++xfs_rtalloc_count_frextent(
++	struct xfs_mount		*mp,
++	struct xfs_trans		*tp,
++	const struct xfs_rtalloc_rec	*rec,
++	void				*priv)
++{
++	uint64_t			*valp = priv;
++
++	*valp += rec->ar_extcount;
++	return 0;
++}
++
++/*
++ * Reinitialize the number of free realtime extents from the realtime bitmap.
++ * Callers must ensure that there is no other activity in the filesystem.
++ */
++int
++xfs_rtalloc_reinit_frextents(
++	struct xfs_mount	*mp)
++{
++	uint64_t		val = 0;
++	int			error;
++
++	xfs_ilock(mp->m_rbmip, XFS_ILOCK_EXCL);
++	error = xfs_rtalloc_query_all(mp, NULL, xfs_rtalloc_count_frextent,
++			&val);
++	xfs_iunlock(mp->m_rbmip, XFS_ILOCK_EXCL);
++	if (error)
++		return error;
++
++	spin_lock(&mp->m_sb_lock);
++	mp->m_sb.sb_frextents = val;
++	spin_unlock(&mp->m_sb_lock);
++	return 0;
++}
++
+ /*
+  * Get the bitmap and summary inodes and the summary cache into the mount
+  * structure at mount time.
+diff --git a/fs/xfs/xfs_rtalloc.h b/fs/xfs/xfs_rtalloc.h
+index 539d134f4f25..62c7ad79cbb6 100644
+--- a/fs/xfs/xfs_rtalloc.h
++++ b/fs/xfs/xfs_rtalloc.h
+@@ -135,6 +135,7 @@ bool xfs_verify_rtbno(struct xfs_mount *mp, xfs_rtblock_t rtbno);
+ int xfs_rtalloc_extent_is_free(struct xfs_mount *mp, struct xfs_trans *tp,
+ 			       xfs_rtblock_t start, xfs_extlen_t len,
+ 			       bool *is_free);
++int xfs_rtalloc_reinit_frextents(struct xfs_mount *mp);
+ #else
+ # define xfs_rtallocate_extent(t,b,min,max,l,f,p,rb)    (ENOSYS)
+ # define xfs_rtfree_extent(t,b,l)                       (ENOSYS)
+@@ -145,6 +146,7 @@ int xfs_rtalloc_extent_is_free(struct xfs_mount *mp, struct xfs_trans *tp,
+ # define xfs_rtbuf_get(m,t,b,i,p)                       (ENOSYS)
+ # define xfs_verify_rtbno(m, r)			(false)
+ # define xfs_rtalloc_extent_is_free(m,t,s,l,i)          (ENOSYS)
++# define xfs_rtalloc_reinit_frextents(m)                (0)
+ static inline int		/* error */
+ xfs_rtmount_init(
+ 	xfs_mount_t	*mp)	/* file system mount structure */

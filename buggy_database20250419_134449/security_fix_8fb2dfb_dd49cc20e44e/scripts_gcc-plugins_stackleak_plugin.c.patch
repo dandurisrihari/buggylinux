@@ -1,0 +1,41 @@
+commit 8fb2dfb228df785bbeb4d055a74402ef4b07fc25
+Author: Alexander Popov <alex.popov@linux.com>
+Date:   Thu Dec 6 18:13:07 2018 +0300
+
+    stackleak: Register the 'stackleak_cleanup' pass before the '*free_cfg' pass
+    
+    Currently the 'stackleak_cleanup' pass deleting a CALL insn is executed
+    after the 'reload' pass. That allows gcc to do some weird optimization in
+    function prologues and epilogues, which are generated later [1].
+    
+    Let's avoid that by registering the 'stackleak_cleanup' pass before
+    the '*free_cfg' pass. It's the moment when the stack frame size is
+    already final, function prologues and epilogues are generated, and the
+    machine-dependent code transformations are not done.
+    
+    [1] https://www.openwall.com/lists/kernel-hardening/2018/11/23/2
+    
+    Reported-by: kbuild test robot <lkp@intel.com>
+    Signed-off-by: Alexander Popov <alex.popov@linux.com>
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+
+diff --git a/scripts/gcc-plugins/stackleak_plugin.c b/scripts/gcc-plugins/stackleak_plugin.c
+index 2f48da98b5d4..dbd37460c573 100644
+--- a/scripts/gcc-plugins/stackleak_plugin.c
++++ b/scripts/gcc-plugins/stackleak_plugin.c
+@@ -363,10 +363,12 @@ __visible int plugin_init(struct plugin_name_args *plugin_info,
+ 						PASS_POS_INSERT_BEFORE);
+ 
+ 	/*
+-	 * The stackleak_cleanup pass should be executed after the
+-	 * "reload" pass, when the stack frame size is final.
++	 * The stackleak_cleanup pass should be executed before the "*free_cfg"
++	 * pass. It's the moment when the stack frame size is already final,
++	 * function prologues and epilogues are generated, and the
++	 * machine-dependent code transformations are not done.
+ 	 */
+-	PASS_INFO(stackleak_cleanup, "reload", 1, PASS_POS_INSERT_AFTER);
++	PASS_INFO(stackleak_cleanup, "*free_cfg", 1, PASS_POS_INSERT_BEFORE);
+ 
+ 	if (!plugin_default_version_check(version, &gcc_version)) {
+ 		error(G_("incompatible gcc/plugin versions"));

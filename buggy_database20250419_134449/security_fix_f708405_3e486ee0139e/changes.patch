@@ -1,0 +1,54 @@
+diff --git a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_cmn.c b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_cmn.c
+index 4c739d5355d2..8ae269ec17a1 100644
+--- a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_cmn.c
++++ b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_cmn.c
+@@ -3030,7 +3030,7 @@ int bnx2x_nic_unload(struct bnx2x *bp, int unload_mode, bool keep_link)
+ 
+ 	del_timer_sync(&bp->timer);
+ 
+-	if (IS_PF(bp)) {
++	if (IS_PF(bp) && !BP_NOMCP(bp)) {
+ 		/* Set ALWAYS_ALIVE bit in shmem */
+ 		bp->fw_drv_pulse_wr_seq |= DRV_PULSE_ALWAYS_ALIVE;
+ 		bnx2x_drv_pulse(bp);
+@@ -3116,7 +3116,7 @@ int bnx2x_nic_unload(struct bnx2x *bp, int unload_mode, bool keep_link)
+ 	bp->cnic_loaded = false;
+ 
+ 	/* Clear driver version indication in shmem */
+-	if (IS_PF(bp))
++	if (IS_PF(bp) && !BP_NOMCP(bp))
+ 		bnx2x_update_mng_version(bp);
+ 
+ 	/* Check if there are pending parity attentions. If there are - set
+diff --git a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_main.c b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_main.c
+index 91e2a7560b48..ddd5d3ebd201 100644
+--- a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_main.c
++++ b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_main.c
+@@ -9578,6 +9578,15 @@ static int bnx2x_init_shmem(struct bnx2x *bp)
+ 
+ 	do {
+ 		bp->common.shmem_base = REG_RD(bp, MISC_REG_SHARED_MEM_ADDR);
++
++		/* If we read all 0xFFs, means we are in PCI error state and
++		 * should bail out to avoid crashes on adapter's FW reads.
++		 */
++		if (bp->common.shmem_base == 0xFFFFFFFF) {
++			bp->flags |= NO_MCP_FLAG;
++			return -ENODEV;
++		}
++
+ 		if (bp->common.shmem_base) {
+ 			val = SHMEM_RD(bp, validity_map[BP_PORT(bp)]);
+ 			if (val & SHR_MEM_VALIDITY_MB)
+@@ -14320,7 +14329,10 @@ static pci_ers_result_t bnx2x_io_slot_reset(struct pci_dev *pdev)
+ 		BNX2X_ERR("IO slot reset --> driver unload\n");
+ 
+ 		/* MCP should have been reset; Need to wait for validity */
+-		bnx2x_init_shmem(bp);
++		if (bnx2x_init_shmem(bp)) {
++			rtnl_unlock();
++			return PCI_ERS_RESULT_DISCONNECT;
++		}
+ 
+ 		if (IS_PF(bp) && SHMEM2_HAS(bp, drv_capabilities_flag)) {
+ 			u32 v;

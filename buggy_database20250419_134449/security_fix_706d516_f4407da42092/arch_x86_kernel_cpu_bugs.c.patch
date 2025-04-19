@@ -1,0 +1,111 @@
+commit 706d51681d636a0c4a5ef53395ec3b803e45ed4d
+Author: Sai Praneeth <sai.praneeth.prakhya@intel.com>
+Date:   Wed Aug 1 11:42:25 2018 -0700
+
+    x86/speculation: Support Enhanced IBRS on future CPUs
+    
+    Future Intel processors will support "Enhanced IBRS" which is an "always
+    on" mode i.e. IBRS bit in SPEC_CTRL MSR is enabled once and never
+    disabled.
+    
+    From the specification [1]:
+    
+     "With enhanced IBRS, the predicted targets of indirect branches
+      executed cannot be controlled by software that was executed in a less
+      privileged predictor mode or on another logical processor. As a
+      result, software operating on a processor with enhanced IBRS need not
+      use WRMSR to set IA32_SPEC_CTRL.IBRS after every transition to a more
+      privileged predictor mode. Software can isolate predictor modes
+      effectively simply by setting the bit once. Software need not disable
+      enhanced IBRS prior to entering a sleep state such as MWAIT or HLT."
+    
+    If Enhanced IBRS is supported by the processor then use it as the
+    preferred spectre v2 mitigation mechanism instead of Retpoline. Intel's
+    Retpoline white paper [2] states:
+    
+     "Retpoline is known to be an effective branch target injection (Spectre
+      variant 2) mitigation on Intel processors belonging to family 6
+      (enumerated by the CPUID instruction) that do not have support for
+      enhanced IBRS. On processors that support enhanced IBRS, it should be
+      used for mitigation instead of retpoline."
+    
+    The reason why Enhanced IBRS is the recommended mitigation on processors
+    which support it is that these processors also support CET which
+    provides a defense against ROP attacks. Retpoline is very similar to ROP
+    techniques and might trigger false positives in the CET defense.
+    
+    If Enhanced IBRS is selected as the mitigation technique for spectre v2,
+    the IBRS bit in SPEC_CTRL MSR is set once at boot time and never
+    cleared. Kernel also has to make sure that IBRS bit remains set after
+    VMEXIT because the guest might have cleared the bit. This is already
+    covered by the existing x86_spec_ctrl_set_guest() and
+    x86_spec_ctrl_restore_host() speculation control functions.
+    
+    Enhanced IBRS still requires IBPB for full mitigation.
+    
+    [1] Speculative-Execution-Side-Channel-Mitigations.pdf
+    [2] Retpoline-A-Branch-Target-Injection-Mitigation.pdf
+    Both documents are available at:
+    https://bugzilla.kernel.org/show_bug.cgi?id=199511
+    
+    Originally-by: David Woodhouse <dwmw@amazon.co.uk>
+    Signed-off-by: Sai Praneeth Prakhya <sai.praneeth.prakhya@intel.com>
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Tim C Chen <tim.c.chen@intel.com>
+    Cc: Dave Hansen <dave.hansen@intel.com>
+    Cc: Ravi Shankar <ravi.v.shankar@intel.com>
+    Link: https://lkml.kernel.org/r/1533148945-24095-1-git-send-email-sai.praneeth.prakhya@intel.com
+
+diff --git a/arch/x86/kernel/cpu/bugs.c b/arch/x86/kernel/cpu/bugs.c
+index bc8c43b22460..405a9a61bb89 100644
+--- a/arch/x86/kernel/cpu/bugs.c
++++ b/arch/x86/kernel/cpu/bugs.c
+@@ -130,6 +130,7 @@ static const char *spectre_v2_strings[] = {
+ 	[SPECTRE_V2_RETPOLINE_MINIMAL_AMD]	= "Vulnerable: Minimal AMD ASM retpoline",
+ 	[SPECTRE_V2_RETPOLINE_GENERIC]		= "Mitigation: Full generic retpoline",
+ 	[SPECTRE_V2_RETPOLINE_AMD]		= "Mitigation: Full AMD retpoline",
++	[SPECTRE_V2_IBRS_ENHANCED]		= "Mitigation: Enhanced IBRS",
+ };
+ 
+ #undef pr_fmt
+@@ -332,6 +333,13 @@ static void __init spectre_v2_select_mitigation(void)
+ 
+ 	case SPECTRE_V2_CMD_FORCE:
+ 	case SPECTRE_V2_CMD_AUTO:
++		if (boot_cpu_has(X86_FEATURE_IBRS_ENHANCED)) {
++			mode = SPECTRE_V2_IBRS_ENHANCED;
++			/* Force it so VMEXIT will restore correctly */
++			x86_spec_ctrl_base |= SPEC_CTRL_IBRS;
++			wrmsrl(MSR_IA32_SPEC_CTRL, x86_spec_ctrl_base);
++			goto specv2_set_mode;
++		}
+ 		if (IS_ENABLED(CONFIG_RETPOLINE))
+ 			goto retpoline_auto;
+ 		break;
+@@ -369,6 +377,7 @@ static void __init spectre_v2_select_mitigation(void)
+ 		setup_force_cpu_cap(X86_FEATURE_RETPOLINE);
+ 	}
+ 
++specv2_set_mode:
+ 	spectre_v2_enabled = mode;
+ 	pr_info("%s\n", spectre_v2_strings[mode]);
+ 
+@@ -391,9 +400,16 @@ static void __init spectre_v2_select_mitigation(void)
+ 
+ 	/*
+ 	 * Retpoline means the kernel is safe because it has no indirect
+-	 * branches. But firmware isn't, so use IBRS to protect that.
++	 * branches. Enhanced IBRS protects firmware too, so, enable restricted
++	 * speculation around firmware calls only when Enhanced IBRS isn't
++	 * supported.
++	 *
++	 * Use "mode" to check Enhanced IBRS instead of boot_cpu_has(), because
++	 * the user might select retpoline on the kernel command line and if
++	 * the CPU supports Enhanced IBRS, kernel might un-intentionally not
++	 * enable IBRS around firmware calls.
+ 	 */
+-	if (boot_cpu_has(X86_FEATURE_IBRS)) {
++	if (boot_cpu_has(X86_FEATURE_IBRS) && mode != SPECTRE_V2_IBRS_ENHANCED) {
+ 		setup_force_cpu_cap(X86_FEATURE_USE_IBRS_FW);
+ 		pr_info("Enabling Restricted Speculation for firmware calls\n");
+ 	}

@@ -1,0 +1,72 @@
+diff --git a/include/net/bluetooth/hci_core.h b/include/net/bluetooth/hci_core.h
+index a29feb01854e..d2cf88407690 100644
+--- a/include/net/bluetooth/hci_core.h
++++ b/include/net/bluetooth/hci_core.h
+@@ -184,6 +184,7 @@ struct hci_conn {
+ 	__u32		 link_mode;
+ 	__u8             auth_type;
+ 	__u8             sec_level;
++	__u8		 pending_sec_level;
+ 	__u8             power_save;
+ 	__u16            disc_timeout;
+ 	unsigned long	 pend;
+diff --git a/net/bluetooth/hci_conn.c b/net/bluetooth/hci_conn.c
+index fe712a89a856..99cd8d9d891b 100644
+--- a/net/bluetooth/hci_conn.c
++++ b/net/bluetooth/hci_conn.c
+@@ -379,7 +379,8 @@ struct hci_conn *hci_connect(struct hci_dev *hdev, int type, bdaddr_t *dst, __u8
+ 	hci_conn_hold(acl);
+ 
+ 	if (acl->state == BT_OPEN || acl->state == BT_CLOSED) {
+-		acl->sec_level = sec_level;
++		acl->sec_level = BT_SECURITY_LOW;
++		acl->pending_sec_level = sec_level;
+ 		acl->auth_type = auth_type;
+ 		hci_acl_connect(acl);
+ 	}
+@@ -437,8 +438,11 @@ static int hci_conn_auth(struct hci_conn *conn, __u8 sec_level, __u8 auth_type)
+ {
+ 	BT_DBG("conn %p", conn);
+ 
++	if (conn->pending_sec_level > sec_level)
++		sec_level = conn->pending_sec_level;
++
+ 	if (sec_level > conn->sec_level)
+-		conn->sec_level = sec_level;
++		conn->pending_sec_level = sec_level;
+ 	else if (conn->link_mode & HCI_LM_AUTH)
+ 		return 1;
+ 
+diff --git a/net/bluetooth/hci_event.c b/net/bluetooth/hci_event.c
+index 38100170d380..a290854fdaa6 100644
+--- a/net/bluetooth/hci_event.c
++++ b/net/bluetooth/hci_event.c
+@@ -692,13 +692,13 @@ static int hci_outgoing_auth_needed(struct hci_dev *hdev,
+ 	if (conn->state != BT_CONFIG || !conn->out)
+ 		return 0;
+ 
+-	if (conn->sec_level == BT_SECURITY_SDP)
++	if (conn->pending_sec_level == BT_SECURITY_SDP)
+ 		return 0;
+ 
+ 	/* Only request authentication for SSP connections or non-SSP
+ 	 * devices with sec_level HIGH */
+ 	if (!(hdev->ssp_mode > 0 && conn->ssp_mode > 0) &&
+-					conn->sec_level != BT_SECURITY_HIGH)
++				conn->pending_sec_level != BT_SECURITY_HIGH)
+ 		return 0;
+ 
+ 	return 1;
+@@ -1095,9 +1095,10 @@ static inline void hci_auth_complete_evt(struct hci_dev *hdev, struct sk_buff *s
+ 
+ 	conn = hci_conn_hash_lookup_handle(hdev, __le16_to_cpu(ev->handle));
+ 	if (conn) {
+-		if (!ev->status)
++		if (!ev->status) {
+ 			conn->link_mode |= HCI_LM_AUTH;
+-		else
++			conn->sec_level = conn->pending_sec_level;
++		} else
+ 			conn->sec_level = BT_SECURITY_LOW;
+ 
+ 		clear_bit(HCI_CONN_AUTH_PEND, &conn->pend);

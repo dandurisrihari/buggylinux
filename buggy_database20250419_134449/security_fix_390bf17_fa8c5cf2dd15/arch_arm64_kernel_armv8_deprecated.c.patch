@@ -1,0 +1,60 @@
+commit 390bf1773c7eba3b45df62ae82b3d2be911185b7
+Author: Andre Przywara <andre.przywara@arm.com>
+Date:   Tue Jun 28 18:07:31 2016 +0100
+
+    arm64: consolidate signal injection on emulation errors
+    
+    The code for injecting a signal into userland if a trapped instruction
+    fails emulation due to a _userland_ error (like an illegal address)
+    will be used more often with the next patch.
+    Factor out the core functionality into a separate function and use
+    that both for the existing trap handler and for the deprecated
+    instructions emulation.
+    
+    Signed-off-by: Andre Przywara <andre.przywara@arm.com>
+    [catalin.marinas@arm.com: s/set_segfault/arm64_notify_segfault/]
+    Signed-off-by: Catalin Marinas <catalin.marinas@arm.com>
+
+diff --git a/arch/arm64/kernel/armv8_deprecated.c b/arch/arm64/kernel/armv8_deprecated.c
+index c37202c0c838..fab5603f57ea 100644
+--- a/arch/arm64/kernel/armv8_deprecated.c
++++ b/arch/arm64/kernel/armv8_deprecated.c
+@@ -316,28 +316,6 @@ static void __init register_insn_emulation_sysctl(struct ctl_table *table)
+  */
+ #define TYPE_SWPB (1 << 22)
+ 
+-/*
+- * Set up process info to signal segmentation fault - called on access error.
+- */
+-static void set_segfault(struct pt_regs *regs, unsigned long addr)
+-{
+-	siginfo_t info;
+-
+-	down_read(&current->mm->mmap_sem);
+-	if (find_vma(current->mm, addr) == NULL)
+-		info.si_code = SEGV_MAPERR;
+-	else
+-		info.si_code = SEGV_ACCERR;
+-	up_read(&current->mm->mmap_sem);
+-
+-	info.si_signo = SIGSEGV;
+-	info.si_errno = 0;
+-	info.si_addr  = (void *) instruction_pointer(regs);
+-
+-	pr_debug("SWP{B} emulation: access caused memory abort!\n");
+-	arm64_notify_die("Illegal memory access", regs, &info, 0);
+-}
+-
+ static int emulate_swpX(unsigned int address, unsigned int *data,
+ 			unsigned int type)
+ {
+@@ -430,7 +408,8 @@ static int swp_handler(struct pt_regs *regs, u32 instr)
+ 	return 0;
+ 
+ fault:
+-	set_segfault(regs, address);
++	pr_debug("SWP{B} emulation: access caused memory abort!\n");
++	arm64_notify_segfault(regs, address);
+ 
+ 	return 0;
+ }

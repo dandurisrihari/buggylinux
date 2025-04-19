@@ -1,0 +1,140 @@
+diff --git a/include/linux/sunrpc/cache.h b/include/linux/sunrpc/cache.h
+index b5612c958cce..3699dff7db8f 100644
+--- a/include/linux/sunrpc/cache.h
++++ b/include/linux/sunrpc/cache.h
+@@ -163,6 +163,17 @@ static inline void cache_put(struct cache_head *h, struct cache_detail *cd)
+ 	kref_put(&h->ref, cd->cache_put);
+ }
+ 
++static inline int cache_valid(struct cache_head *h)
++{
++	/* If an item has been unhashed pending removal when
++	 * the refcount drops to 0, the expiry_time will be
++	 * set to 0.  We don't want to consider such items
++	 * valid in this context even though CACHE_VALID is
++	 * set.
++	 */
++	return (h->expiry_time != 0 && test_bit(CACHE_VALID, &h->flags));
++}
++
+ extern int cache_check(struct cache_detail *detail,
+ 		       struct cache_head *h, struct cache_req *rqstp);
+ extern void cache_flush(void);
+diff --git a/include/linux/sunrpc/svcauth.h b/include/linux/sunrpc/svcauth.h
+index a6601650deeb..de92619b0826 100644
+--- a/include/linux/sunrpc/svcauth.h
++++ b/include/linux/sunrpc/svcauth.h
+@@ -126,6 +126,7 @@ extern struct auth_domain *auth_domain_find(char *name);
+ extern struct auth_domain *auth_unix_lookup(struct in_addr addr);
+ extern int auth_unix_forget_old(struct auth_domain *dom);
+ extern void svcauth_unix_purge(void);
++extern void svcauth_unix_info_release(void *);
+ 
+ static inline unsigned long hash_str(char *name, int bits)
+ {
+diff --git a/include/linux/sunrpc/svcsock.h b/include/linux/sunrpc/svcsock.h
+index 4c296152cbfa..98b21ad370fd 100644
+--- a/include/linux/sunrpc/svcsock.h
++++ b/include/linux/sunrpc/svcsock.h
+@@ -54,6 +54,9 @@ struct svc_sock {
+ 	int			sk_reclen;	/* length of record */
+ 	int			sk_tcplen;	/* current read length */
+ 	time_t			sk_lastrecv;	/* time of last received request */
++
++	/* cache of various info for TCP sockets */
++	void			*sk_info_authunix;
+ };
+ 
+ /*
+diff --git a/net/sunrpc/svcauth_unix.c b/net/sunrpc/svcauth_unix.c
+index 40d41a2831d7..e1bd933629fe 100644
+--- a/net/sunrpc/svcauth_unix.c
++++ b/net/sunrpc/svcauth_unix.c
+@@ -9,6 +9,7 @@
+ #include <linux/seq_file.h>
+ #include <linux/hash.h>
+ #include <linux/string.h>
++#include <net/sock.h>
+ 
+ #define RPCDBG_FACILITY	RPCDBG_AUTH
+ 
+@@ -375,6 +376,44 @@ void svcauth_unix_purge(void)
+ 	cache_purge(&ip_map_cache);
+ }
+ 
++static inline struct ip_map *
++ip_map_cached_get(struct svc_rqst *rqstp)
++{
++	struct ip_map *ipm = rqstp->rq_sock->sk_info_authunix;
++	if (ipm != NULL) {
++		if (!cache_valid(&ipm->h)) {
++			/*
++			 * The entry has been invalidated since it was
++			 * remembered, e.g. by a second mount from the
++			 * same IP address.
++			 */
++			rqstp->rq_sock->sk_info_authunix = NULL;
++			cache_put(&ipm->h, &ip_map_cache);
++			return NULL;
++		}
++		cache_get(&ipm->h);
++	}
++	return ipm;
++}
++
++static inline void
++ip_map_cached_put(struct svc_rqst *rqstp, struct ip_map *ipm)
++{
++	struct svc_sock *svsk = rqstp->rq_sock;
++
++	if (svsk->sk_sock->type == SOCK_STREAM && svsk->sk_info_authunix == NULL)
++		svsk->sk_info_authunix = ipm;	/* newly cached, keep the reference */
++	else
++		cache_put(&ipm->h, &ip_map_cache);
++}
++
++void
++svcauth_unix_info_release(void *info)
++{
++	struct ip_map *ipm = info;
++	cache_put(&ipm->h, &ip_map_cache);
++}
++
+ static int
+ svcauth_unix_set_client(struct svc_rqst *rqstp)
+ {
+@@ -384,8 +423,10 @@ svcauth_unix_set_client(struct svc_rqst *rqstp)
+ 	if (rqstp->rq_proc == 0)
+ 		return SVC_OK;
+ 
+-	ipm = ip_map_lookup(rqstp->rq_server->sv_program->pg_class,
+-			    rqstp->rq_addr.sin_addr);
++	ipm = ip_map_cached_get(rqstp);
++	if (ipm == NULL)
++		ipm = ip_map_lookup(rqstp->rq_server->sv_program->pg_class,
++				    rqstp->rq_addr.sin_addr);
+ 
+ 	if (ipm == NULL)
+ 		return SVC_DENIED;
+@@ -400,7 +441,7 @@ svcauth_unix_set_client(struct svc_rqst *rqstp)
+ 		case 0:
+ 			rqstp->rq_client = &ipm->m_client->h;
+ 			kref_get(&rqstp->rq_client->ref);
+-			cache_put(&ipm->h, &ip_map_cache);
++			ip_map_cached_put(rqstp, ipm);
+ 			break;
+ 	}
+ 	return SVC_OK;
+diff --git a/net/sunrpc/svcsock.c b/net/sunrpc/svcsock.c
+index 1d512337ccd9..b39e7e2b648f 100644
+--- a/net/sunrpc/svcsock.c
++++ b/net/sunrpc/svcsock.c
+@@ -1610,6 +1610,8 @@ svc_delete_socket(struct svc_sock *svsk)
+ 			sockfd_put(svsk->sk_sock);
+ 		else
+ 			sock_release(svsk->sk_sock);
++		if (svsk->sk_info_authunix != NULL)
++			svcauth_unix_info_release(svsk->sk_info_authunix);
+ 		kfree(svsk);
+ 	} else {
+ 		spin_unlock_bh(&serv->sv_lock);

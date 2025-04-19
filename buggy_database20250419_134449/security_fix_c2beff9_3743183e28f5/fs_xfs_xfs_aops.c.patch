@@ -1,0 +1,58 @@
+commit c2beff99eb03866df6fdbd3a93b08fd27eb8bf5c
+Author: Darrick J. Wong <djwong@kernel.org>
+Date:   Mon Nov 28 17:24:35 2022 -0800
+
+    xfs: add debug knob to slow down writeback for fun
+    
+    Add a new error injection knob so that we can arbitrarily slow down
+    writeback to test for race conditions and aberrant reclaim behavior if
+    the writeback mechanisms are slow to issue writeback.  This will enable
+    functional testing for the ifork sequence counters introduced in commit
+    745b3f76d1c8 ("xfs: maintain a sequence count for inode fork
+    manipulations").
+    
+    Signed-off-by: Darrick J. Wong <djwong@kernel.org>
+    Reviewed-by: Dave Chinner <dchinner@redhat.com>
+
+diff --git a/fs/xfs/xfs_aops.c b/fs/xfs/xfs_aops.c
+index a22d90af40c8..41734202796f 100644
+--- a/fs/xfs/xfs_aops.c
++++ b/fs/xfs/xfs_aops.c
+@@ -17,6 +17,8 @@
+ #include "xfs_bmap.h"
+ #include "xfs_bmap_util.h"
+ #include "xfs_reflink.h"
++#include "xfs_errortag.h"
++#include "xfs_error.h"
+ 
+ struct xfs_writepage_ctx {
+ 	struct iomap_writepage_ctx ctx;
+@@ -217,11 +219,17 @@ xfs_imap_valid(
+ 	 * checked (and found nothing at this offset) could have added
+ 	 * overlapping blocks.
+ 	 */
+-	if (XFS_WPC(wpc)->data_seq != READ_ONCE(ip->i_df.if_seq))
++	if (XFS_WPC(wpc)->data_seq != READ_ONCE(ip->i_df.if_seq)) {
++		trace_xfs_wb_data_iomap_invalid(ip, &wpc->iomap,
++				XFS_WPC(wpc)->data_seq, XFS_DATA_FORK);
+ 		return false;
++	}
+ 	if (xfs_inode_has_cow_data(ip) &&
+-	    XFS_WPC(wpc)->cow_seq != READ_ONCE(ip->i_cowfp->if_seq))
++	    XFS_WPC(wpc)->cow_seq != READ_ONCE(ip->i_cowfp->if_seq)) {
++		trace_xfs_wb_cow_iomap_invalid(ip, &wpc->iomap,
++				XFS_WPC(wpc)->cow_seq, XFS_COW_FORK);
+ 		return false;
++	}
+ 	return true;
+ }
+ 
+@@ -285,6 +293,8 @@ xfs_map_blocks(
+ 	if (xfs_is_shutdown(mp))
+ 		return -EIO;
+ 
++	XFS_ERRORTAG_DELAY(mp, XFS_ERRTAG_WB_DELAY_MS);
++
+ 	/*
+ 	 * COW fork blocks can overlap data fork blocks even if the blocks
+ 	 * aren't shared.  COW I/O always takes precedent, so we must always

@@ -1,0 +1,78 @@
+diff --git a/include/linux/fault-inject.h b/include/linux/fault-inject.h
+index be6d0bc111ad..354413950d34 100644
+--- a/include/linux/fault-inject.h
++++ b/include/linux/fault-inject.h
+@@ -91,12 +91,10 @@ static inline void fault_config_init(struct fault_config *config,
+ 
+ struct kmem_cache;
+ 
+-bool should_fail_alloc_page(gfp_t gfp_mask, unsigned int order);
+-
+ #ifdef CONFIG_FAIL_PAGE_ALLOC
+-bool __should_fail_alloc_page(gfp_t gfp_mask, unsigned int order);
++bool should_fail_alloc_page(gfp_t gfp_mask, unsigned int order);
+ #else
+-static inline bool __should_fail_alloc_page(gfp_t gfp_mask, unsigned int order)
++static inline bool should_fail_alloc_page(gfp_t gfp_mask, unsigned int order)
+ {
+ 	return false;
+ }
+diff --git a/kernel/bpf/verifier.c b/kernel/bpf/verifier.c
+index e455654f3b91..a81e18409ec9 100644
+--- a/kernel/bpf/verifier.c
++++ b/kernel/bpf/verifier.c
+@@ -21122,7 +21122,9 @@ BTF_SET_START(btf_non_sleepable_error_inject)
+  * Assume non-sleepable from bpf safety point of view.
+  */
+ BTF_ID(func, __filemap_add_folio)
++#ifdef CONFIG_FAIL_PAGE_ALLOC
+ BTF_ID(func, should_fail_alloc_page)
++#endif
+ #ifdef CONFIG_FAILSLAB
+ BTF_ID(func, should_failslab)
+ #endif
+diff --git a/mm/fail_page_alloc.c b/mm/fail_page_alloc.c
+index b1b09cce9394..532851ce5132 100644
+--- a/mm/fail_page_alloc.c
++++ b/mm/fail_page_alloc.c
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0
+ #include <linux/fault-inject.h>
++#include <linux/error-injection.h>
+ #include <linux/mm.h>
+ 
+ static struct {
+@@ -21,7 +22,7 @@ static int __init setup_fail_page_alloc(char *str)
+ }
+ __setup("fail_page_alloc=", setup_fail_page_alloc);
+ 
+-bool __should_fail_alloc_page(gfp_t gfp_mask, unsigned int order)
++bool should_fail_alloc_page(gfp_t gfp_mask, unsigned int order)
+ {
+ 	int flags = 0;
+ 
+@@ -41,6 +42,7 @@ bool __should_fail_alloc_page(gfp_t gfp_mask, unsigned int order)
+ 
+ 	return should_fail_ex(&fail_page_alloc.attr, 1 << order, flags);
+ }
++ALLOW_ERROR_INJECTION(should_fail_alloc_page, TRUE);
+ 
+ #ifdef CONFIG_FAULT_INJECTION_DEBUG_FS
+ 
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index c46aedfc9a12..3398d914ed83 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -3050,12 +3050,6 @@ struct page *rmqueue(struct zone *preferred_zone,
+ 	return page;
+ }
+ 
+-noinline bool should_fail_alloc_page(gfp_t gfp_mask, unsigned int order)
+-{
+-	return __should_fail_alloc_page(gfp_mask, order);
+-}
+-ALLOW_ERROR_INJECTION(should_fail_alloc_page, TRUE);
+-
+ static inline long __zone_watermark_unusable_free(struct zone *z,
+ 				unsigned int order, unsigned int alloc_flags)
+ {

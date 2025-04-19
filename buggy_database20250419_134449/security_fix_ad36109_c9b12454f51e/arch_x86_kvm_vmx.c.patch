@@ -1,0 +1,59 @@
+commit ad3610919e6f6a4d815c5bf163556b950d6aea56
+Author: Paolo Bonzini <pbonzini@redhat.com>
+Date:   Tue Sep 20 16:15:05 2016 +0200
+
+    kvm: x86: avoid atomic operations on APICv vmentry
+    
+    On some benchmarks (e.g. netperf with ioeventfd disabled), APICv
+    posted interrupts turn out to be slower than interrupt injection via
+    KVM_REQ_EVENT.
+    
+    This patch optimizes a bit the IRR update, avoiding expensive atomic
+    operations in the common case where PI.ON=0 at vmentry or the PIR vector
+    is mostly zero.  This saves at least 20 cycles (1%) per vmexit, as
+    measured by kvm-unit-tests' inl_from_qemu test (20 runs):
+    
+                  | enable_apicv=1  |  enable_apicv=0
+                  | mean     stdev  |  mean     stdev
+        ----------|-----------------|------------------
+        before    | 5826     32.65  |  5765     47.09
+        after     | 5809     43.42  |  5777     77.02
+    
+    Of course, any change in the right column is just placebo effect. :)
+    The savings are bigger if interrupts are frequent.
+    
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/vmx.c b/arch/x86/kvm/vmx.c
+index dcb840e8bfe3..a91a5b01f38e 100644
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -520,6 +520,12 @@ static inline void pi_set_sn(struct pi_desc *pi_desc)
+ 			(unsigned long *)&pi_desc->control);
+ }
+ 
++static inline void pi_clear_on(struct pi_desc *pi_desc)
++{
++	clear_bit(POSTED_INTR_ON,
++  		  (unsigned long *)&pi_desc->control);
++}
++
+ static inline int pi_test_on(struct pi_desc *pi_desc)
+ {
+ 	return test_bit(POSTED_INTR_ON,
+@@ -4780,9 +4786,15 @@ static void vmx_sync_pir_to_irr(struct kvm_vcpu *vcpu)
+ {
+ 	struct vcpu_vmx *vmx = to_vmx(vcpu);
+ 
+-	if (!pi_test_and_clear_on(&vmx->pi_desc))
++	if (!pi_test_on(&vmx->pi_desc))
+ 		return;
+ 
++	pi_clear_on(&vmx->pi_desc);
++	/*
++	 * IOMMU can write to PIR.ON, so the barrier matters even on UP.
++	 * But on x86 this is just a compiler barrier anyway.
++	 */
++	smp_mb__after_atomic();
+ 	kvm_apic_update_irr(vcpu, vmx->pi_desc.pir);
+ }

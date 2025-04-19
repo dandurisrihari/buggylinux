@@ -1,0 +1,88 @@
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index feefa1fb32eb..e6bc0b654bbb 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -6505,6 +6505,15 @@ long kvm_arch_vm_ioctl(struct file *filp,
+ 		r = kvm_xen_hvm_set_attr(kvm, &xha);
+ 		break;
+ 	}
++	case KVM_XEN_HVM_EVTCHN_SEND: {
++		struct kvm_irq_routing_xen_evtchn uxe;
++
++		r = -EFAULT;
++		if (copy_from_user(&uxe, argp, sizeof(uxe)))
++			goto out;
++		r = kvm_xen_hvm_evtchn_send(kvm, &uxe);
++		break;
++	}
+ #endif
+ 	case KVM_SET_CLOCK:
+ 		r = kvm_vm_ioctl_set_clock(kvm, argp);
+diff --git a/arch/x86/kvm/xen.c b/arch/x86/kvm/xen.c
+index 9c87263a5be2..f0f0011c4617 100644
+--- a/arch/x86/kvm/xen.c
++++ b/arch/x86/kvm/xen.c
+@@ -1086,6 +1086,38 @@ int kvm_xen_setup_evtchn(struct kvm *kvm,
+ 	return 0;
+ }
+ 
++/*
++ * Explicit event sending from userspace with KVM_XEN_HVM_EVTCHN_SEND ioctl.
++ */
++int kvm_xen_hvm_evtchn_send(struct kvm *kvm, struct kvm_irq_routing_xen_evtchn *uxe)
++{
++	struct kvm_xen_evtchn e;
++	int ret;
++
++	if (!uxe->port || uxe->port >= max_evtchn_port(kvm))
++		return -EINVAL;
++
++	/* We only support 2 level event channels for now */
++	if (uxe->priority != KVM_IRQ_ROUTING_XEN_EVTCHN_PRIO_2LEVEL)
++		return -EINVAL;
++
++	e.port = uxe->port;
++	e.vcpu_id = uxe->vcpu;
++	e.vcpu_idx = -1;
++	e.priority = uxe->priority;
++
++	ret = kvm_xen_set_evtchn(&e, kvm);
++
++	/*
++	 * None of that 'return 1 if it actually got delivered' nonsense.
++	 * We don't care if it was masked (-ENOTCONN) either.
++	 */
++	if (ret > 0 || ret == -ENOTCONN)
++		ret = 0;
++
++	return ret;
++}
++
+ void kvm_xen_destroy_vcpu(struct kvm_vcpu *vcpu)
+ {
+ 	kvm_gfn_to_pfn_cache_destroy(vcpu->kvm,
+diff --git a/arch/x86/kvm/xen.h b/arch/x86/kvm/xen.h
+index e28feb32add6..852286de574e 100644
+--- a/arch/x86/kvm/xen.h
++++ b/arch/x86/kvm/xen.h
+@@ -20,6 +20,7 @@ int kvm_xen_vcpu_set_attr(struct kvm_vcpu *vcpu, struct kvm_xen_vcpu_attr *data)
+ int kvm_xen_vcpu_get_attr(struct kvm_vcpu *vcpu, struct kvm_xen_vcpu_attr *data);
+ int kvm_xen_hvm_set_attr(struct kvm *kvm, struct kvm_xen_hvm_attr *data);
+ int kvm_xen_hvm_get_attr(struct kvm *kvm, struct kvm_xen_hvm_attr *data);
++int kvm_xen_hvm_evtchn_send(struct kvm *kvm, struct kvm_irq_routing_xen_evtchn *evt);
+ int kvm_xen_write_hypercall_page(struct kvm_vcpu *vcpu, u64 data);
+ int kvm_xen_hvm_config(struct kvm *kvm, struct kvm_xen_hvm_config *xhc);
+ void kvm_xen_init_vm(struct kvm *kvm);
+diff --git a/include/uapi/linux/kvm.h b/include/uapi/linux/kvm.h
+index 91a6fe4e02c0..49cd2e9e0f6a 100644
+--- a/include/uapi/linux/kvm.h
++++ b/include/uapi/linux/kvm.h
+@@ -1699,6 +1699,9 @@ struct kvm_xen_hvm_attr {
+ #define KVM_XEN_VCPU_GET_ATTR	_IOWR(KVMIO, 0xca, struct kvm_xen_vcpu_attr)
+ #define KVM_XEN_VCPU_SET_ATTR	_IOW(KVMIO,  0xcb, struct kvm_xen_vcpu_attr)
+ 
++/* Available with KVM_CAP_XEN_HVM / KVM_XEN_HVM_CONFIG_EVTCHN_SEND */
++#define KVM_XEN_HVM_EVTCHN_SEND	_IOW(KVMIO,  0xd0, struct kvm_irq_routing_xen_evtchn)
++
+ #define KVM_GET_SREGS2             _IOR(KVMIO,  0xcc, struct kvm_sregs2)
+ #define KVM_SET_SREGS2             _IOW(KVMIO,  0xcd, struct kvm_sregs2)

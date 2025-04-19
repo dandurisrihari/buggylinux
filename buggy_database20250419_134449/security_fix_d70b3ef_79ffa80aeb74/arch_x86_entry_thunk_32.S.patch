@@ -1,0 +1,176 @@
+commit d70b3ef54ceaf1c7c92209f5a662a670d04cbed9
+Merge: 650ec5a6bd5d 7ef3d7d58d9d
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Mon Jun 22 17:59:09 2015 -0700
+
+    Merge branch 'x86-core-for-linus' of git://git.kernel.org/pub/scm/linux/kernel/git/tip/tip
+    
+    Pull x86 core updates from Ingo Molnar:
+     "There were so many changes in the x86/asm, x86/apic and x86/mm topics
+      in this cycle that the topical separation of -tip broke down somewhat -
+      so the result is a more traditional architecture pull request,
+      collected into the 'x86/core' topic.
+    
+      The topics were still maintained separately as far as possible, so
+      bisectability and conceptual separation should still be pretty good -
+      but there were a handful of merge points to avoid excessive
+      dependencies (and conflicts) that would have been poorly tested in the
+      end.
+    
+      The next cycle will hopefully be much more quiet (or at least will
+      have fewer dependencies).
+    
+      The main changes in this cycle were:
+    
+       * x86/apic changes, with related IRQ core changes: (Jiang Liu, Thomas
+         Gleixner)
+    
+         - This is the second and most intrusive part of changes to the x86
+           interrupt handling - full conversion to hierarchical interrupt
+           domains:
+    
+              [IOAPIC domain]   -----
+                                     |
+              [MSI domain]      --------[Remapping domain] ----- [ Vector domain ]
+                                     |   (optional)          |
+              [HPET MSI domain] -----                        |
+                                                             |
+              [DMAR domain]     -----------------------------
+                                                             |
+              [Legacy domain]   -----------------------------
+    
+           This now reflects the actual hardware and allowed us to distangle
+           the domain specific code from the underlying parent domain, which
+           can be optional in the case of interrupt remapping.  It's a clear
+           separation of functionality and removes quite some duct tape
+           constructs which plugged the remap code between ioapic/msi/hpet
+           and the vector management.
+    
+         - Intel IOMMU IRQ remapping enhancements, to allow direct interrupt
+           injection into guests (Feng Wu)
+    
+       * x86/asm changes:
+    
+         - Tons of cleanups and small speedups, micro-optimizations.  This
+           is in preparation to move a good chunk of the low level entry
+           code from assembly to C code (Denys Vlasenko, Andy Lutomirski,
+           Brian Gerst)
+    
+         - Moved all system entry related code to a new home under
+           arch/x86/entry/ (Ingo Molnar)
+    
+         - Removal of the fragile and ugly CFI dwarf debuginfo annotations.
+           Conversion to C will reintroduce many of them - but meanwhile
+           they are only getting in the way, and the upstream kernel does
+           not rely on them (Ingo Molnar)
+    
+         - NOP handling refinements. (Borislav Petkov)
+    
+       * x86/mm changes:
+    
+         - Big PAT and MTRR rework: making the code more robust and
+           preparing to phase out exposing direct MTRR interfaces to drivers -
+           in favor of using PAT driven interfaces (Toshi Kani, Luis R
+           Rodriguez, Borislav Petkov)
+    
+         - New ioremap_wt()/set_memory_wt() interfaces to support
+           Write-Through cached memory mappings.  This is especially
+           important for good performance on NVDIMM hardware (Toshi Kani)
+    
+       * x86/ras changes:
+    
+         - Add support for deferred errors on AMD (Aravind Gopalakrishnan)
+    
+           This is an important RAS feature which adds hardware support for
+           poisoned data.  That means roughly that the hardware marks data
+           which it has detected as corrupted but wasn't able to correct, as
+           poisoned data and raises an APIC interrupt to signal that in the
+           form of a deferred error.  It is the OS's responsibility then to
+           take proper recovery action and thus prolonge system lifetime as
+           far as possible.
+    
+         - Add support for Intel "Local MCE"s: upcoming CPUs will support
+           CPU-local MCE interrupts, as opposed to the traditional system-
+           wide broadcasted MCE interrupts (Ashok Raj)
+    
+         - Misc cleanups (Borislav Petkov)
+    
+       * x86/platform changes:
+    
+         - Intel Atom SoC updates
+    
+      ... and lots of other cleanups, fixlets and other changes - see the
+      shortlog and the Git log for details"
+    
+    * 'x86-core-for-linus' of git://git.kernel.org/pub/scm/linux/kernel/git/tip/tip: (222 commits)
+      x86/hpet: Use proper hpet device number for MSI allocation
+      x86/hpet: Check for irq==0 when allocating hpet MSI interrupts
+      x86/mm/pat, drivers/infiniband/ipath: Use arch_phys_wc_add() and require PAT disabled
+      x86/mm/pat, drivers/media/ivtv: Use arch_phys_wc_add() and require PAT disabled
+      x86/platform/intel/baytrail: Add comments about why we disabled HPET on Baytrail
+      genirq: Prevent crash in irq_move_irq()
+      genirq: Enhance irq_data_to_desc() to support hierarchy irqdomain
+      iommu, x86: Properly handle posted interrupts for IOMMU hotplug
+      iommu, x86: Provide irq_remapping_cap() interface
+      iommu, x86: Setup Posted-Interrupts capability for Intel iommu
+      iommu, x86: Add cap_pi_support() to detect VT-d PI capability
+      iommu, x86: Avoid migrating VT-d posted interrupts
+      iommu, x86: Save the mode (posted or remapped) of an IRTE
+      iommu, x86: Implement irq_set_vcpu_affinity for intel_ir_chip
+      iommu: dmar: Provide helper to copy shared irte fields
+      iommu: dmar: Extend struct irte for VT-d Posted-Interrupts
+      iommu: Add new member capability to struct irq_remap_ops
+      x86/asm/entry/64: Disentangle error_entry/exit gsbase/ebx/usermode code
+      x86/asm/entry/32: Shorten __audit_syscall_entry() args preparation
+      x86/asm/entry/32: Explain reloading of registers after __audit_syscall_entry()
+      ...
+
+diff --cc arch/x86/entry/thunk_32.S
+index 000000000000,e9acf5f4fc92..e5a17114a8c4
+mode 000000,100644..100644
+--- a/arch/x86/entry/thunk_32.S
++++ b/arch/x86/entry/thunk_32.S
+@@@ -1,0 -1,42 +1,40 @@@
++ /*
++  * Trampoline to trace irqs off. (otherwise CALLER_ADDR1 might crash)
++  * Copyright 2008 by Steven Rostedt, Red Hat, Inc
++  *  (inspired by Andi Kleen's thunk_64.S)
++  * Subject to the GNU public license, v.2. No warranty of any kind.
++  */
++ 	#include <linux/linkage.h>
++ 	#include <asm/asm.h>
++ 
++ 	/* put return address in eax (arg1) */
++ 	.macro THUNK name, func, put_ret_addr_in_eax=0
++ 	.globl \name
++ \name:
++ 	pushl %eax
++ 	pushl %ecx
++ 	pushl %edx
++ 
++ 	.if \put_ret_addr_in_eax
++ 	/* Place EIP in the arg1 */
++ 	movl 3*4(%esp), %eax
++ 	.endif
++ 
++ 	call \func
++ 	popl %edx
++ 	popl %ecx
++ 	popl %eax
++ 	ret
++ 	_ASM_NOKPROBE(\name)
++ 	.endm
++ 
++ #ifdef CONFIG_TRACE_IRQFLAGS
++ 	THUNK trace_hardirqs_on_thunk,trace_hardirqs_on_caller,1
++ 	THUNK trace_hardirqs_off_thunk,trace_hardirqs_off_caller,1
++ #endif
++ 
++ #ifdef CONFIG_PREEMPT
++ 	THUNK ___preempt_schedule, preempt_schedule
+ -#ifdef CONFIG_CONTEXT_TRACKING
+ -	THUNK ___preempt_schedule_context, preempt_schedule_context
+ -#endif
+++	THUNK ___preempt_schedule_notrace, preempt_schedule_notrace
++ #endif
++

@@ -1,0 +1,73 @@
+commit 65896545b69ffaac947c12e11d3dcc57fd1fb772
+Author: Dave Martin <Dave.Martin@arm.com>
+Date:   Wed Mar 28 10:50:49 2018 +0100
+
+    arm64: uaccess: Fix omissions from usercopy whitelist
+    
+    When the hardend usercopy support was added for arm64, it was
+    concluded that all cases of usercopy into and out of thread_struct
+    were statically sized and so didn't require explicit whitelisting
+    of the appropriate fields in thread_struct.
+    
+    Testing with usercopy hardening enabled has revealed that this is
+    not the case for certain ptrace regset manipulation calls on arm64.
+    This occurs because the sizes of usercopies associated with the
+    regset API are dynamic by construction, and because arm64 does not
+    always stage such copies via the stack: indeed the regset API is
+    designed to avoid the need for that by adding some bounds checking.
+    
+    This is currently believed to affect only the fpsimd and TLS
+    registers.
+    
+    Because the whitelisted fields in thread_struct must be contiguous,
+    this patch groups them together in a nested struct.  It is also
+    necessary to be able to determine the location and size of that
+    struct, so rather than making the struct anonymous (which would
+    save on edits elsewhere) or adding an anonymous union containing
+    named and unnamed instances of the same struct (gross), this patch
+    gives the struct a name and makes the necessary edits to code that
+    references it (noisy but simple).
+    
+    Care is needed to ensure that the new struct does not contain
+    padding (which the usercopy hardening would fail to protect).
+    
+    For this reason, the presence of tp2_value is made unconditional,
+    since a padding field would be needed there in any case.  This pads
+    up to the 16-byte alignment required by struct user_fpsimd_state.
+    
+    Acked-by: Kees Cook <keescook@chromium.org>
+    Reported-by: Mark Rutland <mark.rutland@arm.com>
+    Fixes: 9e8084d3f761 ("arm64: Implement thread_struct whitelist for hardened usercopy")
+    Signed-off-by: Dave Martin <Dave.Martin@arm.com>
+    Signed-off-by: Will Deacon <will.deacon@arm.com>
+
+diff --git a/arch/arm64/kernel/process.c b/arch/arm64/kernel/process.c
+index c0da6efe5465..f08a2ed9db0d 100644
+--- a/arch/arm64/kernel/process.c
++++ b/arch/arm64/kernel/process.c
+@@ -257,7 +257,7 @@ static void tls_thread_flush(void)
+ 	write_sysreg(0, tpidr_el0);
+ 
+ 	if (is_compat_task()) {
+-		current->thread.tp_value = 0;
++		current->thread.uw.tp_value = 0;
+ 
+ 		/*
+ 		 * We need to ensure ordering between the shadow state and the
+@@ -351,7 +351,7 @@ int copy_thread(unsigned long clone_flags, unsigned long stack_start,
+ 		 * for the new thread.
+ 		 */
+ 		if (clone_flags & CLONE_SETTLS)
+-			p->thread.tp_value = childregs->regs[3];
++			p->thread.uw.tp_value = childregs->regs[3];
+ 	} else {
+ 		memset(childregs, 0, sizeof(struct pt_regs));
+ 		childregs->pstate = PSR_MODE_EL1h;
+@@ -379,7 +379,7 @@ static void tls_thread_switch(struct task_struct *next)
+ 	tls_preserve_current_state();
+ 
+ 	if (is_compat_thread(task_thread_info(next)))
+-		write_sysreg(next->thread.tp_value, tpidrro_el0);
++		write_sysreg(next->thread.uw.tp_value, tpidrro_el0);
+ 	else if (!arm64_kernel_unmapped_at_el0())
+ 		write_sysreg(0, tpidrro_el0);

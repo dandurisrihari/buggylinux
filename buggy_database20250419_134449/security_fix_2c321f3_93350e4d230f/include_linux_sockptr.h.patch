@@ -1,0 +1,95 @@
+commit 2c321f3f70bc284510598f712b702ce8d60c4d14
+Author: Suren Baghdasaryan <surenb@google.com>
+Date:   Sun Apr 14 19:07:31 2024 -0700
+
+    mm: change inlined allocation helpers to account at the call site
+    
+    Main goal of memory allocation profiling patchset is to provide accounting
+    that is cheap enough to run in production.  To achieve that we inject
+    counters using codetags at the allocation call sites to account every time
+    allocation is made.  This injection allows us to perform accounting
+    efficiently because injected counters are immediately available as opposed
+    to the alternative methods, such as using _RET_IP_, which would require
+    counter lookup and appropriate locking that makes accounting much more
+    expensive.  This method requires all allocation functions to inject
+    separate counters at their call sites so that their callers can be
+    individually accounted.  Counter injection is implemented by allocation
+    hooks which should wrap all allocation functions.
+    
+    Inlined functions which perform allocations but do not use allocation
+    hooks are directly charged for the allocations they perform.  In most
+    cases these functions are just specialized allocation wrappers used from
+    multiple places to allocate objects of a specific type.  It would be more
+    useful to do the accounting at their call sites instead.  Instrument these
+    helpers to do accounting at the call site.  Simple inlined allocation
+    wrappers are converted directly into macros.  More complex allocators or
+    allocators with documentation are converted into _noprof versions and
+    allocation hooks are added.  This allows memory allocation profiling
+    mechanism to charge allocations to the callers of these functions.
+    
+    Link: https://lkml.kernel.org/r/20240415020731.1152108-1-surenb@google.com
+    Signed-off-by: Suren Baghdasaryan <surenb@google.com>
+    Acked-by: Jan Kara <jack@suse.cz>               [jbd2]
+    Cc: Anna Schumaker <anna@kernel.org>
+    Cc: Arnd Bergmann <arnd@arndb.de>
+    Cc: Benjamin Tissoires <benjamin.tissoires@redhat.com>
+    Cc: Christoph Lameter <cl@linux.com>
+    Cc: David Rientjes <rientjes@google.com>
+    Cc: David S. Miller <davem@davemloft.net>
+    Cc: Dennis Zhou <dennis@kernel.org>
+    Cc: Eric Dumazet <edumazet@google.com>
+    Cc: Herbert Xu <herbert@gondor.apana.org.au>
+    Cc: Jakub Kicinski <kuba@kernel.org>
+    Cc: Jakub Sitnicki <jakub@cloudflare.com>
+    Cc: Jiri Kosina <jikos@kernel.org>
+    Cc: Joerg Roedel <joro@8bytes.org>
+    Cc: Joonsoo Kim <iamjoonsoo.kim@lge.com>
+    Cc: Kent Overstreet <kent.overstreet@linux.dev>
+    Cc: Matthew Wilcox (Oracle) <willy@infradead.org>
+    Cc: Paolo Abeni <pabeni@redhat.com>
+    Cc: Pekka Enberg <penberg@kernel.org>
+    Cc: Tejun Heo <tj@kernel.org>
+    Cc: Theodore Ts'o <tytso@mit.edu>
+    Cc: Trond Myklebust <trond.myklebust@hammerspace.com>
+    Cc: Vlastimil Babka <vbabka@suse.cz>
+    Cc: Will Deacon <will@kernel.org>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+
+diff --git a/include/linux/sockptr.h b/include/linux/sockptr.h
+index 317200cd3a60..fc5a206c4043 100644
+--- a/include/linux/sockptr.h
++++ b/include/linux/sockptr.h
+@@ -117,9 +117,9 @@ static inline int copy_to_sockptr(sockptr_t dst, const void *src, size_t size)
+ 	return copy_to_sockptr_offset(dst, 0, src, size);
+ }
+ 
+-static inline void *memdup_sockptr(sockptr_t src, size_t len)
++static inline void *memdup_sockptr_noprof(sockptr_t src, size_t len)
+ {
+-	void *p = kmalloc_track_caller(len, GFP_USER | __GFP_NOWARN);
++	void *p = kmalloc_track_caller_noprof(len, GFP_USER | __GFP_NOWARN);
+ 
+ 	if (!p)
+ 		return ERR_PTR(-ENOMEM);
+@@ -129,10 +129,11 @@ static inline void *memdup_sockptr(sockptr_t src, size_t len)
+ 	}
+ 	return p;
+ }
++#define memdup_sockptr(...)	alloc_hooks(memdup_sockptr_noprof(__VA_ARGS__))
+ 
+-static inline void *memdup_sockptr_nul(sockptr_t src, size_t len)
++static inline void *memdup_sockptr_nul_noprof(sockptr_t src, size_t len)
+ {
+-	char *p = kmalloc_track_caller(len + 1, GFP_KERNEL);
++	char *p = kmalloc_track_caller_noprof(len + 1, GFP_KERNEL);
+ 
+ 	if (!p)
+ 		return ERR_PTR(-ENOMEM);
+@@ -143,6 +144,7 @@ static inline void *memdup_sockptr_nul(sockptr_t src, size_t len)
+ 	p[len] = '\0';
+ 	return p;
+ }
++#define memdup_sockptr_nul(...)	alloc_hooks(memdup_sockptr_nul_noprof(__VA_ARGS__))
+ 
+ static inline long strncpy_from_sockptr(char *dst, sockptr_t src, size_t count)
+ {

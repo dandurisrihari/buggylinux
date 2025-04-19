@@ -1,0 +1,242 @@
+diff --cc block/bfq-cgroup.c
+index 0fbde0fc0628,ea3638e06e04..89ffb3aa992c
+--- a/block/bfq-cgroup.c
++++ b/block/bfq-cgroup.c
+@@@ -712,6 -711,46 +711,46 @@@ void bfq_bfqq_move(struct bfq_data *bfq
+  	bfq_put_queue(bfqq);
+  }
+  
++ static void bfq_sync_bfqq_move(struct bfq_data *bfqd,
++ 			       struct bfq_queue *sync_bfqq,
++ 			       struct bfq_io_cq *bic,
++ 			       struct bfq_group *bfqg,
++ 			       unsigned int act_idx)
++ {
++ 	struct bfq_queue *bfqq;
++ 
++ 	if (!sync_bfqq->new_bfqq && !bfq_bfqq_coop(sync_bfqq)) {
++ 		/* We are the only user of this bfqq, just move it */
++ 		if (sync_bfqq->entity.sched_data != &bfqg->sched_data)
++ 			bfq_bfqq_move(bfqd, sync_bfqq, bfqg);
++ 		return;
++ 	}
++ 
++ 	/*
++ 	 * The queue was merged to a different queue. Check
++ 	 * that the merge chain still belongs to the same
++ 	 * cgroup.
++ 	 */
++ 	for (bfqq = sync_bfqq; bfqq; bfqq = bfqq->new_bfqq)
++ 		if (bfqq->entity.sched_data != &bfqg->sched_data)
++ 			break;
++ 	if (bfqq) {
++ 		/*
++ 		 * Some queue changed cgroup so the merge is not valid
++ 		 * anymore. We cannot easily just cancel the merge (by
++ 		 * clearing new_bfqq) as there may be other processes
++ 		 * using this queue and holding refs to all queues
++ 		 * below sync_bfqq->new_bfqq. Similarly if the merge
++ 		 * already happened, we need to detach from bfqq now
++ 		 * so that we cannot merge bio to a request from the
++ 		 * old cgroup.
++ 		 */
++ 		bfq_put_cooperator(sync_bfqq);
+ -		bfq_release_process_ref(bfqd, sync_bfqq);
++ 		bic_set_bfqq(bic, NULL, true, act_idx);
+++		bfq_release_process_ref(bfqd, sync_bfqq);
++ 	}
++ }
++ 
+  /**
+   * __bfq_bic_change_cgroup - move @bic to @bfqg.
+   * @bfqd: the queue descriptor.
+diff --cc block/bfq-iosched.c
+index 380e9bda2e57,777dcab73c8e..8a8d4441519c
+--- a/block/bfq-iosched.c
++++ b/block/bfq-iosched.c
+@@@ -5423,16 -5568,14 +5568,16 @@@ static void bfq_check_ioprio_change(str
+  
+  	bic->ioprio = ioprio;
+  
+- 	bfqq = bic_to_bfqq(bic, false);
++ 	bfqq = bic_to_bfqq(bic, false, bfq_actuator_index(bfqd, bio));
+  	if (bfqq) {
+ -		bfq_release_process_ref(bfqd, bfqq);
+ +		struct bfq_queue *old_bfqq = bfqq;
+ +
+  		bfqq = bfq_get_queue(bfqd, bio, false, bic, true);
+- 		bic_set_bfqq(bic, bfqq, false);
++ 		bic_set_bfqq(bic, bfqq, false, bfq_actuator_index(bfqd, bio));
+ +		bfq_release_process_ref(bfqd, old_bfqq);
+  	}
+  
+- 	bfqq = bic_to_bfqq(bic, true);
++ 	bfqq = bic_to_bfqq(bic, true, bfq_actuator_index(bfqd, bio));
+  	if (bfqq)
+  		bfq_set_next_ioprio_data(bfqq, bic);
+  }
+diff --cc drivers/block/ublk_drv.c
+index 6368b56eacf1,f48d213fb65e..b9c759cef00e
+--- a/drivers/block/ublk_drv.c
++++ b/drivers/block/ublk_drv.c
+@@@ -1982,7 -2053,115 +2053,115 @@@ static int ublk_ctrl_end_recovery(struc
+  	ret = 0;
+   out_unlock:
+  	mutex_unlock(&ub->mutex);
+- 	ublk_put_device(ub);
++ 	return ret;
++ }
++ 
++ /*
++  * All control commands are sent via /dev/ublk-control, so we have to check
++  * the destination device's permission
++  */
++ static int ublk_char_dev_permission(struct ublk_device *ub,
++ 		const char *dev_path, int mask)
++ {
++ 	int err;
++ 	struct path path;
++ 	struct kstat stat;
++ 
++ 	err = kern_path(dev_path, LOOKUP_FOLLOW, &path);
++ 	if (err)
++ 		return err;
++ 
++ 	err = vfs_getattr(&path, &stat, STATX_TYPE, AT_STATX_SYNC_AS_STAT);
++ 	if (err)
++ 		goto exit;
++ 
++ 	err = -EPERM;
++ 	if (stat.rdev != ub->cdev_dev.devt || !S_ISCHR(stat.mode))
++ 		goto exit;
++ 
+ -	err = inode_permission(&init_user_ns,
+++	err = inode_permission(&nop_mnt_idmap,
++ 			d_backing_inode(path.dentry), mask);
++ exit:
++ 	path_put(&path);
++ 	return err;
++ }
++ 
++ static int ublk_ctrl_uring_cmd_permission(struct ublk_device *ub,
++ 		struct io_uring_cmd *cmd)
++ {
++ 	struct ublksrv_ctrl_cmd *header = (struct ublksrv_ctrl_cmd *)cmd->cmd;
++ 	bool unprivileged = ub->dev_info.flags & UBLK_F_UNPRIVILEGED_DEV;
++ 	void __user *argp = (void __user *)(unsigned long)header->addr;
++ 	char *dev_path = NULL;
++ 	int ret = 0;
++ 	int mask;
++ 
++ 	if (!unprivileged) {
++ 		if (!capable(CAP_SYS_ADMIN))
++ 			return -EPERM;
++ 		/*
++ 		 * The new added command of UBLK_CMD_GET_DEV_INFO2 includes
++ 		 * char_dev_path in payload too, since userspace may not
++ 		 * know if the specified device is created as unprivileged
++ 		 * mode.
++ 		 */
++ 		if (cmd->cmd_op != UBLK_CMD_GET_DEV_INFO2)
++ 			return 0;
++ 	}
++ 
++ 	/*
++ 	 * User has to provide the char device path for unprivileged ublk
++ 	 *
++ 	 * header->addr always points to the dev path buffer, and
++ 	 * header->dev_path_len records length of dev path buffer.
++ 	 */
++ 	if (!header->dev_path_len || header->dev_path_len > PATH_MAX)
++ 		return -EINVAL;
++ 
++ 	if (header->len < header->dev_path_len)
++ 		return -EINVAL;
++ 
++ 	dev_path = kmalloc(header->dev_path_len + 1, GFP_KERNEL);
++ 	if (!dev_path)
++ 		return -ENOMEM;
++ 
++ 	ret = -EFAULT;
++ 	if (copy_from_user(dev_path, argp, header->dev_path_len))
++ 		goto exit;
++ 	dev_path[header->dev_path_len] = 0;
++ 
++ 	ret = -EINVAL;
++ 	switch (cmd->cmd_op) {
++ 	case UBLK_CMD_GET_DEV_INFO:
++ 	case UBLK_CMD_GET_DEV_INFO2:
++ 	case UBLK_CMD_GET_QUEUE_AFFINITY:
++ 	case UBLK_CMD_GET_PARAMS:
++ 		mask = MAY_READ;
++ 		break;
++ 	case UBLK_CMD_START_DEV:
++ 	case UBLK_CMD_STOP_DEV:
++ 	case UBLK_CMD_ADD_DEV:
++ 	case UBLK_CMD_DEL_DEV:
++ 	case UBLK_CMD_SET_PARAMS:
++ 	case UBLK_CMD_START_USER_RECOVERY:
++ 	case UBLK_CMD_END_USER_RECOVERY:
++ 		mask = MAY_READ | MAY_WRITE;
++ 		break;
++ 	default:
++ 		goto exit;
++ 	}
++ 
++ 	ret = ublk_char_dev_permission(ub, dev_path, mask);
++ 	if (!ret) {
++ 		header->len -= header->dev_path_len;
++ 		header->addr += header->dev_path_len;
++ 	}
++ 	pr_devel("%s: dev id %d cmd_op %x uid %d gid %d path %s ret %d\n",
++ 			__func__, ub->ub_number, cmd->cmd_op,
++ 			ub->dev_info.owner_uid, ub->dev_info.owner_gid,
++ 			dev_path, ret);
++ exit:
++ 	kfree(dev_path);
+  	return ret;
+  }
+  
+diff --cc fs/coredump.c
+index 68619329ec65,0a6873a9c4d0..a141dca68165
+--- a/fs/coredump.c
++++ b/fs/coredump.c
+@@@ -838,37 -838,9 +838,33 @@@ static int __dump_skip(struct coredump_
+  	}
+  }
+  
+ +int dump_emit(struct coredump_params *cprm, const void *addr, int nr)
+ +{
+ +	if (cprm->to_skip) {
+ +		if (!__dump_skip(cprm, cprm->to_skip))
+ +			return 0;
+ +		cprm->to_skip = 0;
+ +	}
+ +	return __dump_emit(cprm, addr, nr);
+ +}
+ +EXPORT_SYMBOL(dump_emit);
+ +
+ +void dump_skip_to(struct coredump_params *cprm, unsigned long pos)
+ +{
+ +	cprm->to_skip = pos - cprm->pos;
+ +}
+ +EXPORT_SYMBOL(dump_skip_to);
+ +
+ +void dump_skip(struct coredump_params *cprm, size_t nr)
+ +{
+ +	cprm->to_skip += nr;
+ +}
+ +EXPORT_SYMBOL(dump_skip);
+ +
+ +#ifdef CONFIG_ELF_CORE
+  static int dump_emit_page(struct coredump_params *cprm, struct page *page)
+  {
+- 	struct bio_vec bvec = {
+- 		.bv_page	= page,
+- 		.bv_offset	= 0,
+- 		.bv_len		= PAGE_SIZE,
+- 	};
++ 	struct bio_vec bvec;
+  	struct iov_iter iter;
+  	struct file *file = cprm->file;
+  	loff_t pos;

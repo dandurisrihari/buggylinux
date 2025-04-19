@@ -1,0 +1,84 @@
+commit 9e85ae6af6e907975f68d82ff127073ec024cb05
+Merge: 6caffe21ddea fa41ba0d08de
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Tue Sep 5 09:45:46 2017 -0700
+
+    Merge branch 'for-linus' of git://git.kernel.org/pub/scm/linux/kernel/git/s390/linux
+    
+    Pull s390 updates from Martin Schwidefsky:
+     "The first part of the s390 updates for 4.14:
+    
+       - Add machine type 0x3906 for IBM z14
+    
+       - Add IBM z14 TLB flushing improvements for KVM guests
+    
+       - Exploit the TOD clock epoch extension to provide a continuous TOD
+         clock afer 2042/09/17
+    
+       - Add NIAI spinlock hints for IBM z14
+    
+       - Rework the vmcp driver and use CMA for the respone buffer of z/VM
+         CP commands
+    
+       - Drop some s390 specific asm headers and use the generic version
+    
+       - Add block discard for DASD-FBA devices under z/VM
+    
+       - Add average request times to DASD statistics
+    
+       - A few of those constify patches which seem to be in vogue right now
+    
+       - Cleanup and bug fixes"
+    
+    * 'for-linus' of git://git.kernel.org/pub/scm/linux/kernel/git/s390/linux: (50 commits)
+      s390/mm: avoid empty zero pages for KVM guests to avoid postcopy hangs
+      s390/dasd: Add discard support for FBA devices
+      s390/zcrypt: make CPRBX const
+      s390/uaccess: avoid mvcos jump label
+      s390/mm: use generic mm_hooks
+      s390/facilities: fix typo
+      s390/vmcp: simplify vmcp_response_free()
+      s390/topology: Remove the unused parent_node() macro
+      s390/dasd: Change unsigned long long to unsigned long
+      s390/smp: convert cpuhp_setup_state() return code to zero on success
+      s390: fix 'novx' early parameter handling
+      s390/dasd: add average request times to dasd statistics
+      s390/scm: use common completion path
+      s390/pci: log changes to uid checking
+      s390/vmcp: simplify vmcp_ioctl()
+      s390/vmcp: return -ENOTTY for unknown ioctl commands
+      s390/vmcp: split vmcp header file and move to uapi
+      s390/vmcp: make use of contiguous memory allocator
+      s390/cpcmd,vmcp: avoid GFP_DMA allocations
+      s390/vmcp: fix uaccess check and avoid undefined behavior
+      ...
+
+diff --cc arch/s390/include/asm/spinlock.h
+index 217ee5210c32,339e450b0567..8182b521c42f
+--- a/arch/s390/include/asm/spinlock.h
++++ b/arch/s390/include/asm/spinlock.h
+@@@ -92,12 -92,20 +92,13 @@@ static inline void arch_spin_unlock(arc
+  {
+  	typecheck(int, lp->lock);
+  	asm volatile(
+- 		"st	%1,%0\n"
+- 		: "+Q" (lp->lock)
+- 		: "d" (0)
+- 		: "cc", "memory");
++ #ifdef CONFIG_HAVE_MARCH_ZEC12_FEATURES
++ 		"	.long	0xb2fa0070\n"	/* NIAI 7 */
++ #endif
++ 		"	st	%1,%0\n"
++ 		: "=Q" (lp->lock) : "d" (0) : "cc", "memory");
+  }
+  
+ -static inline void arch_spin_unlock_wait(arch_spinlock_t *lock)
+ -{
+ -	while (arch_spin_is_locked(lock))
+ -		arch_spin_relax(lock);
+ -	smp_acquire__after_ctrl_dep();
+ -}
+ -
+  /*
+   * Read-write spinlocks, allowing multiple readers
+   * but only one writer.

@@ -1,0 +1,146 @@
+diff --git a/include/net/tcp.h b/include/net/tcp.h
+index a9bc959fb102..7207c52b1fc9 100644
+--- a/include/net/tcp.h
++++ b/include/net/tcp.h
+@@ -2598,8 +2598,8 @@ struct tcp_ulp_ops {
+ 	/* cleanup ulp */
+ 	void (*release)(struct sock *sk);
+ 	/* diagnostic */
+-	int (*get_info)(struct sock *sk, struct sk_buff *skb);
+-	size_t (*get_info_size)(const struct sock *sk);
++	int (*get_info)(struct sock *sk, struct sk_buff *skb, bool net_admin);
++	size_t (*get_info_size)(const struct sock *sk, bool net_admin);
+ 	/* clone ulp */
+ 	void (*clone)(const struct request_sock *req, struct sock *newsk,
+ 		      const gfp_t priority);
+diff --git a/net/ipv4/tcp_diag.c b/net/ipv4/tcp_diag.c
+index d8bba37dbffd..45e174b8cd22 100644
+--- a/net/ipv4/tcp_diag.c
++++ b/net/ipv4/tcp_diag.c
+@@ -96,8 +96,8 @@ static int tcp_diag_put_ulp(struct sk_buff *skb, struct sock *sk,
+ 	if (err)
+ 		goto nla_failure;
+ 
+-	if (net_admin && ulp_ops->get_info)
+-		err = ulp_ops->get_info(sk, skb);
++	if (ulp_ops->get_info)
++		err = ulp_ops->get_info(sk, skb, net_admin);
+ 	if (err)
+ 		goto nla_failure;
+ 
+@@ -170,8 +170,8 @@ static size_t tcp_diag_get_aux_size(struct sock *sk, bool net_admin)
+ 		if (ulp_ops) {
+ 			size += nla_total_size(0) +
+ 				nla_total_size(TCP_ULP_NAME_MAX);
+-			if (net_admin && ulp_ops->get_info_size)
+-				size += ulp_ops->get_info_size(sk);
++			if (ulp_ops->get_info_size)
++				size += ulp_ops->get_info_size(sk, net_admin);
+ 		}
+ 	}
+ 	return size;
+diff --git a/net/mptcp/diag.c b/net/mptcp/diag.c
+index 02205f7994d7..70cf9ebce833 100644
+--- a/net/mptcp/diag.c
++++ b/net/mptcp/diag.c
+@@ -12,7 +12,7 @@
+ #include <net/netlink.h>
+ #include "protocol.h"
+ 
+-static int subflow_get_info(struct sock *sk, struct sk_buff *skb)
++static int subflow_get_info(struct sock *sk, struct sk_buff *skb, bool net_admin)
+ {
+ 	struct mptcp_subflow_context *sf;
+ 	struct nlattr *start;
+@@ -56,15 +56,6 @@ static int subflow_get_info(struct sock *sk, struct sk_buff *skb)
+ 
+ 	if (nla_put_u32(skb, MPTCP_SUBFLOW_ATTR_TOKEN_REM, sf->remote_token) ||
+ 	    nla_put_u32(skb, MPTCP_SUBFLOW_ATTR_TOKEN_LOC, sf->token) ||
+-	    nla_put_u32(skb, MPTCP_SUBFLOW_ATTR_RELWRITE_SEQ,
+-			sf->rel_write_seq) ||
+-	    nla_put_u64_64bit(skb, MPTCP_SUBFLOW_ATTR_MAP_SEQ, sf->map_seq,
+-			      MPTCP_SUBFLOW_ATTR_PAD) ||
+-	    nla_put_u32(skb, MPTCP_SUBFLOW_ATTR_MAP_SFSEQ,
+-			sf->map_subflow_seq) ||
+-	    nla_put_u32(skb, MPTCP_SUBFLOW_ATTR_SSN_OFFSET, sf->ssn_offset) ||
+-	    nla_put_u16(skb, MPTCP_SUBFLOW_ATTR_MAP_DATALEN,
+-			sf->map_data_len) ||
+ 	    nla_put_u32(skb, MPTCP_SUBFLOW_ATTR_FLAGS, flags) ||
+ 	    nla_put_u8(skb, MPTCP_SUBFLOW_ATTR_ID_REM, sf->remote_id) ||
+ 	    nla_put_u8(skb, MPTCP_SUBFLOW_ATTR_ID_LOC, subflow_get_local_id(sf))) {
+@@ -72,6 +63,21 @@ static int subflow_get_info(struct sock *sk, struct sk_buff *skb)
+ 		goto nla_failure;
+ 	}
+ 
++	/* Only export seq related counters to user with CAP_NET_ADMIN */
++	if (net_admin &&
++	    (nla_put_u32(skb, MPTCP_SUBFLOW_ATTR_RELWRITE_SEQ,
++			 sf->rel_write_seq) ||
++	     nla_put_u64_64bit(skb, MPTCP_SUBFLOW_ATTR_MAP_SEQ, sf->map_seq,
++			       MPTCP_SUBFLOW_ATTR_PAD) ||
++	     nla_put_u32(skb, MPTCP_SUBFLOW_ATTR_MAP_SFSEQ,
++			 sf->map_subflow_seq) ||
++	     nla_put_u32(skb, MPTCP_SUBFLOW_ATTR_SSN_OFFSET, sf->ssn_offset) ||
++	     nla_put_u16(skb, MPTCP_SUBFLOW_ATTR_MAP_DATALEN,
++			 sf->map_data_len))) {
++		err = -EMSGSIZE;
++		goto nla_failure;
++	}
++
+ 	rcu_read_unlock();
+ 	unlock_sock_fast(sk, slow);
+ 	nla_nest_end(skb, start);
+@@ -84,22 +90,26 @@ static int subflow_get_info(struct sock *sk, struct sk_buff *skb)
+ 	return err;
+ }
+ 
+-static size_t subflow_get_info_size(const struct sock *sk)
++static size_t subflow_get_info_size(const struct sock *sk, bool net_admin)
+ {
+ 	size_t size = 0;
+ 
+ 	size += nla_total_size(0) +	/* INET_ULP_INFO_MPTCP */
+ 		nla_total_size(4) +	/* MPTCP_SUBFLOW_ATTR_TOKEN_REM */
+ 		nla_total_size(4) +	/* MPTCP_SUBFLOW_ATTR_TOKEN_LOC */
+-		nla_total_size(4) +	/* MPTCP_SUBFLOW_ATTR_RELWRITE_SEQ */
+-		nla_total_size_64bit(8) +	/* MPTCP_SUBFLOW_ATTR_MAP_SEQ */
+-		nla_total_size(4) +	/* MPTCP_SUBFLOW_ATTR_MAP_SFSEQ */
+-		nla_total_size(4) +	/* MPTCP_SUBFLOW_ATTR_SSN_OFFSET */
+-		nla_total_size(2) +	/* MPTCP_SUBFLOW_ATTR_MAP_DATALEN */
+ 		nla_total_size(4) +	/* MPTCP_SUBFLOW_ATTR_FLAGS */
+ 		nla_total_size(1) +	/* MPTCP_SUBFLOW_ATTR_ID_REM */
+ 		nla_total_size(1) +	/* MPTCP_SUBFLOW_ATTR_ID_LOC */
+ 		0;
++
++	if (net_admin)
++		size += nla_total_size(4) +	/* MPTCP_SUBFLOW_ATTR_RELWRITE_SEQ */
++			nla_total_size_64bit(8) +	/* MPTCP_SUBFLOW_ATTR_MAP_SEQ */
++			nla_total_size(4) +	/* MPTCP_SUBFLOW_ATTR_MAP_SFSEQ */
++			nla_total_size(4) +	/* MPTCP_SUBFLOW_ATTR_SSN_OFFSET */
++			nla_total_size(2) +	/* MPTCP_SUBFLOW_ATTR_MAP_DATALEN */
++			0;
++
+ 	return size;
+ }
+ 
+diff --git a/net/tls/tls_main.c b/net/tls/tls_main.c
+index 99ca4465f702..cb86b0bf9a53 100644
+--- a/net/tls/tls_main.c
++++ b/net/tls/tls_main.c
+@@ -1057,7 +1057,7 @@ static u16 tls_user_config(struct tls_context *ctx, bool tx)
+ 	return 0;
+ }
+ 
+-static int tls_get_info(struct sock *sk, struct sk_buff *skb)
++static int tls_get_info(struct sock *sk, struct sk_buff *skb, bool net_admin)
+ {
+ 	u16 version, cipher_type;
+ 	struct tls_context *ctx;
+@@ -1115,7 +1115,7 @@ static int tls_get_info(struct sock *sk, struct sk_buff *skb)
+ 	return err;
+ }
+ 
+-static size_t tls_get_info_size(const struct sock *sk)
++static size_t tls_get_info_size(const struct sock *sk, bool net_admin)
+ {
+ 	size_t size = 0;

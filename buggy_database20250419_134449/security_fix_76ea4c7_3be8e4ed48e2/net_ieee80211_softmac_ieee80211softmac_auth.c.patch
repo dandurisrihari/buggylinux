@@ -1,0 +1,61 @@
+commit 76ea4c7f4cd319dee35934ecab57745feae58fa5
+Author: Daniel Drake <dsd@gentoo.org>
+Date:   Thu Jun 1 15:34:26 2006 +0100
+
+    [PATCH] softmac: complete shared key authentication
+    
+    This patch finishes of the partially-complete shared key authentication
+    implementation in softmac.
+    
+    The complication here is that we need to encrypt a management frame during
+    the authentication process. I don't think there are any other scenarios where
+    this would have to happen.
+    
+    To get around this without causing too many headaches, we decided to just use
+    software encryption for this frame. The softmac config option now selects
+    IEEE80211_CRYPT_WEP so that we can ensure this available. This also involved
+    a modification to some otherwise unused ieee80211 API.
+    
+    Signed-off-by: Daniel Drake <dsd@gentoo.org>
+    Acked-by: Johannes Berg <johannes@sipsolutions.net>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/ieee80211/softmac/ieee80211softmac_auth.c b/net/ieee80211/softmac/ieee80211softmac_auth.c
+index 084b6211f293..90b8484e509b 100644
+--- a/net/ieee80211/softmac/ieee80211softmac_auth.c
++++ b/net/ieee80211/softmac/ieee80211softmac_auth.c
+@@ -107,6 +107,7 @@ ieee80211softmac_auth_queue(void *data)
+ 	printkl(KERN_WARNING PFX "Authentication timed out with "MAC_FMT"\n", MAC_ARG(net->bssid));
+ 	/* Remove this item from the queue */
+ 	spin_lock_irqsave(&mac->lock, flags);
++	net->authenticating = 0;
+ 	ieee80211softmac_call_events_locked(mac, IEEE80211SOFTMAC_EVENT_AUTH_TIMEOUT, net);
+ 	cancel_delayed_work(&auth->work); /* just to make sure... */
+ 	list_del(&auth->list);
+@@ -212,13 +213,13 @@ ieee80211softmac_auth_resp(struct net_device *dev, struct ieee80211_auth *auth)
+ 			aq->state = IEEE80211SOFTMAC_AUTH_SHARED_RESPONSE; 
+ 			spin_unlock_irqrestore(&mac->lock, flags);
+ 
+-			/* Switch to correct channel for this network */
+-			mac->set_channel(mac->dev, net->channel);
+-			
+-			/* Send our response (How to encrypt?) */
++			/* Send our response */
+ 			ieee80211softmac_send_mgt_frame(mac, aq->net, IEEE80211_STYPE_AUTH, aq->state);
+-			break;
++			return 0;
+ 		case IEEE80211SOFTMAC_AUTH_SHARED_PASS:
++			kfree(net->challenge);
++			net->challenge = NULL;
++			net->challenge_len = 0;
+ 			/* Check the status code of the response */
+ 			switch(auth->status) {
+ 			case WLAN_STATUS_SUCCESS:
+@@ -229,6 +230,7 @@ ieee80211softmac_auth_resp(struct net_device *dev, struct ieee80211_auth *auth)
+ 				spin_unlock_irqrestore(&mac->lock, flags);
+ 				printkl(KERN_NOTICE PFX "Shared Key Authentication completed with "MAC_FMT"\n", 
+ 					MAC_ARG(net->bssid));
++				ieee80211softmac_call_events(mac, IEEE80211SOFTMAC_EVENT_AUTHENTICATED, net);
+ 				break;
+ 			default:
+ 				printkl(KERN_NOTICE PFX "Shared Key Authentication with "MAC_FMT" failed, error code: %i\n",

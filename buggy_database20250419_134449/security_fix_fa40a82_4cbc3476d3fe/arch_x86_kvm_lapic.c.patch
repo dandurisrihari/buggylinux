@@ -1,0 +1,47 @@
+commit fa40a8214bb9bcae8d49c234c19d8b4a6c1f37ff
+Author: Marcelo Tosatti <mtosatti@redhat.com>
+Date:   Thu Jun 4 15:08:24 2009 -0300
+
+    KVM: switch irq injection/acking data structures to irq_lock
+    
+    Protect irq injection/acking data structures with a separate irq_lock
+    mutex. This fixes the following deadlock:
+    
+    CPU A                               CPU B
+    kvm_vm_ioctl_deassign_dev_irq()
+      mutex_lock(&kvm->lock);            worker_thread()
+      -> kvm_deassign_irq()                -> kvm_assigned_dev_interrupt_work_handler()
+        -> deassign_host_irq()               mutex_lock(&kvm->lock);
+          -> cancel_work_sync() [blocked]
+    
+    [gleb: fix ia64 path]
+    
+    Reported-by: Alex Williamson <alex.williamson@hp.com>
+    Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
+    Signed-off-by: Gleb Natapov <gleb@redhat.com>
+    Signed-off-by: Avi Kivity <avi@redhat.com>
+
+diff --git a/arch/x86/kvm/lapic.c b/arch/x86/kvm/lapic.c
+index a23f42e550af..44f20cdb5709 100644
+--- a/arch/x86/kvm/lapic.c
++++ b/arch/x86/kvm/lapic.c
+@@ -424,7 +424,9 @@ static void apic_set_eoi(struct kvm_lapic *apic)
+ 		trigger_mode = IOAPIC_LEVEL_TRIG;
+ 	else
+ 		trigger_mode = IOAPIC_EDGE_TRIG;
++	mutex_lock(&apic->vcpu->kvm->irq_lock);
+ 	kvm_ioapic_update_eoi(apic->vcpu->kvm, vector, trigger_mode);
++	mutex_unlock(&apic->vcpu->kvm->irq_lock);
+ }
+ 
+ static void apic_send_ipi(struct kvm_lapic *apic)
+@@ -448,7 +450,9 @@ static void apic_send_ipi(struct kvm_lapic *apic)
+ 		   irq.trig_mode, irq.level, irq.dest_mode, irq.delivery_mode,
+ 		   irq.vector);
+ 
++	mutex_lock(&apic->vcpu->kvm->irq_lock);
+ 	kvm_irq_delivery_to_apic(apic->vcpu->kvm, apic, &irq);
++	mutex_unlock(&apic->vcpu->kvm->irq_lock);
+ }
+ 
+ static u32 apic_get_tmcct(struct kvm_lapic *apic)

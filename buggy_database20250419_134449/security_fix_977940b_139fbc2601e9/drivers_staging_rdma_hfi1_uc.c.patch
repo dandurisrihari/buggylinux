@@ -1,0 +1,71 @@
+commit 977940b85e3c3b6b5b8ffbc1235b23e35284382f
+Author: Arthur Kepner <arthur.kepner@intel.com>
+Date:   Wed Nov 4 21:10:10 2015 -0500
+
+    staging/rdma/hfi1: optionally prescan rx queue for {B, F}ECNs - UC, RC
+    
+    To more rapidly respond to Explicit Congestion Notifications, prescan the
+    receive queue, and process FECNs, and BECNs first.  When a UC, or RC packet
+    containing a FECN, or BECN is found, immediately react to the ECN (either by
+    returning a CNP, or adjusting the injection rate). Afterward, the packet will
+    be processed normally.
+    
+    Reviewed-by: Mike Marciniszyn <mike.marciniszyn@intel.com>
+    Reviewed-by: Dennis Dalessandro <dennis.dalessandro@intel.com>
+    Signed-off-by: Arthur Kepner <arthur.kepner@intel.com>
+    Signed-off-by: Ira Weiny <ira.weiny@intel.com>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/staging/rdma/hfi1/uc.c b/drivers/staging/rdma/hfi1/uc.c
+index 6095039c4485..4f2a7889a852 100644
+--- a/drivers/staging/rdma/hfi1/uc.c
++++ b/drivers/staging/rdma/hfi1/uc.c
+@@ -268,7 +268,7 @@ void hfi1_uc_rcv(struct hfi1_packet *packet)
+ 	u32 tlen = packet->tlen;
+ 	struct hfi1_qp *qp = packet->qp;
+ 	struct hfi1_other_headers *ohdr = packet->ohdr;
+-	u32 opcode;
++	u32 bth0, opcode;
+ 	u32 hdrsize = packet->hlen;
+ 	u32 psn;
+ 	u32 pad;
+@@ -278,10 +278,9 @@ void hfi1_uc_rcv(struct hfi1_packet *packet)
+ 	int has_grh = rcv_flags & HFI1_HAS_GRH;
+ 	int ret;
+ 	u32 bth1;
+-	struct ib_grh *grh = NULL;
+ 
+-	opcode = be32_to_cpu(ohdr->bth[0]);
+-	if (hfi1_ruc_check_hdr(ibp, hdr, has_grh, qp, opcode))
++	bth0 = be32_to_cpu(ohdr->bth[0]);
++	if (hfi1_ruc_check_hdr(ibp, hdr, has_grh, qp, bth0))
+ 		return;
+ 
+ 	bth1 = be32_to_cpu(ohdr->bth[1]);
+@@ -303,6 +302,7 @@ void hfi1_uc_rcv(struct hfi1_packet *packet)
+ 		}
+ 
+ 		if (bth1 & HFI1_FECN_SMASK) {
++			struct ib_grh *grh = NULL;
+ 			u16 pkey = (u16)be32_to_cpu(ohdr->bth[0]);
+ 			u16 slid = be16_to_cpu(hdr->lrh[3]);
+ 			u16 dlid = be16_to_cpu(hdr->lrh[1]);
+@@ -310,13 +310,16 @@ void hfi1_uc_rcv(struct hfi1_packet *packet)
+ 			u8 sc5;
+ 
+ 			sc5 = ibp->sl_to_sc[qp->remote_ah_attr.sl];
++			if (has_grh)
++				grh = &hdr->u.l.grh;
+ 
+-			return_cnp(ibp, qp, src_qp, pkey, dlid, slid, sc5, grh);
++			return_cnp(ibp, qp, src_qp, pkey, dlid, slid, sc5,
++				   grh);
+ 		}
+ 	}
+ 
+ 	psn = be32_to_cpu(ohdr->bth[2]);
+-	opcode >>= 24;
++	opcode = (bth0 >> 24) & 0xff;
+ 
+ 	/* Compare the PSN verses the expected PSN. */
+ 	if (unlikely(cmp_psn(psn, qp->r_psn) != 0)) {

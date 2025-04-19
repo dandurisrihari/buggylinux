@@ -1,0 +1,86 @@
+commit b245be1f4db1a0394e4b6eb66059814b46670ac3
+Author: Willem de Bruijn <willemb@google.com>
+Date:   Fri Jan 30 13:29:32 2015 -0500
+
+    net-timestamp: no-payload only sysctl
+    
+    Tx timestamps are looped onto the error queue on top of an skb. This
+    mechanism leaks packet headers to processes unless the no-payload
+    options SOF_TIMESTAMPING_OPT_TSONLY is set.
+    
+    Add a sysctl that optionally drops looped timestamp with data. This
+    only affects processes without CAP_NET_RAW.
+    
+    The policy is checked when timestamps are generated in the stack.
+    It is possible for timestamps with data to be reported after the
+    sysctl is set, if these were queued internally earlier.
+    
+    No vulnerability is immediately known that exploits knowledge
+    gleaned from packet headers, but it may still be preferable to allow
+    administrators to lock down this path at the cost of possible
+    breakage of legacy applications.
+    
+    Signed-off-by: Willem de Bruijn <willemb@google.com>
+    
+    ----
+    
+    Changes
+      (v1 -> v2)
+      - test socket CAP_NET_RAW instead of capable(CAP_NET_RAW)
+      (rfc -> v1)
+      - document the sysctl in Documentation/sysctl/net.txt
+      - fix access control race: read .._OPT_TSONLY only once,
+            use same value for permission check and skb generation.
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/core/skbuff.c b/net/core/skbuff.c
+index 65a3798f43e6..a5bff2767f15 100644
+--- a/net/core/skbuff.c
++++ b/net/core/skbuff.c
+@@ -74,6 +74,8 @@
+ #include <asm/uaccess.h>
+ #include <trace/events/skb.h>
+ #include <linux/highmem.h>
++#include <linux/capability.h>
++#include <linux/user_namespace.h>
+ 
+ struct kmem_cache *skbuff_head_cache __read_mostly;
+ static struct kmem_cache *skbuff_fclone_cache __read_mostly;
+@@ -3690,11 +3692,28 @@ static void __skb_complete_tx_timestamp(struct sk_buff *skb,
+ 		kfree_skb(skb);
+ }
+ 
++static bool skb_may_tx_timestamp(struct sock *sk, bool tsonly)
++{
++	bool ret;
++
++	if (likely(sysctl_tstamp_allow_data || tsonly))
++		return true;
++
++	read_lock_bh(&sk->sk_callback_lock);
++	ret = sk->sk_socket && sk->sk_socket->file &&
++	      file_ns_capable(sk->sk_socket->file, &init_user_ns, CAP_NET_RAW);
++	read_unlock_bh(&sk->sk_callback_lock);
++	return ret;
++}
++
+ void skb_complete_tx_timestamp(struct sk_buff *skb,
+ 			       struct skb_shared_hwtstamps *hwtstamps)
+ {
+ 	struct sock *sk = skb->sk;
+ 
++	if (!skb_may_tx_timestamp(sk, false))
++		return;
++
+ 	/* take a reference to prevent skb_orphan() from freeing the socket */
+ 	sock_hold(sk);
+ 
+@@ -3712,7 +3731,7 @@ void __skb_tstamp_tx(struct sk_buff *orig_skb,
+ 	struct sk_buff *skb;
+ 	bool tsonly = sk->sk_tsflags & SOF_TIMESTAMPING_OPT_TSONLY;
+ 
+-	if (!sk)
++	if (!sk || !skb_may_tx_timestamp(sk, tsonly))
+ 		return;
+ 
+ 	if (tsonly)

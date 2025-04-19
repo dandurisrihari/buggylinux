@@ -1,0 +1,163 @@
+commit 93d3fb35aa10a8417f923871c7c58c9ad81d7a08
+Author: Hans de Goede <hdegoede@redhat.com>
+Date:   Sat Sep 3 23:26:27 2022 +0200
+
+    media: atomisp: Remove watchdog timer
+    
+    The watchdog timer code to recover from the ISP getting stuck has several
+    major issues:
+    
+    1. There is no way to do fault injection and normally the ISP does not
+    get stuck, so is it is impossible to test it.
+    
+    2. It in essence just stops all streams, resets the ISP and then brings
+    everything back up. Userspace can easily do this itself by using a
+    timeout on dqbuf and then closing (which causes a poweroff) +
+    re-opening the device. Doing this in userspace (if it ever turns out
+    to be necessary) greatly simplifies the kernel code and in general
+    will be a more robust solution.
+    
+    Even just a quick look at the code finds several more issues:
+    
+    3. The need to sync-cancel the timers + work on streamoff requires
+    isp->mutex to be dropped halfway during the ioctl opening all sorts of
+    races.
+    
+    4. The atomisp code supports setting up 2 pipelines, streaming from
+    two sensors at the same time. But there is only a single wdt_work
+    and stopping one of the 2 streams will cancel the timers + work,
+    stopping the wdt even though the other stream might still be running.
+    
+    5. In case atomisp_css_flush() the sync cancel is done while keeping
+    isp->mutex locked, causing a deadlock when racing with wdt_work which
+    also takes isp->mutex.
+    
+    6. Even though the watchdog is purely a software/driver thing which
+    just checkes that new frames keep coming in, there are 2 completely
+    different implementations for the ISP2400/ISP2401 which is not
+    necessary at all.
+    
+    So all in all I believe that it is better to just remove the current
+    watchdog implementation. Fixing all the issues with the current
+    implementation will be so much work, that if it turns out that we do
+    need something like this then doing a clean re-implementation from
+    scratch will be better anyways.
+    
+    wdt_work was also (ab)used to reset the ISP after the firmware signalled
+    an fw-assert error through the irq, add a new assert_recover_work to
+    replace this.
+    
+    Reviewed-by: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+    Signed-off-by: Hans de Goede <hdegoede@redhat.com>
+    Signed-off-by: Mauro Carvalho Chehab <mchehab@kernel.org>
+
+diff --git a/drivers/staging/media/atomisp/pci/atomisp_ioctl.c b/drivers/staging/media/atomisp/pci/atomisp_ioctl.c
+index 9b50f637c46a..daecdcdeb27c 100644
+--- a/drivers/staging/media/atomisp/pci/atomisp_ioctl.c
++++ b/drivers/staging/media/atomisp/pci/atomisp_ioctl.c
+@@ -1363,15 +1363,6 @@ static int atomisp_qbuf(struct file *file, void *fh, struct v4l2_buffer *buf)
+ 			atomisp_handle_parameter_and_buffer(pipe);
+ 		} else {
+ 			atomisp_qbuffers_to_css(asd);
+-
+-			if (!IS_ISP2401) {
+-				if (!atomisp_is_wdt_running(asd) && atomisp_buffers_queued(asd))
+-					atomisp_wdt_start(asd);
+-			} else {
+-				if (!atomisp_is_wdt_running(pipe) &&
+-				    atomisp_buffers_queued_pipe(pipe))
+-					atomisp_wdt_start_pipe(pipe);
+-			}
+ 		}
+ 	}
+ 
+@@ -1594,33 +1585,6 @@ int atomisp_stream_on_master_slave_sensor(struct atomisp_device *isp,
+ 	return 0;
+ }
+ 
+-/* FIXME! ISP2400 */
+-static void __wdt_on_master_slave_sensor(struct atomisp_device *isp,
+-					 unsigned int wdt_duration)
+-{
+-	if (atomisp_buffers_queued(&isp->asd[0]))
+-		atomisp_wdt_refresh(&isp->asd[0], wdt_duration);
+-	if (atomisp_buffers_queued(&isp->asd[1]))
+-		atomisp_wdt_refresh(&isp->asd[1], wdt_duration);
+-}
+-
+-/* FIXME! ISP2401 */
+-static void __wdt_on_master_slave_sensor_pipe(struct atomisp_video_pipe *pipe,
+-					      unsigned int wdt_duration,
+-					      bool enable)
+-{
+-	static struct atomisp_video_pipe *pipe0;
+-
+-	if (enable) {
+-		if (atomisp_buffers_queued_pipe(pipe0))
+-			atomisp_wdt_refresh_pipe(pipe0, wdt_duration);
+-		if (atomisp_buffers_queued_pipe(pipe))
+-			atomisp_wdt_refresh_pipe(pipe, wdt_duration);
+-	} else {
+-		pipe0 = pipe;
+-	}
+-}
+-
+ static void atomisp_pause_buffer_event(struct atomisp_device *isp)
+ {
+ 	struct v4l2_event event = {0};
+@@ -1670,7 +1634,6 @@ static int atomisp_streamon(struct file *file, void *fh,
+ 	struct pci_dev *pdev = to_pci_dev(isp->dev);
+ 	enum ia_css_pipe_id css_pipe_id;
+ 	unsigned int sensor_start_stream;
+-	unsigned int wdt_duration = ATOMISP_ISP_TIMEOUT_DURATION;
+ 	unsigned long irqflags;
+ 	int ret;
+ 
+@@ -1845,15 +1808,9 @@ static int atomisp_streamon(struct file *file, void *fh,
+ 			dev_err(isp->dev, "master slave sensor stream on failed!\n");
+ 			goto out;
+ 		}
+-		if (!IS_ISP2401)
+-			__wdt_on_master_slave_sensor(isp, wdt_duration);
+-		else
+-			__wdt_on_master_slave_sensor_pipe(pipe, wdt_duration, true);
+ 		goto start_delay_wq;
+ 	} else if (asd->depth_mode->val && (atomisp_streaming_count(isp) <
+ 					    ATOMISP_DEPTH_SENSOR_STREAMON_COUNT)) {
+-		if (IS_ISP2401)
+-			__wdt_on_master_slave_sensor_pipe(pipe, wdt_duration, false);
+ 		goto start_delay_wq;
+ 	}
+ 
+@@ -1875,14 +1832,6 @@ static int atomisp_streamon(struct file *file, void *fh,
+ 		goto out;
+ 	}
+ 
+-	if (!IS_ISP2401) {
+-		if (atomisp_buffers_queued(asd))
+-			atomisp_wdt_refresh(asd, wdt_duration);
+-	} else {
+-		if (atomisp_buffers_queued_pipe(pipe))
+-			atomisp_wdt_refresh_pipe(pipe, wdt_duration);
+-	}
+-
+ start_delay_wq:
+ 	if (asd->continuous_mode->val) {
+ 		struct v4l2_mbus_framefmt *sink;
+@@ -1986,16 +1935,7 @@ int __atomisp_streamoff(struct file *file, void *fh, enum v4l2_buf_type type)
+ 		asd->streaming = ATOMISP_DEVICE_STREAMING_STOPPING;
+ 		first_streamoff = true;
+ 	}
+-	spin_unlock_irqrestore(&isp->lock, flags);
+-
+-	if (first_streamoff) {
+-		/* if other streams are running, should not disable watch dog */
+-		mutex_unlock(&isp->mutex);
+-		atomisp_wdt_stop(asd, true);
+-		mutex_lock(&isp->mutex);
+-	}
+ 
+-	spin_lock_irqsave(&isp->lock, flags);
+ 	if (atomisp_subdev_streaming_count(asd) == 1)
+ 		asd->streaming = ATOMISP_DEVICE_STREAMING_DISABLED;
+ 	spin_unlock_irqrestore(&isp->lock, flags);

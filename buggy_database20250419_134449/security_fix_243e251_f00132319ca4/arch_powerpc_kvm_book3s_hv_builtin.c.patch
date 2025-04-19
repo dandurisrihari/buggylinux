@@ -1,0 +1,67 @@
+commit 243e25112d06b348f087a6f7aba4bbc288285bdd
+Author: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+Date:   Wed Apr 5 17:54:50 2017 +1000
+
+    powerpc/xive: Native exploitation of the XIVE interrupt controller
+    
+    The XIVE interrupt controller is the new interrupt controller
+    found in POWER9. It supports advanced virtualization capabilities
+    among other things.
+    
+    Currently we use a set of firmware calls that simulate the old
+    "XICS" interrupt controller but this is fairly inefficient.
+    
+    This adds the framework for using XIVE along with a native
+    backend which OPAL for configuration. Later, a backend allowing
+    the use in a KVM or PowerVM guest will also be provided.
+    
+    This disables some fast path for interrupts in KVM when XIVE is
+    enabled as these rely on the firmware emulation code which is no
+    longer available when the XIVE is used natively by Linux.
+    
+    A latter patch will make KVM also directly exploit the XIVE, thus
+    recovering the lost performance (and more).
+    
+    Signed-off-by: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+    [mpe: Fixup pr_xxx("XIVE:"...), don't split pr_xxx() strings,
+     tweak Kconfig so XIVE_NATIVE selects XIVE and depends on POWERNV,
+     fix build errors when SMP=n, fold in fixes from Ben:
+       Don't call cpu_online() on an invalid CPU number
+       Fix irq target selection returning out of bounds cpu#
+       Extra sanity checks on cpu numbers
+     ]
+    Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+
+diff --git a/arch/powerpc/kvm/book3s_hv_builtin.c b/arch/powerpc/kvm/book3s_hv_builtin.c
+index 4d6c64b3041c..ae55603cf661 100644
+--- a/arch/powerpc/kvm/book3s_hv_builtin.c
++++ b/arch/powerpc/kvm/book3s_hv_builtin.c
+@@ -23,6 +23,7 @@
+ #include <asm/kvm_book3s.h>
+ #include <asm/archrandom.h>
+ #include <asm/xics.h>
++#include <asm/xive.h>
+ #include <asm/dbell.h>
+ #include <asm/cputhreads.h>
+ #include <asm/io.h>
+@@ -224,6 +225,10 @@ void kvmhv_rm_send_ipi(int cpu)
+ 		return;
+ 	}
+ 
++	/* We should never reach this */
++	if (WARN_ON_ONCE(xive_enabled()))
++	    return;
++
+ 	/* Else poke the target with an IPI */
+ 	xics_phys = paca[cpu].kvm_hstate.xics_phys;
+ 	if (xics_phys)
+@@ -386,6 +391,9 @@ long kvmppc_read_intr(void)
+ 	long rc;
+ 	bool again;
+ 
++	if (xive_enabled())
++		return 1;
++
+ 	do {
+ 		again = false;
+ 		rc = kvmppc_read_one_intr(&again);

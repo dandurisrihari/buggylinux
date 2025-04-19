@@ -1,0 +1,44 @@
+commit ad3610919e6f6a4d815c5bf163556b950d6aea56
+Author: Paolo Bonzini <pbonzini@redhat.com>
+Date:   Tue Sep 20 16:15:05 2016 +0200
+
+    kvm: x86: avoid atomic operations on APICv vmentry
+    
+    On some benchmarks (e.g. netperf with ioeventfd disabled), APICv
+    posted interrupts turn out to be slower than interrupt injection via
+    KVM_REQ_EVENT.
+    
+    This patch optimizes a bit the IRR update, avoiding expensive atomic
+    operations in the common case where PI.ON=0 at vmentry or the PIR vector
+    is mostly zero.  This saves at least 20 cycles (1%) per vmexit, as
+    measured by kvm-unit-tests' inl_from_qemu test (20 runs):
+    
+                  | enable_apicv=1  |  enable_apicv=0
+                  | mean     stdev  |  mean     stdev
+        ----------|-----------------|------------------
+        before    | 5826     32.65  |  5765     47.09
+        after     | 5809     43.42  |  5777     77.02
+    
+    Of course, any change in the right column is just placebo effect. :)
+    The savings are bigger if interrupts are frequent.
+    
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/lapic.c b/arch/x86/kvm/lapic.c
+index 6acd76b7e71d..890f218ddd7a 100644
+--- a/arch/x86/kvm/lapic.c
++++ b/arch/x86/kvm/lapic.c
+@@ -342,9 +342,11 @@ void __kvm_apic_update_irr(u32 *pir, void *regs)
+ 	u32 i, pir_val;
+ 
+ 	for (i = 0; i <= 7; i++) {
+-		pir_val = xchg(&pir[i], 0);
+-		if (pir_val)
++		pir_val = READ_ONCE(pir[i]);
++		if (pir_val) {
++			pir_val = xchg(&pir[i], 0);
+ 			*((u32 *)(regs + APIC_IRR + i * 0x10)) |= pir_val;
++		}
+ 	}
+ }
+ EXPORT_SYMBOL_GPL(__kvm_apic_update_irr);

@@ -1,0 +1,127 @@
+diff --git a/MAINTAINERS b/MAINTAINERS
+index 9d7f64dc0efe..640115472199 100644
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -8002,6 +8002,7 @@ L:	linux-hardening@vger.kernel.org
+ S:	Supported
+ T:	git git://git.kernel.org/pub/scm/linux/kernel/git/kees/linux.git for-next/hardening
+ F:	include/linux/fortify-string.h
++F:	lib/fortify_kunit.c
+ F:	lib/test_fortify/*
+ F:	scripts/test_fortify.sh
+ K:	\b__NO_FORTIFY\b
+diff --git a/lib/Kconfig.debug b/lib/Kconfig.debug
+index 36455953d306..1f267c0ddffd 100644
+--- a/lib/Kconfig.debug
++++ b/lib/Kconfig.debug
+@@ -2542,6 +2542,15 @@ config STACKINIT_KUNIT_TEST
+ 	  CONFIG_GCC_PLUGIN_STRUCTLEAK, CONFIG_GCC_PLUGIN_STRUCTLEAK_BYREF,
+ 	  or CONFIG_GCC_PLUGIN_STRUCTLEAK_BYREF_ALL.
+ 
++config FORTIFY_KUNIT_TEST
++	tristate "Test fortified str*() and mem*() function internals at runtime" if !KUNIT_ALL_TESTS
++	depends on KUNIT && FORTIFY_SOURCE
++	default KUNIT_ALL_TESTS
++	help
++	  Builds unit tests for checking internals of FORTIFY_SOURCE as used
++	  by the str*() and mem*() family of functions. For testing runtime
++	  traps of FORTIFY_SOURCE, see LKDTM's "FORTIFY_*" tests.
++
+ config TEST_UDELAY
+ 	tristate "udelay test driver"
+ 	help
+diff --git a/lib/Makefile b/lib/Makefile
+index f545140ed9e7..4ee1ceae945a 100644
+--- a/lib/Makefile
++++ b/lib/Makefile
+@@ -381,6 +381,7 @@ obj-$(CONFIG_IS_SIGNED_TYPE_KUNIT_TEST) += is_signed_type_kunit.o
+ obj-$(CONFIG_OVERFLOW_KUNIT_TEST) += overflow_kunit.o
+ CFLAGS_stackinit_kunit.o += $(call cc-disable-warning, switch-unreachable)
+ obj-$(CONFIG_STACKINIT_KUNIT_TEST) += stackinit_kunit.o
++obj-$(CONFIG_FORTIFY_KUNIT_TEST) += fortify_kunit.o
+ 
+ obj-$(CONFIG_GENERIC_LIB_DEVMEM_IS_ALLOWED) += devmem_is_allowed.o
+ 
+diff --git a/lib/fortify_kunit.c b/lib/fortify_kunit.c
+new file mode 100644
+index 000000000000..99bc0ea60d27
+--- /dev/null
++++ b/lib/fortify_kunit.c
+@@ -0,0 +1,77 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Runtime test cases for CONFIG_FORTIFY_SOURCE that aren't expected to
++ * Oops the kernel on success. (For those, see drivers/misc/lkdtm/fortify.c)
++ *
++ * For corner cases with UBSAN, try testing with:
++ *
++ * ./tools/testing/kunit/kunit.py run --arch=x86_64 \
++ *	--kconfig_add CONFIG_FORTIFY_SOURCE=y \
++ *	--kconfig_add CONFIG_UBSAN=y \
++ *	--kconfig_add CONFIG_UBSAN_TRAP=y \
++ *	--kconfig_add CONFIG_UBSAN_BOUNDS=y \
++ *	--kconfig_add CONFIG_UBSAN_LOCAL_BOUNDS=y \
++ *	--make_options LLVM=1 fortify
++ */
++#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
++
++#include <kunit/test.h>
++#include <linux/string.h>
++#include <linux/init.h>
++
++static const char array_of_10[] = "this is 10";
++static const char *ptr_of_11 = "this is 11!";
++static char array_unknown[] = "compiler thinks I might change";
++
++static void known_sizes_test(struct kunit *test)
++{
++	KUNIT_EXPECT_EQ(test, __compiletime_strlen("88888888"), 8);
++	KUNIT_EXPECT_EQ(test, __compiletime_strlen(array_of_10), 10);
++	KUNIT_EXPECT_EQ(test, __compiletime_strlen(ptr_of_11), 11);
++
++	KUNIT_EXPECT_EQ(test, __compiletime_strlen(array_unknown), SIZE_MAX);
++	/* Externally defined and dynamically sized string pointer: */
++	KUNIT_EXPECT_EQ(test, __compiletime_strlen(saved_command_line), SIZE_MAX);
++}
++
++/* This is volatile so the optimizer can't perform DCE below. */
++static volatile int pick;
++
++/* Not inline to keep optimizer from figuring out which string we want. */
++static noinline size_t want_minus_one(int pick)
++{
++	const char *str;
++
++	switch (pick) {
++	case 1:
++		str = "4444";
++		break;
++	case 2:
++		str = "333";
++		break;
++	default:
++		str = "1";
++		break;
++	}
++	return __compiletime_strlen(str);
++}
++
++static void control_flow_split_test(struct kunit *test)
++{
++	KUNIT_EXPECT_EQ(test, want_minus_one(pick), SIZE_MAX);
++}
++
++static struct kunit_case fortify_test_cases[] = {
++	KUNIT_CASE(known_sizes_test),
++	KUNIT_CASE(control_flow_split_test),
++	{}
++};
++
++static struct kunit_suite fortify_test_suite = {
++	.name = "fortify",
++	.test_cases = fortify_test_cases,
++};
++
++kunit_test_suite(fortify_test_suite);
++
++MODULE_LICENSE("GPL");

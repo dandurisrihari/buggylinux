@@ -1,0 +1,87 @@
+commit 73ac5d6a2b6ac3ae8d1e1818f3e9946f97489bc9
+Author: Thomas Garnier <thgarnie@google.com>
+Date:   Wed Jun 14 18:12:02 2017 -0700
+
+    arm/syscalls: Check address limit on user-mode return
+    
+    Ensure the address limit is a user-mode segment before returning to
+    user-mode. Otherwise a process can corrupt kernel-mode memory and
+    elevate privileges [1].
+    
+    The set_fs function sets the TIF_SETFS flag to force a slow path on
+    return. In the slow path, the address limit is checked to be USER_DS if
+    needed.
+    
+    The TIF_SETFS flag is added to _TIF_WORK_MASK shifting _TIF_SYSCALL_WORK
+    for arm instruction immediate support. The global work mask is too big
+    to used on a single instruction so adapt ret_fast_syscall.
+    
+    [1] https://bugs.chromium.org/p/project-zero/issues/detail?id=990
+    
+    Signed-off-by: Thomas Garnier <thgarnie@google.com>
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Mark Rutland <mark.rutland@arm.com>
+    Cc: kernel-hardening@lists.openwall.com
+    Cc: Catalin Marinas <catalin.marinas@arm.com>
+    Cc: Will Deacon <will.deacon@arm.com>
+    Cc: David Howells <dhowells@redhat.com>
+    Cc: Dave Hansen <dave.hansen@intel.com>
+    Cc: Miroslav Benes <mbenes@suse.cz>
+    Cc: Chris Metcalf <cmetcalf@mellanox.com>
+    Cc: Pratyush Anand <panand@redhat.com>
+    Cc: Russell King <linux@armlinux.org.uk>
+    Cc: Petr Mladek <pmladek@suse.com>
+    Cc: Rik van Riel <riel@redhat.com>
+    Cc: Kees Cook <keescook@chromium.org>
+    Cc: Arnd Bergmann <arnd@arndb.de>
+    Cc: Al Viro <viro@zeniv.linux.org.uk>
+    Cc: Andy Lutomirski <luto@kernel.org>
+    Cc: Josh Poimboeuf <jpoimboe@redhat.com>
+    Cc: linux-arm-kernel@lists.infradead.org
+    Cc: Will Drewry <wad@chromium.org>
+    Cc: linux-api@vger.kernel.org
+    Cc: Oleg Nesterov <oleg@redhat.com>
+    Cc: Andy Lutomirski <luto@amacapital.net>
+    Cc: Paolo Bonzini <pbonzini@redhat.com>
+    Link: http://lkml.kernel.org/r/20170615011203.144108-2-thgarnie@google.com
+
+diff --git a/arch/arm/include/asm/thread_info.h b/arch/arm/include/asm/thread_info.h
+index 776757d1604a..1d468b527b7b 100644
+--- a/arch/arm/include/asm/thread_info.h
++++ b/arch/arm/include/asm/thread_info.h
+@@ -139,10 +139,11 @@ extern int vfp_restore_user_hwstate(struct user_vfp __user *,
+ #define TIF_NEED_RESCHED	1	/* rescheduling necessary */
+ #define TIF_NOTIFY_RESUME	2	/* callback before returning to user */
+ #define TIF_UPROBE		3	/* breakpointed or singlestepping */
+-#define TIF_SYSCALL_TRACE	4	/* syscall trace active */
+-#define TIF_SYSCALL_AUDIT	5	/* syscall auditing active */
+-#define TIF_SYSCALL_TRACEPOINT	6	/* syscall tracepoint instrumentation */
+-#define TIF_SECCOMP		7	/* seccomp syscall filtering active */
++#define TIF_FSCHECK		4	/* Check FS is USER_DS on return */
++#define TIF_SYSCALL_TRACE	5	/* syscall trace active */
++#define TIF_SYSCALL_AUDIT	6	/* syscall auditing active */
++#define TIF_SYSCALL_TRACEPOINT	7	/* syscall tracepoint instrumentation */
++#define TIF_SECCOMP		8	/* seccomp syscall filtering active */
+ 
+ #define TIF_NOHZ		12	/* in adaptive nohz mode */
+ #define TIF_USING_IWMMXT	17
+@@ -153,6 +154,7 @@ extern int vfp_restore_user_hwstate(struct user_vfp __user *,
+ #define _TIF_NEED_RESCHED	(1 << TIF_NEED_RESCHED)
+ #define _TIF_NOTIFY_RESUME	(1 << TIF_NOTIFY_RESUME)
+ #define _TIF_UPROBE		(1 << TIF_UPROBE)
++#define _TIF_FSCHECK		(1 << TIF_FSCHECK)
+ #define _TIF_SYSCALL_TRACE	(1 << TIF_SYSCALL_TRACE)
+ #define _TIF_SYSCALL_AUDIT	(1 << TIF_SYSCALL_AUDIT)
+ #define _TIF_SYSCALL_TRACEPOINT	(1 << TIF_SYSCALL_TRACEPOINT)
+@@ -166,8 +168,9 @@ extern int vfp_restore_user_hwstate(struct user_vfp __user *,
+ /*
+  * Change these and you break ASM code in entry-common.S
+  */
+-#define _TIF_WORK_MASK		(_TIF_NEED_RESCHED | _TIF_SIGPENDING | \
+-				 _TIF_NOTIFY_RESUME | _TIF_UPROBE)
++#define _TIF_WORK_MASK		(_TIF_NEED_RESCHED | _TIF_SIGPENDING |	\
++				 _TIF_NOTIFY_RESUME | _TIF_UPROBE |	\
++				 _TIF_FSCHECK)
+ 
+ #endif /* __KERNEL__ */
+ #endif /* __ASM_ARM_THREAD_INFO_H */

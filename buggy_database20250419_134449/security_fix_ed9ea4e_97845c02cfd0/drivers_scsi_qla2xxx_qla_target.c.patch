@@ -1,0 +1,99 @@
+commit ed9ea4ed3a44e8f8e8c7e8a12a05fd73f9ae1fb4
+Merge: c1fdb2d3389c 0ed6e189e3f6
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Thu Jun 12 22:38:32 2014 -0700
+
+    Merge branch 'for-next' of git://git.kernel.org/pub/scm/linux/kernel/git/nab/target-pending
+    
+    Pull SCSI target updates from Nicholas Bellinger:
+     "The highlights this round include:
+    
+       - Add support for T10 PI pass-through between vhost-scsi +
+         virtio-scsi (MST + Paolo + MKP + nab)
+       - Add support for T10 PI in qla2xxx target mode (Quinn + MKP + hch +
+         nab, merged through scsi.git)
+       - Add support for percpu-ida pre-allocation in qla2xxx target code
+         (Quinn + nab)
+       - A number of iser-target fixes related to hardening the network
+         portal shutdown path (Sagi + Slava)
+       - Fix response length residual handling for a number of control CDBs
+         (Roland + Christophe V.)
+       - Various iscsi RFC conformance fixes in the CHAP authentication path
+         (Tejas and Calsoft folks + nab)
+       - Return TASK_SET_FULL status for tcm_fc(FCoE) DataIn + Response
+         failures (Vasu + Jun + nab)
+       - Fix long-standing ABORT_TASK + session reset hang (nab)
+       - Convert iser-initiator + iser-target to include T10 bytes into EDTL
+         (Sagi + Or + MKP + Mike Christie)
+       - Fix NULL pointer dereference regression related to XCOPY introduced
+         in v3.15 + CC'ed to v3.12.y (nab)"
+    
+    * 'for-next' of git://git.kernel.org/pub/scm/linux/kernel/git/nab/target-pending: (34 commits)
+      target: Fix NULL pointer dereference for XCOPY in target_put_sess_cmd
+      vhost-scsi: Include prot_bytes into expected data transfer length
+      TARGET/sbc,loopback: Adjust command data length in case pi exists on the wire
+      libiscsi, iser: Adjust data_length to include protection information
+      scsi_cmnd: Introduce scsi_transfer_length helper
+      target: Report correct response length for some commands
+      target/sbc: Check that the LBA and number of blocks are correct in VERIFY
+      target/sbc: Remove sbc_check_valid_sectors()
+      Target/iscsi: Fix sendtargets response pdu for iser transport
+      Target/iser: Fix a wrong dereference in case discovery session is over iser
+      iscsi-target: Fix ABORT_TASK + connection reset iscsi_queue_req memory leak
+      target: Use complete_all for se_cmd->t_transport_stop_comp
+      target: Set CMD_T_ACTIVE bit for Task Management Requests
+      target: cleanup some boolean tests
+      target/spc: Simplify INQUIRY EVPD=0x80
+      tcm_fc: Generate TASK_SET_FULL status for response failures
+      tcm_fc: Generate TASK_SET_FULL status for DataIN failures
+      iscsi-target: Reject mutual authentication with reflected CHAP_C
+      iscsi-target: Remove no-op from iscsit_tpg_del_portal_group
+      iscsi-target: Fix CHAP_A parameter list handling
+      ...
+
+diff --cc drivers/scsi/qla2xxx/qla_target.c
+index b1d10f9935c7,bd9c725c08e1..8d85ed8d8917
+--- a/drivers/scsi/qla2xxx/qla_target.c
++++ b/drivers/scsi/qla2xxx/qla_target.c
+@@@ -2705,15 -2164,18 +2704,22 @@@ done
+  
+  void qlt_free_cmd(struct qla_tgt_cmd *cmd)
+  {
++ 	struct qla_tgt_sess *sess = cmd->sess;
++ 
+ -	BUG_ON(cmd->sg_mapped);
+ +	ql_dbg(ql_dbg_tgt, cmd->vha, 0xe074,
+ +	    "%s: se_cmd[%p] ox_id %04x\n",
+ +	    __func__, &cmd->se_cmd,
+ +	    be16_to_cpu(cmd->atio.u.isp24.fcp_hdr.ox_id));
+  
+ +	BUG_ON(cmd->sg_mapped);
+  	if (unlikely(cmd->free_sg))
+  		kfree(cmd->sg);
+- 	kmem_cache_free(qla_tgt_cmd_cachep, cmd);
++ 
++ 	if (!sess || !sess->se_sess) {
++ 		WARN_ON(1);
++ 		return;
++ 	}
++ 	percpu_ida_free(&sess->se_sess->sess_tag_pool, cmd->se_cmd.map_tag);
+  }
+  EXPORT_SYMBOL(qlt_free_cmd);
+  
+@@@ -3149,12 -2533,11 +3119,12 @@@ static void __qlt_do_work(struct qla_tg
+  	    atio->u.isp24.fcp_cmnd.add_cdb_len]));
+  
+  	ql_dbg(ql_dbg_tgt, vha, 0xe022,
+ -	    "qla_target: START qla command: %p lun: 0x%04x (tag %d)\n",
+ -	    cmd, cmd->unpacked_lun, cmd->tag);
+ +		"qla_target: START qla cmd: %p se_cmd %p lun: 0x%04x (tag %d) len(%d) ox_id %x\n",
+ +		cmd, &cmd->se_cmd, cmd->unpacked_lun, cmd->tag, data_length,
+ +		cmd->atio.u.isp24.fcp_hdr.ox_id);
+  
+- 	ret = vha->hw->tgt.tgt_ops->handle_cmd(vha, cmd, cdb, data_length,
+- 	    fcp_task_attr, data_dir, bidi);
++ 	ret = ha->tgt.tgt_ops->handle_cmd(vha, cmd, cdb, data_length,
++ 				          fcp_task_attr, data_dir, bidi);
+  	if (ret != 0)
+  		goto out_term;
+  	/*

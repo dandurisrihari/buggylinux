@@ -1,0 +1,60 @@
+commit 47b08e75a669887b19ecaf4e429cf3c19b748500
+Author: Sergey Matyukevich <sergey.matyukevich.os@quantenna.com>
+Date:   Tue Feb 5 09:48:57 2019 +0000
+
+    qtnfmac: enable WPA3 SAE support
+    
+    In the case of SAE AP, drivers offload authentication to user-space
+    software, e.g. hostapd. For FullMAC drivers the procedure is as follows.
+    If auth_type is SAE and user space indicates external authentication
+    capability, then driver requests authentication offload to user-space
+    software using cfg80211_external_auth_request call. From that point,
+    auth frame exchange is performed transparently for driver: user-space
+    software sends/receives mgmt frames using mgmt_tx/mgmt_frame_register
+    cfg80211 callbacks. As soon as authenitcation is completed, user-space
+    software notifies driver about its status using external_auth cfg80211
+    callback.
+    
+    Signed-off-by: Sergey Matyukevich <sergey.matyukevich.os@quantenna.com>
+    Signed-off-by: Kalle Valo <kvalo@codeaurora.org>
+
+diff --git a/drivers/net/wireless/quantenna/qtnfmac/commands.c b/drivers/net/wireless/quantenna/qtnfmac/commands.c
+index 0f48f541de41..85a2a58f4c16 100644
+--- a/drivers/net/wireless/quantenna/qtnfmac/commands.c
++++ b/drivers/net/wireless/quantenna/qtnfmac/commands.c
+@@ -2322,6 +2322,35 @@ int qtnf_cmd_send_connect(struct qtnf_vif *vif,
+ 	return ret;
+ }
+ 
++int qtnf_cmd_send_external_auth(struct qtnf_vif *vif,
++				struct cfg80211_external_auth_params *auth)
++{
++	struct sk_buff *cmd_skb;
++	struct qlink_cmd_external_auth *cmd;
++	int ret;
++
++	cmd_skb = qtnf_cmd_alloc_new_cmdskb(vif->mac->macid, vif->vifid,
++					    QLINK_CMD_EXTERNAL_AUTH,
++					    sizeof(*cmd));
++	if (!cmd_skb)
++		return -ENOMEM;
++
++	cmd = (struct qlink_cmd_external_auth *)cmd_skb->data;
++
++	ether_addr_copy(cmd->bssid, auth->bssid);
++	cmd->status = cpu_to_le16(auth->status);
++
++	qtnf_bus_lock(vif->mac->bus);
++	ret = qtnf_cmd_send(vif->mac->bus, cmd_skb);
++	if (ret)
++		goto out;
++
++out:
++	qtnf_bus_unlock(vif->mac->bus);
++
++	return ret;
++}
++
+ int qtnf_cmd_send_disconnect(struct qtnf_vif *vif, u16 reason_code)
+ {
+ 	struct sk_buff *cmd_skb;

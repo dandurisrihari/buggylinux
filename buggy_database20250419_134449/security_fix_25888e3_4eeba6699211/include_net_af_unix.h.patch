@@ -1,0 +1,48 @@
+commit 25888e30319f8896fc656fc68643e6a078263060
+Author: Eric Dumazet <eric.dumazet@gmail.com>
+Date:   Thu Nov 25 04:11:39 2010 +0000
+
+    af_unix: limit recursion level
+    
+    Its easy to eat all kernel memory and trigger NMI watchdog, using an
+    exploit program that queues unix sockets on top of others.
+    
+    lkml ref : http://lkml.org/lkml/2010/11/25/8
+    
+    This mechanism is used in applications, one choice we have is to have a
+    recursion limit.
+    
+    Other limits might be needed as well (if we queue other types of files),
+    since the passfd mechanism is currently limited by socket receive queue
+    sizes only.
+    
+    Add a recursion_level to unix socket, allowing up to 4 levels.
+    
+    Each time we send an unix socket through sendfd mechanism, we copy its
+    recursion level (plus one) to receiver. This recursion level is cleared
+    when socket receive queue is emptied.
+    
+    Reported-by: Марк Коренберг <socketpair@gmail.com>
+    Signed-off-by: Eric Dumazet <eric.dumazet@gmail.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/include/net/af_unix.h b/include/net/af_unix.h
+index 90c9e2872f27..18e5c3f67580 100644
+--- a/include/net/af_unix.h
++++ b/include/net/af_unix.h
+@@ -10,6 +10,7 @@ extern void unix_inflight(struct file *fp);
+ extern void unix_notinflight(struct file *fp);
+ extern void unix_gc(void);
+ extern void wait_for_unix_gc(void);
++extern struct sock *unix_get_socket(struct file *filp);
+ 
+ #define UNIX_HASH_SIZE	256
+ 
+@@ -56,6 +57,7 @@ struct unix_sock {
+ 	spinlock_t		lock;
+ 	unsigned int		gc_candidate : 1;
+ 	unsigned int		gc_maybe_cycle : 1;
++	unsigned char		recursion_level;
+ 	struct socket_wq	peer_wq;
+ };
+ #define unix_sk(__sk) ((struct unix_sock *)__sk)

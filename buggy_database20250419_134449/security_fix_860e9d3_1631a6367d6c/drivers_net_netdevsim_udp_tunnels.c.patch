@@ -1,0 +1,53 @@
+commit 860e9d328fa585aafda2ef09aa1b13986279cbe7
+Author: Jakub Kicinski <kuba@kernel.org>
+Date:   Fri Sep 25 17:56:41 2020 -0700
+
+    netdevsim: add warnings on unexpected UDP tunnel port errors
+    
+    We should never see a removal of a port which is not in the table
+    or adding a port to an occupied entry in the table. To make sure
+    such errors don't escape the checks in the test script add a
+    warning/kernel spat.
+    
+    Error injection will not trigger those, nor should it ever put
+    us in a bad state.
+    
+    Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/netdevsim/udp_tunnels.c b/drivers/net/netdevsim/udp_tunnels.c
+index 22c06a76033c..ad65b860bd7b 100644
+--- a/drivers/net/netdevsim/udp_tunnels.c
++++ b/drivers/net/netdevsim/udp_tunnels.c
+@@ -22,11 +22,13 @@ nsim_udp_tunnel_set_port(struct net_device *dev, unsigned int table,
+ 		msleep(ns->udp_ports.sleep);
+ 
+ 	if (!ret) {
+-		if (ns->udp_ports.ports[table][entry])
++		if (ns->udp_ports.ports[table][entry]) {
++			WARN(1, "entry already in use\n");
+ 			ret = -EBUSY;
+-		else
++		} else {
+ 			ns->udp_ports.ports[table][entry] =
+ 				be16_to_cpu(ti->port) << 16 | ti->type;
++		}
+ 	}
+ 
+ 	netdev_info(dev, "set [%d, %d] type %d family %d port %d - %d\n",
+@@ -50,10 +52,13 @@ nsim_udp_tunnel_unset_port(struct net_device *dev, unsigned int table,
+ 	if (!ret) {
+ 		u32 val = be16_to_cpu(ti->port) << 16 | ti->type;
+ 
+-		if (val == ns->udp_ports.ports[table][entry])
++		if (val == ns->udp_ports.ports[table][entry]) {
+ 			ns->udp_ports.ports[table][entry] = 0;
+-		else
++		} else {
++			WARN(1, "entry not installed %x vs %x\n",
++			     val, ns->udp_ports.ports[table][entry]);
+ 			ret = -ENOENT;
++		}
+ 	}
+ 
+ 	netdev_info(dev, "unset [%d, %d] type %d family %d port %d - %d\n",

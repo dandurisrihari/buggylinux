@@ -1,0 +1,99 @@
+commit 6447828875b7d768e4ef0f58765b4bd4e16bcf18
+Author: Nikolay Borisov <nik.borisov@suse.com>
+Date:   Tue Feb 25 16:33:48 2025 +0200
+
+    x86/mce/inject: Remove call to mce_notify_irq()
+    
+    The call to mce_notify_irq() has been there since the initial version of
+    the soft inject mce machinery, introduced in
+    
+      ea149b36c7f5 ("x86, mce: add basic error injection infrastructure").
+    
+    At that time it was functional since injecting an MCE resulted in the
+    following call chain:
+    
+      raise_mce()
+        ->machine_check_poll()
+            ->mce_log() - sets notfiy_user_bit
+      ->mce_notify_user() (current mce_notify_irq) consumed the bit and called the
+      usermode helper.
+    
+    However, with the introduction of
+    
+      011d82611172 ("RAS: Add a Corrected Errors Collector")
+    
+    the code got moved around and the usermode helper began to be called via the
+    early notifier mce_first_notifier() rendering the call in raise_local()
+    defunct as the mce_need_notify bit (ex notify_user) is only being set from the
+    early notifier.
+    
+    Remove the noop call and make mce_notify_irq() static.
+    
+    No functional changes.
+    
+    Signed-off-by: Nikolay Borisov <nik.borisov@suse.com>
+    Signed-off-by: Borislav Petkov (AMD) <bp@alien8.de>
+    Link: https://lore.kernel.org/r/20250225143348.268469-1-nik.borisov@suse.com
+
+diff --git a/arch/x86/kernel/cpu/mce/core.c b/arch/x86/kernel/cpu/mce/core.c
+index 0dc00c9894c7..1f14c3308b6b 100644
+--- a/arch/x86/kernel/cpu/mce/core.c
++++ b/arch/x86/kernel/cpu/mce/core.c
+@@ -584,6 +584,28 @@ bool mce_is_correctable(struct mce *m)
+ }
+ EXPORT_SYMBOL_GPL(mce_is_correctable);
+ 
++/*
++ * Notify the user(s) about new machine check events.
++ * Can be called from interrupt context, but not from machine check/NMI
++ * context.
++ */
++static bool mce_notify_irq(void)
++{
++	/* Not more than two messages every minute */
++	static DEFINE_RATELIMIT_STATE(ratelimit, 60*HZ, 2);
++
++	if (test_and_clear_bit(0, &mce_need_notify)) {
++		mce_work_trigger();
++
++		if (__ratelimit(&ratelimit))
++			pr_info(HW_ERR "Machine check events logged\n");
++
++		return true;
++	}
++
++	return false;
++}
++
+ static int mce_early_notifier(struct notifier_block *nb, unsigned long val,
+ 			      void *data)
+ {
+@@ -1773,28 +1795,6 @@ static void mce_timer_delete_all(void)
+ 		del_timer_sync(&per_cpu(mce_timer, cpu));
+ }
+ 
+-/*
+- * Notify the user(s) about new machine check events.
+- * Can be called from interrupt context, but not from machine check/NMI
+- * context.
+- */
+-bool mce_notify_irq(void)
+-{
+-	/* Not more than two messages every minute */
+-	static DEFINE_RATELIMIT_STATE(ratelimit, 60*HZ, 2);
+-
+-	if (test_and_clear_bit(0, &mce_need_notify)) {
+-		mce_work_trigger();
+-
+-		if (__ratelimit(&ratelimit))
+-			pr_info(HW_ERR "Machine check events logged\n");
+-
+-		return true;
+-	}
+-	return false;
+-}
+-EXPORT_SYMBOL_GPL(mce_notify_irq);
+-
+ static void __mcheck_cpu_mce_banks_init(void)
+ {
+ 	struct mce_bank *mce_banks = this_cpu_ptr(mce_banks_array);

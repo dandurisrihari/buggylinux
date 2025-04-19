@@ -1,0 +1,97 @@
+commit 5b0eea835d4e9cb5229e696c5763929fc2394f39
+Author: Ondrej Mosnacek <omosnace@redhat.com>
+Date:   Tue Jun 20 15:12:22 2023 +0200
+
+    selinux: introduce an initial SID for early boot processes
+    
+    Currently, SELinux doesn't allow distinguishing between kernel threads
+    and userspace processes that are started before the policy is first
+    loaded - both get the label corresponding to the kernel SID. The only
+    way a process that persists from early boot can get a meaningful label
+    is by doing a voluntary dyntransition or re-executing itself.
+    
+    Reusing the kernel label for userspace processes is problematic for
+    several reasons:
+    1. The kernel is considered to be a privileged domain and generally
+       needs to have a wide range of permissions allowed to work correctly,
+       which prevents the policy writer from effectively hardening against
+       early boot processes that might remain running unintentionally after
+       the policy is loaded (they represent a potential extra attack surface
+       that should be mitigated).
+    2. Despite the kernel being treated as a privileged domain, the policy
+       writer may want to impose certain special limitations on kernel
+       threads that may conflict with the requirements of intentional early
+       boot processes. For example, it is a good hardening practice to limit
+       what executables the kernel can execute as usermode helpers and to
+       confine the resulting usermode helper processes. However, a
+       (legitimate) process surviving from early boot may need to execute a
+       different set of executables.
+    3. As currently implemented, overlayfs remembers the security context of
+       the process that created an overlayfs mount and uses it to bound
+       subsequent operations on files using this context. If an overlayfs
+       mount is created before the SELinux policy is loaded, these "mounter"
+       checks are made against the kernel context, which may clash with
+       restrictions on the kernel domain (see 2.).
+    
+    To resolve this, introduce a new initial SID (reusing the slot of the
+    former "init" initial SID) that will be assigned to any userspace
+    process started before the policy is first loaded. This is easy to do,
+    as we can simply label any process that goes through the
+    bprm_creds_for_exec LSM hook with the new init-SID instead of
+    propagating the kernel SID from the parent.
+    
+    To provide backwards compatibility for existing policies that are
+    unaware of this new semantic of the "init" initial SID, introduce a new
+    policy capability "userspace_initial_context" and set the "init" SID to
+    the same context as the "kernel" SID unless this capability is set by
+    the policy.
+    
+    Signed-off-by: Ondrej Mosnacek <omosnace@redhat.com>
+    Signed-off-by: Paul Moore <paul@paul-moore.com>
+
+diff --git a/security/selinux/hooks.c b/security/selinux/hooks.c
+index d06e350fedee..b8a8a4f0f2ad 100644
+--- a/security/selinux/hooks.c
++++ b/security/selinux/hooks.c
+@@ -2288,6 +2288,19 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
+ 	new_tsec->keycreate_sid = 0;
+ 	new_tsec->sockcreate_sid = 0;
+ 
++	/*
++	 * Before policy is loaded, label any task outside kernel space
++	 * as SECINITSID_INIT, so that any userspace tasks surviving from
++	 * early boot end up with a label different from SECINITSID_KERNEL
++	 * (if the policy chooses to set SECINITSID_INIT != SECINITSID_KERNEL).
++	 */
++	if (!selinux_initialized()) {
++		new_tsec->sid = SECINITSID_INIT;
++		/* also clear the exec_sid just in case */
++		new_tsec->exec_sid = 0;
++		return 0;
++	}
++
+ 	if (old_tsec->exec_sid) {
+ 		new_tsec->sid = old_tsec->exec_sid;
+ 		/* Reset exec SID on execve. */
+@@ -4504,6 +4517,21 @@ static int sock_has_perm(struct sock *sk, u32 perms)
+ 	if (sksec->sid == SECINITSID_KERNEL)
+ 		return 0;
+ 
++	/*
++	 * Before POLICYDB_CAP_USERSPACE_INITIAL_CONTEXT, sockets that
++	 * inherited the kernel context from early boot used to be skipped
++	 * here, so preserve that behavior unless the capability is set.
++	 *
++	 * By setting the capability the policy signals that it is ready
++	 * for this quirk to be fixed. Note that sockets created by a kernel
++	 * thread or a usermode helper executed without a transition will
++	 * still be skipped in this check regardless of the policycap
++	 * setting.
++	 */
++	if (!selinux_policycap_userspace_initial_context() &&
++	    sksec->sid == SECINITSID_INIT)
++		return 0;
++
+ 	ad.type = LSM_AUDIT_DATA_NET;
+ 	ad.u.net = &net;
+ 	ad.u.net->sk = sk;

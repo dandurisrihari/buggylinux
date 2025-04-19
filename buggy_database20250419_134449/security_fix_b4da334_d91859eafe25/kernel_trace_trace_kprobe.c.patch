@@ -1,0 +1,45 @@
+commit b4da3340eae2c3932144be3e81ccfd4e424d87b7
+Author: Masami Hiramatsu <mhiramat@kernel.org>
+Date:   Sat Jan 13 02:54:04 2018 +0900
+
+    tracing/kprobe: bpf: Check error injectable event is on function entry
+    
+    Check whether error injectable event is on function entry or not.
+    Currently it checks the event is ftrace-based kprobes or not,
+    but that is wrong. It should check if the event is on the entry
+    of target function. Since error injection will override a function
+    to just return with modified return value, that operation must
+    be done before the target function starts making stackframe.
+    
+    As a side effect, bpf error injection is no need to depend on
+    function-tracer. It can work with sw-breakpoint based kprobe
+    events too.
+    
+    Signed-off-by: Masami Hiramatsu <mhiramat@kernel.org>
+    Reviewed-by: Josef Bacik <jbacik@fb.com>
+    Signed-off-by: Alexei Starovoitov <ast@kernel.org>
+
+diff --git a/kernel/trace/trace_kprobe.c b/kernel/trace/trace_kprobe.c
+index 91f4b57dab82..3c8deb977a8b 100644
+--- a/kernel/trace/trace_kprobe.c
++++ b/kernel/trace/trace_kprobe.c
+@@ -88,13 +88,16 @@ static nokprobe_inline unsigned long trace_kprobe_nhit(struct trace_kprobe *tk)
+ 	return nhit;
+ }
+ 
+-int trace_kprobe_ftrace(struct trace_event_call *call)
++bool trace_kprobe_on_func_entry(struct trace_event_call *call)
+ {
+ 	struct trace_kprobe *tk = (struct trace_kprobe *)call->data;
+-	return kprobe_ftrace(&tk->rp.kp);
++
++	return kprobe_on_func_entry(tk->rp.kp.addr,
++			tk->rp.kp.addr ? NULL : tk->rp.kp.symbol_name,
++			tk->rp.kp.addr ? 0 : tk->rp.kp.offset);
+ }
+ 
+-int trace_kprobe_error_injectable(struct trace_event_call *call)
++bool trace_kprobe_error_injectable(struct trace_event_call *call)
+ {
+ 	struct trace_kprobe *tk = (struct trace_kprobe *)call->data;
+ 	unsigned long addr;

@@ -1,0 +1,240 @@
+diff --git a/drivers/gpu/drm/drm_atomic.c b/drivers/gpu/drm/drm_atomic.c
+index ed991ba66e21..ed22a719440f 100644
+--- a/drivers/gpu/drm/drm_atomic.c
++++ b/drivers/gpu/drm/drm_atomic.c
+@@ -244,7 +244,7 @@ drm_atomic_get_plane_state(struct drm_atomic_state *state,
+ 	 * grab all crtc locks. Once we have per-plane locks we must update this
+ 	 * to only take the plane mutex.
+ 	 */
+-	ret = drm_modeset_lock_all_crtcs(state->dev, state->acquire_ctx);
++	ret = drm_modeset_lock(&plane->mutex, state->acquire_ctx);
+ 	if (ret)
+ 		return ERR_PTR(ret);
+ 
+diff --git a/drivers/gpu/drm/drm_atomic_helper.c b/drivers/gpu/drm/drm_atomic_helper.c
+index fad2b932cf72..c0a07cba3aaa 100644
+--- a/drivers/gpu/drm/drm_atomic_helper.c
++++ b/drivers/gpu/drm/drm_atomic_helper.c
+@@ -1006,6 +1006,8 @@ void drm_atomic_helper_commit_planes(struct drm_device *dev,
+ 		if (!crtc)
+ 			continue;
+ 
++		WARN_ON(!drm_modeset_is_locked(&crtc->mutex));
++
+ 		funcs = crtc->helper_private;
+ 
+ 		if (!funcs || !funcs->atomic_begin)
+@@ -1021,6 +1023,8 @@ void drm_atomic_helper_commit_planes(struct drm_device *dev,
+ 		if (!plane)
+ 			continue;
+ 
++		WARN_ON(!drm_modeset_is_locked(&plane->mutex));
++
+ 		funcs = plane->helper_private;
+ 
+ 		if (!funcs || !funcs->atomic_update)
+diff --git a/drivers/gpu/drm/drm_crtc.c b/drivers/gpu/drm/drm_crtc.c
+index e6c169152bf1..3652ed8dda80 100644
+--- a/drivers/gpu/drm/drm_crtc.c
++++ b/drivers/gpu/drm/drm_crtc.c
+@@ -1152,12 +1152,12 @@ int drm_universal_plane_init(struct drm_device *dev, struct drm_plane *plane,
+ {
+ 	int ret;
+ 
+-	drm_modeset_lock_all(dev);
+-
+ 	ret = drm_mode_object_get(dev, &plane->base, DRM_MODE_OBJECT_PLANE);
+ 	if (ret)
+ 		goto out;
+ 
++	drm_modeset_lock_init(&plane->mutex);
++
+ 	plane->base.properties = &plane->properties;
+ 	plane->dev = dev;
+ 	plane->funcs = funcs;
+@@ -1185,7 +1185,6 @@ int drm_universal_plane_init(struct drm_device *dev, struct drm_plane *plane,
+ 				   plane->type);
+ 
+  out:
+-	drm_modeset_unlock_all(dev);
+ 
+ 	return ret;
+ }
+@@ -2809,7 +2808,7 @@ static int drm_mode_cursor_common(struct drm_device *dev,
+ 	 * If this crtc has a universal cursor plane, call that plane's update
+ 	 * handler rather than using legacy cursor handlers.
+ 	 */
+-	drm_modeset_lock_crtc(crtc);
++	drm_modeset_lock_crtc(crtc, crtc->cursor);
+ 	if (crtc->cursor) {
+ 		ret = drm_mode_cursor_universal(crtc, req, file_priv);
+ 		goto out;
+@@ -4598,7 +4597,7 @@ int drm_mode_page_flip_ioctl(struct drm_device *dev,
+ 	if (!crtc)
+ 		return -ENOENT;
+ 
+-	drm_modeset_lock_crtc(crtc);
++	drm_modeset_lock_crtc(crtc, crtc->primary);
+ 	if (crtc->primary->fb == NULL) {
+ 		/* The framebuffer is currently unbound, presumably
+ 		 * due to a hotplug event, that userspace has not
+diff --git a/drivers/gpu/drm/drm_modeset_lock.c b/drivers/gpu/drm/drm_modeset_lock.c
+index 474e4d12a2d8..51cc47d827d8 100644
+--- a/drivers/gpu/drm/drm_modeset_lock.c
++++ b/drivers/gpu/drm/drm_modeset_lock.c
+@@ -157,14 +157,20 @@ void drm_modeset_unlock_all(struct drm_device *dev)
+ EXPORT_SYMBOL(drm_modeset_unlock_all);
+ 
+ /**
+- * drm_modeset_lock_crtc - lock crtc with hidden acquire ctx
+- * @crtc: drm crtc
++ * drm_modeset_lock_crtc - lock crtc with hidden acquire ctx for a plane update
++ * @crtc: DRM CRTC
++ * @plane: DRM plane to be updated on @crtc
++ *
++ * This function locks the given crtc and plane (which should be either the
++ * primary or cursor plane) using a hidden acquire context. This is necessary so
++ * that drivers internally using the atomic interfaces can grab further locks
++ * with the lock acquire context.
+  *
+- * This function locks the given crtc using a hidden acquire context. This is
+- * necessary so that drivers internally using the atomic interfaces can grab
+- * further locks with the lock acquire context.
++ * Note that @plane can be NULL, e.g. when the cursor support hasn't yet been
++ * converted to universal planes yet.
+  */
+-void drm_modeset_lock_crtc(struct drm_crtc *crtc)
++void drm_modeset_lock_crtc(struct drm_crtc *crtc,
++			   struct drm_plane *plane)
+ {
+ 	struct drm_modeset_acquire_ctx *ctx;
+ 	int ret;
+@@ -180,6 +186,18 @@ void drm_modeset_lock_crtc(struct drm_crtc *crtc)
+ 	if (ret)
+ 		goto fail;
+ 
++	if (plane) {
++		ret = drm_modeset_lock(&plane->mutex, ctx);
++		if (ret)
++			goto fail;
++
++		if (plane->crtc) {
++			ret = drm_modeset_lock(&plane->crtc->mutex, ctx);
++			if (ret)
++				goto fail;
++		}
++	}
++
+ 	WARN_ON(crtc->acquire_ctx);
+ 
+ 	/* now we hold the locks, so now that it is safe, stash the
+@@ -437,15 +455,14 @@ void drm_modeset_unlock(struct drm_modeset_lock *lock)
+ }
+ EXPORT_SYMBOL(drm_modeset_unlock);
+ 
+-/* Temporary.. until we have sufficiently fine grained locking, there
+- * are a couple scenarios where it is convenient to grab all crtc locks.
+- * It is planned to remove this:
+- */
++/* In some legacy codepaths it's convenient to just grab all the crtc and plane
++ * related locks. */
+ int drm_modeset_lock_all_crtcs(struct drm_device *dev,
+ 		struct drm_modeset_acquire_ctx *ctx)
+ {
+ 	struct drm_mode_config *config = &dev->mode_config;
+ 	struct drm_crtc *crtc;
++	struct drm_plane *plane;
+ 	int ret = 0;
+ 
+ 	list_for_each_entry(crtc, &config->crtc_list, head) {
+@@ -454,6 +471,12 @@ int drm_modeset_lock_all_crtcs(struct drm_device *dev,
+ 			return ret;
+ 	}
+ 
++	list_for_each_entry(plane, &config->plane_list, head) {
++		ret = drm_modeset_lock(&plane->mutex, ctx);
++		if (ret)
++			return ret;
++	}
++
+ 	return 0;
+ }
+ EXPORT_SYMBOL(drm_modeset_lock_all_crtcs);
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index 31bb1d7acf9b..5fae12cf1072 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -8728,6 +8728,9 @@ bool intel_get_load_detect_pipe(struct drm_connector *connector,
+ 		crtc = encoder->crtc;
+ 
+ 		ret = drm_modeset_lock(&crtc->mutex, ctx);
++		if (ret)
++			goto fail_unlock;
++		ret = drm_modeset_lock(&crtc->primary->mutex, ctx);
+ 		if (ret)
+ 			goto fail_unlock;
+ 
+@@ -8765,6 +8768,9 @@ bool intel_get_load_detect_pipe(struct drm_connector *connector,
+ 	}
+ 
+ 	ret = drm_modeset_lock(&crtc->mutex, ctx);
++	if (ret)
++		goto fail_unlock;
++	ret = drm_modeset_lock(&crtc->primary->mutex, ctx);
+ 	if (ret)
+ 		goto fail_unlock;
+ 	intel_encoder->new_crtc = to_intel_crtc(crtc);
+diff --git a/drivers/gpu/drm/vmwgfx/vmwgfx_kms.c b/drivers/gpu/drm/vmwgfx/vmwgfx_kms.c
+index 941a7bc0b791..3725b521d931 100644
+--- a/drivers/gpu/drm/vmwgfx/vmwgfx_kms.c
++++ b/drivers/gpu/drm/vmwgfx/vmwgfx_kms.c
+@@ -252,7 +252,7 @@ int vmw_du_crtc_cursor_set(struct drm_crtc *crtc, struct drm_file *file_priv,
+ 	ret = 0;
+ out:
+ 	drm_modeset_unlock_all(dev_priv->dev);
+-	drm_modeset_lock_crtc(crtc);
++	drm_modeset_lock_crtc(crtc, crtc->cursor);
+ 
+ 	return ret;
+ }
+@@ -281,7 +281,7 @@ int vmw_du_crtc_cursor_move(struct drm_crtc *crtc, int x, int y)
+ 				   du->cursor_y + du->hotspot_y);
+ 
+ 	drm_modeset_unlock_all(dev_priv->dev);
+-	drm_modeset_lock_crtc(crtc);
++	drm_modeset_lock_crtc(crtc, crtc->cursor);
+ 
+ 	return 0;
+ }
+diff --git a/include/drm/drm_crtc.h b/include/drm/drm_crtc.h
+index bc1cc3ce05c4..cbb475654b1c 100644
+--- a/include/drm/drm_crtc.h
++++ b/include/drm/drm_crtc.h
+@@ -751,6 +751,8 @@ struct drm_plane {
+ 	struct drm_device *dev;
+ 	struct list_head head;
+ 
++	struct drm_modeset_lock mutex;
++
+ 	struct drm_mode_object base;
+ 
+ 	uint32_t possible_crtcs;
+diff --git a/include/drm/drm_modeset_lock.h b/include/drm/drm_modeset_lock.h
+index 28931a23d96c..70595ff565ba 100644
+--- a/include/drm/drm_modeset_lock.h
++++ b/include/drm/drm_modeset_lock.h
+@@ -127,11 +127,13 @@ void drm_modeset_unlock(struct drm_modeset_lock *lock);
+ 
+ struct drm_device;
+ struct drm_crtc;
++struct drm_plane;
+ 
+ void drm_modeset_lock_all(struct drm_device *dev);
+ int __drm_modeset_lock_all(struct drm_device *dev, bool trylock);
+ void drm_modeset_unlock_all(struct drm_device *dev);
+-void drm_modeset_lock_crtc(struct drm_crtc *crtc);
++void drm_modeset_lock_crtc(struct drm_crtc *crtc,
++			   struct drm_plane *plane);
+ void drm_modeset_unlock_crtc(struct drm_crtc *crtc);
+ void drm_warn_on_modeset_not_all_locked(struct drm_device *dev);
+ struct drm_modeset_acquire_ctx *

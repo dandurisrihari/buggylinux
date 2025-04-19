@@ -1,0 +1,376 @@
+diff --git a/drivers/net/wireless/microchip/wilc1000/cfg80211.c b/drivers/net/wireless/microchip/wilc1000/cfg80211.c
+index 256026d57a70..ea59ce9fd991 100644
+--- a/drivers/net/wireless/microchip/wilc1000/cfg80211.c
++++ b/drivers/net/wireless/microchip/wilc1000/cfg80211.c
+@@ -20,9 +20,11 @@
+ static const struct ieee80211_txrx_stypes
+ 	wilc_wfi_cfg80211_mgmt_types[NUM_NL80211_IFTYPES] = {
+ 	[NL80211_IFTYPE_STATION] = {
+-		.tx = 0xffff,
++		.tx = BIT(IEEE80211_STYPE_ACTION >> 4) |
++			BIT(IEEE80211_STYPE_AUTH >> 4),
+ 		.rx = BIT(IEEE80211_STYPE_ACTION >> 4) |
+-			BIT(IEEE80211_STYPE_PROBE_REQ >> 4)
++			BIT(IEEE80211_STYPE_PROBE_REQ >> 4) |
++			BIT(IEEE80211_STYPE_AUTH >> 4)
+ 	},
+ 	[NL80211_IFTYPE_AP] = {
+ 		.tx = 0xffff,
+@@ -350,6 +352,16 @@ static int connect(struct wiphy *wiphy, struct net_device *dev,
+ 		auth_type = WILC_FW_AUTH_OPEN_SYSTEM;
+ 		break;
+ 
++	case NL80211_AUTHTYPE_SAE:
++		auth_type = WILC_FW_AUTH_SAE;
++		if (sme->ssid_len) {
++			memcpy(vif->auth.ssid.ssid, sme->ssid, sme->ssid_len);
++			vif->auth.ssid.ssid_len = sme->ssid_len;
++		}
++		vif->auth.key_mgmt_suite = cpu_to_be32(sme->crypto.akm_suites[0]);
++		ether_addr_copy(vif->auth.bssid, sme->bssid);
++		break;
++
+ 	default:
+ 		break;
+ 	}
+@@ -357,6 +369,10 @@ static int connect(struct wiphy *wiphy, struct net_device *dev,
+ 	if (sme->crypto.n_akm_suites) {
+ 		if (sme->crypto.akm_suites[0] == WLAN_AKM_SUITE_8021X)
+ 			auth_type = WILC_FW_AUTH_IEEE8021;
++		else if (sme->crypto.akm_suites[0] == WLAN_AKM_SUITE_PSK_SHA256)
++			auth_type = WILC_FW_AUTH_OPEN_SYSTEM_SHA256;
++		else if (sme->crypto.akm_suites[0] == WLAN_AKM_SUITE_8021X_SHA256)
++			auth_type = WILC_FW_AUTH_IEE8021X_SHA256;
+ 	}
+ 
+ 	if (wfi_drv->usr_scan_req.scan_result) {
+@@ -905,6 +921,18 @@ static inline void wilc_wfi_cfg_parse_ch_attr(u8 *buf, u32 len, u8 sta_ch)
+ 	}
+ }
+ 
++bool wilc_wfi_mgmt_frame_rx(struct wilc_vif *vif, u8 *buff, u32 size)
++{
++	struct wilc *wl = vif->wilc;
++	struct wilc_priv *priv = &vif->priv;
++	int freq, ret;
++
++	freq = ieee80211_channel_to_frequency(wl->op_ch, NL80211_BAND_2GHZ);
++	ret = cfg80211_rx_mgmt(&priv->wdev, freq, 0, buff, size, 0);
++
++	return ret;
++}
++
+ void wilc_wfi_p2p_rx(struct wilc_vif *vif, u8 *buff, u32 size)
+ {
+ 	struct wilc *wl = vif->wilc;
+@@ -1090,8 +1118,14 @@ static int mgmt_tx(struct wiphy *wiphy,
+ 		goto out_txq_add_pkt;
+ 	}
+ 
+-	if (!ieee80211_is_public_action((struct ieee80211_hdr *)buf, len))
++	if (!ieee80211_is_public_action((struct ieee80211_hdr *)buf, len)) {
++		if (chan)
++			wilc_set_mac_chnl_num(vif, chan->hw_value);
++		else
++			wilc_set_mac_chnl_num(vif, vif->wilc->op_ch);
++
+ 		goto out_set_timeout;
++	}
+ 
+ 	d = (struct wilc_p2p_pub_act_frame *)(&mgmt->u.action);
+ 	if (d->oui_type != WLAN_OUI_TYPE_WFA_P2P ||
+@@ -1158,6 +1192,7 @@ void wilc_update_mgmt_frame_registrations(struct wiphy *wiphy,
+ 	struct wilc_vif *vif = netdev_priv(wdev->netdev);
+ 	u32 presp_bit = BIT(IEEE80211_STYPE_PROBE_REQ >> 4);
+ 	u32 action_bit = BIT(IEEE80211_STYPE_ACTION >> 4);
++	u32 pauth_bit = BIT(IEEE80211_STYPE_AUTH >> 4);
+ 
+ 	if (wl->initialized) {
+ 		bool prev = vif->mgmt_reg_stypes & presp_bit;
+@@ -1171,10 +1206,26 @@ void wilc_update_mgmt_frame_registrations(struct wiphy *wiphy,
+ 
+ 		if (now != prev)
+ 			wilc_frame_register(vif, IEEE80211_STYPE_ACTION, now);
++
++		prev = vif->mgmt_reg_stypes & pauth_bit;
++		now = upd->interface_stypes & pauth_bit;
++		if (now != prev)
++			wilc_frame_register(vif, IEEE80211_STYPE_AUTH, now);
+ 	}
+ 
+ 	vif->mgmt_reg_stypes =
+-		upd->interface_stypes & (presp_bit | action_bit);
++		upd->interface_stypes & (presp_bit | action_bit | pauth_bit);
++}
++
++static int external_auth(struct wiphy *wiphy, struct net_device *dev,
++			 struct cfg80211_external_auth_params *auth)
++{
++	struct wilc_vif *vif = netdev_priv(dev);
++
++	if (auth->status == WLAN_STATUS_SUCCESS)
++		wilc_set_external_auth_param(vif, auth);
++
++	return 0;
+ }
+ 
+ static int set_cqm_rssi_config(struct wiphy *wiphy, struct net_device *dev,
+@@ -1590,6 +1641,7 @@ static const struct cfg80211_ops wilc_cfg80211_ops = {
+ 	.change_bss = change_bss,
+ 	.set_wiphy_params = set_wiphy_params,
+ 
++	.external_auth = external_auth,
+ 	.set_pmksa = set_pmksa,
+ 	.del_pmksa = del_pmksa,
+ 	.flush_pmksa = flush_pmksa,
+@@ -1732,7 +1784,7 @@ struct wilc *wilc_create_wiphy(struct device *dev)
+ 				BIT(NL80211_IFTYPE_P2P_GO) |
+ 				BIT(NL80211_IFTYPE_P2P_CLIENT);
+ 	wiphy->flags |= WIPHY_FLAG_HAS_REMAIN_ON_CHANNEL;
+-
++	wiphy->features |= NL80211_FEATURE_SAE;
+ 	set_wiphy_dev(wiphy, dev);
+ 	wl->wiphy = wiphy;
+ 	ret = wiphy_register(wiphy);
+diff --git a/drivers/net/wireless/microchip/wilc1000/fw.h b/drivers/net/wireless/microchip/wilc1000/fw.h
+index 237ca348d1f8..9449c5d0b472 100644
+--- a/drivers/net/wireless/microchip/wilc1000/fw.h
++++ b/drivers/net/wireless/microchip/wilc1000/fw.h
+@@ -110,4 +110,13 @@ struct wilc_join_bss_param {
+ 		struct wilc_noa_opp_enable opp_en;
+ 	};
+ } __packed;
++
++struct wilc_external_auth_param {
++	u8 action;
++	u8 bssid[ETH_ALEN];
++	u8 ssid[IEEE80211_MAX_SSID_LEN];
++	u8 ssid_len;
++	__le32 key_mgmt_suites;
++	__le16 status;
++} __packed;
+ #endif
+diff --git a/drivers/net/wireless/microchip/wilc1000/hif.c b/drivers/net/wireless/microchip/wilc1000/hif.c
+index 573750356007..5d9d3aba737c 100644
+--- a/drivers/net/wireless/microchip/wilc1000/hif.c
++++ b/drivers/net/wireless/microchip/wilc1000/hif.c
+@@ -306,7 +306,10 @@ static int wilc_send_connect_wid(struct wilc_vif *vif)
+ 		netdev_err(vif->ndev, "failed to send config packet\n");
+ 		goto error;
+ 	} else {
+-		hif_drv->hif_state = HOST_IF_WAITING_CONN_RESP;
++                if (conn_attr->auth_type == WILC_FW_AUTH_SAE)
++                        hif_drv->hif_state = HOST_IF_EXTERNAL_AUTH;
++                else
++                        hif_drv->hif_state = HOST_IF_WAITING_CONN_RESP;
+ 	}
+ 
+ 	return 0;
+@@ -665,7 +668,12 @@ static void handle_rcvd_gnrl_async_info(struct work_struct *work)
+ 		goto free_msg;
+ 	}
+ 
+-	if (hif_drv->hif_state == HOST_IF_WAITING_CONN_RESP) {
++
++        if (hif_drv->hif_state == HOST_IF_EXTERNAL_AUTH) {
++                cfg80211_external_auth_request(vif->ndev, &vif->auth,
++					       GFP_KERNEL);
++                hif_drv->hif_state = HOST_IF_WAITING_CONN_RESP;
++        } else if (hif_drv->hif_state == HOST_IF_WAITING_CONN_RESP) {
+ 		host_int_parse_assoc_resp_info(vif, mac_info->status);
+ 	} else if (mac_info->status == WILC_MAC_STATUS_DISCONNECTED) {
+ 		if (hif_drv->hif_state == HOST_IF_CONNECTED) {
+@@ -710,7 +718,8 @@ int wilc_disconnect(struct wilc_vif *vif)
+ 	}
+ 
+ 	if (conn_info->conn_result) {
+-		if (hif_drv->hif_state == HOST_IF_WAITING_CONN_RESP)
++		if (hif_drv->hif_state == HOST_IF_WAITING_CONN_RESP ||
++		    hif_drv->hif_state == HOST_IF_EXTERNAL_AUTH)
+ 			del_timer(&hif_drv->connect_timer);
+ 
+ 		conn_info->conn_result(CONN_DISCONN_EVENT_DISCONN_NOTIF, 0,
+@@ -986,6 +995,31 @@ void wilc_set_wowlan_trigger(struct wilc_vif *vif, bool enabled)
+ 		pr_err("Failed to send wowlan trigger config packet\n");
+ }
+ 
++int wilc_set_external_auth_param(struct wilc_vif *vif,
++				 struct cfg80211_external_auth_params *auth)
++{
++	int ret;
++	struct wid wid;
++	struct wilc_external_auth_param *param;
++
++	wid.id = WID_EXTERNAL_AUTH_PARAM;
++	wid.type = WID_BIN_DATA;
++	wid.size = sizeof(*param);
++	param = kzalloc(sizeof(*param), GFP_KERNEL);
++	if (!param)
++		return -EINVAL;
++
++	wid.val = (u8 *)param;
++	param->action = auth->action;
++	ether_addr_copy(param->bssid, auth->bssid);
++	memcpy(param->ssid, auth->ssid.ssid, auth->ssid.ssid_len);
++	param->ssid_len = auth->ssid.ssid_len;
++	ret = wilc_send_config_pkt(vif, WILC_SET_CFG, &wid, 1);
++
++	kfree(param);
++	return ret;
++}
++
+ static void handle_scan_timer(struct work_struct *work)
+ {
+ 	struct host_if_msg *msg = container_of(work, struct host_if_msg, work);
+@@ -1647,6 +1681,10 @@ void wilc_frame_register(struct wilc_vif *vif, u16 frame_type, bool reg)
+ 		reg_frame.reg_id = WILC_FW_PROBE_REQ_IDX;
+ 		break;
+ 
++        case IEEE80211_STYPE_AUTH:
++                reg_frame.reg_id = WILC_FW_AUTH_REQ_IDX;
++                break;
++
+ 	default:
+ 		break;
+ 	}
+diff --git a/drivers/net/wireless/microchip/wilc1000/hif.h b/drivers/net/wireless/microchip/wilc1000/hif.h
+index c9740457ed58..f1a0a1f042ca 100644
+--- a/drivers/net/wireless/microchip/wilc1000/hif.h
++++ b/drivers/net/wireless/microchip/wilc1000/hif.h
+@@ -47,6 +47,7 @@ enum host_if_state {
+ 	HOST_IF_WAITING_CONN_RESP	= 3,
+ 	HOST_IF_CONNECTED		= 4,
+ 	HOST_IF_P2P_LISTEN		= 5,
++	HOST_IF_EXTERNAL_AUTH           = 6,
+ 	HOST_IF_FORCE_32BIT		= 0xFFFFFFFF
+ };
+ 
+@@ -202,6 +203,8 @@ int wilc_get_vif_idx(struct wilc_vif *vif);
+ int wilc_set_tx_power(struct wilc_vif *vif, u8 tx_power);
+ int wilc_get_tx_power(struct wilc_vif *vif, u8 *tx_power);
+ void wilc_set_wowlan_trigger(struct wilc_vif *vif, bool enabled);
++int wilc_set_external_auth_param(struct wilc_vif *vif,
++				 struct cfg80211_external_auth_params *param);
+ void wilc_scan_complete_received(struct wilc *wilc, u8 *buffer, u32 length);
+ void wilc_network_info_received(struct wilc *wilc, u8 *buffer, u32 length);
+ void wilc_gnrl_async_info_received(struct wilc *wilc, u8 *buffer, u32 length);
+diff --git a/drivers/net/wireless/microchip/wilc1000/netdev.c b/drivers/net/wireless/microchip/wilc1000/netdev.c
+index 3c292e3464c2..fcc4e61592ee 100644
+--- a/drivers/net/wireless/microchip/wilc1000/netdev.c
++++ b/drivers/net/wireless/microchip/wilc1000/netdev.c
+@@ -835,15 +835,24 @@ void wilc_frmw_to_host(struct wilc *wilc, u8 *buff, u32 size,
+ 	}
+ }
+ 
+-void wilc_wfi_mgmt_rx(struct wilc *wilc, u8 *buff, u32 size)
++void wilc_wfi_mgmt_rx(struct wilc *wilc, u8 *buff, u32 size, bool is_auth)
+ {
+ 	int srcu_idx;
+ 	struct wilc_vif *vif;
+ 
+ 	srcu_idx = srcu_read_lock(&wilc->srcu);
+ 	list_for_each_entry_rcu(vif, &wilc->vif_list, list) {
++		struct ieee80211_mgmt *mgmt = (struct ieee80211_mgmt *)buff;
+ 		u16 type = le16_to_cpup((__le16 *)buff);
+ 		u32 type_bit = BIT(type >> 4);
++		u32 auth_bit = BIT(IEEE80211_STYPE_AUTH >> 4);
++
++		if ((vif->mgmt_reg_stypes & auth_bit &&
++		     ieee80211_is_auth(mgmt->frame_control)) &&
++		    vif->iftype == WILC_STATION_MODE && is_auth) {
++			wilc_wfi_mgmt_frame_rx(vif, buff, size);
++			break;
++		}
+ 
+ 		if (vif->priv.p2p_listen_state &&
+ 		    vif->mgmt_reg_stypes & type_bit)
+diff --git a/drivers/net/wireless/microchip/wilc1000/netdev.h b/drivers/net/wireless/microchip/wilc1000/netdev.h
+index 630b1e85e68f..a0d9e981500e 100644
+--- a/drivers/net/wireless/microchip/wilc1000/netdev.h
++++ b/drivers/net/wireless/microchip/wilc1000/netdev.h
+@@ -185,6 +185,7 @@ struct wilc_vif {
+ 	struct wilc_priv priv;
+ 	struct list_head list;
+ 	struct cfg80211_bss *bss;
++	struct cfg80211_external_auth_params auth;
+ };
+ 
+ struct wilc_tx_queue_status {
+@@ -278,7 +279,7 @@ struct wilc_wfi_mon_priv {
+ void wilc_frmw_to_host(struct wilc *wilc, u8 *buff, u32 size, u32 pkt_offset);
+ void wilc_mac_indicate(struct wilc *wilc);
+ void wilc_netdev_cleanup(struct wilc *wilc);
+-void wilc_wfi_mgmt_rx(struct wilc *wilc, u8 *buff, u32 size);
++void wilc_wfi_mgmt_rx(struct wilc *wilc, u8 *buff, u32 size, bool is_auth);
+ void wilc_wlan_set_bssid(struct net_device *wilc_netdev, const u8 *bssid,
+ 			 u8 mode);
+ struct wilc_vif *wilc_netdev_ifc_init(struct wilc *wl, const char *name,
+diff --git a/drivers/net/wireless/microchip/wilc1000/wlan.c b/drivers/net/wireless/microchip/wilc1000/wlan.c
+index 48441f0389ca..f3f504d12873 100644
+--- a/drivers/net/wireless/microchip/wilc1000/wlan.c
++++ b/drivers/net/wireless/microchip/wilc1000/wlan.c
+@@ -968,7 +968,8 @@ static void wilc_wlan_handle_rx_buff(struct wilc *wilc, u8 *buffer, int size)
+ 
+ 		if (pkt_offset & IS_MANAGMEMENT) {
+ 			buff_ptr += HOST_HDR_OFFSET;
+-			wilc_wfi_mgmt_rx(wilc, buff_ptr, pkt_len);
++			wilc_wfi_mgmt_rx(wilc, buff_ptr, pkt_len,
++					 pkt_offset & IS_MGMT_AUTH_PKT);
+ 		} else {
+ 			if (!is_cfg_packet) {
+ 				wilc_frmw_to_host(wilc, buff_ptr, pkt_len,
+diff --git a/drivers/net/wireless/microchip/wilc1000/wlan.h b/drivers/net/wireless/microchip/wilc1000/wlan.h
+index eb7978166d73..b45e72789a0e 100644
+--- a/drivers/net/wireless/microchip/wilc1000/wlan.h
++++ b/drivers/net/wireless/microchip/wilc1000/wlan.h
+@@ -305,6 +305,7 @@
+ #define IS_MANAGMEMENT		0x100
+ #define IS_MANAGMEMENT_CALLBACK	0x080
+ #define IS_MGMT_STATUS_SUCCES	0x040
++#define IS_MGMT_AUTH_PKT       0x010
+ 
+ #define WILC_WID_TYPE		GENMASK(15, 12)
+ #define WILC_VMM_ENTRY_FULL_RETRY	1
+@@ -423,6 +424,7 @@ int wilc_wlan_get_num_conn_ifcs(struct wilc *wilc);
+ netdev_tx_t wilc_mac_xmit(struct sk_buff *skb, struct net_device *dev);
+ 
+ void wilc_wfi_p2p_rx(struct wilc_vif *vif, u8 *buff, u32 size);
++bool wilc_wfi_mgmt_frame_rx(struct wilc_vif *vif, u8 *buff, u32 size);
+ void host_wakeup_notify(struct wilc *wilc);
+ void host_sleep_notify(struct wilc *wilc);
+ void chip_allow_sleep(struct wilc *wilc);
+diff --git a/drivers/net/wireless/microchip/wilc1000/wlan_if.h b/drivers/net/wireless/microchip/wilc1000/wlan_if.h
+index 6eb7eb4ac294..18f13b5643e8 100644
+--- a/drivers/net/wireless/microchip/wilc1000/wlan_if.h
++++ b/drivers/net/wireless/microchip/wilc1000/wlan_if.h
+@@ -85,7 +85,10 @@ enum authtype {
+ 	WILC_FW_AUTH_OPEN_SYSTEM = 1,
+ 	WILC_FW_AUTH_SHARED_KEY = 2,
+ 	WILC_FW_AUTH_ANY = 3,
+-	WILC_FW_AUTH_IEEE8021 = 5
++	WILC_FW_AUTH_IEEE8021 = 5,
++	WILC_FW_AUTH_SAE = 7,
++	WILC_FW_AUTH_IEE8021X_SHA256 = 9,
++	WILC_FW_AUTH_OPEN_SYSTEM_SHA256 = 13
+ };
+ 
+ enum site_survey {
+@@ -176,7 +179,8 @@ enum {
+ 
+ enum {
+ 	WILC_FW_ACTION_FRM_IDX = 0,
+-	WILC_FW_PROBE_REQ_IDX = 1
++	WILC_FW_PROBE_REQ_IDX = 1,
++	WILC_FW_AUTH_REQ_IDX = 2
+ };
+ 
+ enum wid_type {
+@@ -789,7 +793,7 @@ enum {
+ 	WID_ADD_BEACON			= 0x408a,
+ 
+ 	WID_SETUP_MULTICAST_FILTER	= 0x408b,
+-
++	WID_EXTERNAL_AUTH_PARAM		= 0x408d,
+ 	/* Miscellaneous WIDs */
+ 	WID_ALL				= 0x7FFE,
+ 	WID_MAX				= 0xFFFF

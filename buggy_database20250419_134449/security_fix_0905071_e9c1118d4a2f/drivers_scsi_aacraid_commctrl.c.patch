@@ -1,0 +1,97 @@
+commit 090507157f3bc43dd925fda50f8aca7d03b616b6
+Author: Mark Salyzyn <Mark_Salyzyn@adaptec.com>
+Date:   Wed May 28 15:32:55 2008 -0400
+
+    [SCSI] aacraid: prevent copy_from_user() BUG!
+    
+    Seen:
+    
+            kernel BUG at arch/i386/lib/usercopy.c:872
+    
+    under a 2.6.18-8.el5 kernel. Traced it to a garbage-in/garbage-out
+    ioctl condition in the aacraid driver.
+    
+    Adaptec's special ioctl scb passthrough needs to check the validity of
+    the individual scatter gather count fields to the maximum the adapter
+    supports. Doing so will have the side effect of preventing
+    copy_from_user() from bugging out while populating the dma buffers.
+    This is a hardening effort, issue was triggered by an errant version
+    of the management tools and thus the BUG should not be seen in the
+    field.
+    
+    [jejb: fixed up compile failure]
+    Signed-off-by: Mark Salyzyn <aacraid@adaptec.com>
+    Signed-off-by: James Bottomley <James.Bottomley@HansenPartnership.com>
+
+diff --git a/drivers/scsi/aacraid/commctrl.c b/drivers/scsi/aacraid/commctrl.c
+index 5fd83deab36c..a7355260cfcf 100644
+--- a/drivers/scsi/aacraid/commctrl.c
++++ b/drivers/scsi/aacraid/commctrl.c
+@@ -41,6 +41,7 @@
+ #include <linux/kthread.h>
+ #include <linux/semaphore.h>
+ #include <asm/uaccess.h>
++#include <scsi/scsi_host.h>
+ 
+ #include "aacraid.h"
+ 
+@@ -581,6 +582,14 @@ static int aac_send_raw_srb(struct aac_dev* dev, void __user * arg)
+ 			for (i = 0; i < upsg->count; i++) {
+ 				u64 addr;
+ 				void* p;
++				if (upsg->sg[i].count >
++				    (dev->adapter_info.options &
++				     AAC_OPT_NEW_COMM) ?
++				      (dev->scsi_host_ptr->max_sectors << 9) :
++				      65536) {
++					rcode = -EINVAL;
++					goto cleanup;
++				}
+ 				/* Does this really need to be GFP_DMA? */
+ 				p = kmalloc(upsg->sg[i].count,GFP_KERNEL|__GFP_DMA);
+ 				if(!p) {
+@@ -625,6 +634,14 @@ static int aac_send_raw_srb(struct aac_dev* dev, void __user * arg)
+ 			for (i = 0; i < usg->count; i++) {
+ 				u64 addr;
+ 				void* p;
++				if (usg->sg[i].count >
++				    (dev->adapter_info.options &
++				     AAC_OPT_NEW_COMM) ?
++				      (dev->scsi_host_ptr->max_sectors << 9) :
++				      65536) {
++					rcode = -EINVAL;
++					goto cleanup;
++				}
+ 				/* Does this really need to be GFP_DMA? */
+ 				p = kmalloc(usg->sg[i].count,GFP_KERNEL|__GFP_DMA);
+ 				if(!p) {
+@@ -667,6 +684,14 @@ static int aac_send_raw_srb(struct aac_dev* dev, void __user * arg)
+ 			for (i = 0; i < upsg->count; i++) {
+ 				uintptr_t addr;
+ 				void* p;
++				if (usg->sg[i].count >
++				    (dev->adapter_info.options &
++				     AAC_OPT_NEW_COMM) ?
++				      (dev->scsi_host_ptr->max_sectors << 9) :
++				      65536) {
++					rcode = -EINVAL;
++					goto cleanup;
++				}
+ 				/* Does this really need to be GFP_DMA? */
+ 				p = kmalloc(usg->sg[i].count,GFP_KERNEL|__GFP_DMA);
+ 				if(!p) {
+@@ -698,6 +723,14 @@ static int aac_send_raw_srb(struct aac_dev* dev, void __user * arg)
+ 			for (i = 0; i < upsg->count; i++) {
+ 				dma_addr_t addr;
+ 				void* p;
++				if (upsg->sg[i].count >
++				    (dev->adapter_info.options &
++				     AAC_OPT_NEW_COMM) ?
++				      (dev->scsi_host_ptr->max_sectors << 9) :
++				      65536) {
++					rcode = -EINVAL;
++					goto cleanup;
++				}
+ 				p = kmalloc(upsg->sg[i].count, GFP_KERNEL);
+ 				if (!p) {
+ 					dprintk((KERN_DEBUG"aacraid: Could not allocate SG buffer - size = %d buffer number %d of %d\n",

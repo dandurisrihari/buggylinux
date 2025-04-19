@@ -1,0 +1,65 @@
+commit bfe298745afc9548ad9344a9a3f26c81fd1a76c4
+Author: James Morse <james.morse@arm.com>
+Date:   Fri Oct 25 17:42:16 2019 +0100
+
+    arm64: entry-common: don't touch daif before bp-hardening
+    
+    The previous patches mechanically transformed the assembly version of
+    entry.S to entry-common.c for synchronous exceptions.
+    
+    The C version of local_daif_restore() doesn't quite do the same thing
+    as the assembly versions if pseudo-NMI is in use. In particular,
+    | local_daif_restore(DAIF_PROCCTX_NOIRQ)
+    will still allow pNMI to be delivered. This is not the behaviour
+    do_el0_ia_bp_hardening() and do_sp_pc_abort() want as it should not
+    be possible for the PMU handler to run as an NMI until the bp-hardening
+    sequence has run.
+    
+    The bp-hardening calls were placed where they are because this was the
+    first C code to run after the relevant exceptions. As we've now moved
+    that point earlier, move the checks and calls earlier too.
+    
+    This makes it clearer that this stuff runs before any kind of exception,
+    and saves modifying PSTATE twice.
+    
+    Signed-off-by: James Morse <james.morse@arm.com>
+    Reviewed-by: Mark Rutland <mark.rutland@arm.com>
+    Cc: Julien Thierry <julien.thierry.kdev@gmail.com>
+    Signed-off-by: Catalin Marinas <catalin.marinas@arm.com>
+
+diff --git a/arch/arm64/include/asm/processor.h b/arch/arm64/include/asm/processor.h
+index 5623685c7d13..8899d26f73ff 100644
+--- a/arch/arm64/include/asm/processor.h
++++ b/arch/arm64/include/asm/processor.h
+@@ -26,10 +26,12 @@
+ #include <linux/init.h>
+ #include <linux/stddef.h>
+ #include <linux/string.h>
++#include <linux/thread_info.h>
+ 
+ #include <asm/alternative.h>
+ #include <asm/cpufeature.h>
+ #include <asm/hw_breakpoint.h>
++#include <asm/kasan.h>
+ #include <asm/lse.h>
+ #include <asm/pgtable-hwdef.h>
+ #include <asm/pointer_auth.h>
+@@ -214,6 +216,18 @@ static inline void start_thread(struct pt_regs *regs, unsigned long pc,
+ 	regs->sp = sp;
+ }
+ 
++static inline bool is_ttbr0_addr(unsigned long addr)
++{
++	/* entry assembly clears tags for TTBR0 addrs */
++	return addr < TASK_SIZE;
++}
++
++static inline bool is_ttbr1_addr(unsigned long addr)
++{
++	/* TTBR1 addresses may have a tag if KASAN_SW_TAGS is in use */
++	return arch_kasan_reset_tag(addr) >= PAGE_OFFSET;
++}
++
+ #ifdef CONFIG_COMPAT
+ static inline void compat_start_thread(struct pt_regs *regs, unsigned long pc,
+ 				       unsigned long sp)

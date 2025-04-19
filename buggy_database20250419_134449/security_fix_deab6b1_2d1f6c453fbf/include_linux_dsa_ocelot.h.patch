@@ -1,0 +1,88 @@
+commit deab6b1cd9789bb9bd466d5e76aecb8b336259b4
+Author: Vladimir Oltean <vladimir.oltean@nxp.com>
+Date:   Tue Oct 12 14:40:40 2021 +0300
+
+    net: dsa: tag_ocelot: break circular dependency with ocelot switch lib driver
+    
+    As explained here:
+    https://lore.kernel.org/netdev/20210908220834.d7gmtnwrorhharna@skbuf/
+    DSA tagging protocol drivers cannot depend on symbols exported by switch
+    drivers, because this creates a circular dependency that breaks module
+    autoloading.
+    
+    The tag_ocelot.c file depends on the ocelot_ptp_rew_op() function
+    exported by the common ocelot switch lib. This function looks at
+    OCELOT_SKB_CB(skb) and computes how to populate the REW_OP field of the
+    DSA tag, for PTP timestamping (the command: one-step/two-step, and the
+    TX timestamp identifier).
+    
+    None of that requires deep insight into the driver, it is quite
+    stateless, as it only depends upon the skb->cb. So let's make it a
+    static inline function and put it in include/linux/dsa/ocelot.h, a
+    file that despite its name is used by the ocelot switch driver for
+    populating the injection header too - since commit 40d3f295b5fe ("net:
+    mscc: ocelot: use common tag parsing code with DSA").
+    
+    With that function declared as static inline, its body is expanded
+    inside each call site, so the dependency is broken and the DSA tagger
+    can be built without the switch library, upon which the felix driver
+    depends.
+    
+    Fixes: 39e5308b3250 ("net: mscc: ocelot: support PTP Sync one-step timestamping")
+    Signed-off-by: Vladimir Oltean <vladimir.oltean@nxp.com>
+    Reviewed-by: Florian Fainelli <f.fainelli@gmail.com>
+    Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+diff --git a/include/linux/dsa/ocelot.h b/include/linux/dsa/ocelot.h
+index 435777a0073c..50641a7529ad 100644
+--- a/include/linux/dsa/ocelot.h
++++ b/include/linux/dsa/ocelot.h
+@@ -6,6 +6,26 @@
+ #define _NET_DSA_TAG_OCELOT_H
+ 
+ #include <linux/packing.h>
++#include <linux/skbuff.h>
++
++struct ocelot_skb_cb {
++	struct sk_buff *clone;
++	unsigned int ptp_class; /* valid only for clones */
++	u8 ptp_cmd;
++	u8 ts_id;
++};
++
++#define OCELOT_SKB_CB(skb) \
++	((struct ocelot_skb_cb *)((skb)->cb))
++
++#define IFH_TAG_TYPE_C			0
++#define IFH_TAG_TYPE_S			1
++
++#define IFH_REW_OP_NOOP			0x0
++#define IFH_REW_OP_DSCP			0x1
++#define IFH_REW_OP_ONE_STEP_PTP		0x2
++#define IFH_REW_OP_TWO_STEP_PTP		0x3
++#define IFH_REW_OP_ORIGIN_PTP		0x5
+ 
+ #define OCELOT_TAG_LEN			16
+ #define OCELOT_SHORT_PREFIX_LEN		4
+@@ -215,4 +235,21 @@ static inline void ocelot_ifh_set_vid(void *injection, u64 vid)
+ 	packing(injection, &vid, 11, 0, OCELOT_TAG_LEN, PACK, 0);
+ }
+ 
++/* Determine the PTP REW_OP to use for injecting the given skb */
++static inline u32 ocelot_ptp_rew_op(struct sk_buff *skb)
++{
++	struct sk_buff *clone = OCELOT_SKB_CB(skb)->clone;
++	u8 ptp_cmd = OCELOT_SKB_CB(skb)->ptp_cmd;
++	u32 rew_op = 0;
++
++	if (ptp_cmd == IFH_REW_OP_TWO_STEP_PTP && clone) {
++		rew_op = ptp_cmd;
++		rew_op |= OCELOT_SKB_CB(clone)->ts_id << 3;
++	} else if (ptp_cmd == IFH_REW_OP_ORIGIN_PTP) {
++		rew_op = ptp_cmd;
++	}
++
++	return rew_op;
++}
++
+ #endif

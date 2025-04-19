@@ -1,0 +1,102 @@
+commit 243e25112d06b348f087a6f7aba4bbc288285bdd
+Author: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+Date:   Wed Apr 5 17:54:50 2017 +1000
+
+    powerpc/xive: Native exploitation of the XIVE interrupt controller
+    
+    The XIVE interrupt controller is the new interrupt controller
+    found in POWER9. It supports advanced virtualization capabilities
+    among other things.
+    
+    Currently we use a set of firmware calls that simulate the old
+    "XICS" interrupt controller but this is fairly inefficient.
+    
+    This adds the framework for using XIVE along with a native
+    backend which OPAL for configuration. Later, a backend allowing
+    the use in a KVM or PowerVM guest will also be provided.
+    
+    This disables some fast path for interrupts in KVM when XIVE is
+    enabled as these rely on the firmware emulation code which is no
+    longer available when the XIVE is used natively by Linux.
+    
+    A latter patch will make KVM also directly exploit the XIVE, thus
+    recovering the lost performance (and more).
+    
+    Signed-off-by: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+    [mpe: Fixup pr_xxx("XIVE:"...), don't split pr_xxx() strings,
+     tweak Kconfig so XIVE_NATIVE selects XIVE and depends on POWERNV,
+     fix build errors when SMP=n, fold in fixes from Ben:
+       Don't call cpu_online() on an invalid CPU number
+       Fix irq target selection returning out of bounds cpu#
+       Extra sanity checks on cpu numbers
+     ]
+    Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+
+diff --git a/arch/powerpc/sysdev/xive/xive-internal.h b/arch/powerpc/sysdev/xive/xive-internal.h
+new file mode 100644
+index 000000000000..d07ef2d29caf
+--- /dev/null
++++ b/arch/powerpc/sysdev/xive/xive-internal.h
+@@ -0,0 +1,62 @@
++/*
++ * Copyright 2016,2017 IBM Corporation.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License
++ * as published by the Free Software Foundation; either version
++ * 2 of the License, or (at your option) any later version.
++ */
++#ifndef __XIVE_INTERNAL_H
++#define __XIVE_INTERNAL_H
++
++/* Each CPU carry one of these with various per-CPU state */
++struct xive_cpu {
++#ifdef CONFIG_SMP
++	/* HW irq number and data of IPI */
++	u32 hw_ipi;
++	struct xive_irq_data ipi_data;
++#endif /* CONFIG_SMP */
++
++	int chip_id;
++
++	/* Queue datas. Only one is populated */
++#define XIVE_MAX_QUEUES	8
++	struct xive_q queue[XIVE_MAX_QUEUES];
++
++	/*
++	 * Pending mask. Each bit corresponds to a priority that
++	 * potentially has pending interrupts.
++	 */
++	u8 pending_prio;
++
++	/* Cache of HW CPPR */
++	u8 cppr;
++};
++
++/* Backend ops */
++struct xive_ops {
++	int	(*populate_irq_data)(u32 hw_irq, struct xive_irq_data *data);
++	int 	(*configure_irq)(u32 hw_irq, u32 target, u8 prio, u32 sw_irq);
++	int	(*setup_queue)(unsigned int cpu, struct xive_cpu *xc, u8 prio);
++	void	(*cleanup_queue)(unsigned int cpu, struct xive_cpu *xc, u8 prio);
++	void	(*setup_cpu)(unsigned int cpu, struct xive_cpu *xc);
++	void	(*teardown_cpu)(unsigned int cpu, struct xive_cpu *xc);
++	bool	(*match)(struct device_node *np);
++	void	(*shutdown)(void);
++
++	void	(*update_pending)(struct xive_cpu *xc);
++	void	(*eoi)(u32 hw_irq);
++	void	(*sync_source)(u32 hw_irq);
++#ifdef CONFIG_SMP
++	int	(*get_ipi)(unsigned int cpu, struct xive_cpu *xc);
++	void	(*put_ipi)(unsigned int cpu, struct xive_cpu *xc);
++#endif
++	const char *name;
++};
++
++bool xive_core_init(const struct xive_ops *ops, void __iomem *area, u32 offset,
++		    u8 max_prio);
++
++extern bool xive_cmdline_disabled;
++
++#endif /*  __XIVE_INTERNAL_H */

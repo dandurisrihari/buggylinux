@@ -1,0 +1,55 @@
+commit 21e733930be6458e0c33482b6783e7c15ba984eb
+Author: Shirish Pargaonkar <shirishpargaonkar@gmail.com>
+Date:   Thu Oct 21 06:42:55 2010 -0500
+
+    NTLM auth and sign - Allocate session key/client response dynamically
+    
+    Start calculating auth response within a session.  Move/Add pertinet
+    data structures like session key, server challenge and ntlmv2_hash in
+    a session structure.  We should do the calculations within a session
+    before copying session key and response over to server data
+    structures because a session setup can fail.
+    
+    Only after a very first smb session succeeds, it copy/make its
+    session key, session key of smb connection.  This key stays with
+    the smb connection throughout its life.
+    sequence_number within server is set to 0x2.
+    
+    The authentication Message Authentication Key (mak) which consists
+    of session key followed by client response within structure session_key
+    is now dynamic.  Every authentication type allocates the key + response
+    sized memory within its session structure and later either assigns or
+    frees it once the client response is sent and if session's session key
+    becomes connetion's session key.
+    
+    ntlm/ntlmi authentication functions are rearranged.  A function
+    named setup_ntlm_resp(), similar to setup_ntlmv2_resp(), replaces
+    function cifs_calculate_session_key().
+    
+    size of CIFS_SESS_KEY_SIZE is changed to 16, to reflect the byte size
+    of the key it holds.
+    
+    Reviewed-by: Jeff Layton <jlayton@samba.org>
+    Signed-off-by: Shirish Pargaonkar <shirishpargaonkar@gmail.com>
+    Signed-off-by: Steve French <sfrench@us.ibm.com>
+
+diff --git a/fs/cifs/cifsglob.h b/fs/cifs/cifsglob.h
+index 539475a11c45..66f76b2d270b 100644
+--- a/fs/cifs/cifsglob.h
++++ b/fs/cifs/cifsglob.h
+@@ -99,14 +99,7 @@ enum protocolEnum {
+ 
+ struct session_key {
+ 	unsigned int len;
+-	union {
+-		char ntlm[CIFS_SESS_KEY_SIZE + 16];
+-		char krb5[CIFS_SESS_KEY_SIZE + 16]; /* BB: length correct? */
+-		struct {
+-			char key[16];
+-			struct ntlmv2_resp resp;
+-		} ntlmv2;
+-	} data;
++	char *response;
+ };
+ 
+ struct cifs_cred {

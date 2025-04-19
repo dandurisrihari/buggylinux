@@ -1,0 +1,123 @@
+commit dd0bb688eaa241b5655d396d45366cba9225aed9
+Author: Josef Bacik <jbacik@fb.com>
+Date:   Tue Nov 7 15:28:42 2017 -0500
+
+    bpf: add a bpf_override_function helper
+    
+    Error injection is sloppy and very ad-hoc.  BPF could fill this niche
+    perfectly with it's kprobe functionality.  We could make sure errors are
+    only triggered in specific call chains that we care about with very
+    specific situations.  Accomplish this with the bpf_override_funciton
+    helper.  This will modify the probe'd callers return value to the
+    specified value and set the PC to an override function that simply
+    returns, bypassing the originally probed function.  This gives us a nice
+    clean way to implement systematic error injection for all of our code
+    paths.
+    
+    Acked-by: Alexei Starovoitov <ast@kernel.org>
+    Signed-off-by: Josef Bacik <jbacik@fb.com>
+    Acked-by: Daniel Borkmann <daniel@iogearbox.net>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/kernel/trace/trace_kprobe.c b/kernel/trace/trace_kprobe.c
+index abf92e478cfb..8e3c9ec1faf7 100644
+--- a/kernel/trace/trace_kprobe.c
++++ b/kernel/trace/trace_kprobe.c
+@@ -42,6 +42,7 @@ struct trace_kprobe {
+ 	(offsetof(struct trace_kprobe, tp.args) +	\
+ 	(sizeof(struct probe_arg) * (n)))
+ 
++DEFINE_PER_CPU(int, bpf_kprobe_override);
+ 
+ static nokprobe_inline bool trace_kprobe_is_return(struct trace_kprobe *tk)
+ {
+@@ -87,6 +88,12 @@ static nokprobe_inline unsigned long trace_kprobe_nhit(struct trace_kprobe *tk)
+ 	return nhit;
+ }
+ 
++int trace_kprobe_ftrace(struct trace_event_call *call)
++{
++	struct trace_kprobe *tk = (struct trace_kprobe *)call->data;
++	return kprobe_ftrace(&tk->rp.kp);
++}
++
+ static int register_kprobe_event(struct trace_kprobe *tk);
+ static int unregister_kprobe_event(struct trace_kprobe *tk);
+ 
+@@ -1170,7 +1177,7 @@ static int kretprobe_event_define_fields(struct trace_event_call *event_call)
+ #ifdef CONFIG_PERF_EVENTS
+ 
+ /* Kprobe profile handler */
+-static void
++static int
+ kprobe_perf_func(struct trace_kprobe *tk, struct pt_regs *regs)
+ {
+ 	struct trace_event_call *call = &tk->tp.call;
+@@ -1179,12 +1186,29 @@ kprobe_perf_func(struct trace_kprobe *tk, struct pt_regs *regs)
+ 	int size, __size, dsize;
+ 	int rctx;
+ 
+-	if (bpf_prog_array_valid(call) && !trace_call_bpf(call, regs))
+-		return;
++	if (bpf_prog_array_valid(call)) {
++		int ret;
++
++		ret = trace_call_bpf(call, regs);
++
++		/*
++		 * We need to check and see if we modified the pc of the
++		 * pt_regs, and if so clear the kprobe and return 1 so that we
++		 * don't do the instruction skipping.  Also reset our state so
++		 * we are clean the next pass through.
++		 */
++		if (__this_cpu_read(bpf_kprobe_override)) {
++			__this_cpu_write(bpf_kprobe_override, 0);
++			reset_current_kprobe();
++			return 1;
++		}
++		if (!ret)
++			return 0;
++	}
+ 
+ 	head = this_cpu_ptr(call->perf_events);
+ 	if (hlist_empty(head))
+-		return;
++		return 0;
+ 
+ 	dsize = __get_data_size(&tk->tp, regs);
+ 	__size = sizeof(*entry) + tk->tp.size + dsize;
+@@ -1193,13 +1217,14 @@ kprobe_perf_func(struct trace_kprobe *tk, struct pt_regs *regs)
+ 
+ 	entry = perf_trace_buf_alloc(size, NULL, &rctx);
+ 	if (!entry)
+-		return;
++		return 0;
+ 
+ 	entry->ip = (unsigned long)tk->rp.kp.addr;
+ 	memset(&entry[1], 0, dsize);
+ 	store_trace_args(sizeof(*entry), &tk->tp, regs, (u8 *)&entry[1], dsize);
+ 	perf_trace_buf_submit(entry, size, rctx, call->event.type, 1, regs,
+ 			      head, NULL, NULL);
++	return 0;
+ }
+ NOKPROBE_SYMBOL(kprobe_perf_func);
+ 
+@@ -1275,6 +1300,7 @@ static int kprobe_register(struct trace_event_call *event,
+ static int kprobe_dispatcher(struct kprobe *kp, struct pt_regs *regs)
+ {
+ 	struct trace_kprobe *tk = container_of(kp, struct trace_kprobe, rp.kp);
++	int ret = 0;
+ 
+ 	raw_cpu_inc(*tk->nhit);
+ 
+@@ -1282,9 +1308,9 @@ static int kprobe_dispatcher(struct kprobe *kp, struct pt_regs *regs)
+ 		kprobe_trace_func(tk, regs);
+ #ifdef CONFIG_PERF_EVENTS
+ 	if (tk->tp.flags & TP_FLAG_PROFILE)
+-		kprobe_perf_func(tk, regs);
++		ret = kprobe_perf_func(tk, regs);
+ #endif
+-	return 0;	/* We don't tweek kernel, so just return 0 */
++	return ret;
+ }
+ NOKPROBE_SYMBOL(kprobe_dispatcher);

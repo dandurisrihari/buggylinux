@@ -1,0 +1,104 @@
+commit c6668726d2c2c581e6c417448c472c994d026f5f
+Merge: 06b45f2aa703 68d4cef3bab3
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Fri Apr 24 10:22:09 2015 -0700
+
+    Merge branch 'for-next' of git://git.kernel.org/pub/scm/linux/kernel/git/nab/target-pending
+    
+    Pull SCSI target updates from Nicholas Bellinger:
+     "Lots of activity in target land the last months.
+    
+      The highlights include:
+    
+       - Convert fabric drivers tree-wide to target_register_template() (hch
+         + bart)
+    
+       - iser-target hardening fixes + v1.0 improvements (sagi)
+    
+       - Convert iscsi_thread_set usage to kthread.h + kill
+         iscsi_target_tq.c (sagi + nab)
+    
+       - Add support for T10-PI WRITE_STRIP + READ_INSERT operation (mkp +
+         sagi + nab)
+    
+       - DIF fixes for CONFIG_DEBUG_SG=y + UNMAP file emulation (akinobu +
+         sagi + mkp)
+    
+       - Extended TCMU ABI v2 for future BIDI + DIF support (andy + ilias)
+    
+       - Fix COMPARE_AND_WRITE handling for NO_ALLLOC drivers (hch + nab)
+    
+      Thanks to everyone who contributed this round with new features,
+      bug-reports, fixes, cleanups and improvements.
+    
+      Looking forward, it's currently shaping up to be a busy v4.2 as well"
+    
+    * 'for-next' of git://git.kernel.org/pub/scm/linux/kernel/git/nab/target-pending: (69 commits)
+      target: Put TCMU under a new config option
+      target: Version 2 of TCMU ABI
+      target: fix tcm_mod_builder.py
+      target/file: Fix UNMAP with DIF protection support
+      target/file: Fix SG table for prot_buf initialization
+      target/file: Fix BUG() when CONFIG_DEBUG_SG=y and DIF protection enabled
+      target: Make core_tmr_abort_task() skip TMFs
+      target/sbc: Update sbc_dif_generate pr_debug output
+      target/sbc: Make internal DIF emulation honor ->prot_checks
+      target/sbc: Return INVALID_CDB_FIELD if DIF + sess_prot_type disabled
+      target: Ensure sess_prot_type is saved across session restart
+      target/rd: Don't pass incomplete scatterlist entries to sbc_dif_verify_*
+      target: Remove the unused flag SCF_ACK_KREF
+      target: Fix two sparse warnings
+      target: Fix COMPARE_AND_WRITE with SG_TO_MEM_NOALLOC handling
+      target: simplify the target template registration API
+      target: simplify target_xcopy_init_pt_lun
+      target: remove the unused SCF_CMD_XCOPY_PASSTHROUGH flag
+      target/rd: reduce code duplication in rd_execute_rw()
+      tcm_loop: fixup tpgt string to integer conversion
+      ...
+
+diff --cc drivers/target/iscsi/iscsi_target.c
+index 77d64251af40,5d75bb418696..34871a628b11
+--- a/drivers/target/iscsi/iscsi_target.c
++++ b/drivers/target/iscsi/iscsi_target.c
+@@@ -4261,19 -4233,30 +4238,36 @@@ int iscsit_close_connection
+  	pr_debug("Closing iSCSI connection CID %hu on SID:"
+  		" %u\n", conn->cid, sess->sid);
+  	/*
+ -	 * Always up conn_logout_comp just in case the RX Thread is sleeping
+ -	 * and the logout response never got sent because the connection
+ -	 * failed.
+ +	 * Always up conn_logout_comp for the traditional TCP case just in case
+ +	 * the RX Thread in iscsi_target_rx_opcode() is sleeping and the logout
+ +	 * response never got sent because the connection failed.
+ +	 *
+ +	 * However for iser-target, isert_wait4logout() is using conn_logout_comp
+ +	 * to signal logout response TX interrupt completion.  Go ahead and skip
+ +	 * this for iser since isert_rx_opcode() does not wait on logout failure,
+ +	 * and to avoid iscsi_conn pointer dereference in iser-target code.
+  	 */
+ -	complete(&conn->conn_logout_comp);
+ +	if (conn->conn_transport->transport_type == ISCSI_TCP)
+ +		complete(&conn->conn_logout_comp);
+  
+- 	iscsi_release_thread_set(conn);
++ 	if (!strcmp(current->comm, ISCSI_RX_THREAD_NAME)) {
++ 		if (conn->tx_thread &&
++ 		    cmpxchg(&conn->tx_thread_active, true, false)) {
++ 			send_sig(SIGINT, conn->tx_thread, 1);
++ 			kthread_stop(conn->tx_thread);
++ 		}
++ 	} else if (!strcmp(current->comm, ISCSI_TX_THREAD_NAME)) {
++ 		if (conn->rx_thread &&
++ 		    cmpxchg(&conn->rx_thread_active, true, false)) {
++ 			send_sig(SIGINT, conn->rx_thread, 1);
++ 			kthread_stop(conn->rx_thread);
++ 		}
++ 	}
++ 
++ 	spin_lock(&iscsit_global->ts_bitmap_lock);
++ 	bitmap_release_region(iscsit_global->ts_bitmap, conn->bitmap_id,
++ 			      get_order(1));
++ 	spin_unlock(&iscsit_global->ts_bitmap_lock);
+  
+  	iscsit_stop_timers_for_cmds(conn);
+  	iscsit_stop_nopin_response_timer(conn);

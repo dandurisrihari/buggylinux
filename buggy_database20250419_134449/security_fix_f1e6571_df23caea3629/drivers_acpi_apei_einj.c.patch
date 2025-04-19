@@ -1,0 +1,51 @@
+commit f1e65718ec1855263c349997dc294e186e55d67a
+Author: Shuai Xue <xueshuai@linux.alibaba.com>
+Date:   Thu Mar 23 09:53:57 2023 +0800
+
+    ACPI: APEI: EINJ: warn on invalid argument when explicitly indicated by platform
+    
+    OSPM executes an EXECUTE_OPERATION action to instruct the platform to begin
+    the injection operation, then executes a GET_COMMAND_STATUS action to
+    determine the status of the completed operation. The ACPI Specification
+    documented error codes[1] are:
+    
+            0 = Success (Linux #define EINJ_STATUS_SUCCESS)
+            1 = Unknown failure (Linux #define EINJ_STATUS_FAIL)
+            2 = Invalid Access (Linux #define EINJ_STATUS_INVAL)
+    
+    The original code report -EBUSY for both "Unknown Failure" and "Invalid
+    Access" cases. Actually, firmware could do some platform dependent sanity
+    checks and returns different error codes, e.g. "Invalid Access" to indicate
+    to the user that the parameters they supplied cannot be used for injection.
+    
+    To this end, fix to return -EINVAL in the __einj_error_inject() error
+    handling case instead of always -EBUSY, when explicitly indicated by the
+    platform in the status of the completed operation.
+    
+    [1] ACPI Specification 6.5 18.6.1. Error Injection Table
+    
+    Signed-off-by: Shuai Xue <xueshuai@linux.alibaba.com>
+    Reviewed-by: Tony Luck <tony.luck@intel.com>
+    Signed-off-by: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
+
+diff --git a/drivers/acpi/apei/einj.c b/drivers/acpi/apei/einj.c
+index 39bee5a067cc..013eb621dc92 100644
+--- a/drivers/acpi/apei/einj.c
++++ b/drivers/acpi/apei/einj.c
+@@ -489,9 +489,15 @@ static int __einj_error_inject(u32 type, u32 flags, u64 param1, u64 param2,
+ 	if (rc)
+ 		return rc;
+ 	val = apei_exec_ctx_get_output(&ctx);
+-	if (val != EINJ_STATUS_SUCCESS)
++	if (val == EINJ_STATUS_FAIL)
+ 		return -EBUSY;
++	else if (val == EINJ_STATUS_INVAL)
++		return -EINVAL;
+ 
++	/*
++	 * The error is injected into the platform successfully, then it needs
++	 * to trigger the error.
++	 */
+ 	rc = apei_exec_run(&ctx, ACPI_EINJ_GET_TRIGGER_TABLE);
+ 	if (rc)
+ 		return rc;

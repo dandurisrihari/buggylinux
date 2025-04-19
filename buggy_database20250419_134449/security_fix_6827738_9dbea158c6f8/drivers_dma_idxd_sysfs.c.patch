@@ -1,0 +1,76 @@
+commit 6827738dc684a87ad54ebba3ae7f3d7c977698eb
+Author: Nikhil Rao <nikhil.rao@intel.com>
+Date:   Wed Apr 24 15:16:12 2024 +0000
+
+    dmaengine: idxd: add a write() method for applications to submit work
+    
+    After the patch to restrict the use of mmap() to CAP_SYS_RAWIO for
+    the currently existing devices, most applications can no longer make
+    use of the accelerators as in production "you don't run things as root".
+    
+    To keep the DSA and IAA accelerators usable, hook up a write() method
+    so that applications can still submit work. In the write method,
+    sufficient input validation is performed to avoid the security issue
+    that required the mmap CAP_SYS_RAWIO check.
+    
+    One complication is that the DSA device allows for indirect ("batched")
+    descriptors. There is no reasonable way to do the input validation
+    on these indirect descriptors so the write() method will not allow these
+    to be submitted to the hardware on affected hardware, and the sysfs
+    enumeration of support for the opcode is also removed.
+    
+    Early performance data shows that the performance delta for most common
+    cases is within the noise.
+    
+    Signed-off-by: Nikhil Rao <nikhil.rao@intel.com>
+    Signed-off-by: Arjan van de Ven <arjan@linux.intel.com>
+
+diff --git a/drivers/dma/idxd/sysfs.c b/drivers/dma/idxd/sysfs.c
+index 7f28f01be672..f706eae0e76b 100644
+--- a/drivers/dma/idxd/sysfs.c
++++ b/drivers/dma/idxd/sysfs.c
+@@ -1197,12 +1197,35 @@ static ssize_t wq_enqcmds_retries_store(struct device *dev, struct device_attrib
+ static struct device_attribute dev_attr_wq_enqcmds_retries =
+ 		__ATTR(enqcmds_retries, 0644, wq_enqcmds_retries_show, wq_enqcmds_retries_store);
+ 
++static ssize_t op_cap_show_common(struct device *dev, char *buf, unsigned long *opcap_bmap)
++{
++	ssize_t pos;
++	int i;
++
++	pos = 0;
++	for (i = IDXD_MAX_OPCAP_BITS/64 - 1; i >= 0; i--) {
++		unsigned long val = opcap_bmap[i];
++
++		/* On systems where direct user submissions are not safe, we need to clear out
++		 * the BATCH capability from the capability mask in sysfs since we cannot support
++		 * that command on such systems.
++		 */
++		if (i == DSA_OPCODE_BATCH/64 && !confdev_to_idxd(dev)->user_submission_safe)
++			clear_bit(DSA_OPCODE_BATCH % 64, &val);
++
++		pos += sysfs_emit_at(buf, pos, "%*pb", 64, &val);
++		pos += sysfs_emit_at(buf, pos, "%c", i == 0 ? '\n' : ',');
++	}
++
++	return pos;
++}
++
+ static ssize_t wq_op_config_show(struct device *dev,
+ 				 struct device_attribute *attr, char *buf)
+ {
+ 	struct idxd_wq *wq = confdev_to_wq(dev);
+ 
+-	return sysfs_emit(buf, "%*pb\n", IDXD_MAX_OPCAP_BITS, wq->opcap_bmap);
++	return op_cap_show_common(dev, buf, wq->opcap_bmap);
+ }
+ 
+ static int idxd_verify_supported_opcap(struct idxd_device *idxd, unsigned long *opmask)
+@@ -1455,7 +1478,7 @@ static ssize_t op_cap_show(struct device *dev,
+ {
+ 	struct idxd_device *idxd = confdev_to_idxd(dev);
+ 
+-	return sysfs_emit(buf, "%*pb\n", IDXD_MAX_OPCAP_BITS, idxd->opcap_bmap);
++	return op_cap_show_common(dev, buf, idxd->opcap_bmap);
+ }
+ static DEVICE_ATTR_RO(op_cap);

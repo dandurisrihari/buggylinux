@@ -1,0 +1,76 @@
+commit 6787ab81b29115b6d2e7d17fe8a8017da66197d6
+Author: Jason A. Donenfeld <Jason@zx2c4.com>
+Date:   Wed Jun 7 22:34:26 2017 -0400
+
+    iscsi: ensure RNG is seeded before use
+    
+    It's not safe to use weak random data here, especially for the challenge
+    response randomness. Since we're always in process context, it's safe to
+    simply wait until we have enough randomness to carry out the
+    authentication correctly.
+    
+    While we're at it, we clean up a small memleak during an error
+    condition.
+    
+    Signed-off-by: Jason A. Donenfeld <Jason@zx2c4.com>
+    Cc: "Nicholas A. Bellinger" <nab@linux-iscsi.org>
+    Cc: Lee Duncan <lduncan@suse.com>
+    Cc: Chris Leech <cleech@redhat.com>
+    Signed-off-by: Theodore Ts'o <tytso@mit.edu>
+
+diff --git a/drivers/target/iscsi/iscsi_target_auth.c b/drivers/target/iscsi/iscsi_target_auth.c
+index 903b667f8e01..f9bc8ec6fb6b 100644
+--- a/drivers/target/iscsi/iscsi_target_auth.c
++++ b/drivers/target/iscsi/iscsi_target_auth.c
+@@ -47,18 +47,21 @@ static void chap_binaryhex_to_asciihex(char *dst, char *src, int src_len)
+ 	}
+ }
+ 
+-static void chap_gen_challenge(
++static int chap_gen_challenge(
+ 	struct iscsi_conn *conn,
+ 	int caller,
+ 	char *c_str,
+ 	unsigned int *c_len)
+ {
++	int ret;
+ 	unsigned char challenge_asciihex[CHAP_CHALLENGE_LENGTH * 2 + 1];
+ 	struct iscsi_chap *chap = conn->auth_protocol;
+ 
+ 	memset(challenge_asciihex, 0, CHAP_CHALLENGE_LENGTH * 2 + 1);
+ 
+-	get_random_bytes(chap->challenge, CHAP_CHALLENGE_LENGTH);
++	ret = get_random_bytes_wait(chap->challenge, CHAP_CHALLENGE_LENGTH);
++	if (unlikely(ret))
++		return ret;
+ 	chap_binaryhex_to_asciihex(challenge_asciihex, chap->challenge,
+ 				CHAP_CHALLENGE_LENGTH);
+ 	/*
+@@ -69,6 +72,7 @@ static void chap_gen_challenge(
+ 
+ 	pr_debug("[%s] Sending CHAP_C=0x%s\n\n", (caller) ? "server" : "client",
+ 			challenge_asciihex);
++	return 0;
+ }
+ 
+ static int chap_check_algorithm(const char *a_str)
+@@ -143,6 +147,7 @@ static struct iscsi_chap *chap_server_open(
+ 	case CHAP_DIGEST_UNKNOWN:
+ 	default:
+ 		pr_err("Unsupported CHAP_A value\n");
++		kfree(conn->auth_protocol);
+ 		return NULL;
+ 	}
+ 
+@@ -156,7 +161,10 @@ static struct iscsi_chap *chap_server_open(
+ 	/*
+ 	 * Generate Challenge.
+ 	 */
+-	chap_gen_challenge(conn, 1, aic_str, aic_len);
++	if (chap_gen_challenge(conn, 1, aic_str, aic_len) < 0) {
++		kfree(conn->auth_protocol);
++		return NULL;
++	}
+ 
+ 	return chap;
+ }

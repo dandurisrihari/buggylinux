@@ -1,0 +1,88 @@
+commit 176e4f84423af3105894a7d71b23c1a16678a6be
+Author: Johannes Berg <johannes@sipsolutions.net>
+Date:   Tue Dec 18 15:27:47 2007 +0100
+
+    mac80211: move tx crypto decision
+    
+    This patch moves the decision making about whether a frame is encrypted
+    with a certain algorithm up into the TX handlers rather than having it
+    in the crypto algorithm implementation.
+    
+    This fixes a problem with the radiotap injection code where injecting
+    a non-data packet and requesting encryption could end up asking the
+    driver to encrypt a packet without giving it a key.
+    
+    Signed-off-by: Johannes Berg <johannes@sipsolutions.net>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/mac80211/tx.c b/net/mac80211/tx.c
+index f7aff2e97eea..8302c70da9a4 100644
+--- a/net/mac80211/tx.c
++++ b/net/mac80211/tx.c
+@@ -438,11 +438,7 @@ static ieee80211_txrx_result
+ ieee80211_tx_h_select_key(struct ieee80211_txrx_data *tx)
+ {
+ 	struct ieee80211_key *key;
+-	const struct ieee80211_hdr *hdr;
+-	u16 fc;
+-
+-	hdr = (const struct ieee80211_hdr *) tx->skb->data;
+-	fc = le16_to_cpu(hdr->frame_control);
++	u16 fc = tx->fc;
+ 
+ 	if (unlikely(tx->u.tx.control->flags & IEEE80211_TXCTL_DO_NOT_ENCRYPT))
+ 		tx->key = NULL;
+@@ -455,16 +451,34 @@ ieee80211_tx_h_select_key(struct ieee80211_txrx_data *tx)
+ 		 !(tx->flags & IEEE80211_TXRXD_TX_INJECTED)) {
+ 		I802_DEBUG_INC(tx->local->tx_handlers_drop_unencrypted);
+ 		return TXRX_DROP;
+-	} else {
++	} else
+ 		tx->key = NULL;
+-		tx->u.tx.control->flags |= IEEE80211_TXCTL_DO_NOT_ENCRYPT;
+-	}
+ 
+ 	if (tx->key) {
++		u16 ftype, stype;
++
+ 		tx->key->tx_rx_count++;
+ 		/* TODO: add threshold stuff again */
++
++		switch (tx->key->conf.alg) {
++		case ALG_WEP:
++			ftype = fc & IEEE80211_FCTL_FTYPE;
++			stype = fc & IEEE80211_FCTL_STYPE;
++
++			if (ftype == IEEE80211_FTYPE_MGMT &&
++			    stype == IEEE80211_STYPE_AUTH)
++				break;
++		case ALG_TKIP:
++		case ALG_CCMP:
++			if (!WLAN_FC_DATA_PRESENT(fc))
++				tx->key = NULL;
++			break;
++		}
+ 	}
+ 
++	if (!tx->key || !(tx->key->flags & KEY_FLAG_UPLOADED_TO_HARDWARE))
++		tx->u.tx.control->flags |= IEEE80211_TXCTL_DO_NOT_ENCRYPT;
++
+ 	return TXRX_CONTINUE;
+ }
+ 
+@@ -706,15 +720,6 @@ ieee80211_tx_h_misc(struct ieee80211_txrx_data *tx)
+ 		}
+ 	}
+ 
+-	/*
+-	 * Tell hardware to not encrypt when we had sw crypto.
+-	 * Because we use the same flag to internally indicate that
+-	 * no (software) encryption should be done, we have to set it
+-	 * after all crypto handlers.
+-	 */
+-	if (tx->key && !(tx->key->flags & KEY_FLAG_UPLOADED_TO_HARDWARE))
+-		tx->u.tx.control->flags |= IEEE80211_TXCTL_DO_NOT_ENCRYPT;
+-
+ 	return TXRX_CONTINUE;
+ }

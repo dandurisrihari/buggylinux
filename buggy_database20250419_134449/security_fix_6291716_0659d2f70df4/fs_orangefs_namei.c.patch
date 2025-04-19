@@ -1,0 +1,113 @@
+commit 629171657a2864d819a3bbecabe0a5e001d05c7a
+Author: Justin Stitt <justinstitt@google.com>
+Date:   Fri Mar 22 21:41:18 2024 +0000
+
+    orangefs: cleanup uses of strncpy
+    
+    strncpy() is deprecated for use on NUL-terminated destination strings
+    [1] and as such we should prefer more robust and less ambiguous string
+    interfaces.
+    
+    There is some care taken to ensure these destination buffers are
+    NUL-terminated by bounding the strncpy()'s by ORANGEFS_NAME_MAX - 1 or
+    ORANGEFS_MAX_SERVER_ADDR_LEN - 1. Instead, we can use the new 2-argument
+    version of strscpy() to guarantee NUL-termination on the destination
+    buffers while simplifying the code.
+    
+    Based on usage with printf-likes, we can see these buffers are expected
+    to be NUL-terminated:
+    |       gossip_debug(GOSSIP_NAME_DEBUG,
+    |                       "%s: doing lookup on %s under %pU,%d\n",
+    |                       __func__,
+    |                       new_op->upcall.req.lookup.d_name,
+    |                       &new_op->upcall.req.lookup.parent_refn.khandle,
+    |                       new_op->upcall.req.lookup.parent_refn.fs_id);
+    ...
+    |       gossip_debug(GOSSIP_SUPER_DEBUG,
+    |                       "Attempting ORANGEFS Remount via host %s\n",
+    |                       new_op->upcall.req.fs_mount.orangefs_config_server);
+    
+    NUL-padding isn't required for any of these destination buffers as
+    they've all been zero-allocated with op_alloc() or kzalloc().
+    
+    Link: https://www.kernel.org/doc/html/latest/process/deprecated.html#strncpy-on-nul-terminated-strings [1]
+    Link: https://manpages.debian.org/testing/linux-manual-4.8/strscpy.9.en.html [2]
+    Link: https://github.com/KSPP/linux/issues/90
+    Cc: linux-hardening@vger.kernel.org
+    Signed-off-by: Justin Stitt <justinstitt@google.com>
+    Link: https://lore.kernel.org/r/20240322-strncpy-fs-orangefs-dcache-c-v1-1-15d12debbf38@google.com
+    Reviewed-by: Kees Cook <keescook@chromium.org>
+    Signed-off-by: Christian Brauner <brauner@kernel.org>
+
+diff --git a/fs/orangefs/namei.c b/fs/orangefs/namei.c
+index c9dfd5c6a097..200558ec72f0 100644
+--- a/fs/orangefs/namei.c
++++ b/fs/orangefs/namei.c
+@@ -41,8 +41,7 @@ static int orangefs_create(struct mnt_idmap *idmap,
+ 	fill_default_sys_attrs(new_op->upcall.req.create.attributes,
+ 			       ORANGEFS_TYPE_METAFILE, mode);
+ 
+-	strncpy(new_op->upcall.req.create.d_name,
+-		dentry->d_name.name, ORANGEFS_NAME_MAX - 1);
++	strscpy(new_op->upcall.req.create.d_name, dentry->d_name.name);
+ 
+ 	ret = service_operation(new_op, __func__, get_interruptible_flag(dir));
+ 
+@@ -137,8 +136,7 @@ static struct dentry *orangefs_lookup(struct inode *dir, struct dentry *dentry,
+ 		     &parent->refn.khandle);
+ 	new_op->upcall.req.lookup.parent_refn = parent->refn;
+ 
+-	strncpy(new_op->upcall.req.lookup.d_name, dentry->d_name.name,
+-		ORANGEFS_NAME_MAX - 1);
++	strscpy(new_op->upcall.req.lookup.d_name, dentry->d_name.name);
+ 
+ 	gossip_debug(GOSSIP_NAME_DEBUG,
+ 		     "%s: doing lookup on %s under %pU,%d\n",
+@@ -192,8 +190,7 @@ static int orangefs_unlink(struct inode *dir, struct dentry *dentry)
+ 		return -ENOMEM;
+ 
+ 	new_op->upcall.req.remove.parent_refn = parent->refn;
+-	strncpy(new_op->upcall.req.remove.d_name, dentry->d_name.name,
+-		ORANGEFS_NAME_MAX - 1);
++	strscpy(new_op->upcall.req.remove.d_name, dentry->d_name.name);
+ 
+ 	ret = service_operation(new_op, "orangefs_unlink",
+ 				get_interruptible_flag(inode));
+@@ -247,10 +244,8 @@ static int orangefs_symlink(struct mnt_idmap *idmap,
+ 			       ORANGEFS_TYPE_SYMLINK,
+ 			       mode);
+ 
+-	strncpy(new_op->upcall.req.sym.entry_name,
+-		dentry->d_name.name,
+-		ORANGEFS_NAME_MAX - 1);
+-	strncpy(new_op->upcall.req.sym.target, symname, ORANGEFS_NAME_MAX - 1);
++	strscpy(new_op->upcall.req.sym.entry_name, dentry->d_name.name);
++	strscpy(new_op->upcall.req.sym.target, symname);
+ 
+ 	ret = service_operation(new_op, __func__, get_interruptible_flag(dir));
+ 
+@@ -324,8 +319,7 @@ static int orangefs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+ 	fill_default_sys_attrs(new_op->upcall.req.mkdir.attributes,
+ 			      ORANGEFS_TYPE_DIRECTORY, mode);
+ 
+-	strncpy(new_op->upcall.req.mkdir.d_name,
+-		dentry->d_name.name, ORANGEFS_NAME_MAX - 1);
++	strscpy(new_op->upcall.req.mkdir.d_name, dentry->d_name.name);
+ 
+ 	ret = service_operation(new_op, __func__, get_interruptible_flag(dir));
+ 
+@@ -405,12 +399,8 @@ static int orangefs_rename(struct mnt_idmap *idmap,
+ 	new_op->upcall.req.rename.old_parent_refn = ORANGEFS_I(old_dir)->refn;
+ 	new_op->upcall.req.rename.new_parent_refn = ORANGEFS_I(new_dir)->refn;
+ 
+-	strncpy(new_op->upcall.req.rename.d_old_name,
+-		old_dentry->d_name.name,
+-		ORANGEFS_NAME_MAX - 1);
+-	strncpy(new_op->upcall.req.rename.d_new_name,
+-		new_dentry->d_name.name,
+-		ORANGEFS_NAME_MAX - 1);
++	strscpy(new_op->upcall.req.rename.d_old_name, old_dentry->d_name.name);
++	strscpy(new_op->upcall.req.rename.d_new_name, new_dentry->d_name.name);
+ 
+ 	ret = service_operation(new_op,
+ 				"orangefs_rename",

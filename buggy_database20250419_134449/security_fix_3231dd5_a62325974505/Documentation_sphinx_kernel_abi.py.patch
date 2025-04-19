@@ -1,0 +1,105 @@
+commit 3231dd5862779c2e15633c96133a53205ad660ce
+Author: Vegard Nossum <vegard.nossum@oracle.com>
+Date:   Mon Jan 1 00:59:59 2024 +0100
+
+    docs: kernel_abi.py: fix command injection
+    
+    The kernel-abi directive passes its argument straight to the shell.
+    This is unfortunate and unnecessary.
+    
+    Let's always use paths relative to $srctree/Documentation/ and use
+    subprocess.check_call() instead of subprocess.Popen(shell=True).
+    
+    This also makes the code shorter.
+    
+    Link: https://fosstodon.org/@jani/111676532203641247
+    Reported-by: Jani Nikula <jani.nikula@intel.com>
+    Cc: stable@vger.kernel.org
+    Signed-off-by: Vegard Nossum <vegard.nossum@oracle.com>
+    Signed-off-by: Jonathan Corbet <corbet@lwn.net>
+    Link: https://lore.kernel.org/r/20231231235959.3342928-2-vegard.nossum@oracle.com
+
+diff --git a/Documentation/sphinx/kernel_abi.py b/Documentation/sphinx/kernel_abi.py
+index 49797c55479c..5911bd0d7965 100644
+--- a/Documentation/sphinx/kernel_abi.py
++++ b/Documentation/sphinx/kernel_abi.py
+@@ -39,8 +39,6 @@ import sys
+ import re
+ import kernellog
+ 
+-from os import path
+-
+ from docutils import nodes, statemachine
+ from docutils.statemachine import ViewList
+ from docutils.parsers.rst import directives, Directive
+@@ -73,60 +71,26 @@ class KernelCmd(Directive):
+     }
+ 
+     def run(self):
+-
+         doc = self.state.document
+         if not doc.settings.file_insertion_enabled:
+             raise self.warning("docutils: file insertion disabled")
+ 
+-        env = doc.settings.env
+-        cwd = path.dirname(doc.current_source)
+-        cmd = "get_abi.pl rest --enable-lineno --dir "
+-        cmd += self.arguments[0]
+-
+-        if 'rst' in self.options:
+-            cmd += " --rst-source"
++        srctree = os.path.abspath(os.environ["srctree"])
+ 
+-        srctree = path.abspath(os.environ["srctree"])
++        args = [
++            os.path.join(srctree, 'scripts/get_abi.pl'),
++            'rest',
++            '--enable-lineno',
++            '--dir', os.path.join(srctree, 'Documentation', self.arguments[0]),
++        ]
+ 
+-        fname = cmd
+-
+-        # extend PATH with $(srctree)/scripts
+-        path_env = os.pathsep.join([
+-            srctree + os.sep + "scripts",
+-            os.environ["PATH"]
+-        ])
+-        shell_env = os.environ.copy()
+-        shell_env["PATH"]    = path_env
+-        shell_env["srctree"] = srctree
++        if 'rst' in self.options:
++            args.append('--rst-source')
+ 
+-        lines = self.runCmd(cmd, shell=True, cwd=cwd, env=shell_env)
++        lines = subprocess.check_output(args, cwd=os.path.dirname(doc.current_source)).decode('utf-8')
+         nodeList = self.nestedParse(lines, self.arguments[0])
+         return nodeList
+ 
+-    def runCmd(self, cmd, **kwargs):
+-        u"""Run command ``cmd`` and return its stdout as unicode."""
+-
+-        try:
+-            proc = subprocess.Popen(
+-                cmd
+-                , stdout = subprocess.PIPE
+-                , stderr = subprocess.PIPE
+-                , **kwargs
+-            )
+-            out, err = proc.communicate()
+-
+-            out, err = codecs.decode(out, 'utf-8'), codecs.decode(err, 'utf-8')
+-
+-            if proc.returncode != 0:
+-                raise self.severe(
+-                    u"command '%s' failed with return code %d"
+-                    % (cmd, proc.returncode)
+-                )
+-        except OSError as exc:
+-            raise self.severe(u"problems with '%s' directive: %s."
+-                              % (self.name, ErrorString(exc)))
+-        return out
+-
+     def nestedParse(self, lines, fname):
+         env = self.state.document.settings.env
+         content = ViewList()

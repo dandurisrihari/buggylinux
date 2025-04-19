@@ -1,0 +1,63 @@
+commit 885f82bfbc6fefb6664ea27965c3ab9ac4194b8c
+Author: Thomas Gleixner <tglx@linutronix.de>
+Date:   Sun Apr 29 15:21:42 2018 +0200
+
+    x86/process: Allow runtime control of Speculative Store Bypass
+    
+    The Speculative Store Bypass vulnerability can be mitigated with the
+    Reduced Data Speculation (RDS) feature. To allow finer grained control of
+    this eventually expensive mitigation a per task mitigation control is
+    required.
+    
+    Add a new TIF_RDS flag and put it into the group of TIF flags which are
+    evaluated for mismatch in switch_to(). If these bits differ in the previous
+    and the next task, then the slow path function __switch_to_xtra() is
+    invoked. Implement the TIF_RDS dependent mitigation control in the slow
+    path.
+    
+    If the prctl for controlling Speculative Store Bypass is disabled or no
+    task uses the prctl then there is no overhead in the switch_to() fast
+    path.
+    
+    Update the KVM related speculation control functions to take TID_RDS into
+    account as well.
+    
+    Based on a patch from Tim Chen. Completely rewritten.
+    
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Reviewed-by: Ingo Molnar <mingo@kernel.org>
+    Reviewed-by: Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+
+diff --git a/arch/x86/include/asm/spec-ctrl.h b/arch/x86/include/asm/spec-ctrl.h
+index 3ad64420a06e..45ef00ad5105 100644
+--- a/arch/x86/include/asm/spec-ctrl.h
++++ b/arch/x86/include/asm/spec-ctrl.h
+@@ -2,6 +2,7 @@
+ #ifndef _ASM_X86_SPECCTRL_H_
+ #define _ASM_X86_SPECCTRL_H_
+ 
++#include <linux/thread_info.h>
+ #include <asm/nospec-branch.h>
+ 
+ /*
+@@ -18,4 +19,20 @@ extern void x86_spec_ctrl_restore_host(u64);
+ extern u64 x86_amd_ls_cfg_base;
+ extern u64 x86_amd_ls_cfg_rds_mask;
+ 
++/* The Intel SPEC CTRL MSR base value cache */
++extern u64 x86_spec_ctrl_base;
++
++static inline u64 rds_tif_to_spec_ctrl(u64 tifn)
++{
++	BUILD_BUG_ON(TIF_RDS < SPEC_CTRL_RDS_SHIFT);
++	return (tifn & _TIF_RDS) >> (TIF_RDS - SPEC_CTRL_RDS_SHIFT);
++}
++
++static inline u64 rds_tif_to_amd_ls_cfg(u64 tifn)
++{
++	return (tifn & _TIF_RDS) ? x86_amd_ls_cfg_rds_mask : 0ULL;
++}
++
++extern void speculative_store_bypass_update(void);
++
+ #endif

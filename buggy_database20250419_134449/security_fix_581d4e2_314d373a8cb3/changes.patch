@@ -1,0 +1,174 @@
+diff --git a/block/blk-softirq.c b/block/blk-softirq.c
+index 7ab344afb16f..e660d26ca656 100644
+--- a/block/blk-softirq.c
++++ b/block/blk-softirq.c
+@@ -154,6 +154,8 @@ void __blk_complete_request(struct request *req)
+  **/
+ void blk_complete_request(struct request *req)
+ {
++	if (unlikely(blk_should_fake_timeout(req->q)))
++		return;
+ 	if (!blk_mark_rq_complete(req))
+ 		__blk_complete_request(req);
+ }
+diff --git a/block/blk-timeout.c b/block/blk-timeout.c
+index 6e5c781c5af1..9b4ad138bb33 100644
+--- a/block/blk-timeout.c
++++ b/block/blk-timeout.c
+@@ -4,9 +4,68 @@
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+ #include <linux/blkdev.h>
++#include <linux/fault-inject.h>
+ 
+ #include "blk.h"
+ 
++#ifdef CONFIG_FAIL_IO_TIMEOUT
++
++static DECLARE_FAULT_ATTR(fail_io_timeout);
++
++static int __init setup_fail_io_timeout(char *str)
++{
++	return setup_fault_attr(&fail_io_timeout, str);
++}
++__setup("fail_io_timeout=", setup_fail_io_timeout);
++
++int blk_should_fake_timeout(struct request_queue *q)
++{
++	if (!test_bit(QUEUE_FLAG_FAIL_IO, &q->queue_flags))
++		return 0;
++
++	return should_fail(&fail_io_timeout, 1);
++}
++
++static int __init fail_io_timeout_debugfs(void)
++{
++	return init_fault_attr_dentries(&fail_io_timeout, "fail_io_timeout");
++}
++
++late_initcall(fail_io_timeout_debugfs);
++
++ssize_t part_timeout_show(struct device *dev, struct device_attribute *attr,
++			  char *buf)
++{
++	struct gendisk *disk = dev_to_disk(dev);
++	int set = test_bit(QUEUE_FLAG_FAIL_IO, &disk->queue->queue_flags);
++
++	return sprintf(buf, "%d\n", set != 0);
++}
++
++ssize_t part_timeout_store(struct device *dev, struct device_attribute *attr,
++			   const char *buf, size_t count)
++{
++	struct gendisk *disk = dev_to_disk(dev);
++	int val;
++
++	if (count) {
++		struct request_queue *q = disk->queue;
++		char *p = (char *) buf;
++
++		val = simple_strtoul(p, &p, 10);
++		spin_lock_irq(q->queue_lock);
++		if (val)
++			queue_flag_set(QUEUE_FLAG_FAIL_IO, q);
++		else
++			queue_flag_clear(QUEUE_FLAG_FAIL_IO, q);
++		spin_unlock_irq(q->queue_lock);
++	}
++
++	return count;
++}
++
++#endif /* CONFIG_FAIL_IO_TIMEOUT */
++
+ /*
+  * blk_delete_timer - Delete/cancel timer for a given function.
+  * @req:	request that we are canceling timer for
+diff --git a/block/blk.h b/block/blk.h
+index a4f4a50aefaa..e5c579769963 100644
+--- a/block/blk.h
++++ b/block/blk.h
+@@ -42,6 +42,18 @@ static inline void blk_clear_rq_complete(struct request *rq)
+ 	clear_bit(REQ_ATOM_COMPLETE, &rq->atomic_flags);
+ }
+ 
++#ifdef CONFIG_FAIL_IO_TIMEOUT
++int blk_should_fake_timeout(struct request_queue *);
++ssize_t part_timeout_show(struct device *, struct device_attribute *, char *);
++ssize_t part_timeout_store(struct device *, struct device_attribute *,
++				const char *, size_t);
++#else
++static inline int blk_should_fake_timeout(struct request_queue *q)
++{
++	return 0;
++}
++#endif
++
+ struct io_context *current_io_context(gfp_t gfp_flags, int node);
+ 
+ int ll_back_merge_fn(struct request_queue *q, struct request *req,
+diff --git a/block/genhd.c b/block/genhd.c
+index 8acaff0154e3..4cd3433c99ac 100644
+--- a/block/genhd.c
++++ b/block/genhd.c
+@@ -817,6 +817,11 @@ static DEVICE_ATTR(stat, S_IRUGO, part_stat_show, NULL);
+ static struct device_attribute dev_attr_fail =
+ 	__ATTR(make-it-fail, S_IRUGO|S_IWUSR, part_fail_show, part_fail_store);
+ #endif
++#ifdef CONFIG_FAIL_IO_TIMEOUT
++static struct device_attribute dev_attr_fail_timeout =
++	__ATTR(io-timeout-fail,  S_IRUGO|S_IWUSR, part_timeout_show,
++		part_timeout_store);
++#endif
+ 
+ static struct attribute *disk_attrs[] = {
+ 	&dev_attr_range.attr,
+@@ -828,6 +833,9 @@ static struct attribute *disk_attrs[] = {
+ 	&dev_attr_stat.attr,
+ #ifdef CONFIG_FAIL_MAKE_REQUEST
+ 	&dev_attr_fail.attr,
++#endif
++#ifdef CONFIG_FAIL_IO_TIMEOUT
++	&dev_attr_fail_timeout.attr,
+ #endif
+ 	NULL
+ };
+diff --git a/include/linux/blkdev.h b/include/linux/blkdev.h
+index b47767c72ce3..e34999d14c16 100644
+--- a/include/linux/blkdev.h
++++ b/include/linux/blkdev.h
+@@ -440,6 +440,7 @@ struct request_queue
+ #define QUEUE_FLAG_BIDI		9	/* queue supports bidi requests */
+ #define QUEUE_FLAG_NOMERGES    10	/* disable merge attempts */
+ #define QUEUE_FLAG_SAME_COMP   11	/* force complete on same CPU */
++#define QUEUE_FLAG_FAIL_IO     12	/* fake timeout */
+ 
+ static inline int queue_is_locked(struct request_queue *q)
+ {
+diff --git a/lib/Kconfig.debug b/lib/Kconfig.debug
+index c556896abe57..7d7a31d0ddeb 100644
+--- a/lib/Kconfig.debug
++++ b/lib/Kconfig.debug
+@@ -683,10 +683,21 @@ config FAIL_PAGE_ALLOC
+ 
+ config FAIL_MAKE_REQUEST
+ 	bool "Fault-injection capability for disk IO"
+-	depends on FAULT_INJECTION
++	depends on FAULT_INJECTION && BLOCK
+ 	help
+ 	  Provide fault-injection capability for disk IO.
+ 
++config FAIL_IO_TIMEOUT
++	bool "Faul-injection capability for faking disk interrupts"
++	depends on FAULT_INJECTION && BLOCK
++	help
++	  Provide fault-injection capability on end IO handling. This
++	  will make the block layer "forget" an interrupt as configured,
++	  thus exercising the error handling.
++
++	  Only works with drivers that use the generic timeout handling,
++	  for others it wont do anything.
++
+ config FAULT_INJECTION_DEBUG_FS
+ 	bool "Debugfs entries for fault-injection capabilities"
+ 	depends on FAULT_INJECTION && SYSFS && DEBUG_FS

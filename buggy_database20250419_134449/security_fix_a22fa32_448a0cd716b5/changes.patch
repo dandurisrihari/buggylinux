@@ -1,0 +1,122 @@
+diff --git a/Documentation/arm64/pointer-authentication.txt b/Documentation/arm64/pointer-authentication.txt
+index 5baca42ba146..fc71b33de87e 100644
+--- a/Documentation/arm64/pointer-authentication.txt
++++ b/Documentation/arm64/pointer-authentication.txt
+@@ -87,7 +87,21 @@ used to get and set the keys for a thread.
+ Virtualization
+ --------------
+ 
+-Pointer authentication is not currently supported in KVM guests. KVM
+-will mask the feature bits from ID_AA64ISAR1_EL1, and attempted use of
+-the feature will result in an UNDEFINED exception being injected into
+-the guest.
++Pointer authentication is enabled in KVM guest when each virtual cpu is
++initialised by passing flags KVM_ARM_VCPU_PTRAUTH_[ADDRESS/GENERIC] and
++requesting these two separate cpu features to be enabled. The current KVM
++guest implementation works by enabling both features together, so both
++these userspace flags are checked before enabling pointer authentication.
++The separate userspace flag will allow to have no userspace ABI changes
++if support is added in the future to allow these two features to be
++enabled independently of one another.
++
++As Arm Architecture specifies that Pointer Authentication feature is
++implemented along with the VHE feature so KVM arm64 ptrauth code relies
++on VHE mode to be present.
++
++Additionally, when these vcpu feature flags are not set then KVM will
++filter out the Pointer Authentication system key registers from
++KVM_GET/SET_REG_* ioctls and mask those features from cpufeature ID
++register. Any attempt to use the Pointer Authentication instructions will
++result in an UNDEFINED exception being injected into the guest.
+diff --git a/Documentation/virtual/kvm/api.txt b/Documentation/virtual/kvm/api.txt
+index e410a9f0f0d4..32afe7f5c35a 100644
+--- a/Documentation/virtual/kvm/api.txt
++++ b/Documentation/virtual/kvm/api.txt
+@@ -2761,6 +2761,16 @@ Possible features:
+ 	- KVM_ARM_VCPU_PMU_V3: Emulate PMUv3 for the CPU.
+ 	  Depends on KVM_CAP_ARM_PMU_V3.
+ 
++	- KVM_ARM_VCPU_PTRAUTH_ADDRESS: Enables Address Pointer authentication
++	  for arm64 only.
++	  Both KVM_ARM_VCPU_PTRAUTH_ADDRESS and KVM_ARM_VCPU_PTRAUTH_GENERIC
++	  must be requested or neither must be requested.
++
++	- KVM_ARM_VCPU_PTRAUTH_GENERIC: Enables Generic Pointer authentication
++	  for arm64 only.
++	  Both KVM_ARM_VCPU_PTRAUTH_ADDRESS and KVM_ARM_VCPU_PTRAUTH_GENERIC
++	  must be requested or neither must be requested.
++
+ 	- KVM_ARM_VCPU_SVE: Enables SVE for the CPU (arm64 only).
+ 	  Depends on KVM_CAP_ARM_SVE.
+ 	  Requires KVM_ARM_VCPU_FINALIZE(KVM_ARM_VCPU_SVE):
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index 7eebea7059c6..f772ac2fb3e9 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -49,7 +49,7 @@
+ 
+ #define KVM_MAX_VCPUS VGIC_V3_MAX_CPUS
+ 
+-#define KVM_VCPU_MAX_FEATURES 5
++#define KVM_VCPU_MAX_FEATURES 7
+ 
+ #define KVM_REQ_SLEEP \
+ 	KVM_ARCH_REQ_FLAGS(0, KVM_REQUEST_WAIT | KVM_REQUEST_NO_WAKEUP)
+diff --git a/arch/arm64/include/uapi/asm/kvm.h b/arch/arm64/include/uapi/asm/kvm.h
+index edd2db8e5160..7b7ac0f6cec9 100644
+--- a/arch/arm64/include/uapi/asm/kvm.h
++++ b/arch/arm64/include/uapi/asm/kvm.h
+@@ -104,6 +104,8 @@ struct kvm_regs {
+ #define KVM_ARM_VCPU_PSCI_0_2		2 /* CPU uses PSCI v0.2 */
+ #define KVM_ARM_VCPU_PMU_V3		3 /* Support guest PMUv3 */
+ #define KVM_ARM_VCPU_SVE		4 /* enable SVE for this CPU */
++#define KVM_ARM_VCPU_PTRAUTH_ADDRESS	5 /* VCPU uses address authentication */
++#define KVM_ARM_VCPU_PTRAUTH_GENERIC	6 /* VCPU uses generic authentication */
+ 
+ struct kvm_vcpu_init {
+ 	__u32 target;
+diff --git a/arch/arm64/kvm/reset.c b/arch/arm64/kvm/reset.c
+index 3402543fdcd3..028d0c604652 100644
+--- a/arch/arm64/kvm/reset.c
++++ b/arch/arm64/kvm/reset.c
+@@ -221,6 +221,27 @@ static void kvm_vcpu_reset_sve(struct kvm_vcpu *vcpu)
+ 		memset(vcpu->arch.sve_state, 0, vcpu_sve_state_size(vcpu));
+ }
+ 
++static int kvm_vcpu_enable_ptrauth(struct kvm_vcpu *vcpu)
++{
++	/* Support ptrauth only if the system supports these capabilities. */
++	if (!has_vhe())
++		return -EINVAL;
++
++	if (!system_supports_address_auth() ||
++	    !system_supports_generic_auth())
++		return -EINVAL;
++	/*
++	 * For now make sure that both address/generic pointer authentication
++	 * features are requested by the userspace together.
++	 */
++	if (!test_bit(KVM_ARM_VCPU_PTRAUTH_ADDRESS, vcpu->arch.features) ||
++	    !test_bit(KVM_ARM_VCPU_PTRAUTH_GENERIC, vcpu->arch.features))
++		return -EINVAL;
++
++	vcpu->arch.flags |= KVM_ARM64_GUEST_HAS_PTRAUTH;
++	return 0;
++}
++
+ /**
+  * kvm_reset_vcpu - sets core registers and sys_regs to reset value
+  * @vcpu: The VCPU pointer
+@@ -261,6 +282,12 @@ int kvm_reset_vcpu(struct kvm_vcpu *vcpu)
+ 		kvm_vcpu_reset_sve(vcpu);
+ 	}
+ 
++	if (test_bit(KVM_ARM_VCPU_PTRAUTH_ADDRESS, vcpu->arch.features) ||
++	    test_bit(KVM_ARM_VCPU_PTRAUTH_GENERIC, vcpu->arch.features)) {
++		if (kvm_vcpu_enable_ptrauth(vcpu))
++			goto out;
++	}
++
+ 	switch (vcpu->arch.target) {
+ 	default:
+ 		if (test_bit(KVM_ARM_VCPU_EL1_32BIT, vcpu->arch.features)) {

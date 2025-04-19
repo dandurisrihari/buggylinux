@@ -1,0 +1,96 @@
+diff --git a/Documentation/sysctl/vm.txt b/Documentation/sysctl/vm.txt
+index 3f13d8599337..749322060f10 100644
+--- a/Documentation/sysctl/vm.txt
++++ b/Documentation/sysctl/vm.txt
+@@ -61,6 +61,7 @@ Currently, these files are in /proc/sys/vm:
+ - stat_refresh
+ - numa_stat
+ - swappiness
++- unprivileged_userfaultfd
+ - user_reserve_kbytes
+ - vfs_cache_pressure
+ - watermark_boost_factor
+@@ -818,6 +819,17 @@ The default value is 60.
+ 
+ ==============================================================
+ 
++unprivileged_userfaultfd
++
++This flag controls whether unprivileged users can use the userfaultfd
++system calls.  Set this to 1 to allow unprivileged users to use the
++userfaultfd system calls, or set this to 0 to restrict userfaultfd to only
++privileged users (with SYS_CAP_PTRACE capability).
++
++The default value is 1.
++
++==============================================================
++
+ - user_reserve_kbytes
+ 
+ When overcommit_memory is set to 2, "never overcommit" mode, reserve
+diff --git a/fs/userfaultfd.c b/fs/userfaultfd.c
+index f5de1e726356..3b30301c90ec 100644
+--- a/fs/userfaultfd.c
++++ b/fs/userfaultfd.c
+@@ -30,6 +30,8 @@
+ #include <linux/security.h>
+ #include <linux/hugetlb.h>
+ 
++int sysctl_unprivileged_userfaultfd __read_mostly = 1;
++
+ static struct kmem_cache *userfaultfd_ctx_cachep __read_mostly;
+ 
+ enum userfaultfd_state {
+@@ -1930,6 +1932,9 @@ SYSCALL_DEFINE1(userfaultfd, int, flags)
+ 	struct userfaultfd_ctx *ctx;
+ 	int fd;
+ 
++	if (!sysctl_unprivileged_userfaultfd && !capable(CAP_SYS_PTRACE))
++		return -EPERM;
++
+ 	BUG_ON(!current->mm);
+ 
+ 	/* Check the UFFD_* constants for consistency.  */
+diff --git a/include/linux/userfaultfd_k.h b/include/linux/userfaultfd_k.h
+index 37c9eba75c98..ac9d71e24b81 100644
+--- a/include/linux/userfaultfd_k.h
++++ b/include/linux/userfaultfd_k.h
+@@ -28,6 +28,8 @@
+ #define UFFD_SHARED_FCNTL_FLAGS (O_CLOEXEC | O_NONBLOCK)
+ #define UFFD_FLAGS_SET (EFD_SHARED_FCNTL_FLAGS)
+ 
++extern int sysctl_unprivileged_userfaultfd;
++
+ extern vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason);
+ 
+ extern ssize_t mcopy_atomic(struct mm_struct *dst_mm, unsigned long dst_start,
+diff --git a/kernel/sysctl.c b/kernel/sysctl.c
+index 599510a3355e..ba158f61aab4 100644
+--- a/kernel/sysctl.c
++++ b/kernel/sysctl.c
+@@ -66,6 +66,7 @@
+ #include <linux/kexec.h>
+ #include <linux/bpf.h>
+ #include <linux/mount.h>
++#include <linux/userfaultfd_k.h>
+ 
+ #include "../lib/kstrtox.h"
+ 
+@@ -1719,6 +1720,17 @@ static struct ctl_table vm_table[] = {
+ 		.extra1		= (void *)&mmap_rnd_compat_bits_min,
+ 		.extra2		= (void *)&mmap_rnd_compat_bits_max,
+ 	},
++#endif
++#ifdef CONFIG_USERFAULTFD
++	{
++		.procname	= "unprivileged_userfaultfd",
++		.data		= &sysctl_unprivileged_userfaultfd,
++		.maxlen		= sizeof(sysctl_unprivileged_userfaultfd),
++		.mode		= 0644,
++		.proc_handler	= proc_dointvec_minmax,
++		.extra1		= &zero,
++		.extra2		= &one,
++	},
+ #endif
+ 	{ }
+ };

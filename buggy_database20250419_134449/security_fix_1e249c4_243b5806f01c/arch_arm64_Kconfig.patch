@@ -1,0 +1,65 @@
+commit 1e249c41ea43157fc69e1496e3b4feea999f107a
+Author: Mark Rutland <mark.rutland@arm.com>
+Date:   Tue Jan 31 10:58:08 2023 +0000
+
+    arm64: unify asm-arch manipulation
+    
+    Assemblers will reject instructions not supported by a target
+    architecture version, and so we must explicitly tell the assembler the
+    latest architecture version for which we want to assemble instructions
+    from.
+    
+    We've added a few AS_HAS_ARMV8_<N> definitions for this, in addition to
+    an inconsistently named AS_HAS_PAC definition, from which arm64's
+    top-level Makefile determines the architecture version that we intend to
+    target, and generates the `asm-arch` variable.
+    
+    To make this a bit clearer and easier to maintain, this patch reworks
+    the Makefile to determine asm-arch in a single if-else-endif chain.
+    AS_HAS_PAC, which is defined when the assembler supports
+    `-march=armv8.3-a`, is renamed to AS_HAS_ARMV8_3.
+    
+    As the logic for armv8.3-a is lifted out of the block handling pointer
+    authentication, `asm-arch` may now be set to armv8.3-a regardless of
+    whether support for pointer authentication is selected. This means that
+    it will be possible to assemble armv8.3-a instructions even if we didn't
+    intend to, but this is consistent with our handling of other
+    architecture versions, and the compiler won't generate armv8.3-a
+    instructions regardless.
+    
+    For the moment there's no need for an CONFIG_AS_HAS_ARMV8_1, as the code
+    for LSE atomics and LDAPR use individual `.arch_extension` entries and
+    do not require the baseline asm arch to be bumped to armv8.1-a. The
+    other armv8.1-a features (e.g. PAN) do not require assembler support.
+    
+    There should be no functional change as a result of this patch.
+    
+    Signed-off-by: Mark Rutland <mark.rutland@arm.com>
+    Reviewed-by: Ard Biesheuvel <ardb@kernel.org>
+    Reviewed-by: Mark Brown <broonie@kernel.org>
+    Cc: Will Deacon <will@kernel.org>
+    Link: https://lore.kernel.org/r/20230131105809.991288-2-mark.rutland@arm.com
+    Signed-off-by: Catalin Marinas <catalin.marinas@arm.com>
+
+diff --git a/arch/arm64/Kconfig b/arch/arm64/Kconfig
+index 03934808b2ed..be760ad7715d 100644
+--- a/arch/arm64/Kconfig
++++ b/arch/arm64/Kconfig
+@@ -1818,7 +1818,7 @@ config ARM64_PTR_AUTH_KERNEL
+ 	bool "Use pointer authentication for kernel"
+ 	default y
+ 	depends on ARM64_PTR_AUTH
+-	depends on (CC_HAS_SIGN_RETURN_ADDRESS || CC_HAS_BRANCH_PROT_PAC_RET) && AS_HAS_PAC
++	depends on (CC_HAS_SIGN_RETURN_ADDRESS || CC_HAS_BRANCH_PROT_PAC_RET) && AS_HAS_ARMV8_3
+ 	# Modern compilers insert a .note.gnu.property section note for PAC
+ 	# which is only understood by binutils starting with version 2.33.1.
+ 	depends on LD_IS_LLD || LD_VERSION >= 23301 || (CC_IS_GCC && GCC_VERSION < 90100)
+@@ -1843,7 +1843,7 @@ config CC_HAS_SIGN_RETURN_ADDRESS
+ 	# GCC 7, 8
+ 	def_bool $(cc-option,-msign-return-address=all)
+ 
+-config AS_HAS_PAC
++config AS_HAS_ARMV8_3
+ 	def_bool $(cc-option,-Wa$(comma)-march=armv8.3-a)
+ 
+ config AS_HAS_CFI_NEGATE_RA_STATE

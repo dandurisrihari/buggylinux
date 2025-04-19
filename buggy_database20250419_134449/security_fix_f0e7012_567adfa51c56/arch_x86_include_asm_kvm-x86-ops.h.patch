@@ -1,0 +1,60 @@
+commit f0e7012c4b938606c7ca230154f181f8eed683eb
+Author: Sean Christopherson <seanjc@google.com>
+Date:   Wed Oct 9 10:49:59 2024 -0700
+
+    KVM: x86: Bypass register cache when querying CPL from kvm_sched_out()
+    
+    When querying guest CPL to determine if a vCPU was preempted while in
+    kernel mode, bypass the register cache, i.e. always read SS.AR_BYTES from
+    the VMCS on Intel CPUs.  If the kernel is running with full preemption
+    enabled, using the register cache in the preemption path can result in
+    stale and/or uninitialized data being cached in the segment cache.
+    
+    In particular the following scenario is currently possible:
+    
+     - vCPU is just created, and the vCPU thread is preempted before
+       SS.AR_BYTES is written in vmx_vcpu_reset().
+    
+     - When scheduling out the vCPU task, kvm_arch_vcpu_in_kernel() =>
+       vmx_get_cpl() reads and caches '0' for SS.AR_BYTES.
+    
+     - vmx_vcpu_reset() => seg_setup() configures SS.AR_BYTES, but doesn't
+       invoke vmx_segment_cache_clear() to invalidate the cache.
+    
+    As a result, KVM retains a stale value in the cache, which can be read,
+    e.g. via KVM_GET_SREGS.  Usually this is not a problem because the VMX
+    segment cache is reset on each VM-Exit, but if the userspace VMM (e.g KVM
+    selftests) reads and writes system registers just after the vCPU was
+    created, _without_ modifying SS.AR_BYTES, userspace will write back the
+    stale '0' value and ultimately will trigger a VM-Entry failure due to
+    incorrect SS segment type.
+    
+    Note, the VM-Enter failure can also be avoided by moving the call to
+    vmx_segment_cache_clear() until after the vmx_vcpu_reset() initializes all
+    segments.  However, while that change is correct and desirable (and will
+    come along shortly), it does not address the underlying problem that
+    accessing KVM's register caches from !task context is generally unsafe.
+    
+    In addition to fixing the immediate bug, bypassing the cache for this
+    particular case will allow hardening KVM register caching log to assert
+    that the caches are accessed only when KVM _knows_ it is safe to do so.
+    
+    Fixes: de63ad4cf497 ("KVM: X86: implement the logic for spinlock optimization")
+    Reported-by: Maxim Levitsky <mlevitsk@redhat.com>
+    Closes: https://lore.kernel.org/all/20240716022014.240960-3-mlevitsk@redhat.com
+    Reviewed-by: Maxim Levitsky <mlevitsk@redhat.com>
+    Link: https://lore.kernel.org/r/20241009175002.1118178-2-seanjc@google.com
+    Signed-off-by: Sean Christopherson <seanjc@google.com>
+
+diff --git a/arch/x86/include/asm/kvm-x86-ops.h b/arch/x86/include/asm/kvm-x86-ops.h
+index 861d080ed4c6..5aff7222e40f 100644
+--- a/arch/x86/include/asm/kvm-x86-ops.h
++++ b/arch/x86/include/asm/kvm-x86-ops.h
+@@ -34,6 +34,7 @@ KVM_X86_OP(set_msr)
+ KVM_X86_OP(get_segment_base)
+ KVM_X86_OP(get_segment)
+ KVM_X86_OP(get_cpl)
++KVM_X86_OP(get_cpl_no_cache)
+ KVM_X86_OP(set_segment)
+ KVM_X86_OP(get_cs_db_l_bits)
+ KVM_X86_OP(is_valid_cr0)

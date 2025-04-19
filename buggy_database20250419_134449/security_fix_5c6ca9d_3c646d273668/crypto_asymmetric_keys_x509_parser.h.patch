@@ -1,0 +1,54 @@
+commit 5c6ca9d936654a135b459c846885e08966e5e5bf
+Author: Lukas Wunner <lukas@wunner.de>
+Date:   Sun Apr 7 19:57:40 2024 +0200
+
+    X.509: Introduce scope-based x509_certificate allocation
+    
+    Add a DEFINE_FREE() clause for x509_certificate structs and use it in
+    x509_cert_parse() and x509_key_preparse().  These are the only functions
+    where scope-based x509_certificate allocation currently makes sense.
+    A third user will be introduced with the forthcoming SPDM library
+    (Security Protocol and Data Model) for PCI device authentication.
+    
+    Unlike most other DEFINE_FREE() clauses, this one checks for IS_ERR()
+    instead of NULL before calling x509_free_certificate() at end of scope.
+    That's because the "constructor" of x509_certificate structs,
+    x509_cert_parse(), returns a valid pointer or an ERR_PTR(), but never
+    NULL.
+    
+    Comparing the Assembler output before/after has shown they are identical,
+    save for the fact that gcc-12 always generates two return paths when
+    __cleanup() is used, one for the success case and one for the error case.
+    
+    In x509_cert_parse(), add a hint for the compiler that kzalloc() never
+    returns an ERR_PTR().  Otherwise the compiler adds a gratuitous IS_ERR()
+    check on return.  Introduce an assume() macro for this which can be
+    re-used elsewhere in the kernel to provide hints for the compiler.
+    
+    Suggested-by: Jonathan Cameron <Jonathan.Cameron@Huawei.com>
+    Link: https://lore.kernel.org/all/20231003153937.000034ca@Huawei.com/
+    Link: https://lwn.net/Articles/934679/
+    Signed-off-by: Lukas Wunner <lukas@wunner.de>
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+diff --git a/crypto/asymmetric_keys/x509_parser.h b/crypto/asymmetric_keys/x509_parser.h
+index 97a886cbe01c..0688c222806b 100644
+--- a/crypto/asymmetric_keys/x509_parser.h
++++ b/crypto/asymmetric_keys/x509_parser.h
+@@ -5,6 +5,7 @@
+  * Written by David Howells (dhowells@redhat.com)
+  */
+ 
++#include <linux/cleanup.h>
+ #include <linux/time.h>
+ #include <crypto/public_key.h>
+ #include <keys/asymmetric-type.h>
+@@ -44,6 +45,8 @@ struct x509_certificate {
+  * x509_cert_parser.c
+  */
+ extern void x509_free_certificate(struct x509_certificate *cert);
++DEFINE_FREE(x509_free_certificate, struct x509_certificate *,
++	    if (!IS_ERR(_T)) x509_free_certificate(_T))
+ extern struct x509_certificate *x509_cert_parse(const void *data, size_t datalen);
+ extern int x509_decode_time(time64_t *_t,  size_t hdrlen,
+ 			    unsigned char tag,

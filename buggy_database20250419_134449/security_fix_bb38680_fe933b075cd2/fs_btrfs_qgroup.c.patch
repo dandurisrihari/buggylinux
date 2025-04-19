@@ -1,0 +1,44 @@
+commit bb3868033a4cccff7be57e9145f2117cbdc91c11
+Author: Filipe Manana <fdmanana@suse.com>
+Date:   Fri Jun 14 14:50:47 2024 +0100
+
+    btrfs: do not BUG_ON() when freeing tree block after error
+    
+    When freeing a tree block, at btrfs_free_tree_block(), if we fail to
+    create a delayed reference we don't deal with the error and just do a
+    BUG_ON(). The error most likely to happen is -ENOMEM, and we have a
+    comment mentioning that only -ENOMEM can happen, but that is not true,
+    because in case qgroups are enabled any error returned from
+    btrfs_qgroup_trace_extent_post() (can be -EUCLEAN or anything returned
+    from btrfs_search_slot() for example) can be propagated back to
+    btrfs_free_tree_block().
+    
+    So stop doing a BUG_ON() and return the error to the callers and make
+    them abort the transaction to prevent leaking space. Syzbot was
+    triggering this, likely due to memory allocation failure injection.
+    
+    Reported-by: syzbot+a306f914b4d01b3958fe@syzkaller.appspotmail.com
+    Link: https://lore.kernel.org/linux-btrfs/000000000000fcba1e05e998263c@google.com/
+    Reviewed-by: Qu Wenruo <wqu@suse.com>
+    Signed-off-by: Filipe Manana <fdmanana@suse.com>
+    Reviewed-by: David Sterba <dsterba@suse.com>
+    Signed-off-by: David Sterba <dsterba@suse.com>
+
+diff --git a/fs/btrfs/qgroup.c b/fs/btrfs/qgroup.c
+index 31249b5200b7..8b01bfdee820 100644
+--- a/fs/btrfs/qgroup.c
++++ b/fs/btrfs/qgroup.c
+@@ -1441,9 +1441,11 @@ int btrfs_quota_disable(struct btrfs_fs_info *fs_info)
+ 	btrfs_tree_lock(quota_root->node);
+ 	btrfs_clear_buffer_dirty(trans, quota_root->node);
+ 	btrfs_tree_unlock(quota_root->node);
+-	btrfs_free_tree_block(trans, btrfs_root_id(quota_root),
+-			      quota_root->node, 0, 1);
++	ret = btrfs_free_tree_block(trans, btrfs_root_id(quota_root),
++				    quota_root->node, 0, 1);
+ 
++	if (ret < 0)
++		btrfs_abort_transaction(trans, ret);
+ 
+ out:
+ 	btrfs_put_root(quota_root);

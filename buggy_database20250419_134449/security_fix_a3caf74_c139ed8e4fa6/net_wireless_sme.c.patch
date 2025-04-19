@@ -1,0 +1,63 @@
+commit a3caf7440dedd2399f90f27ff11ac390bf03e6c4
+Author: Vidyullatha Kanchanapally <vkanchan@qti.qualcomm.com>
+Date:   Fri Mar 31 00:22:34 2017 +0300
+
+    cfg80211: Add support for FILS shared key authentication offload
+    
+    Enhance nl80211 and cfg80211 connect request and response APIs to
+    support FILS shared key authentication offload. The new nl80211
+    attributes can be used to provide additional information to the driver
+    to establish a FILS connection. Also enhance the set/del PMKSA to allow
+    support for adding and deleting PMKSA based on FILS cache identifier.
+    
+    Add a new feature flag that drivers can use to advertize support for
+    FILS shared key authentication and association in station mode when
+    using their own SME.
+    
+    Signed-off-by: Vidyullatha Kanchanapally <vkanchan@qti.qualcomm.com>
+    Signed-off-by: Jouni Malinen <jouni@qca.qualcomm.com>
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+
+diff --git a/net/wireless/sme.c b/net/wireless/sme.c
+index ebd7adc27246..6459bb7c21f7 100644
+--- a/net/wireless/sme.c
++++ b/net/wireless/sme.c
+@@ -805,7 +805,9 @@ void cfg80211_connect_done(struct net_device *dev,
+ 	}
+ 
+ 	ev = kzalloc(sizeof(*ev) + (params->bssid ? ETH_ALEN : 0) +
+-		     params->req_ie_len + params->resp_ie_len, gfp);
++		     params->req_ie_len + params->resp_ie_len +
++		     params->fils_kek_len + params->pmk_len +
++		     (params->pmkid ? WLAN_PMKID_LEN : 0), gfp);
+ 	if (!ev) {
+ 		cfg80211_put_bss(wdev->wiphy, params->bss);
+ 		return;
+@@ -832,6 +834,27 @@ void cfg80211_connect_done(struct net_device *dev,
+ 		       params->resp_ie_len);
+ 		next += params->resp_ie_len;
+ 	}
++	if (params->fils_kek_len) {
++		ev->cr.fils_kek = next;
++		ev->cr.fils_kek_len = params->fils_kek_len;
++		memcpy((void *)ev->cr.fils_kek, params->fils_kek,
++		       params->fils_kek_len);
++		next += params->fils_kek_len;
++	}
++	if (params->pmk_len) {
++		ev->cr.pmk = next;
++		ev->cr.pmk_len = params->pmk_len;
++		memcpy((void *)ev->cr.pmk, params->pmk, params->pmk_len);
++		next += params->pmk_len;
++	}
++	if (params->pmkid) {
++		ev->cr.pmkid = next;
++		memcpy((void *)ev->cr.pmkid, params->pmkid, WLAN_PMKID_LEN);
++		next += WLAN_PMKID_LEN;
++	}
++	ev->cr.update_erp_next_seq_num = params->update_erp_next_seq_num;
++	if (params->update_erp_next_seq_num)
++		ev->cr.fils_erp_next_seq_num = params->fils_erp_next_seq_num;
+ 	if (params->bss)
+ 		cfg80211_hold_bss(bss_from_pub(params->bss));
+ 	ev->cr.bss = params->bss;
